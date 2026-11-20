@@ -76,13 +76,24 @@ describe('ReportsController — redemption report', () => {
 
   it('export → the redemption-report kind with the default IST-month range filled in (stored explicitly)', async () => {
     const exportsSvc = { respond: jest.fn().mockResolvedValue('FILE') };
-    const ctl = new ReportsController({} as any, exportsSvc as any);
+    const ctl = new ReportsController({ redemptionCount: jest.fn().mockResolvedValue(10) } as any, exportsSvc as any);
     const user = { sub: 'u', role: 'CLIENT_ADMIN', clientId: 'bajaj' } as any;
     const res = {} as any;
     await expect(ctl.redemptionsExport(user, { status: 'DELIVERED' } as any, res)).resolves.toBe('FILE');
     const sent = exportsSvc.respond.mock.calls[0][3];
     expect(exportsSvc.respond.mock.calls[0][2]).toBe('redemption-report');
     expect(sent).toMatchObject({ status: 'DELIVERED', from: expect.stringMatching(/^\d{4}-\d{2}-01$/), to: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/) });
+  });
+
+  it('more than 5,000 orders in a short range → always queued to Downloads (202)', async () => {
+    const exportsSvc = { respond: jest.fn(), request: jest.fn().mockResolvedValue({ exportRequestId: 'e1', message: 'm' }) };
+    const ctl = new ReportsController({ redemptionCount: jest.fn().mockResolvedValue(5001) } as any, exportsSvc as any);
+    const user = { sub: 'u', role: 'CLIENT_ADMIN', clientId: 'bajaj' } as any;
+    const res = { status: jest.fn(), req: { headers: {} } } as any;
+    await expect(ctl.redemptionsExport(user, { from: '2025-11-01', to: '2025-11-05' } as any, res)).resolves.toEqual({ exportRequestId: 'e1', message: 'm' });
+    expect(exportsSvc.request).toHaveBeenCalledWith(user, 'redemption-report', { from: '2025-11-01', to: '2025-11-05' }, res.req);
+    expect(res.status).toHaveBeenCalledWith(202);
+    expect(exportsSvc.respond).not.toHaveBeenCalled();
   });
 
   it('an un-assumed Gifsy owner without ?clientId= gets a 400 (one client at a time)', async () => {

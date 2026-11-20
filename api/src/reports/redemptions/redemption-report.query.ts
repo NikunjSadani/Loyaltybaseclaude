@@ -13,10 +13,10 @@
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import type { Prisma, RedemptionStatus } from '@prisma/client';
 import type { JwtPayload } from '../../common/decorators/current-user.decorator';
-import { escapeLikeLiteral } from '../../common/applies-to/applies-to.prisma';
 import { istDateKey, istDayRangeFilter, istMonthKey } from '../../common/ist-date';
 import { platformWide } from '../../common/tenant-scope';
 import type { RedemptionReportQueryDto, RedemptionRewardType } from '../dto/redemption-report.dto';
+import { comparePrimary } from './redemption-report.rows';
 
 export interface RedemptionReportParams {
   /** The ONE tenant this report reads (resolved from the JWT; never platform-wide). */
@@ -30,8 +30,7 @@ export interface RedemptionReportParams {
   state: string | null;
 }
 
-export const REDEMPTION_CHOOSE_CLIENT_MESSAGE =
-  'Choose a client first: open the client (Working in …) or add ?clientId= — this report lists one client at a time.';
+export const REDEMPTION_CHOOSE_CLIENT_MESSAGE = 'Choose a client (assume one) to download — this report lists one client at a time.';
 
 /** The tenant the caller may read. Throws 400 for an un-assumed Gifsy owner with no ?clientId=. */
 export function resolveRedemptionClientId(user: JwtPayload, requested: string | null | undefined): string {
@@ -81,6 +80,23 @@ export function resolveRedemptionParams(q: RedemptionReportQueryDto, user: JwtPa
   };
 }
 
+/**
+ * An un-assumed Gifsy owner's ?clientId= must name a real client (400 "Unknown client" otherwise). Everyone else is
+ * pinned to their JWT tenant, so no lookup is made for them.
+ */
+export async function assertRedemptionClientKnown(
+  db: { client: { findUnique(args: { where: { id: string }; select: { id: true } }): Promise<{ id: string } | null> } },
+  user: JwtPayload,
+  clientId: string,
+): Promise<void> {
+  if (!platformWide(user)) return;
+  const c = await db.client.findUnique({ where: { id: clientId }, select: { id: true } });
+  if (!c) throw new BadRequestException(`Unknown client: ${clientId}`);
+}
+
+/** Orders above this count are prepared on the Downloads page even inside a short range. */
+export const REDEMPTION_LIGHT_MAX_ROWS = 5000;
+
 /** Ranges longer than this many IST days are prepared in the background (Downloads page). */
 export const REDEMPTION_LIGHT_MAX_DAYS = 31;
 
@@ -88,8 +104,6 @@ export const REDEMPTION_LIGHT_MAX_DAYS = 31;
 export function rangeDays(p: Pick<RedemptionReportParams, 'from' | 'to'>): number {
   return Math.round((Date.parse(`${p.to}T00:00:00Z`) - Date.parse(`${p.from}T00:00:00Z`)) / 86_400_000) + 1;
 }
-
-const ci = (v: string) => ({ equals: escapeLikeLiteral(v), mode: 'insensitive' as const });
 
 /**
  * Reward-type rule (shared with the row's "Type" column — rewardTypeOf):
@@ -111,22 +125,53 @@ function rewardTypeWhere(t: RedemptionRewardType | null): Prisma.RedemptionOrder
   return {};
 }
 
-/** The ONE WHERE for every redemption-report read (orders, counts, summaries, status-history pass). */
-export function redemptionWhere(p: RedemptionReportParams): Prisma.RedemptionOrderWhereInput {
-  const outletFilter: Prisma.OutletWhereInput = {
-    deletedAt: null,
-    ...(p.zone ? { zone: ci(p.zone) } : {}),
-    ...(p.state ? { state: ci(p.state) } : {}),
-  };
+/**
+ * The ONE WHERE for every redemption-report read (orders, counts, summaries, status-history pass).
+ * `partnerIds` = the zone/state filter resolved on each member's PRIMARY outlet (resolveRedemptionWhere) — required
+ * whenever p.zone / p.state is set.
+ */
+export function redemptionWhere(p: RedemptionReportParams, partnerIds?: readonly string[] | null): Prisma.RedemptionOrderWhereInput {
+  if ((p.zone || p.state) && !partnerIds) throw new Error('redemptionWhere: zone/state need resolveRedemptionWhere');
   return {
-    partner: {
-      clientId: p.clientId,
-      ...(p.zone || p.state ? { outlets: { some: outletFilter } } : {}),
-    },
+    partner: { clientId: p.clientId },
+    ...(p.zone || p.state ? { partnerId: { in: [...(partnerIds ?? [])] } } : {}),
     createdAt: istDayRangeFilter(p.from, p.to),
     ...(p.status ? { status: p.status } : {}),
     ...rewardTypeWhere(p.rewardType),
   };
+}
+
+const norm = (v: string | null | undefined) => (v ?? '').trim().toLowerCase();
+
+/**
+ * The WHERE with the zone/state filter matched on the SAME outlet the row shows — each member's primary outlet
+ * (comparePrimary) — not on "any of its outlets". One query: the live outlets of members who redeemed in the range.
+ */
+export async function resolveRedemptionWhere(
+  db: { outlet: { findMany(args: Prisma.OutletFindManyArgs): Promise<Array<{ id: string; partnerId: string | null; isPrimary: boolean; createdAt: Date; zone: string | null; state: string | null }>> } },
+  p: RedemptionReportParams,
+): Promise<Prisma.RedemptionOrderWhereInput> {
+  if (!p.zone && !p.state) return redemptionWhere(p);
+  const outlets = await db.outlet.findMany({
+    where: {
+      deletedAt: null,
+      partner: { clientId: p.clientId, redemptionOrders: { some: { createdAt: istDayRangeFilter(p.from, p.to) } } },
+    },
+    select: { id: true, partnerId: true, isPrimary: true, createdAt: true, zone: true, state: true },
+  });
+  const primary = new Map<string, (typeof outlets)[number]>();
+  for (const o of outlets) {
+    if (!o.partnerId) continue;
+    const cur = primary.get(o.partnerId);
+    if (!cur || comparePrimary(o, cur) < 0) primary.set(o.partnerId, o);
+  }
+  const ids: string[] = [];
+  for (const [partnerId, o] of primary) {
+    if (p.zone && norm(o.zone) !== norm(p.zone)) continue;
+    if (p.state && norm(o.state) !== norm(p.state)) continue;
+    ids.push(partnerId);
+  }
+  return redemptionWhere(p, ids);
 }
 
 /** Plain-English filter line (Downloads page + About sheet). */

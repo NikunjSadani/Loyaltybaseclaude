@@ -17,6 +17,8 @@ import {
   type SalesNode,
 } from '../../../reports/redemptions/redemption-report.rows';
 import { ORDER_SELECT, REDEMPTION_REPORT_KIND } from './redemption-report.kind';
+import { HUBBLE_NO_ORDER_REASON_TEXT, redactFreeText, safeReasonText } from '../../../reports/redemptions/redemption-report.redact';
+import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../../rewards/rewards.service';
 import { ctxFor, readBook, renderKind } from './parity.support-spec';
 
 // ─── Users ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -100,11 +102,20 @@ function model(rows: Row[], calls: string[], name: string) {
     calls.push(name);
     let out = rows.filter((r) => matches(r, args.where as Row));
     if (args.orderBy) out = [...out].sort(sortBy(args.orderBy));
-    const skip = (args.skip as number) ?? 0;
-    return out.slice(skip, args.take === undefined ? undefined : skip + (args.take as number));
+    let start = 0;
+    if (args.cursor) {
+      const i = out.findIndex((r) => r.id === (args.cursor as Row).id);
+      start = i < 0 ? out.length : i;
+    }
+    start += (args.skip as number) ?? 0;
+    return out.slice(start, args.take === undefined ? undefined : start + (args.take as number));
   };
   return {
     findMany: jest.fn(async (args?: Row) => list(args)),
+    findUnique: jest.fn(async (args: { where: Row }) => {
+      calls.push(`${name}.findUnique`);
+      return rows.find((r) => matches(r, args.where)) ?? null;
+    }),
     count: jest.fn(async (args?: Row) => {
       calls.push(`${name}.count`);
       return rows.filter((r) => matches(r, args?.where as Row)).length;
@@ -183,14 +194,19 @@ function addOrder(w: World, clientId: string, over: Row = {}, outletOver: Row = 
     programCategory: 'Urban',
     outletTypeId: 'ot-ret',
     outletType: { name: 'Retail outlet', code: 'RETAILER' },
+    isPrimary: true,
+    isActive: true,
+    createdAt: at(-1000),
     deletedAt: null,
     ...outletOver,
   };
   const order: Row = {
     id: `o-${String(n).padStart(6, '0')}`,
     orderNumber: `${clientId.toUpperCase()}-25-${n}`,
+    partnerId: `p-${n}`,
     status: 'DELIVERED',
     quantity: 1,
+    pointsDeducted: 500,
     totalPointsCost: 500,
     valuePaise: 50_000n,
     redemptionMode: 'PHYSICAL_GIFT',
@@ -267,7 +283,21 @@ function assign(w: World, order: Row, salesUserId: string, clientId: string) {
 function prismaFor(w: World) {
   const calls: string[] = [];
   const audit = jest.fn(async () => ({}));
+  // Outlets as Prisma sees them (owner partner + its orders, for the primary-outlet zone/state filter).
+  const outlets = new Map<string, Row>();
+  for (const o of w.orders) {
+    const partner = o.partner as Row & { outlets: Row[]; clientId: string; id: string };
+    for (const x of partner.outlets) {
+      outlets.set(x.id as string, {
+        ...x,
+        partnerId: partner.id,
+        partner: { clientId: partner.clientId, redemptionOrders: w.orders.filter((y) => (y.partner as Row).id === partner.id) },
+      });
+    }
+  }
   const prisma: Row = {
+    outlet: model([...outlets.values()], calls, 'outlet'),
+    client: model([{ id: 'bajaj' }, { id: 'deoleo' }], calls, 'client'),
     redemptionOrder: model(w.orders, calls, 'redemptionOrder'),
     redemptionStatusHistory: model(w.history, calls, 'redemptionStatusHistory'),
     payoutTransaction: model(w.payouts, calls, 'payoutTransaction'),
@@ -497,7 +527,7 @@ describe('redemption report — stage timestamps', () => {
       names,
     );
     expect(s.closed).toMatchObject({ at: at(3), by: 'System' });
-    expect(s.closedReason).toBe('Cancelled: Superseded — OTP not completed');
+    expect(s.closedReason).toBe('Cancelled: OTP not completed — replaced by a newer order');
     expect(s.confirmed.when).toBe('—');
   });
 
@@ -583,7 +613,7 @@ describe('redemption report — hierarchy columns', () => {
     const noRep = addOrder(w, 'deoleo');
     assign(w, withRep, 'D-XSR', 'deoleo');
     const { cell, rs, cap } = await exportAs(DEOLEO_ADMIN, w);
-    expect(rs.headers.slice(22, 34)).toEqual(['XSR', 'XSR code', 'SO', 'SO code', 'ASM', 'ASM code', 'RSM', 'RSM code', 'ZNM', 'ZNM code', 'NSM', 'NSM code']);
+    expect(rs.headers.slice(23, 35)).toEqual(['XSR', 'XSR code', 'SO', 'SO code', 'ASM', 'ASM code', 'RSM', 'RSM code', 'ZNM', 'ZNM code', 'NSM', 'NSM code']);
     expect(cell(withRep.orderNumber as string, 'ASM')).toBe('ASM person D');
     expect(cell(withRep.orderNumber as string, 'NSM code')).toBe('NSM-D');
     expect(cell(noRep.orderNumber as string, 'XSR')).toBe('Not assigned');
@@ -684,7 +714,7 @@ describe('redemption report — row values, placeholders and audit', () => {
     const cash = addOrder(w, 'bajaj', { redemptionMode: 'UPI', fulfilmentChannel: null, status: 'DELIVERED', deliveredAt: at(48) });
     w.payouts.push({ id: 'p-old', redemptionOrderId: cash.id, status: 'FAILED', completedAt: null, providerRefId: null, tdsPaise: 0n, createdAt: at(20) });
     w.payouts.push({ id: 'p-new', redemptionOrderId: cash.id, status: 'SUCCESS', completedAt: at(48), providerRefId: 'UTR777', tdsPaise: 1500n, createdAt: at(30) });
-    const ev = addOrder(w, 'bajaj', { redemptionMode: 'GIFT_CARD', fulfilmentChannel: null, voucherProvider: 'Hubble', status: 'PENDING', valuePaise: null });
+    const ev = addOrder(w, 'bajaj', { redemptionMode: 'GIFT_CARD', fulfilmentChannel: null, voucherProvider: 'Hubble', status: 'PENDING', valuePaise: null, pointsDeducted: 0 });
     const bare = addOrder(w, 'bajaj', { logisticsPartner: null, trackingNumber: null, podUrl: null, reward: { name: 'Bag', metadata: null, category: null } }, { zone: null, programName: null });
     const { cell, audit, cap } = await exportAs(BAJAJ_ADMIN, w);
     const c = cash.orderNumber as string;
@@ -699,7 +729,10 @@ describe('redemption report — row values, placeholders and audit', () => {
     expect(cell(e, 'Type')).toBe('E-voucher');
     expect(cell(e, 'Fulfilled by')).toBe('Hubble');
     expect(cell(e, 'Current status')).toBe('Placed');
-    expect(cell(e, 'Value (₹)')).toBe('Not set');
+    expect(cell(e, 'Value (₹)')).toBe(0); // nothing deducted → no value (consistent with Points deducted)
+    expect(cell(e, 'Points deducted')).toBe(0);
+    expect(cell(e, 'Points requested')).toBe(500);
+    expect(cell(e, 'TDS deducted (₹)')).toBe('—');
     expect(cell(e, 'Bank reference (UTR)')).toBe('—');
     const b = bare.orderNumber as string;
     expect(cell(b, 'Courier')).toBe('Not recorded');
@@ -717,7 +750,7 @@ describe('redemption report — row values, placeholders and audit', () => {
     const about = cap.sheets.About.rows.map((r) => r[0]);
     expect(about).toEqual(expect.arrayContaining(['Not recorded', 'Not set', '—', 'Skipped', 'Not assigned', 'Generated (IST)', 'Never included']));
     const summary = cap.sheets.Summary.rows;
-    expect(summary[0]).toEqual(['Total', 'All orders in this file', 3, 1500, 1000, 1000, 1000, 2, expect.any(Number)]);
+    expect(summary[0]).toEqual(['Total', 'All orders in this file', 3, 1000, 1000, 1500, 2, expect.any(Number)]);
   });
 
   it('0 matching orders → 404 and no audit row', async () => {
@@ -728,4 +761,167 @@ describe('redemption report — row values, placeholders and audit', () => {
     await expect(REDEMPTION_REPORT_KIND.run(ctxFor(BAJAJ_ADMIN, prisma, []), params, captureWriter().w)).rejects.toBeInstanceOf(NotFoundException);
     expect(audit).not.toHaveBeenCalled();
   });
+});
+
+// ─── Audit fix round ────────────────────────────────────────────────────────────────────────────────────────────
+describe('redemption report — audit fixes', () => {
+  const NOTE = 'Vendor said code AB12CD34EF / 4321-8765-0000 rejected; call 98765 43210 or ops@vendor.in, PAN ABCPE1234X';
+
+  it('free text is redacted: codes, grouped codes, phones, e-mails, PANs, links', () => {
+    const out = redactFreeText(`${NOTE} see https://x.example/t?code=1`);
+    for (const secret of ['AB12CD34EF', '4321-8765-0000', '98765 43210', 'ops@vendor.in', 'ABCPE1234X', 'https://']) expect(out).not.toContain(secret);
+    expect(out).toContain('[removed]');
+    expect(out).toContain('Vendor said code');
+    // Plain words survive (no digit → not a code), short numbers too.
+    expect(redactFreeText('Customer cancelled, wrong address, 2 items')).toBe('Customer cancelled, wrong address, 2 items');
+    // Platform reasons → fixed plain words; a provider-error tail is dropped entirely.
+    expect(safeReasonText('Superseded — OTP not completed')).toBe('OTP not completed — replaced by a newer order');
+    expect(safeReasonText('Hubble failed — points refunded: card VCX99887766 out of stock')).toBe('E-voucher could not be issued — points refunded');
+    expect(HUBBLE_NO_ORDER_REASON_TEXT).toBe(HUBBLE_NO_ORDER_REFUND_REASON);
+  });
+
+  it('neither the reason column nor the Status history sheet exports raw notes', async () => {
+    const w = emptyWorld();
+    const o = addOrder(w, 'bajaj', { status: 'CANCELLED', cancelledAt: at(3), cancelReason: NOTE, pointsDeducted: 0 });
+    hist(w, o, [['CONFIRMED', 'CANCELLED', 3, 'u-op', NOTE]]);
+    const { cap, cell } = await exportAs(BAJAJ_ADMIN, w);
+    const dump = JSON.stringify(cap.sheets);
+    for (const secret of ['AB12CD34EF', '4321-8765-0000', '98765 43210', 'ops@vendor.in', 'ABCPE1234X']) expect(dump).not.toContain(secret);
+    expect(String(cell(o.orderNumber as string, 'Cancel/return/fail reason'))).toMatch(/^Cancelled: Vendor said code \[removed\]/);
+    expect(String(cap.sheets['Status history'].rows[0][6])).toContain('[removed]');
+  });
+
+  it('Points deducted / requested; Value follows Points deducted; Summary totals == the sum of the rows', async () => {
+    const w = emptyWorld();
+    addOrder(w, 'bajaj', { pointsDeducted: 500, totalPointsCost: 500, valuePaise: 50_000n });
+    addOrder(w, 'bajaj', { status: 'CANCELLED', pointsDeducted: 0, totalPointsCost: 300, valuePaise: 30_000n }); // refunded
+    addOrder(w, 'bajaj', { status: 'PENDING', pointsDeducted: 0, totalPointsCost: 200, valuePaise: null });
+    addOrder(w, 'bajaj', { status: 'CONFIRMED', pointsDeducted: 700, totalPointsCost: 700, valuePaise: null }); // legacy
+    const { rs, cap } = await exportAs(BAJAJ_ADMIN, w);
+    const col = (h: string) => rs.rows.map((r) => r[rs.headers.indexOf(h)]);
+    expect(col('Points deducted')).toEqual([500, 0, 0, 700]);
+    expect(col('Points requested')).toEqual([500, 300, 200, 700]);
+    expect(col('Value (₹)')).toEqual([500, 0, 0, 'Not recorded']);
+    const total = cap.sheets.Summary.rows[0];
+    const sumNum = (xs: XlsxCell[]) => xs.reduce<number>((s, x) => s + (typeof x === 'number' ? x : 0), 0);
+    expect(total[3]).toBe(sumNum(col('Points deducted')));
+    expect(total[4]).toBe(sumNum(col('Value (₹)')));
+    expect(total[5]).toBe(sumNum(col('Points requested')));
+    // Every section's groups add back up to the total.
+    for (const section of ['By zone', 'By state', 'By status', 'By reward type', 'Delivery']) {
+      const rows = cap.sheets.Summary.rows.filter((r) => r[0] === section);
+      expect(sumNum(rows.map((r) => r[3]))).toBe(total[3]);
+      expect(sumNum(rows.map((r) => r[2]))).toBe(total[2]);
+    }
+  });
+
+  it('zone / state filter matches the PRIMARY outlet the row shows, not any outlet', async () => {
+    const w = emptyWorld();
+    const o = addOrder(w, 'bajaj', {}, { zone: 'East', state: 'Odisha' });
+    (o.partner as { outlets: Row[] }).outlets.push({
+      ...(o.partner as { outlets: Row[] }).outlets[0],
+      id: 'ol-second',
+      outletCode: 'OC-SECOND',
+      zone: 'West',
+      state: 'Goa',
+      isPrimary: false,
+      createdAt: at(-2000), // older, but not primary
+    });
+    // 0 matches → 404 (no file), reported here as [].
+    const nos = async (raw: Row) =>
+      exportAs(BAJAJ_ADMIN, w, raw).then(
+        (r) => r.rs.rows.map((x) => x[0]),
+        (e) => {
+          if (e instanceof NotFoundException) return [];
+          throw e;
+        },
+      );
+    expect(await nos({ zone: 'west' })).toEqual([]);
+    expect(await nos({ state: 'goa' })).toEqual([]);
+    expect(await nos({ zone: 'EAST', state: 'odisha' })).toEqual([o.orderNumber]);
+    const { cell } = await exportAs(BAJAJ_ADMIN, w, { zone: 'East' });
+    expect(cell(o.orderNumber as string, 'Outlet code')).toBe('OC1');
+  });
+
+  it('hierarchy falls back to the member\'s other outlets (active, oldest first), then partner level', async () => {
+    const w = emptyWorld();
+    addChain(w, 'bajaj', 'F');
+    addChain(w, 'bajaj', 'G');
+    const o = addOrder(w, 'bajaj');
+    const outlets = (o.partner as { outlets: Row[] }).outlets;
+    outlets.push({ ...outlets[0], id: 'ol-inactive', isPrimary: false, isActive: false, createdAt: at(-3000) });
+    outlets.push({ ...outlets[0], id: 'ol-active', isPrimary: false, isActive: true, createdAt: at(-500) });
+    w.assignments.push({ id: 'a1', outletId: 'ol-inactive', partnerId: null, salesUserId: 'G-XSR', unassignedAt: null, assignedAt: at(0), salesUser: { clientId: 'bajaj' } });
+    w.assignments.push({ id: 'a2', outletId: 'ol-active', partnerId: null, salesUserId: 'F-XSR', unassignedAt: null, assignedAt: at(0), salesUser: { clientId: 'bajaj' } });
+    const { cell } = await exportAs(BAJAJ_ADMIN, w);
+    expect(cell(o.orderNumber as string, 'ISR code')).toBe('XSR-F'); // the active other outlet wins over the older inactive one
+
+    const w2 = emptyWorld();
+    addChain(w2, 'bajaj', 'P');
+    const o2 = addOrder(w2, 'bajaj');
+    w2.assignments.push({ id: 'a3', outletId: null, partnerId: (o2.partner as Row).id, salesUserId: 'P-XSR', unassignedAt: null, assignedAt: at(0), salesUser: { clientId: 'bajaj' } });
+    expect((await exportAs(BAJAJ_ADMIN, w2)).cell(o2.orderNumber as string, 'ISR code')).toBe('XSR-P');
+  });
+
+  it('a SUSPENDED post holder is shown as vacant; headers use the shared rung label (not a custom level name)', () => {
+    const w = emptyWorld();
+    addChain(w, 'deoleo', 'S');
+    (w.salesUsers.find((s) => s.id === 'S-SO') as Row).user = { name: 'Suspended Sam', status: 'SUSPENDED' };
+    const levels = (w.levels.filter((l) => l.clientId === 'deoleo') as unknown as LevelDef[]).map((l) =>
+      l.code === 'ASM' ? { ...l, name: 'Area Sales Manager' } : l,
+    );
+    const ctx = { clientId: 'deoleo', levels, nodes: new Map((w.salesUsers as unknown as SalesNode[]).map((n) => [n.id, n])) };
+    expect(hierarchyCells('S-XSR', ctx).slice(2, 4)).toEqual(['Vacant (SO-S)', 'SO-S']);
+    expect(hierarchyHeaders(ctx).slice(4, 6)).toEqual(['ASM', 'ASM code']);
+    // A non-standard level keeps the tenant's own name.
+    expect(hierarchyHeaders({ clientId: 'deoleo', levels: [{ id: 'x', code: 'TSE', name: 'Territory Exec', level: 1 }] })).toEqual(['Territory Exec', 'Territory Exec code']);
+  });
+
+  it('payout: the PAID transaction wins over a newer failed attempt; a failed attempt never shows TDS', async () => {
+    const w = emptyWorld();
+    const paid = addOrder(w, 'bajaj', { redemptionMode: 'UPI', fulfilmentChannel: null });
+    w.payouts.push({ id: 'x1', redemptionOrderId: paid.id, status: 'SUCCESS', completedAt: at(20), providerRefId: 'UTR1', tdsPaise: 500n, createdAt: at(10) });
+    w.payouts.push({ id: 'x2', redemptionOrderId: paid.id, status: 'FAILED', completedAt: null, providerRefId: null, tdsPaise: 900n, createdAt: at(30) });
+    const failed = addOrder(w, 'bajaj', { redemptionMode: 'BANK_TRANSFER', fulfilmentChannel: null, status: 'CONFIRMED' });
+    w.payouts.push({ id: 'x3', redemptionOrderId: failed.id, status: 'FAILED', completedAt: null, providerRefId: null, tdsPaise: 900n, createdAt: at(30) });
+    const { cell } = await exportAs(BAJAJ_ADMIN, w);
+    expect(cell(paid.orderNumber as string, 'Payout status')).toBe('Paid');
+    expect(cell(paid.orderNumber as string, 'TDS deducted (₹)')).toBe(5);
+    expect(cell(paid.orderNumber as string, 'Bank reference (UTR)')).toBe('UTR1');
+    expect(cell(failed.orderNumber as string, 'Payout status')).toBe('Failed');
+    expect(cell(failed.orderNumber as string, 'TDS deducted (₹)')).toBe(0);
+    expect(cell(failed.orderNumber as string, 'Paid on (IST)')).toBe('—');
+  });
+
+  it('days placed → delivered and the delivery average count only CURRENTLY delivered orders', async () => {
+    const w = emptyWorld();
+    const returned = addOrder(w, 'bajaj', { status: 'RETURNED', createdAt: at(0), deliveredAt: at(24), cancelledAt: at(48), pointsDeducted: 0 });
+    hist(w, returned, [['DISPATCHED', 'DELIVERED', 24, 'u-op'], ['DELIVERED', 'RETURNED', 48, 'u-op']]);
+    const delivered = addOrder(w, 'bajaj', { status: 'DELIVERED', createdAt: at(0), deliveredAt: at(72) });
+    const { cell, cap } = await exportAs(BAJAJ_ADMIN, w);
+    expect(cell(returned.orderNumber as string, 'Days placed → delivered')).toBe('Not delivered');
+    expect(cell(delivered.orderNumber as string, 'Days placed → delivered')).toBe(3);
+    const total = cap.sheets.Summary.rows[0];
+    expect(total[6]).toBe(1);
+    expect(total[7]).toBe(3);
+  });
+
+  it('an un-assumed owner\'s unknown ?clientId= is a 400 "Unknown client"', async () => {
+    const w = emptyWorld();
+    addOrder(w, 'bajaj');
+    const params = REDEMPTION_REPORT_KIND.parseParams({ ...NOV, clientId: 'nope' }, GIFSY);
+    const { prisma } = prismaFor(w);
+    await expect(REDEMPTION_REPORT_KIND.run(ctxFor(GIFSY, prisma, []), params, captureWriter().w)).rejects.toThrow(/Unknown client: nope/);
+  });
+
+  it('cursor paging: 4,500 orders → every order exactly once, in order', async () => {
+    const w = emptyWorld();
+    for (let i = 0; i < 4500; i++) addOrder(w, 'bajaj');
+    const { rs, calls } = await exportAs(BAJAJ_ADMIN, w);
+    const nos = rs.rows.map((r) => r[0]);
+    expect(new Set(nos).size).toBe(4500);
+    expect(nos[0]).toBe('BAJAJ-25-1');
+    expect(nos[4499]).toBe('BAJAJ-25-4500');
+    expect(calls.filter((c) => c === 'redemptionOrder')).toHaveLength(3); // 2,000 + 2,000 + 500
+  }, 60_000);
 });

@@ -12,10 +12,11 @@
  */
 import type { RedemptionStatus } from '@prisma/client';
 import { istDateTimeCell } from '../../common/ist-date';
-import { rungDisplayLabel } from '../../common/hierarchy-labels';
+import { HIERARCHY_RUNG_CODES, rungDisplayLabel } from '../../common/hierarchy-labels';
 import type { HyperlinkCell } from '../../common/xlsx';
 import type { XlsxCell } from '../../common/xlsx-stream';
 import type { RedemptionRewardType } from '../dto/redemption-report.dto';
+import { safeReasonText } from './redemption-report.redact';
 
 export const NOT_RECORDED = 'Not recorded';
 export const NOT_SET = 'Not set';
@@ -56,8 +57,6 @@ const PARTNER_ROLE_LABEL: Record<string, string> = { SSS: 'SSS', WHOLESALER: 'Wh
 /** The happy path, in order. Rank = index. */
 export const HAPPY_STAGES: readonly RedemptionStatus[] = ['PENDING', 'CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED'];
 export const END_STAGES: readonly RedemptionStatus[] = ['CANCELLED', 'RETURNED', 'FAILED'];
-/** Orders that actually took points and are going / went through (the Summary's "live" columns). */
-export const LIVE_STATUSES: readonly RedemptionStatus[] = ['CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED'];
 
 // ─── Input shapes (exactly what the loader selects) ────────────────────────────────────────────────────────────
 
@@ -66,6 +65,8 @@ export interface ReportOrder {
   orderNumber: string;
   status: RedemptionStatus;
   quantity: number;
+  /** What actually left the wallet (0 until OTP-confirmed; reset to 0 when refunded). */
+  pointsDeducted: number;
   totalPointsCost: number;
   valuePaise: bigint | null;
   redemptionMode: string;
@@ -111,6 +112,9 @@ export interface ReportOutlet {
   programCategory: string | null;
   outletTypeId: string;
   outletType: { name: string; code: string } | null;
+  isPrimary: boolean;
+  isActive: boolean;
+  createdAt: Date;
 }
 
 export interface HistoryRow {
@@ -183,9 +187,38 @@ export function brandOf(rewardMetadata: unknown): string {
   return NOT_RECORDED;
 }
 
-/** The outlet a redemption belongs to: the partner's primary outlet, else its oldest (the loader orders them so). */
+/**
+ * THE primary-outlet rule (used by the row AND the zone/state filter): isPrimary first, then oldest, then id.
+ * Only non-deleted outlets are ever passed in.
+ */
+export function comparePrimary(
+  a: { isPrimary: boolean; createdAt: Date; id: string },
+  b: { isPrimary: boolean; createdAt: Date; id: string },
+): number {
+  if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+  const t = a.createdAt.getTime() - b.createdAt.getTime();
+  if (t) return t;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** The outlet a redemption belongs to: the partner's primary outlet (comparePrimary). */
 export function outletOf(o: ReportOrder): ReportOutlet | null {
-  return o.partner?.outlets[0] ?? null;
+  const list = o.partner?.outlets ?? [];
+  if (!list.length) return null;
+  return [...list].sort(comparePrimary)[0];
+}
+
+/**
+ * Outlets to look for an active rep assignment, in order: the primary outlet, then the member's other outlets —
+ * active before inactive, oldest first.
+ */
+export function assignmentOutlets(o: ReportOrder): ReportOutlet[] {
+  const primary = outletOf(o);
+  if (!primary) return [];
+  const others = (o.partner?.outlets ?? [])
+    .filter((x) => x.id !== primary.id)
+    .sort((a, b) => Number(b.isActive) - Number(a.isActive) || a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : 1));
+  return [primary, ...others];
 }
 
 function metadataString(meta: unknown, key: string): string | null {
@@ -210,10 +243,15 @@ export interface HierarchyCtx {
   nodes: Map<string, SalesNode>;
 }
 
-/** Header for a level: the tenant's own level name, else the display label of its code (Bajaj labels). */
+/**
+ * Header for a level — the SAME label the other reports use (outlet master / visibility: rungDisplayLabel): a standard
+ * rung code gets its display label (Bajaj: XSR→ISR, RSM→SM, ZNM→ZH; other tenants: the code); a non-standard level
+ * falls back to the tenant's level name, else its code.
+ */
 export function levelHeader(clientId: string, l: LevelDef): string {
-  const n = (l.name ?? '').trim();
-  return n || rungDisplayLabel(clientId, l.code);
+  const code = (l.code ?? '').trim();
+  if ((HIERARCHY_RUNG_CODES as readonly string[]).includes(code.toUpperCase())) return rungDisplayLabel(clientId, code);
+  return (l.name ?? '').trim() || code;
 }
 
 export function hierarchyHeaders(ctx: Pick<HierarchyCtx, 'clientId' | 'levels'>): string[] {
@@ -224,7 +262,8 @@ export function hierarchyHeaders(ctx: Pick<HierarchyCtx, 'clientId' | 'levels'>)
 }
 
 export function isVacant(n: SalesNode): boolean {
-  return !n.isActive || n.deletedAt != null || n.user?.status === 'INACTIVE';
+  // Deactivated / removed posts, and holders whose login is INACTIVE or SUSPENDED, are vacant.
+  return !n.isActive || n.deletedAt != null || n.user?.status === 'INACTIVE' || n.user?.status === 'SUSPENDED';
 }
 
 /**
@@ -331,7 +370,8 @@ export function resolveStages(o: ReportOrder, history: HistoryRow[], nameOf: (id
     closed = at
       ? { at, when: '', by: h ? actor(h) : NOT_RECORDED }
       : { at: null, when: `${label} — time ${NOT_RECORDED.toLowerCase()}`, by: NOT_RECORDED };
-    closedReason = `${label}: ${text((o.status === endStatus ? o.cancelReason : null) ?? h?.notes)}`;
+    // Free text is never exported raw: platform reasons in plain words, anything else redacted.
+    closedReason = `${label}: ${text(safeReasonText((o.status === endStatus ? o.cancelReason : null) || h?.notes))}`;
   }
 
   const stages = {
@@ -364,7 +404,8 @@ export const LEAD_HEADERS = [
   'Type',
   'Brand',
   'Quantity',
-  'Points redeemed',
+  'Points deducted',
+  'Points requested',
   'Value (₹)',
   'TDS deducted (₹)',
   'Current status',
@@ -416,6 +457,7 @@ export function redemptionHeaders(ctx: Pick<HierarchyCtx, 'clientId' | 'levels'>
 export interface RowInputs {
   order: ReportOrder;
   history: HistoryRow[];
+  /** The order's cash payout: its latest PAID transaction, else its latest attempt (pickPayout). */
   payout: PayoutRow | null;
   repId: string | null;
   /** Tenant display names for outlet types (OutletTypeClientConfig.displayName), by outletTypeId. */
@@ -432,10 +474,30 @@ export interface RowFacts {
   state: string;
   reward: string;
   status: RedemptionStatus;
-  points: number;
+  /** = the row's "Points deducted". */
+  pointsDeducted: number;
+  /** = the row's "Points requested". */
+  pointsRequested: number;
+  /** = the row's "Value (₹)" in paise (0 when no points were deducted; null = Not recorded). */
   valuePaise: bigint | null;
+  /** Days placed → delivered; set ONLY when the current status is DELIVERED and the delivery time is known. */
   daysToDeliver: number | null;
   hierarchy: string[];
+}
+
+/** The payout to show for a cash order: the latest PAID one, else the latest attempt. `rows` newest first. */
+export function pickPayout(rows: PayoutRow[]): PayoutRow | null {
+  return rows.find((r) => r.status === 'SUCCESS') ?? rows[0] ?? null;
+}
+
+/**
+ * Value (₹) — consistent with Points deducted in the same row: the frozen rupee value when points were deducted;
+ * 0 when nothing was deducted (not yet confirmed, cancelled before confirming, or refunded); null (→ "Not recorded")
+ * when points were deducted but no value was frozen (very old orders).
+ */
+export function rowValuePaise(o: Pick<ReportOrder, 'pointsDeducted' | 'valuePaise'>): bigint | null {
+  if (o.pointsDeducted <= 0) return 0n;
+  return o.valuePaise;
 }
 
 function podCell(o: ReportOrder): XlsxCell {
@@ -471,19 +533,27 @@ export function redemptionRow(inp: RowInputs): { cells: XlsxCell[]; facts: RowFa
       NOT_RECORDED
     : PARTNER_ROLE_LABEL[o.partner?.user?.role ?? ''] ?? NOT_RECORDED;
 
-  const daysToDeliver = stages.delivered.at ? days(stages.delivered.at.getTime() - o.createdAt.getTime()) : null;
+  // Only orders CURRENTLY Delivered (a returned order is not delivered), with a known delivery time.
+  const daysToDeliver =
+    o.status === 'DELIVERED' && stages.delivered.at ? days(stages.delivered.at.getTime() - o.createdAt.getTime()) : null;
+  const value = rowValuePaise(o);
 
-  // Cash payout bridge (PayoutTransaction): status / paid date / UTR. Not a cash order → "—".
+  // Cash payout bridge (PayoutTransaction): status from the chosen payout; paid date / UTR / TDS only from a PAID one.
+  // Not a cash order → "—".
   let payoutStatus = NOT_APPLICABLE;
   let paidOn = NOT_APPLICABLE;
   let utr = NOT_APPLICABLE;
+  let tds: XlsxCell = NOT_APPLICABLE;
   if (type === 'CASH') {
+    tds = 0;
     if (!payout) payoutStatus = 'Not created yet';
     else {
       payoutStatus = PAYOUT_STATUS_LABEL[payout.status] ?? payout.status;
       if (payout.status === 'SUCCESS') {
         paidOn = payout.completedAt ? istDateTimeCell(payout.completedAt) : NOT_RECORDED;
         utr = text(payout.providerRefId);
+        // Only TDS actually withheld from the PAID payout. 194R on redemptions is client-borne → normally 0.
+        tds = inr(payout.tdsPaise);
       }
     }
   }
@@ -496,10 +566,10 @@ export function redemptionRow(inp: RowInputs): { cells: XlsxCell[]; facts: RowFa
     REWARD_TYPE_LABEL[type],
     brandOf(o.reward?.metadata),
     o.quantity,
+    o.pointsDeducted,
     o.totalPointsCost,
-    o.valuePaise != null ? inr(o.valuePaise) : NOT_SET,
-    // Only TDS actually withheld from this order's cash payout. 194R on redemptions is client-borne → normally 0.
-    payout ? inr(payout.tdsPaise) : 0,
+    value != null ? inr(value) : NOT_RECORDED,
+    tds,
     STATUS_LABEL[o.status] ?? o.status,
     text(o.partner?.ownerName ?? o.partner?.user?.name),
     role,
@@ -548,15 +618,16 @@ export function redemptionRow(inp: RowInputs): { cells: XlsxCell[]; facts: RowFa
       state: text(outlet?.state),
       reward: text(o.reward?.name),
       status: o.status,
-      points: o.totalPointsCost,
-      valuePaise: o.valuePaise,
+      pointsDeducted: o.pointsDeducted,
+      pointsRequested: o.totalPointsCost,
+      valuePaise: value,
       daysToDeliver,
       hierarchy: hier,
     },
   };
 }
 
-/** One "Status history" row. */
+/** One "Status history" row. Notes are free text → plain words or redacted (never exported raw). */
 export const HISTORY_HEADERS = ['Order no', 'Outlet code', 'From', 'To', 'When (IST)', 'By', 'Notes'] as const;
 
 export function historyRow(h: HistoryRow, orderNumber: string, outletCode: string, nameOf: (id: string | null) => string): XlsxCell[] {
@@ -567,7 +638,7 @@ export function historyRow(h: HistoryRow, orderNumber: string, outletCode: strin
     STATUS_LABEL[h.toStatus] ?? h.toStatus,
     istDateTimeCell(h.createdAt),
     h.changedById ? nameOf(h.changedById) : SYSTEM,
-    text(h.notes, NOT_APPLICABLE),
+    text(safeReasonText(h.notes), NOT_APPLICABLE),
   ];
 }
 
@@ -575,27 +646,26 @@ export function historyRow(h: HistoryRow, orderNumber: string, outletCode: strin
 
 interface Bucket {
   orders: number;
-  points: number;
+  pointsDeducted: number;
   valuePaise: bigint;
-  livePoints: number;
-  liveValuePaise: bigint;
+  pointsRequested: number;
+  /** Orders whose CURRENT status is Delivered. */
   delivered: number;
-  /** Delivered orders whose delivery time is known (the average's denominator). */
+  /** Of those, the ones with a known delivery time (the average's denominator). */
   timed: number;
   deliverDays: number;
 }
 
-const emptyBucket = (): Bucket => ({ orders: 0, points: 0, valuePaise: 0n, livePoints: 0, liveValuePaise: 0n, delivered: 0, timed: 0, deliverDays: 0 });
+const emptyBucket = (): Bucket => ({ orders: 0, pointsDeducted: 0, valuePaise: 0n, pointsRequested: 0, delivered: 0, timed: 0, deliverDays: 0 });
 
 export const SUMMARY_HEADERS = [
   'Section',
   'Group',
   'Orders',
-  'Points (all orders)',
-  'Value ₹ (all orders)',
-  'Points (confirmed to delivered)',
-  'Value ₹ (confirmed to delivered)',
-  'Delivered orders',
+  'Points deducted',
+  'Value ₹ (of points deducted)',
+  'Points requested',
+  'Delivered orders (current status)',
   'Avg days placed → delivered',
 ] as const;
 
@@ -619,14 +689,11 @@ export class RedemptionSummary {
 
   private addTo(b: Bucket, f: RowFacts): void {
     b.orders++;
-    b.points += f.points;
+    b.pointsDeducted += f.pointsDeducted;
     b.valuePaise += f.valuePaise ?? 0n;
-    if (LIVE_STATUSES.includes(f.status)) {
-      b.livePoints += f.points;
-      b.liveValuePaise += f.valuePaise ?? 0n;
-    }
+    b.pointsRequested += f.pointsRequested;
     if (f.status === 'DELIVERED') b.delivered++;
-    if (f.daysToDeliver != null) {
+    if (f.status === 'DELIVERED' && f.daysToDeliver != null) {
       b.timed++;
       b.deliverDays += f.daysToDeliver;
     }
@@ -654,10 +721,9 @@ export class RedemptionSummary {
       section,
       group,
       b.orders,
-      b.points,
+      b.pointsDeducted,
       inr(b.valuePaise),
-      b.livePoints,
-      inr(b.liveValuePaise),
+      b.pointsRequested,
       b.delivered,
       b.timed ? Math.round((b.deliverDays / b.timed) * 10) / 10 : NOT_APPLICABLE,
     ];
@@ -666,7 +732,7 @@ export class RedemptionSummary {
   rows(): XlsxCell[][] {
     const out: XlsxCell[][] = [this.line('Total', 'All orders in this file', this.total)];
     for (const [section, groups] of this.sections) {
-      const sorted = [...groups.entries()].sort((a, b) => b[1].points - a[1].points || a[0].localeCompare(b[0]));
+      const sorted = [...groups.entries()].sort((a, b) => b[1].pointsDeducted - a[1].pointsDeducted || a[0].localeCompare(b[0]));
       for (const [g, b] of sorted) out.push(this.line(section, g, b));
     }
     return out;

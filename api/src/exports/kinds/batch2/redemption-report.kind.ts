@@ -30,9 +30,10 @@ import { RedemptionReportQueryDto } from '../../../reports/dto/redemption-report
 import {
   describeRedemptionParams,
   REDEMPTION_LIGHT_MAX_DAYS,
+  assertRedemptionClientKnown,
   rangeDays,
-  redemptionWhere,
   resolveRedemptionClientId,
+  resolveRedemptionWhere,
   resolveRedemptionParams,
   type RedemptionReportParams,
 } from '../../../reports/redemptions/redemption-report.query';
@@ -43,7 +44,9 @@ import {
   SUMMARY_HEADERS,
   historyRow,
   levelHeader,
+  assignmentOutlets,
   outletOf,
+  pickPayout,
   placedById,
   redemptionHeaders,
   redemptionRow,
@@ -67,6 +70,7 @@ export const ORDER_SELECT = {
   orderNumber: true,
   status: true,
   quantity: true,
+  pointsDeducted: true,
   totalPointsCost: true,
   valuePaise: true,
   redemptionMode: true,
@@ -96,9 +100,12 @@ export const ORDER_SELECT = {
       user: { select: { name: true, role: true } },
       outlets: {
         where: { deletedAt: null },
+        // ALL live outlets: the row shows the primary one (comparePrimary); the others are the rep-assignment fallback.
         orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
-        take: 1,
         select: {
+          isPrimary: true,
+          isActive: true,
+          createdAt: true,
           id: true,
           outletCode: true,
           name: true,
@@ -147,7 +154,8 @@ class Names {
 
 async function run(ctx: ExportRunContext, raw: RedemptionReportParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
   const p = pinned(ctx.user, raw);
-  const where = redemptionWhere(p);
+  await assertRedemptionClientKnown(ctx.prisma, ctx.user, p.clientId);
+  const where = await resolveRedemptionWhere(ctx.prisma, p);
 
   // 1. Nothing matched → 404, no file, no audit row.
   const matched = await ctx.prisma.redemptionOrder.count({ where });
@@ -230,11 +238,12 @@ export async function runIn(
     widths: headers.map((h) => Math.min(40, Math.max(12, h.length + 2))),
   });
   let written = 0;
+  let cursor: string | null = null;
   for (;;) {
     const fetched = (await db.redemptionOrder.findMany({
       where,
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      skip: written,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}), // keyset: resume after the last row written
       take: EXPORT_PAGE_SIZE + 1, // one extra row = "there is another page" without an extra round trip
       select: ORDER_SELECT,
     })) as unknown as ReportOrder[];
@@ -251,7 +260,7 @@ export async function runIn(
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         select: { redemptionOrderId: true, status: true, completedAt: true, providerRefId: true, tdsPaise: true },
       });
-      const outletPks = [...new Set(page.map((o) => outletOf(o)?.id).filter((x): x is string => !!x))];
+      const outletPks = [...new Set(page.flatMap((o) => (o.partner?.outlets ?? []).map((x) => x.id)))];
       const partnerIds = [...new Set(page.map((o) => o.partner?.id).filter((x): x is string => !!x))];
       const assignments = await db.salesUserAssignment.findMany({
         where: {
@@ -270,8 +279,13 @@ export async function runIn(
         if (list) list.push(h);
         else historyBy.set(h.orderId, [h]);
       }
-      const payoutBy = new Map<string, PayoutRow>();
-      for (const t of payouts) if (t.redemptionOrderId && !payoutBy.has(t.redemptionOrderId)) payoutBy.set(t.redemptionOrderId, t);
+      const payoutsBy = new Map<string, PayoutRow[]>(); // newest first (query order)
+      for (const t of payouts) {
+        if (!t.redemptionOrderId) continue;
+        const list = payoutsBy.get(t.redemptionOrderId);
+        if (list) list.push(t);
+        else payoutsBy.set(t.redemptionOrderId, [t]);
+      }
       const repByOutlet = new Map<string, string>();
       const repByPartner = new Map<string, string>();
       for (const a of assignments) {
@@ -281,12 +295,20 @@ export async function runIn(
 
       for (const o of page) {
         const outlet = outletOf(o);
-        // Outlet-level assignment first, else a partner-level one.
-        const repId = (outlet ? repByOutlet.get(outlet.id) : undefined) ?? (o.partner ? repByPartner.get(o.partner.id) : undefined) ?? null;
+        // Primary outlet's active rep → the member's other outlets (active first, oldest first) → partner-level.
+        let repId: string | null = null;
+        for (const x of assignmentOutlets(o)) {
+          const r = repByOutlet.get(x.id);
+          if (r) {
+            repId = r;
+            break;
+          }
+        }
+        repId ??= (o.partner ? repByPartner.get(o.partner.id) : undefined) ?? null;
         const { cells, facts } = redemptionRow({
           order: o,
           history: historyBy.get(o.id) ?? [],
-          payout: payoutBy.get(o.id) ?? null,
+          payout: pickPayout(payoutsBy.get(o.id) ?? []),
           repId,
           typeDisplay,
           nameOf: names.nameOf,
@@ -298,6 +320,7 @@ export async function runIn(
         orderMeta.set(o.id, { orderNumber: o.orderNumber, outletCode: outlet?.outletCode ?? NOT_RECORDED });
         written++;
       }
+      cursor = page[page.length - 1].id;
     }
     if (fetched.length <= EXPORT_PAGE_SIZE) break;
   }
@@ -305,11 +328,12 @@ export async function runIn(
   // ── Sheet 2: Status history (second paged pass over the same snapshot) ──
   const hist = await out.addSheet('Status history', [...HISTORY_HEADERS], { widths: [18, 14, 14, 14, 18, 24, 50] });
   let histWritten = 0;
+  let histCursor: string | null = null;
   for (;;) {
     const fetched: HistoryRow[] = await db.redemptionStatusHistory.findMany({
       where: { order: where },
       orderBy: [{ order: { createdAt: 'asc' } }, { orderId: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
-      skip: histWritten,
+      ...(histCursor ? { cursor: { id: histCursor }, skip: 1 } : {}),
       take: EXPORT_PAGE_SIZE + 1,
       select: HISTORY_SELECT,
     });
@@ -321,6 +345,7 @@ export async function runIn(
         await hist.addRow(historyRow(h, m?.orderNumber ?? NOT_RECORDED, m?.outletCode ?? NOT_RECORDED, names.nameOf));
         histWritten++;
       }
+      histCursor = page[page.length - 1].id;
     }
     if (fetched.length <= EXPORT_PAGE_SIZE) break;
   }

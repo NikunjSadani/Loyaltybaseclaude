@@ -19,7 +19,7 @@ import { LocationComplianceQueryDto } from './dto/location-compliance.dto';
 import { LOCATION_REQUIRED_FEATURE } from '../common/location-gate.helper';
 import { buildLocationReport, pageOfLocationReport, resolveLocationParams } from './location/location-compliance-report';
 import { RedemptionReportQueryDto } from './dto/redemption-report.dto';
-import { redemptionScreenSummary, type RedemptionScreenSummary } from './redemptions/redemption-report.summary';
+import { redemptionOrderCount, redemptionScreenSummary, type RedemptionScreenSummary } from './redemptions/redemption-report.summary';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -347,6 +347,11 @@ export class ReportsService {
    */
   async redemptionSummary(user: JwtPayload, q: RedemptionReportQueryDto): Promise<RedemptionScreenSummary> {
     return redemptionScreenSummary(this.prisma, user, q, new Date());
+  }
+
+  /** Matching order count for the redemption export (validates scope + an un-assumed owner's ?clientId=). */
+  async redemptionCount(user: JwtPayload, q: RedemptionReportQueryDto): Promise<number> {
+    return redemptionOrderCount(this.prisma, user, q, new Date());
   }
 
   // ── Usage Report ──────────────────────────────────────────────────────────────
