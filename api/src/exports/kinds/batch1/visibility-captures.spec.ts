@@ -2,7 +2,7 @@
  * Visibility report export kind (`visibility-captures`) — the 2026-11-20 redesign. Reads the workbook back with SheetJS
  * and asserts: headers (fixed + per-photo groups from the form LABELS), plain statuses, overall remark composed from
  * per-photo reasons, reviewer name/time, imported Source, Not-captured sheet (open → "Not captured yet", closed →
- * "Missed"), About counts = main sheet, absolute photo links on the primary portal host, formula-injection safety,
+ * "Missed"), closed-window re-take / rejection → "Not approved — window closed", "Captured on" never blank, About counts = main sheet, absolute photo links on the primary portal host, formula-injection safety,
  * tenant isolation, paging, params + heavy rule, and the master-switch 403.
  */
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
@@ -10,7 +10,7 @@ import * as XLSX from 'xlsx';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import { TenantService } from '../../../tenant/tenant.service';
 import { TenantSettingsService } from '../../../tenant/tenant-settings.service';
-import { visibilityAddressableOutletWhere } from '../../../visibility/visibility-report.service';
+import { visibilityUniverseWhere } from '../../../visibility/visibility-scope.helper';
 import {
   VISIBILITY_CAPTURES_KIND,
   VISIBILITY_HISTORY_HEADERS,
@@ -348,6 +348,27 @@ describe('visibility report export (visibility-captures)', () => {
     expect(rowOf('A004')('Status')).toBe('Rejected');
   });
 
+  it('a re-take / rejection left when the window CLOSED reads "Not approved — window closed" (and is counted on About)', async () => {
+    const { rowOf, sheet } = await run(baseDb(), { month: '2026-11' }, new Date('2026-12-02T06:00:00Z'));
+    expect(rowOf('A002')('Status')).toBe('Not approved — window closed');
+    expect(rowOf('A004')('Status')).toBe('Not approved — window closed');
+    expect(rowOf('A001')('Status')).toBe('Approved');
+    // The count rows are the indented ones (the STATUS section repeats the words with their meaning).
+    const counts = Object.fromEntries(
+      sheet('About').slice(1).filter((r) => String(r[0]).startsWith('  ')).map((r) => [String(r[0]).trim(), r[1]]),
+    );
+    expect(counts['Not approved — window closed']).toBe(2);
+    expect(counts['Needs re-take']).toBe(0);
+    const meaning = sheet('About').slice(1).filter((r) => String(r[0]) === 'Not approved — window closed');
+    expect(meaning.some((r) => String(r[1]).includes('cannot be re-submitted'))).toBe(true);
+  });
+
+  it('"Captured on" is never a silent blank: portal capture without a phone time → "Not recorded"; imported → "Not recorded (old app)"', async () => {
+    const { rowOf } = await run(baseDb());
+    expect(rowOf('A004')('Captured on')).toBe('Not recorded');
+    expect(rowOf('A003')('Captured on')).toBe('Not recorded (old app)');
+  });
+
   it('CHANGES_REQUESTED: per-photo decisions/reasons/reviewers + Overall remark composed from the rejected photos', async () => {
     const { rowOf } = await run(baseDb());
     const a2 = rowOf('A002');
@@ -435,8 +456,8 @@ describe('visibility report export (visibility-captures)', () => {
     ]);
     // The SAME in-scope rule as the report tiles, narrowed to outlets alive during the window (IST November).
     expect(prisma.calls['outlet.findMany'][0].where).toEqual(
-      visibilityAddressableOutletWhere(T, SCOPE, { programs: [], subPrograms: [] }, {
-        start: new Date('2026-10-31T18:30:00Z'), end: new Date('2026-11-30T18:30:00Z'),
+      visibilityUniverseWhere(T, { outletScope: SCOPE, programs: [], subPrograms: [] }, {
+        activeDuring: { start: new Date('2026-10-31T18:30:00Z'), end: new Date('2026-11-30T18:30:00Z') },
       }),
     );
   });
@@ -447,9 +468,11 @@ describe('visibility report export (visibility-captures)', () => {
     expect(sheet('Visibility')).toHaveLength(1); // header only: no October captures
     const rows = sheet('Not captured').slice(1);
     expect(rows).toHaveLength(1);
-    expect(rows[0][0]).toBe("Not tracked for imported months — the old app's records only include approved visits");
+    expect(rows[0][0]).toBe(
+      "Not tracked for imported months — the old app's records only include approved visits, so coverage and Missed cannot be worked out.",
+    );
     expect(rows[0][10]).toBe('2026-10-P1');
-    expect(rows[0][11]).toBe('Not tracked');
+    expect(rows[0][11]).toBe('Not tracked for imported months');
     expect(rowCount).toBe(1);
     const about = Object.fromEntries(sheet('About').slice(1).map((r) => [String(r[0]).trim(), r[1]]));
     expect(String(about['NOT CAPTURED'])).toContain('portal went live on 05 Nov 2026, 3:01 pm');
@@ -472,8 +495,8 @@ describe('visibility report export (visibility-captures)', () => {
     ]);
     // The outlet query is the tiles' rule narrowed to outlets alive during October (IST).
     expect(prisma.calls['outlet.findMany'][0].where).toEqual(
-      visibilityAddressableOutletWhere(T, SCOPE, { programs: [], subPrograms: [] }, {
-        start: new Date('2026-09-30T18:30:00Z'), end: new Date('2026-10-31T18:30:00Z'),
+      visibilityUniverseWhere(T, { outletScope: SCOPE, programs: [], subPrograms: [] }, {
+        activeDuring: { start: new Date('2026-09-30T18:30:00Z'), end: new Date('2026-10-31T18:30:00Z') },
       }),
     );
   });
@@ -493,7 +516,7 @@ describe('visibility report export (visibility-captures)', () => {
     const { sheet } = await run(db, { month: '2026-11' }, new Date('2026-12-02T06:00:00Z'));
     const rows = sheet('Not captured').slice(1);
     expect(rows.map((r) => [r[0], r[10], r[11]])).toEqual([
-      ['A005', '2026-11-P1', 'No approved record — part of this window was on the old app (it only sent approved visits)'],
+      ['A005', '2026-11-P1', 'No approved record — part of this window was on the old app'],
     ]);
     const about = Object.fromEntries(sheet('About').slice(1).map((r) => [String(r[0]).trim(), r[1]]));
     expect(about['No approved record (window partly on the old app)']).toBe(1);
@@ -585,6 +608,7 @@ describe('visibility report export (visibility-captures)', () => {
       'Waiting for review': count('Waiting for review'),
       'Needs re-take': count('Needs re-take'),
       Rejected: count('Rejected'),
+      'Not approved — window closed': count('Not approved — window closed'),
       'of which imported from the old app': 1,
     });
     expect(about['Covers']).toBe('November 2026 — every window of the month');

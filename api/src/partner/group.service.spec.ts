@@ -13,6 +13,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { visibilityUniverseWhere } from '../visibility/visibility-scope.helper';
 
 const mockPrisma = {
   channelPartner: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -560,8 +561,12 @@ describe('GroupService.getVisibilityRollup', () => {
       mockTenantSettings.getEffectiveSettings.mockResolvedValue({
         visibilityConfig: { outletScope: ['RETAILER'], frequencyPerMonth: 1, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 } },
       });
-      // 1st outlet.findMany = the shared group load; 2nd = the photo path's scoped load.
-      mockPrisma.outlet.findMany.mockResolvedValueOnce(groupOutlets).mockResolvedValueOnce(groupOutlets);
+      // 1st outlet.findMany = the shared group load; 2nd = the photo path's group load; 3rd = the in-scope ids
+      // (visibilityUniverseWhere — the database decides; the depot is out of scope).
+      mockPrisma.outlet.findMany
+        .mockResolvedValueOnce(groupOutlets)
+        .mockResolvedValueOnce(groupOutlets)
+        .mockResolvedValueOnce(groupOutlets.filter((o) => o.id !== 'o9').map((o) => ({ id: o.id })));
     });
 
     it('reads VisibilityCapture for the CURRENT window and returns plain-status-ready codes + counts', async () => {
@@ -593,12 +598,33 @@ describe('GroupService.getVisibilityRollup', () => {
       ]);
       // The photo-path outlet load excludes deactivated outlets (same as the coverage denominator).
       expect(mockPrisma.outlet.findMany.mock.calls[1][0].where).toMatchObject({ parentId: 'parent1', clientId: 'deoleo', deletedAt: null, deactivatedAt: null });
+      // In scope = THE shared rule (report / Excel / dashboards / capture list), narrowed to this group.
+      const cfg = { outletScope: ['RETAILER'], frequencyPerMonth: 1, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 } };
+      expect(mockPrisma.outlet.findMany.mock.calls[2][0].where).toEqual({
+        AND: [visibilityUniverseWhere('deoleo', cfg), { parentId: 'parent1' }],
+      });
+    });
+
+    it('a group outlet the shared rule excludes (e.g. KYC not approved yet) is listed as not in scope, never counted', async () => {
+      mockPrisma.outlet.findMany.mockReset();
+      mockPrisma.outlet.findMany
+        .mockResolvedValueOnce(groupOutlets)
+        .mockResolvedValueOnce(groupOutlets)
+        .mockResolvedValueOnce([{ id: 'o1' }, { id: 'o2' }]); // o3..o5 are RETAILER but not KYC-approved
+      mockPrisma.visibilityCapture.findMany.mockResolvedValueOnce([]);
+      const result = await makeService().getVisibilityRollup(user, {});
+      if (!result.available || !result.visibilityEnabled || result.mode !== 'PHOTO_APPROVAL') throw new Error('expected photo branch');
+      expect(mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where.outletId.in.sort()).toEqual(['o1', 'o2']);
+      expect(result.counts).toMatchObject({ total: 2, notCaptured: 2, notInScope: 4 });
+      expect(result.outlets.find((o) => o.outletCode === 'OUT-3')?.inScope).toBe(false);
     });
 
     it('a group with no in-scope outlets does not query captures', async () => {
       mockTenantSettings.getEffectiveSettings.mockResolvedValue({
         visibilityConfig: { outletScope: ['NOTHING'], frequencyPerMonth: 2, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 } },
       });
+      mockPrisma.outlet.findMany.mockReset();
+      mockPrisma.outlet.findMany.mockResolvedValueOnce(groupOutlets).mockResolvedValueOnce(groupOutlets).mockResolvedValueOnce([]);
       const result = await makeService().getVisibilityRollup(user, {});
       if (!result.available || !result.visibilityEnabled || result.mode !== 'PHOTO_APPROVAL') throw new Error('expected photo branch');
       expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();

@@ -2,7 +2,7 @@ import { Type } from 'class-transformer';
 import { IsIn, IsInt, IsOptional, IsString, Matches, Max, Min } from 'class-validator';
 import { PLAIN_STATUSES, PlainStatus } from '../visibility-metrics';
 
-/** Month-wise visibility queries (VISIBILITY-POSM-DESIGN.md §Metrics). */
+/** Month-wise visibility queries (VISIBILITY-POSM-DESIGN.md §17). */
 const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 /** GET /v1/visibility/report[/tenant] — a month (default current IST month) + optional single window of it. */

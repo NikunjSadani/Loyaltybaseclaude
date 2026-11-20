@@ -1,7 +1,7 @@
 /**
  * visibility-metrics.ts — THE shared definitions behind every Visibility (POSM) number: the report screen,
  * the admin "Pending Visibility Approvals" tile, the Operations "Visibility Program Funnel" and the Daily Ops
- * Digest. VISIBILITY-POSM-DESIGN.md §"Metrics (month-wise)" is the written contract; this file is its code.
+ * Digest. VISIBILITY-POSM-DESIGN.md §17 is the written contract; this file is its code.
  *
  *   - Everything is MONTH-WISE: a month `YYYY-MM` (default = the current IST month) selects every window
  *     `YYYY-MM-Pn` of that month. Imported old-app captures carry `windowKey = <their month>-P1`, so they
@@ -24,6 +24,7 @@ import {
   VisibilityFormSchema,
 } from './visibility-types';
 import { classifyPhotoFence, outletMasterFencePolicy, PhotoFencePolicy } from './geo-fence.helper';
+import { VISIBILITY_WORDS } from './visibility-report-labels';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Plain statuses (owner decision 2026-11-20)
@@ -38,19 +39,21 @@ export const PLAIN_STATUSES = [
   'NOT_CAPTURED',
   'MISSED',
   'NOT_TRACKED',
+  'PART_OLD_APP',
 ] as const;
 export type PlainStatus = (typeof PLAIN_STATUSES)[number];
 
-/** The words shown to people. Keep in sync with platform/src/lib/visibility-report.ts (FE mirror). */
+/** The words shown to people — from the ONE API word list (visibility-report-labels VISIBILITY_WORDS). */
 export const PLAIN_STATUS_LABEL: Record<PlainStatus, string> = {
-  WAITING: 'Waiting for review',
-  APPROVED: 'Approved',
-  NEEDS_RETAKE: 'Needs re-take',
-  REJECTED: 'Rejected',
-  CLOSED_NOT_APPROVED: 'Not approved — window closed',
-  NOT_CAPTURED: 'Not captured yet',
-  MISSED: 'Missed',
-  NOT_TRACKED: 'Not tracked (imported month)',
+  WAITING: VISIBILITY_WORDS.WAITING,
+  APPROVED: VISIBILITY_WORDS.APPROVED,
+  NEEDS_RETAKE: VISIBILITY_WORDS.NEEDS_RETAKE,
+  REJECTED: VISIBILITY_WORDS.REJECTED,
+  CLOSED_NOT_APPROVED: VISIBILITY_WORDS.CLOSED_NOT_APPROVED,
+  NOT_CAPTURED: VISIBILITY_WORDS.NOT_CAPTURED,
+  MISSED: VISIBILITY_WORDS.MISSED,
+  NOT_TRACKED: VISIBILITY_WORDS.NOT_TRACKED,
+  PART_OLD_APP: VISIBILITY_WORDS.PART_OLD_APP,
 };
 
 /**
@@ -60,13 +63,16 @@ export const PLAIN_STATUS_LABEL: Record<PlainStatus, string> = {
  *   resubmit); once the window has closed a resubmit is refused (visibility-capture.service resubmitCapture), so
  *   it is final: "Not approved — window closed" — never counted as waiting on reps.
  * No capture: "Not captured yet" while the window is open (or not started), "Missed" ONLY once the window has
- * closed — except in an IMPORTED month (visibility-import.helper), where the old app kept only approved visits,
- * so a missing capture is "Not tracked", never "Missed".
+ * closed — except (visibility-portal-go-live): in an IMPORTED month / a window that ended before the portal went
+ * live (`importedMonth`), where the old app kept only approved visits, a missing capture is "Not tracked"; and in a
+ * closed window that was PARTLY on the old app (`partOldApp`), it is "No approved record — part of this window was on
+ * the old app" — never "Missed".
  */
 export function plainStatusOf(
   status: VisibilityCaptureStatus | null | undefined,
   windowClosed: boolean,
   importedMonth = false,
+  partOldApp = false,
 ): PlainStatus {
   switch (status) {
     case 'SUBMITTED':
@@ -79,6 +85,7 @@ export function plainStatusOf(
       return windowClosed ? 'CLOSED_NOT_APPROVED' : 'REJECTED';
     default:
       if (importedMonth) return 'NOT_TRACKED';
+      if (windowClosed && partOldApp) return 'PART_OLD_APP';
       return windowClosed ? 'MISSED' : 'NOT_CAPTURED';
   }
 }

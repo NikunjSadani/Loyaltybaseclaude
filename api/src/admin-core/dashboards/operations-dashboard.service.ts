@@ -22,7 +22,7 @@ import {
   monthCaptureWhere,
   resolveMonth,
 } from '../../visibility/visibility-metrics';
-import { IMPORTED_MONTH_NOTE, isVisibilityImportedMonth } from '../../visibility/visibility-import.helper';
+import { IMPORTED_MONTH_NOTE, isVisibilityImportedMonth } from '../../visibility/visibility-portal-go-live';
 
 /** How long one fraud scan is reused (the funnel load + its flag-list pages share it). */
 const FRAUD_SCAN_TTL_MS = 60_000;
@@ -444,14 +444,14 @@ export class OperationsDashboardService {
   }
 
   /**
-   * PHOTO_APPROVAL funnel for ONE month (VISIBILITY-POSM-DESIGN.md §Metrics) — in-scope outlets only
+   * PHOTO_APPROVAL funnel for ONE month (VISIBILITY-POSM-DESIGN.md §17) — in-scope outlets only
    * (visibilityUniverseWhere), the same definitions as the report:
    *   submitted = this month's captures (any status) · approved / waiting / needs re-take / rejected (open window) /
    *   not approved — window closed, by status;
    *   approval rate = approved ÷ every decided capture — null if none;
    *   flagged = captures with a duplicate photo OR a photo outside the fence; fraud flag rate = flagged ÷ submitted;
    *   participation = in-scope outlets with ≥1 capture this month ÷ in-scope outlets — null for an IMPORTED month
-   *   (the old app kept only approved visits; never divided by today's outlets — visibility-import.helper).
+   *   (the old app kept only approved visits; never divided by today's outlets — visibility-portal-go-live).
    * `flagDetails` = the caller may open the flagged-capture list (Gifsy only for now); client roles get counts only.
    */
   private async buildPhotoVisibility(clientId: string, month: string, flagDetails: boolean) {

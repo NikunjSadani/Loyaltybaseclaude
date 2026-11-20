@@ -58,9 +58,12 @@ const STATUS_STYLES: Record<string, string> = {
   CHANGES_REQUESTED: 'bg-orange-100 text-orange-700',
 };
 
-/** Badge label for a capture status — the shared plain words (raw code for an unknown value). */
-function statusLabel(status: string): string {
-  return visibilityStatusLabel(status);
+/**
+ * Badge label for a capture status — the shared plain words (raw code for an unknown value). `windowClosed` (from the
+ * API): a re-take / rejection left when the window closed reads "Not approved — window closed" (report + Excel words).
+ */
+function statusLabel(status: string, windowClosed?: boolean): string {
+  return visibilityStatusLabel(status, { windowClosed: windowClosed === true });
 }
 
 /**
@@ -237,7 +240,7 @@ export function VisibilityCaptureQueue() {
                     <td className="px-4 py-2.5"><GeoBadge geoFenceOk={r.geoFenceOk} distanceMeters={r.distanceMeters} /></td>
                     <td className="px-4 py-2.5 text-xs text-gray-600 font-mono">{r.submittedBy?.employeeCode ?? '—'}</td>
                     <td className="px-4 py-2.5">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[r.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(r.status)}{r.currentVersion > 1 ? ` · v${r.currentVersion}` : ''}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[r.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(r.status, r.windowClosed)}{r.currentVersion > 1 ? ` · v${r.currentVersion}` : ''}</span>
                     </td>
                     <td className="px-4 py-2.5 text-right">
                       <button onClick={() => setOpenId(r.id)} data-review-id={r.id} className="text-xs text-[var(--brand-primary)] font-medium hover:underline">Review</button>
@@ -829,7 +832,7 @@ function CaptureReview({
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <h2 className="text-base sm:text-lg font-bold text-gray-900 truncate">{detail.outletName || 'Outlet'}</h2>
               <span className="text-xs text-gray-500 font-mono">{detail.outletCode}</span>
-              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[detail.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(detail.status)}</span>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_STYLES[detail.status] ?? 'bg-gray-100 text-gray-600'}`}>{statusLabel(detail.status, detail.windowClosed)}</span>
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="capture-review-program">
               <span className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 border border-indigo-200 px-2.5 py-1 text-sm">
@@ -1078,7 +1081,7 @@ function CaptureReview({
           {decided && (
             <div ref={nextBoxRef} tabIndex={-1} role="status"
               className="flex flex-wrap items-center justify-end gap-3 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 focus:outline-none" data-testid="capture-review-next">
-              <span className="text-xs text-gray-700 mr-auto">Decision saved — {statusLabel(detail.status)}.</span>
+              <span className="text-xs text-gray-700 mr-auto">Decision saved — {statusLabel(detail.status, detail.windowClosed)}.</span>
               {nextId ? (
                 <button ref={nextBtnRef} onClick={() => onNext(nextId)}
                   className="flex items-center gap-1.5 px-4 py-2 text-sm font-semibold bg-[var(--brand-primary)] text-white rounded-lg hover:opacity-90">

@@ -71,7 +71,7 @@ interface LegacyVisibilityBlock {
   participationPct: number;
 }
 
-/** PHOTO_APPROVAL tenants — one month, in-scope outlets (VISIBILITY-POSM-DESIGN.md §Metrics). */
+/** PHOTO_APPROVAL tenants — one month, in-scope outlets (VISIBILITY-POSM-DESIGN.md §17). */
 interface PhotoVisibilityBlock {
   enabled: true;
   mode: 'PHOTO_APPROVAL';

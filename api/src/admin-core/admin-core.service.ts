@@ -1967,7 +1967,7 @@ export class AdminCoreService {
    * Unfiltered, every `where` is exactly the pre-filter one (Deoleo byte-identical). An unknown
    * program matches nothing → zeros. `availablePrograms` = distinct trimmed outlet programs.
    *
-   * Visibility (VISIBILITY-POSM-DESIGN.md §Metrics) — PHOTO_APPROVAL tenants only: MONTH-WISE (`visibilityMonth`,
+   * Visibility (VISIBILITY-POSM-DESIGN.md §17) — PHOTO_APPROVAL tenants only: MONTH-WISE (`visibilityMonth`,
    * default the current IST month), in-scope outlets only (visibilityUniverseWhere): `pendingVisibility` = EVERY
    * capture still "Waiting for review" whatever its month (Gifsy's whole queue; `visibility.waiting` = the picked
    * month's share, `waitingEarlierMonths` = the rest), and `visibility.waitingOnReps` = re-takes / rejections in a

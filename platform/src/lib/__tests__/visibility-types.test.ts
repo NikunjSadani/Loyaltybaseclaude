@@ -311,6 +311,27 @@ describe('plain visibility status words', () => {
     expect(VISIBILITY_STATUS_WORDS.MISSED).toBe('Missed');
   });
 
+  it('the whole word list is pinned (= the API VISIBILITY_WORDS, api/src/visibility/visibility-report-labels.ts)', () => {
+    expect(VISIBILITY_STATUS_WORDS).toEqual({
+      SUBMITTED: 'Waiting for review',
+      APPROVED: 'Approved',
+      CHANGES_REQUESTED: 'Needs re-take',
+      REJECTED: 'Rejected',
+      CLOSED_NOT_APPROVED: 'Not approved — window closed',
+      NOT_CAPTURED: 'Not captured yet',
+      MISSED: 'Missed',
+      NOT_STARTED: 'Not started',
+      NOT_TRACKED: 'Not tracked for imported months',
+      PART_OLD_APP: 'No approved record — part of this window was on the old app',
+    });
+  });
+
+  it('visibilityStatusLabel: a re-take / rejection in a CLOSED window reads "Not approved — window closed"', () => {
+    expect(visibilityStatusLabel('CHANGES_REQUESTED', { windowClosed: true })).toBe('Not approved — window closed');
+    expect(visibilityStatusLabel('REJECTED', { windowClosed: true })).toBe('Not approved — window closed');
+    expect(visibilityStatusLabel('CHANGES_REQUESTED')).toBe('Needs re-take');
+  });
+
   it('visibilityStatusLabel: null → Not captured yet / Missed (closed window); unknown code shown as-is', () => {
     expect(visibilityStatusLabel(null)).toBe('Not captured yet');
     expect(visibilityStatusLabel(undefined, { windowClosed: true })).toBe('Missed');

@@ -192,8 +192,8 @@ describe('VisibilityReviewService', () => {
   // ── Programme / sub-programme (review-layout, 2026-11-19) — additive fields ──────
   it('adminListCaptures adds the outlet programme + sub-programme to each row (flattened, no nested outlet)', async () => {
     mockPrisma.visibilityCapture.findMany.mockResolvedValue([
-      { id: 'cap1', outletCode: 'OC1', status: 'SUBMITTED', outlet: { programName: 'Unnati', programCategory: 'Elite' } },
-      { id: 'cap2', outletCode: 'OC2', status: 'SUBMITTED', outlet: { programName: null, programCategory: null } },
+      { id: 'cap1', outletCode: 'OC1', windowKey: '2020-01-P1', status: 'SUBMITTED', outlet: { programName: 'Unnati', programCategory: 'Elite' } },
+      { id: 'cap2', outletCode: 'OC2', windowKey: '2020-01-P1', status: 'SUBMITTED', outlet: { programName: null, programCategory: null } },
     ]);
     mockPrisma.visibilityCapture.count.mockResolvedValue(2);
     const res = await service.adminListCaptures(gifsy, {});
@@ -201,9 +201,30 @@ describe('VisibilityReviewService', () => {
     expect(select.outlet).toEqual({ select: { programName: true, programCategory: true } });
     // Existing fields still selected (additive change).
     expect(select).toMatchObject({ id: true, outletCode: true, geoFenceOk: true, photoReviews: true });
-    expect(res.captures[0]).toEqual({ id: 'cap1', outletCode: 'OC1', status: 'SUBMITTED', programName: 'Unnati', programCategory: 'Elite' });
+    expect(res.captures[0]).toEqual({
+      id: 'cap1', outletCode: 'OC1', windowKey: '2020-01-P1', status: 'SUBMITTED', programName: 'Unnati', programCategory: 'Elite',
+      windowClosed: true,
+    });
     expect(res.captures[1]).toMatchObject({ programName: null, programCategory: null });
     expect(res.captures[0]).not.toHaveProperty('outlet');
+  });
+
+  it('adminListCaptures: windowClosed per row (IST, tenant frequency) — the queue words a closed re-take "Not approved — window closed"', async () => {
+    const s = new Date(Date.now() + 330 * 60_000);
+    const thisMonthP1 = `${s.getUTCFullYear()}-${String(s.getUTCMonth() + 1).padStart(2, '0')}-P1`;
+    mockSettings.getEffectiveSettings.mockResolvedValue({
+      visibilityConfig: { geoFence: { enabled: true, radiusMeters: 50 }, frequencyPerMonth: 1 },
+    });
+    mockPrisma.visibilityCapture.findMany.mockResolvedValue([
+      { id: 'open', windowKey: thisMonthP1, status: 'CHANGES_REQUESTED', outlet: null },
+      { id: 'closed', windowKey: '2020-01-P1', status: 'CHANGES_REQUESTED', outlet: null },
+    ]);
+    mockPrisma.visibilityCapture.count.mockResolvedValue(2);
+    const res = await service.adminListCaptures(gifsy, {});
+    expect(res.captures.map((c: { id: string; windowClosed: boolean }) => [c.id, c.windowClosed])).toEqual([
+      ['open', false],
+      ['closed', true],
+    ]);
   });
 
   it('adminGetCapture adds the outlet programme + sub-programme (null-safe when absent)', async () => {

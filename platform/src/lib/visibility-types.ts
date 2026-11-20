@@ -258,18 +258,26 @@ export const VISIBILITY_REJECT_REASON_LABELS: Record<VisibilityRejectReasonCode,
 
 /**
  * THE plain status words for Visibility (owner 2026-11-20) — the ONE place admin, sales and
- * partner UI take a status label from. Codes stay in data; only the words shown change. The
- * server-side Excel export's wording is NOT changed on this branch — it is handled in the report
- * branch. Two extra words cover "no capture" rows:
- * NOT_CAPTURED (window still open) and MISSED (window closed without an approved capture).
+ * partner UI (incl. the month report, lib/visibility-report.ts) take a status label from. Codes
+ * stay in data; only the words shown change. The API mirror is `VISIBILITY_WORDS` in
+ * api/src/visibility/visibility-report-labels.ts (Excel report, status report, digest) — the same
+ * strings, pinned by a test on each side. Extra words:
+ *   NOT_CAPTURED (no capture, window still open) · MISSED (window closed without a capture) ·
+ *   NOT_STARTED (window not begun) · CLOSED_NOT_APPROVED (a re-take / rejection left when the window
+ *   closed — a resubmit is refused, so it is final) · NOT_TRACKED (imported old-app month) ·
+ *   PART_OLD_APP (closed window partly on the old app, no capture — never "Missed").
  */
 export const VISIBILITY_STATUS_WORDS = {
   SUBMITTED: 'Waiting for review',
   APPROVED: 'Approved',
   CHANGES_REQUESTED: 'Needs re-take',
   REJECTED: 'Rejected',
+  CLOSED_NOT_APPROVED: 'Not approved — window closed',
   NOT_CAPTURED: 'Not captured yet',
   MISSED: 'Missed',
+  NOT_STARTED: 'Not started',
+  NOT_TRACKED: 'Not tracked for imported months',
+  PART_OLD_APP: 'No approved record — part of this window was on the old app',
 } as const;
 
 /** Short human label for a capture status (sales + admin surfaces). */
@@ -282,8 +290,10 @@ export const VISIBILITY_CAPTURE_STATUS_LABELS: Record<VisibilityCaptureStatus, s
 
 /**
  * Plain label for a capture status code; null/absent = no capture → "Not captured yet",
- * or "Missed" when `windowClosed`. An APPROVED capture is "Approved" even after the window
- * closes. An unknown code is shown as-is (never blank).
+ * or "Missed" when `windowClosed`. With `windowClosed`, a CHANGES_REQUESTED / REJECTED capture
+ * can no longer be resubmitted → "Not approved — window closed" (the API's plainStatusOf rule).
+ * An APPROVED capture is "Approved" even after the window closes. An unknown code is shown
+ * as-is (never blank).
  */
 export function visibilityStatusLabel(
   status: VisibilityCaptureStatus | string | null | undefined,
@@ -291,6 +301,9 @@ export function visibilityStatusLabel(
 ): string {
   if (status == null || status === '') {
     return opts.windowClosed ? VISIBILITY_STATUS_WORDS.MISSED : VISIBILITY_STATUS_WORDS.NOT_CAPTURED;
+  }
+  if (opts.windowClosed && (status === 'CHANGES_REQUESTED' || status === 'REJECTED')) {
+    return VISIBILITY_STATUS_WORDS.CLOSED_NOT_APPROVED;
   }
   return VISIBILITY_CAPTURE_STATUS_LABELS[status as VisibilityCaptureStatus] ?? status;
 }
@@ -669,6 +682,8 @@ export interface VisibilityCaptureRow {
   programName?: string | null;
   /** The outlet's sub-programme (`Outlet.programCategory`, e.g. "Elite"); null/absent when unset. */
   programCategory?: string | null;
+  /** The capture's window has closed (IST) — a re-take / rejection is then final ("Not approved — window closed"). */
+  windowClosed?: boolean;
 }
 
 export interface VisibilityCaptureListResponse {
@@ -805,6 +820,8 @@ export interface VisibilityCaptureDetail extends VisibilityCapture {
   reviewHistory?: VisibilityReviewEvent[];
   /** Imported old-app capture (photos under /vendor-import/) — reviewer = the old app, never an admin. */
   imported?: boolean;
+  /** The capture's window has closed (IST) — a re-take / rejection is then final ("Not approved — window closed"). */
+  windowClosed?: boolean;
   /** Latest review decision of the CURRENT version; null = not reviewed yet. */
   lastReview?: { actorName: string | null; actorUserId: string | null; at: string; action: VisibilityReviewAction } | null;
   media: VisibilityMediaRef[];

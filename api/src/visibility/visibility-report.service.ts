@@ -7,7 +7,7 @@ import {
 } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isGifsyOperator } from '../common/tenant-scope';
-import { visibilityReportScopeError } from './visibility-report-scope';
+import { visibilityReportScopeError, windowRangeUtc } from './visibility-report-scope';
 import { visibilityProgramScope, visibilityUniverseWhere } from './visibility-scope.helper';
 import {
   monthCaptureWhere,
@@ -18,7 +18,14 @@ import {
   resolveMonth,
 } from './visibility-metrics';
 import { readPhotoReviews } from './visibility-types';
-import { IMPORTED_MONTH_NOTE, isImportedCaptureFormValues, isVisibilityImportedMonth } from './visibility-import.helper';
+import {
+  classifyWindowAgainstGoLive,
+  GoLiveWindowClass,
+  IMPORTED_MONTH_NOTE,
+  importedWindowKeys,
+  isImportedVisibilityCapture,
+  visibilityPortalGoLive,
+} from './visibility-portal-go-live';
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { firstActiveApproverId } from '../sales/sales-hierarchy-access.helper';
 import type { ReportGroup } from './dto/visibility-report.dto';
@@ -64,6 +71,8 @@ export interface StatusTally {
   missed: number;
   /** Imported months only — no record from the old app (it kept only approved visits). Always 0 here. */
   notTracked: number;
+  /** Closed window partly on the old app, no capture — "No approved record — part of this window was on the old app". */
+  partOldApp: number;
   /** approved ÷ inScope × 100 (1 dp); 0 when nothing is in scope; null for an imported month (not tracked). */
   coveragePct: number | null;
 }
@@ -96,6 +105,7 @@ const STATUS_FIELD: Record<PlainStatus, keyof Omit<StatusTally, 'inScope' | 'cov
   NOT_CAPTURED: 'notCaptured',
   MISSED: 'missed',
   NOT_TRACKED: 'notTracked',
+  PART_OLD_APP: 'partOldApp',
 };
 
 /**
@@ -105,7 +115,7 @@ const STATUS_FIELD: Record<PlainStatus, keyof Omit<StatusTally, 'inScope' | 'cov
 export function tallySlots(slots: Array<Pick<ReportSlot, 'status'>>, coverageTracked = true): StatusTally {
   const t: StatusTally = {
     inScope: 0, waiting: 0, approved: 0, needsRetake: 0, rejected: 0, closedNotApproved: 0,
-    notCaptured: 0, missed: 0, notTracked: 0, coveragePct: 0,
+    notCaptured: 0, missed: 0, notTracked: 0, partOldApp: 0, coveragePct: 0,
   };
   for (const s of slots) {
     t.inScope += 1;
@@ -181,13 +191,15 @@ function chunks<T>(xs: T[]): T[][] {
 }
 
 /**
- * VisibilityReportService — the MONTH-WISE Visibility (POSM) report (VISIBILITY-POSM-DESIGN.md §Metrics).
+ * VisibilityReportService — the MONTH-WISE Visibility (POSM) report (VISIBILITY-POSM-DESIGN.md §17).
  * Pick a month (default the current IST month; any past month incl. imported old-app history) and optionally
  * one window of it. Every in-scope outlet × window of the selection is one "visit due" with ONE plain status:
  * Waiting for review · Approved · Needs re-take / Rejected (window open — the rep can still redo it) · Not approved —
  * window closed (re-take / rejection left when the window closed; final) · Not captured yet (window open) · Missed
- * (no capture by window close). An IMPORTED month (before the portal went live — visibility-import.helper) lists only
- * the visits the old app recorded, with coverage / Missed "not tracked" (importedMonthNote). Tiles, the Programme / Rep / Manager breakdowns and the outlet list are all computed from the SAME
+ * (no capture by window close). Old-app history (visibility-portal-go-live — the SAME per-window rule as the Excel
+ * report): a window that ended before the portal went live lists only the visits the old app recorded (no "Missed"); a
+ * month made only of such windows is an IMPORTED month (coverage "not tracked", importedMonthNote); a closed window
+ * PARTLY on the old app reads "No approved record — part of this window was on the old app" instead of Missed. Tiles, the Programme / Rep / Manager breakdowns and the outlet list are all computed from the SAME
  * slot table, so a tile, its breakdown rows and its outlet list always add up. In scope = visibilityUniverseWhere.
  * Captures that exist but are NOT counted (outlet no longer in scope, or a window key the current frequency does
  * not have) are returned in `notCounted` and shown on screen — never silently dropped.
@@ -254,9 +266,28 @@ export class VisibilityReportService {
     const closedByKey = new Map(sel.selected.map((w) => [w.key, w.closed]));
     const scoped = config.outletScope.length > 0;
     const universe = visibilityUniverseWhere(clientId, config);
-    // An IMPORTED (pre-portal) month: the old app kept only approved visits → list only what it recorded, never
-    // "Missed" / coverage against today's outlets (visibility-import.helper — the shared go-live rule).
-    const importedMonth = await isVisibilityImportedMonth(this.prisma, clientId, sel.month);
+    // Old-app history, per window (visibility-portal-go-live — the same rule as the Excel report's Not-captured sheet):
+    // 'old' (ended before the portal went live) → only what the old app recorded, never "Missed"; 'part-old' (began
+    // before go-live / holds imported visits) → a closed window with no capture is "No approved record — part of this
+    // window was on the old app". The imported-capture check looks at every window key of the scope (P1..P4 for a
+    // month), exactly like the Excel export.
+    const goLive = await visibilityPortalGoLive(this.prisma, clientId);
+    const importedKeys = await importedWindowKeys(
+      this.prisma,
+      clientId,
+      sel.windowKey ? [sel.windowKey] : [1, 2, 3, 4].map((n) => `${sel.month}-P${n}`),
+    );
+    const classByKey = new Map<string, GoLiveWindowClass>(
+      sel.selected.map((w) => [
+        w.key,
+        classifyWindowAgainstGoLive(windowRangeUtc(w.key, freq), goLive, {
+          windowHoldsImported: importedKeys.has(w.key),
+          scopeHoldsImported: importedKeys.size > 0,
+        }),
+      ]),
+    );
+    // An IMPORTED month = every selected window is old-app history: coverage / Missed are not tracked.
+    const importedMonth = sel.selected.length > 0 && sel.selected.every((w) => classByKey.get(w.key) === 'old');
 
     const outlets = scoped
       ? await this.prisma.outlet.findMany({
@@ -345,10 +376,11 @@ export class VisibilityReportService {
       const managerId = repId ? managerByRep.get(repId) ?? null : null;
       for (const key of selectedKeys) {
         const c = capByKey.get(`${o.id}|${key}`) ?? null;
-        // Imported month: only the visits the old app recorded are listed (no capture = not tracked, not a slot).
-        if (importedMonth && !c) continue;
+        const wClass = classByKey.get(key) ?? 'portal';
+        // Old-app window: only the visits the old app recorded are listed (no capture = not tracked, not a slot).
+        if (wClass === 'old' && !c) continue;
         const rev = c ? reviewerOf.get(c.id) : undefined;
-        const imported = !!c && isImportedCaptureFormValues(c.formValues);
+        const imported = !!c && isImportedVisibilityCapture(c.formValues);
         slots.push({
           outletId: o.id,
           outletCode: o.outletCode,
@@ -357,7 +389,7 @@ export class VisibilityReportService {
           subProgramme: o.programCategory ?? null,
           windowKey: key,
           windowClosed: closedByKey.get(key) ?? false,
-          status: plainStatusOf(c?.status ?? null, closedByKey.get(key) ?? false, importedMonth),
+          status: plainStatusOf(c?.status ?? null, closedByKey.get(key) ?? false, wClass === 'old', wClass === 'part-old'),
           captureId: c?.id ?? null,
           repId,
           repName: repId ? people.get(repId)?.name ?? null : null,
@@ -378,12 +410,14 @@ export class VisibilityReportService {
         });
       }
     }
-    return { config, sel, slots, notCounted: { outOfScope, otherWindow }, outletsInScope: outlets.length, importedMonth };
+    return {
+      config, sel, slots, notCounted: { outOfScope, otherWindow }, outletsInScope: outlets.length, importedMonth, goLive,
+    };
   }
 
   /** The month report: tiles + breakdowns. */
   private async computeReport(clientId: string, q: { month?: string; windowKey?: string }) {
-    const { config, sel, slots, notCounted, outletsInScope, importedMonth } = await this.buildSlots(clientId, q);
+    const { config, sel, slots, notCounted, outletsInScope, importedMonth, goLive } = await this.buildSlots(clientId, q);
     const t = tallySlots(slots, !importedMonth);
     const programScope = visibilityProgramScope(config);
     const allClosed = sel.selected.length > 0 && sel.selected.every((w) => w.closed);
@@ -404,6 +438,8 @@ export class VisibilityReportService {
        */
       importedMonth,
       ...(importedMonth ? { importedMonthNote: IMPORTED_MONTH_NOTE } : {}),
+      /** When this portal started capturing (earliest non-imported capture); null = no portal capture yet. */
+      portalGoLive: goLive ? goLive.toISOString() : null,
       summary: t,
       notCounted,
       breakdowns: {

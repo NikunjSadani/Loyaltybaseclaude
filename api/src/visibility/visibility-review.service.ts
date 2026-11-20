@@ -38,9 +38,10 @@ import {
   appendReviewEvents,
   compareEventsNewestFirst,
   IMPORTED_REVIEW_ACTOR_LABEL,
-  isImportedCapture,
   ReviewEventInput,
 } from './visibility-review-events';
+import { isImportedVisibilityCapture } from './visibility-portal-go-live';
+import { windowClosedSafe } from './visibility-metrics';
 
 /** 409 text when a review lost a race with another change to the same capture (L2). */
 export const CAPTURE_CHANGED_MESSAGE = 'This visit was just changed by someone else — reload';
@@ -428,11 +429,19 @@ export class VisibilityReviewService {
       }),
       this.prisma.visibilityCapture.count({ where }),
     ]);
+    // Additive `windowClosed` (IST, the tenant's frequency): the queue shows a re-take / rejection left when its window
+    // closed as "Not approved — window closed" — the same words as the report screen + Excel (plainStatusOf).
+    const freq = (await this.tenantSettings.getEffectiveSettings(user.clientId)).visibilityConfig.frequencyPerMonth ?? 1;
+    const now = new Date();
 
     return {
       // Additive: programName / programCategory flattened from the live outlet master
       // (Outlet.programName = programme, Outlet.programCategory = sub-programme).
-      captures: rows.map(({ outlet, ...r }) => ({ ...r, ...outletProgram(outlet) })),
+      captures: rows.map(({ outlet, ...r }) => ({
+        ...r,
+        ...outletProgram(outlet),
+        windowClosed: windowClosedSafe(r.windowKey, now, freq),
+      })),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
   }
@@ -478,7 +487,7 @@ export class VisibilityReviewService {
     );
     // An imported old-app capture (photos under /vendor-import/): its approvedBy is only the admin who ran
     // the import — the review is shown as the old app's approval, never as that admin's (B1).
-    const imported = isImportedCapture(capture.formValues);
+    const imported = isImportedVisibilityCapture(capture.formValues);
     const { reviewHistory, lastReview } = await this.loadReviewHistory(
       capture.clientId,
       capture.id,
@@ -493,6 +502,8 @@ export class VisibilityReviewService {
         ...outletProgram(captureOutlet),
         // Imported old-app capture → never expose the importing admin as the approver.
         imported,
+        // Additive: the capture's window has closed (IST, tenant frequency) → a re-take / rejection is final.
+        windowClosed: windowClosedSafe(capture.windowKey, new Date(), config.frequencyPerMonth ?? 1),
         ...(imported ? { approvedBy: null, approvedByUserId: null } : {}),
         photoReviews: reviews,
         media,

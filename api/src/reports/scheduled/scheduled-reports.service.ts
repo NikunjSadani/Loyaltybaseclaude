@@ -870,7 +870,7 @@ export class ScheduledReportsService {
   }
 
   /**
-   * PHOTO_APPROVAL tenants (VISIBILITY-POSM-DESIGN.md §Metrics): reviews done = ONE per capture per IST day by that
+   * PHOTO_APPROVAL tenants (VISIBILITY-POSM-DESIGN.md §17): reviews done = ONE per capture per IST day by that
    * day's final outcome (a rejection followed by a same-day resubmit still counts — visibility-metrics
    * countReviewActions); waiting for review = EVERY in-scope capture still waiting, any month (with the current
    * month's share and the earlier-months remainder); waiting on reps = re-takes / rejections in a window still open

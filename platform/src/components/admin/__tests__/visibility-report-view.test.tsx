@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 /**
- * VISRPT — VisibilityReportView (month-wise, VISIBILITY-POSM-DESIGN.md §Metrics)
+ * VISRPT — VisibilityReportView (month-wise, VISIBILITY-POSM-DESIGN.md §17)
  *
  * VISRPT1: default = current IST month; plain-status tiles + coverage from the report.
  * VISRPT2: Export calls downloadExport with the month's only window (freq 1).
@@ -49,7 +49,7 @@ vi.mock('@/lib/visibility-report', async (orig) => {
 import { VisibilityReportView } from '../VisibilityReportView';
 
 const tally = {
-  inScope: 10, approved: 6, waiting: 1, needsRetake: 1, rejected: 1, closedNotApproved: 0, notCaptured: 1, missed: 0, notTracked: 0,
+  inScope: 10, approved: 6, waiting: 1, needsRetake: 1, rejected: 1, closedNotApproved: 0, notCaptured: 1, missed: 0, notTracked: 0, partOldApp: 0,
   coveragePct: 60 as number | null,
 };
 const REPORT = {
@@ -107,6 +107,9 @@ describe('VISRPT — VisibilityReportView', () => {
   });
 
   it('VISRPT2b: Export month calls downloadExport with the selected report month', async () => {
+    getReport.mockImplementation((_v: unknown, q: { month: string }) =>
+      Promise.resolve({ success: true, data: { ...REPORT, month: q.month, windows: [{ key: `${q.month}-P1`, closed: q.month < '2026-11' }] } }),
+    );
     render(<VisibilityReportView variant="admin" />);
     await screen.findByText(/^Coverage — Nov 2026/);
     fireEvent.change(screen.getByLabelText('Report month'), { target: { value: '2026-10' } });
@@ -235,6 +238,16 @@ describe('VISRPT — VisibilityReportView', () => {
     render(<VisibilityReportView variant="tenant" />);
     note = await screen.findByTestId('report-not-counted');
     expect(note.textContent).toContain("still in the month's Excel export");
+  });
+
+  it('VISRPT13: the old-app tile ("No approved record — part of this window was on the old app") shows only when it counts something', async () => {
+    const { unmount } = render(<VisibilityReportView variant="admin" />);
+    await screen.findByText(/^Coverage — /);
+    expect(screen.queryByText('No approved record — part of this window was on the old app')).not.toBeInTheDocument();
+    unmount();
+    getReport.mockResolvedValue({ success: true, data: { ...REPORT, summary: { ...tally, partOldApp: 2 } } });
+    render(<VisibilityReportView variant="admin" />);
+    expect((await screen.findAllByText('No approved record — part of this window was on the old app')).length).toBeGreaterThan(0);
   });
 
   it('VISRPT12: definitions are keyboard toggletips; tabs move with arrow keys; the coverage bar has a text alternative', async () => {

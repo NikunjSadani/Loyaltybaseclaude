@@ -156,6 +156,25 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     expect(screen.getByRole('option', { name: 'Needs re-take' })).toHaveAttribute('value', 'CHANGES_REQUESTED');
   });
 
+  it('VISQ5b: a re-take / rejection whose window has CLOSED reads "Not approved — window closed" (report + Excel words)', async () => {
+    listCaptures.mockResolvedValue({
+      success: true,
+      data: {
+        captures: [
+          { ...ROW, status: 'CHANGES_REQUESTED', windowClosed: true },
+          { ...ROW, id: 'cap-2', status: 'REJECTED', windowClosed: true },
+          { ...ROW, id: 'cap-3', status: 'APPROVED', windowClosed: true },
+        ],
+        pagination: { page: 1, limit: 25, total: 3, pages: 1 },
+      },
+    });
+    render(<VisibilityCaptureQueue />);
+    const table = await screen.findByRole('table');
+    expect(await within(table).findAllByText('Not approved — window closed')).toHaveLength(2);
+    expect(within(table).getByText('Approved')).toBeInTheDocument();
+    expect(within(table).queryByText('Needs re-take')).not.toBeInTheDocument();
+  });
+
   // ── Permanent review history (2026-11-20) ─────────────────────────────────────
   const HISTORY = [
     { id: 'e3', version: 2, action: 'PHOTO_REJECTED', statusAfter: 'CHANGES_REQUESTED', fieldId: 'ph2', fieldLabel: 'Shelf photo', reasonCode: 'BLURRY', reason: 'out of focus', actorUserId: 'g1', actorName: 'Asha Reviewer', backfilled: false, createdAt: '2026-07-20T09:00:00.000Z' },

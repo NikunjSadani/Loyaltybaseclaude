@@ -56,7 +56,7 @@ export function withVisibilityProgramWhere(
 }
 
 /**
- * THE single "in scope for visibility" outlet rule (VISIBILITY-POSM-DESIGN.md §Metrics, decided 2026-11-20).
+ * THE single "in scope for visibility" outlet rule (VISIBILITY-POSM-DESIGN.md §17, decided 2026-11-20).
  * An outlet is in scope when a rep can actually be asked to capture it:
  *   - not soft-deleted and not deactivated;
  *   - `isActive: true` — the outlet is KYC-approved. A pending outlet is created `isActive:false` and only
@@ -72,8 +72,32 @@ export function withVisibilityProgramWhere(
 export function visibilityUniverseWhere(
   clientId: string,
   cfg: VisibilityProgramScopeLike & { outletScope: ReadonlyArray<string> },
+  opts: {
+    /**
+     * A PAST period [start, end) instead of today (the Excel report's "Not captured" sheet): outlets that EXISTED and
+     * were in scope during it — created before `end`, and either active today or deactivated only after `start`
+     * (deactivation flips isActive off, and only an active outlet can be deactivated, so a later-deactivated outlet
+     * was KYC-approved then). Outlet type / programme / KYC intent are today's values (their history is not kept).
+     * Omitted → today's universe (every other caller).
+     */
+    activeDuring?: { start: Date; end: Date };
+  } = {},
 ): Prisma.OutletWhereInput {
-  return withVisibilityProgramWhere(visibilityUniverseBase(clientId, cfg.outletScope), cfg);
+  if (!opts.activeDuring) return withVisibilityProgramWhere(visibilityUniverseBase(clientId, cfg.outletScope), cfg);
+  const { start, end } = opts.activeDuring;
+  return withVisibilityProgramWhere(
+    {
+      clientId,
+      deletedAt: null,
+      createdAt: { lt: end },
+      outletType: { code: { in: [...cfg.outletScope] } },
+      AND: [
+        { OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }] },
+        { OR: [{ isActive: true, deactivatedAt: null }, { deactivatedAt: { gt: start } }] },
+      ],
+    },
+    cfg,
+  );
 }
 
 /**

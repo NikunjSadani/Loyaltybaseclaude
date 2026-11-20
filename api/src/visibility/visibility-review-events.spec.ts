@@ -1,12 +1,13 @@
 /**
- * visibility-review-events helpers: the imported-capture rule (B1) and the deterministic event order (S2).
+ * visibility-review-events helpers: the imported-capture rule (B1 — the shared visibility-portal-go-live rule) and the deterministic event order (S2).
  * The SQL side of the same rule is proven by visibility-review-events.migration.spec.ts (real Postgres).
  */
-import { compareEventsNewestFirst, isImportedCapture, VENDOR_IMPORT_PATH_MARKER } from './visibility-review-events';
+import { compareEventsNewestFirst } from './visibility-review-events';
+import { isImportedVisibilityCapture as isImportedCapture, VISIBILITY_IMPORTED_KEY_MARKER } from './visibility-portal-go-live';
 
-describe('isImportedCapture', () => {
+describe('isImportedVisibilityCapture (the rule the migration SQL mirrors)', () => {
   it('true when any photo key (bare string or {key}) is under /vendor-import/', () => {
-    expect(VENDOR_IMPORT_PATH_MARKER).toBe('/vendor-import/');
+    expect(VISIBILITY_IMPORTED_KEY_MARKER).toBe('/vendor-import/');
     expect(isImportedCapture({ a: 'visibility-media/bajaj/vendor-import/prod/x/OUT1/2025-06_v1.jpg' })).toBe(true);
     expect(isImportedCapture({ a: 'visibility-media/bajaj/n.jpg', b: { key: 'visibility-media/bajaj/vendor-import/OUT2/x.jpg', geo: null } })).toBe(true);
   });

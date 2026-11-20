@@ -16,6 +16,7 @@ import { formatDateIST } from '../../common/ist-date';
 import { isFastTrackRow, type KycFastTrackHistoryRow } from '../../kyc/kyc-fast-track.helper';
 import { monthLabel } from '../../sales-import/months/month-state';
 import { emailShell, esc, intIN, rupees, sectionHeading, statRow, table } from './email-html';
+import { VISIBILITY_WORDS } from '../../visibility/visibility-report-labels';
 
 /** Mirrors digest-run-state PERSISTENT_FAILURE_RUNS (kept here so this module stays import-cycle free). */
 const PERSISTENT_FAILURE_RUNS = 3;
@@ -748,7 +749,7 @@ function tenantSections(t: TenantDigest): string {
             ]) +
             metricLine('Right now', [
               [
-                'waiting for review',
+                VISIBILITY_WORDS.WAITING.toLowerCase(),
                 `${intIN(v.waitingAllMonths ?? v.waiting ?? 0)}${
                   (v.waitingEarlierMonths ?? 0) > 0 ? ` (${intIN(v.waitingEarlierMonths ?? 0)} from earlier months)` : ''
                 }`,
@@ -756,7 +757,7 @@ function tenantSections(t: TenantDigest): string {
               ],
               ['waiting on reps (re-take / capture again — window still open)', intIN(v.waitingOnReps ?? v.needsRetake ?? 0)],
               ...((v.closedNotApproved ?? 0) > 0
-                ? ([[`not approved — window closed (${monthLabel(v.month)})`, intIN(v.closedNotApproved ?? 0)]] as Array<[string, string]>)
+                ? ([[`${VISIBILITY_WORDS.CLOSED_NOT_APPROVED.toLowerCase()} (${monthLabel(v.month)})`, intIN(v.closedNotApproved ?? 0)]] as Array<[string, string]>)
                 : []),
             ])
           : metricLine('In window', [

@@ -1,30 +1,13 @@
 import { Prisma, VisibilityCaptureStatus, VisibilityReviewAction } from '@prisma/client';
-import { readMediaValue } from './visibility-types';
 
-/**
- * Old-app (vendor) captures imported into the platform (Bajaj prod 2026-11-12, ~51k rows; also staging).
- * The importer copied every photo into OUR storage under a path containing `/vendor-import/`
- * (`visibility-media/<tenant>/vendor-import/...`, see BAJAJ-PROD-OUTLET-IMPORT.md §8) — that path is
- * THE marker of an imported capture (there is no column for it). The migration
- * 20261120140000_visibility_review_events uses the SAME rule in SQL (formValues text LIKE '%/vendor-import/%').
- */
-export const VENDOR_IMPORT_PATH_MARKER = '/vendor-import/';
+// Imported old-app captures are recognised ONLY by visibility-portal-go-live.ts (isImportedVisibilityCapture —
+// a photo key under `/vendor-import/`); the migration 20261120140000_visibility_review_events uses the same string.
 
 /**
  * Who "reviewed" an imported capture: the OLD app approved it (approvedBy on the row is only the Gifsy
  * admin who ran the import, so it must never be shown as the reviewer). Same text as the migration backfill.
  */
 export const IMPORTED_REVIEW_ACTOR_LABEL = 'Imported — old app approval';
-
-/** True when any photo of the capture lives under the vendor-import path (an imported old-app capture). */
-export function isImportedCapture(formValues: unknown): boolean {
-  if (!formValues || typeof formValues !== 'object' || Array.isArray(formValues)) return false;
-  for (const v of Object.values(formValues as Record<string, unknown>)) {
-    const { key } = readMediaValue(v);
-    if (key && key.includes(VENDOR_IMPORT_PATH_MARKER)) return true;
-  }
-  return false;
-}
 
 /**
  * Tie-break rank for events sharing one timestamp (one transaction writes e.g. PHOTO_REJECTED +

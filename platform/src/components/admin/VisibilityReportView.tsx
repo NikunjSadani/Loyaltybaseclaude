@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * VisibilityReportView — the MONTH-WISE Visibility (POSM) report (VISIBILITY-POSM-DESIGN.md §Metrics).
+ * VisibilityReportView — the MONTH-WISE Visibility (POSM) report (VISIBILITY-POSM-DESIGN.md §17).
  * Shared by the GIFSY admin report tab (`variant="admin"`, with the Excel export) and the tenant read-only
  * report page (`variant="tenant"`).
  *
@@ -70,6 +70,7 @@ const STATUS_TONE: Record<PlainStatus, string> = {
   NOT_CAPTURED: 'text-gray-600',
   MISSED: 'text-red-700',
   NOT_TRACKED: 'text-gray-500',
+  PART_OLD_APP: 'text-gray-600',
 };
 
 const BADGE_TONE: Record<PlainStatus, string> = {
@@ -81,12 +82,17 @@ const BADGE_TONE: Record<PlainStatus, string> = {
   NOT_CAPTURED: 'bg-gray-50 text-gray-600 border-gray-200',
   MISSED: 'bg-red-50 text-red-800 border-red-300',
   NOT_TRACKED: 'bg-gray-50 text-gray-500 border-gray-200',
+  PART_OLD_APP: 'bg-gray-50 text-gray-600 border-gray-300',
 };
 
-type CountField = 'approved' | 'waiting' | 'needsRetake' | 'rejected' | 'closedNotApproved' | 'notCaptured' | 'missed';
+type CountField =
+  | 'approved' | 'waiting' | 'needsRetake' | 'rejected' | 'closedNotApproved' | 'notCaptured' | 'missed' | 'partOldApp';
 
-/** Tiles in order. `trackedOnly` = hidden for an imported month (no denominator → never "Missed"). */
-const TILE_ORDER: Array<{ status: PlainStatus; field: CountField; trackedOnly?: boolean }> = [
+/**
+ * Tiles in order. `trackedOnly` = hidden for an imported month (no denominator → never "Missed"). `whenNonZero` = only
+ * shown when it counts something (old-app history only appears around the portal go-live).
+ */
+const TILE_ORDER: Array<{ status: PlainStatus; field: CountField; trackedOnly?: boolean; whenNonZero?: boolean }> = [
   { status: 'APPROVED', field: 'approved' },
   { status: 'WAITING', field: 'waiting' },
   { status: 'NEEDS_RETAKE', field: 'needsRetake' },
@@ -94,6 +100,7 @@ const TILE_ORDER: Array<{ status: PlainStatus; field: CountField; trackedOnly?: 
   { status: 'CLOSED_NOT_APPROVED', field: 'closedNotApproved' },
   { status: 'NOT_CAPTURED', field: 'notCaptured', trackedOnly: true },
   { status: 'MISSED', field: 'missed', trackedOnly: true },
+  { status: 'PART_OLD_APP', field: 'partOldApp', trackedOnly: true, whenNonZero: true },
 ];
 
 const NOT_TRACKED_TEXT = 'Not tracked for imported months';
@@ -173,7 +180,7 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
   const showWindowCol = multiWindow && !windowKey;
   const notCountedTotal = report ? report.notCounted.outOfScope + report.notCounted.otherWindow : 0;
   const imported = report?.importedMonth === true;
-  const tiles = TILE_ORDER.filter((t) => !(imported && t.trackedOnly));
+  const tiles = TILE_ORDER.filter((t) => !(imported && t.trackedOnly) && !(t.whenNonZero && !(s?.[t.field] ?? 0)));
   const groups = Object.keys(GROUP_LABEL) as ReportGroup[];
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   // WAI-ARIA tabs: Left/Right (and Home/End) move between the breakdown tabs and select them.
@@ -433,6 +440,7 @@ function coverageBarText(s: MonthReport['summary']): string {
     [PLAIN_STATUS_LABEL.CLOSED_NOT_APPROVED, s.closedNotApproved],
     [PLAIN_STATUS_LABEL.NOT_CAPTURED, s.notCaptured],
     [PLAIN_STATUS_LABEL.MISSED, s.missed],
+    ...(s.partOldApp ? ([[PLAIN_STATUS_LABEL.PART_OLD_APP, s.partOldApp]] as Array<[string, number]>) : []),
   ];
   return `Coverage ${fmtCoverage(s.coveragePct)} of ${fmtInt(s.inScope)} visits due: ${parts.map(([l, n]) => `${l} ${fmtInt(n)}`).join(', ')}.`;
 }

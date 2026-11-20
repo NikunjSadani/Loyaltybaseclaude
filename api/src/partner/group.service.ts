@@ -10,7 +10,7 @@ import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
 import { GroupVisibilityQueryDto } from './dto/group.dto';
 import { istMonthKey, istDateKey } from '../common/ist-date';
 import { currentWindowKey, windowBoundsForKey } from '../visibility/visibility-window.helper';
-import { visibilityProgramMatches } from '../visibility/visibility-scope.helper';
+import { visibilityUniverseWhere } from '../visibility/visibility-scope.helper';
 import { AppliesToOutletFacets } from '../common/applies-to/applies-to';
 import { kpiAppliesToOutlet, outletPrimaryFallback } from '../sales/outlet-kpi-scope.helper';
 
@@ -505,10 +505,11 @@ export class GroupService {
 
   /**
    * PHOTO_APPROVAL roll-up for a group: each group outlet's VisibilityCapture status for the
-   * CURRENT window (IST, the tenant's capture frequency). Outlets outside the tenant's visibility
-   * scope (outlet type / program / sub-program — the SAME predicate the capture + coverage use)
-   * are listed with inScope:false and are NOT counted, so the parent sees why a shop has no
-   * status instead of a silent gap. Status codes stay codes; the FE shows the plain words.
+   * CURRENT window (IST, the tenant's capture frequency). In scope = visibilityUniverseWhere — THE
+   * one rule the report screen, Excel, dashboards and the rep's capture list use (type / programme /
+   * sub-programme, KYC-approved, not deactivated, not Not-interested / Parked). Group outlets outside it
+   * are listed with inScope:false and are NOT counted, so the parent sees why a shop has no status
+   * instead of a silent gap. Status codes stay codes; the FE shows the plain words.
    */
   private async photoVisibilityRollup(
     clientId: string,
@@ -527,15 +528,17 @@ export class GroupService {
         id: true,
         outletCode: true,
         name: true,
-        programName: true,
-        programCategory: true,
-        outletType: { select: { code: true } },
       },
     });
-    // TODO(integration): use visibilityUniverseWhere
-    const inScope = (o: (typeof outlets)[number]) =>
-      config.outletScope.includes(o.outletType?.code ?? '') &&
-      visibilityProgramMatches(config, { program: o.programName, subProgram: o.programCategory });
+    // The single in-scope rule, decided by the database (never re-implemented in memory).
+    const scopedRows = config.outletScope.length
+      ? await this.prisma.outlet.findMany({
+          where: { AND: [visibilityUniverseWhere(clientId, config), { parentId }] },
+          select: { id: true },
+        })
+      : [];
+    const scopedSet = new Set(scopedRows.map((o) => o.id));
+    const inScope = (o: (typeof outlets)[number]) => scopedSet.has(o.id);
     const scopedIds = outlets.filter(inScope).map((o) => o.id);
 
     const captures = scopedIds.length

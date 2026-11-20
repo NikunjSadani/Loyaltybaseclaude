@@ -11,7 +11,7 @@
 --
 -- Backfill = ONLY what the old data can honestly tell (no invented per-photo decisions):
 --   A. IMPORTED old-app captures (Bajaj ~51k; any photo key contains '/vendor-import/' — the same rule as
---      isImportedCapture() in api/src/visibility/visibility-review-events.ts): exactly ONE event,
+--      isImportedVisibilityCapture() in api/src/visibility/visibility-portal-go-live.ts): exactly ONE event,
 --      CAPTURE_APPROVED_ALL, actor = the label 'Imported — old app approval' with NO actor id (approvedBy on
 --      those rows is only the Gifsy admin who ran the import, never the reviewer), dated at the original
 --      approval (reviewedAt), else updatedAt / createdAt.

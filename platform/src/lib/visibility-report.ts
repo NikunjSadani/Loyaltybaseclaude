@@ -1,16 +1,18 @@
 /**
- * Month-wise Visibility (POSM) report client + plain status words (VISIBILITY-POSM-DESIGN.md §Metrics).
+ * Month-wise Visibility (POSM) report client + plain status words (VISIBILITY-POSM-DESIGN.md §17).
  * Backend: GET /v1/visibility/report[/tenant][/outlets] (visibility-report.service.ts) and the shared metric
  * definitions in api/src/visibility/visibility-metrics.ts.
  *
- * Imported months: the API's rule (api/src/visibility/visibility-import.helper.ts) decides; this file only shows it.
+ * Old-app (imported) history: the API's rule (api/src/visibility/visibility-portal-go-live.ts — the same per-window
+ * rule as the Excel report) decides; this file only shows it.
  *
- * NOTE (consolidation): the plain status words below are a LOCAL mapping. A parallel track is adding plain status
- * labels to `lib/visibility-types.ts`; once both land, point PLAIN_STATUS_LABEL at that single source. The older
- * `visibilityApi.getReport/getTenantReport` + `VisibilityReport` type (per-window shape) are superseded by this file.
+ * The plain status words come from the ONE platform word list (`VISIBILITY_STATUS_WORDS`, lib/visibility-types.ts).
+ * The older `visibilityApi.getReport/getTenantReport` + `VisibilityReport` type (per-window shape) are superseded by
+ * this file.
  */
 import { api } from '@/lib/api-client';
 import { istMonthKey } from '@/lib/ist-date';
+import { VISIBILITY_STATUS_WORDS } from '@/lib/visibility-types';
 
 export const PLAIN_STATUSES = [
   'WAITING',
@@ -21,19 +23,21 @@ export const PLAIN_STATUSES = [
   'NOT_CAPTURED',
   'MISSED',
   'NOT_TRACKED',
+  'PART_OLD_APP',
 ] as const;
 export type PlainStatus = (typeof PLAIN_STATUSES)[number];
 
-/** The words shown to people (mirror of the API's PLAIN_STATUS_LABEL — api/src/visibility/visibility-metrics.ts). */
+/** The words shown to people — from the ONE platform word list (= the API's PLAIN_STATUS_LABEL). */
 export const PLAIN_STATUS_LABEL: Record<PlainStatus, string> = {
-  WAITING: 'Waiting for review',
-  APPROVED: 'Approved',
-  NEEDS_RETAKE: 'Needs re-take',
-  REJECTED: 'Rejected',
-  CLOSED_NOT_APPROVED: 'Not approved — window closed',
-  NOT_CAPTURED: 'Not captured yet',
-  MISSED: 'Missed',
-  NOT_TRACKED: 'Not tracked (imported month)',
+  WAITING: VISIBILITY_STATUS_WORDS.SUBMITTED,
+  APPROVED: VISIBILITY_STATUS_WORDS.APPROVED,
+  NEEDS_RETAKE: VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED,
+  REJECTED: VISIBILITY_STATUS_WORDS.REJECTED,
+  CLOSED_NOT_APPROVED: VISIBILITY_STATUS_WORDS.CLOSED_NOT_APPROVED,
+  NOT_CAPTURED: VISIBILITY_STATUS_WORDS.NOT_CAPTURED,
+  MISSED: VISIBILITY_STATUS_WORDS.MISSED,
+  NOT_TRACKED: VISIBILITY_STATUS_WORDS.NOT_TRACKED,
+  PART_OLD_APP: VISIBILITY_STATUS_WORDS.PART_OLD_APP,
 };
 
 /**
@@ -50,6 +54,8 @@ export const PLAIN_STATUS_HINT: Record<PlainStatus, string> = {
   NOT_CAPTURED: 'No capture yet, and the window is still open (or has not started).',
   MISSED: 'No capture by the time the window closed.',
   NOT_TRACKED: 'Imported month — the old app only kept approved visits, so a missing visit is not tracked.',
+  PART_OLD_APP:
+    'The window closed with no capture, but part of it was on the old app (it only sent approved visits) — the outlet may have been visited and not approved, so it is not counted as Missed.',
 };
 
 export interface StatusTally {
@@ -63,6 +69,8 @@ export interface StatusTally {
   notCaptured: number;
   missed: number;
   notTracked: number;
+  /** Closed window partly on the old app, no capture (never "Missed"). */
+  partOldApp: number;
   /** null for an imported month (not tracked). */
   coveragePct: number | null;
 }
@@ -88,6 +96,8 @@ export interface MonthReport {
   importedMonth?: boolean;
   /** Plain one-line reason, present when importedMonth. */
   importedMonthNote?: string;
+  /** When this portal started capturing (ISO; earliest non-imported capture). null = no portal capture yet. */
+  portalGoLive?: string | null;
   summary: StatusTally;
   notCounted: { outOfScope: number; otherWindow: number };
   breakdowns: Record<ReportGroup, BreakdownRow[]>;

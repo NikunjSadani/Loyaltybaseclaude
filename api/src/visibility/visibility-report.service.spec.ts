@@ -1,5 +1,5 @@
 /**
- * Unit tests for visibility-report.service.ts — the MONTH-WISE report (VISIBILITY-POSM-DESIGN.md §Metrics).
+ * Unit tests for visibility-report.service.ts — the MONTH-WISE report (VISIBILITY-POSM-DESIGN.md §17).
  *
  * Fixture: 5 in-scope outlets; o1 APPROVED by an IMPORTED old-app row (no submitter), o2 SUBMITTED (portal),
  * o3 CHANGES_REQUESTED, o4 REJECTED, o5 no capture. Portal go-live defaults to 2026-01 (no imported month). Rep r1 (o1,o2) reports to an INACTIVE m1 who reports to m2
@@ -63,6 +63,8 @@ function capturesFor(month: string, window = 'P1') {
 const mockPrisma = {
   outlet: { findMany: jest.fn() },
   visibilityCapture: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
+  // visibility-portal-go-live: MIN(receivedAt) go-live + the windows holding imported captures.
+  $queryRaw: jest.fn(),
   salesUserAssignment: { findMany: jest.fn() },
   salesUser: { findMany: jest.fn() },
   user: { findMany: jest.fn() },
@@ -70,11 +72,20 @@ const mockPrisma = {
 const mockTenant = { resolveVisibilityEnabled: jest.fn() };
 const mockSettings = { getEffectiveSettings: jest.fn() };
 
-function wireFixture(opts: { config?: Record<string, unknown>; goLive?: string | null } = {}) {
+function wireFixture(
+  opts: { config?: Record<string, unknown>; goLive?: string | Date | null; importedWindows?: string[] } = {},
+) {
   mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...baseConfig, ...(opts.config ?? {}) } });
-  // Portal go-live (first capture with a submitting rep): by default long before the fixture months → none imported.
-  const goLive = opts.goLive === undefined ? '2026-01' : opts.goLive;
-  mockPrisma.visibilityCapture.findFirst.mockResolvedValue(goLive ? { windowKey: `${goLive}-P1` } : null);
+  // Portal go-live instant (earliest non-imported capture): a `YYYY-MM` = the first instant of that IST month. By
+  // default long before the fixture months → nothing is old-app history.
+  const g = opts.goLive === undefined ? '2026-01' : opts.goLive;
+  const goLiveAt = g === null ? null : g instanceof Date ? g : new Date(`${g}-01T00:00:00+05:30`);
+  const importedWindows = opts.importedWindows ?? [];
+  mockPrisma.$queryRaw.mockImplementation((q: { sql: string; values: unknown[] }) => {
+    if (q.sql.includes('MIN("receivedAt")')) return Promise.resolve([{ goLive: goLiveAt }]);
+    // importedWindowKeys: DISTINCT windowKey among the asked keys holding a /vendor-import/ photo.
+    return Promise.resolve(importedWindows.filter((w) => q.values.includes(w)).map((windowKey) => ({ windowKey })));
+  });
   mockPrisma.outlet.findMany.mockResolvedValue(OUTLETS);
   mockPrisma.visibilityCapture.findMany.mockImplementation(({ where }: any) => {
     const keys: string[] = where.windowKey.in;
@@ -276,13 +287,29 @@ describe('VisibilityReportService (month-wise)', () => {
   });
 
   it('no portal capture at all: a month holding only imported captures is an imported month', async () => {
-    wireFixture({ goLive: null });
-    mockPrisma.visibilityCapture.count.mockImplementation(({ where }: any) =>
-      Promise.resolve(where.windowKey?.startsWith === '2026-10-P' && !where.NOT && !where.windowKey?.notIn ? 1 : 0),
-    );
+    wireFixture({ goLive: null, importedWindows: ['2026-10-P1'] });
     const res = await service.gifsyReport(gifsy, { month: '2026-10' });
     expect(res.importedMonth).toBe(true);
+    expect(res.portalGoLive).toBeNull();
     expect(res.summary.missed).toBe(0);
+    // A month with no captures at all is not imported (nothing to show as old-app history).
+    expect((await service.gifsyReport(gifsy, { month: '2026-11' })).importedMonth).toBe(false);
+  });
+
+  it('a CLOSED window partly on the old app (began before go-live): no capture = "No approved record — part of this window was on the old app", never Missed (same rule as the Excel)', async () => {
+    wireFixture({ goLive: new Date('2026-10-10T06:00:00Z') });
+    const res = await service.gifsyReport(gifsy, { month: '2026-10' });
+    expect(res.importedMonth).toBe(false);
+    expect(res.portalGoLive).toBe('2026-10-10T06:00:00.000Z');
+    expect(res.summary).toMatchObject({ missed: 0, partOldApp: 1 });
+    const part = await service.gifsyOutlets(gifsy, { month: '2026-10', status: 'PART_OLD_APP' });
+    expect(part.rows.map((r) => r.outletCode)).toEqual(['A5']);
+    // A window that only HOLDS imported visits (began after go-live) is part old-app too.
+    wireFixture({ goLive: new Date('2026-09-10T06:00:00Z'), importedWindows: ['2026-10-P1'] });
+    expect((await service.gifsyReport(gifsy, { month: '2026-10' })).summary).toMatchObject({ missed: 0, partOldApp: 1 });
+    // Fully after go-live and no imported visit → the normal Missed.
+    wireFixture({ goLive: new Date('2026-09-10T06:00:00Z') });
+    expect((await service.gifsyReport(gifsy, { month: '2026-10' })).summary).toMatchObject({ missed: 1, partOldApp: 0 });
   });
 
   it('"Imported" = photo stored under vendor-import/, not "no submitting rep" (a removed rep stays a portal capture)', async () => {
@@ -351,6 +378,29 @@ describe('VisibilityReportService (month-wise)', () => {
     await expect(service.tenantReport(clientAdmin, {})).rejects.toThrow(ForbiddenException);
     await expect(service.tenantOutlets(clientAdmin, {})).rejects.toThrow(ForbiddenException);
   });
+
+  describe('assertExportScope (report export 400s before any file)', () => {
+    const now = new Date('2026-11-20T06:00:00Z');
+    it('a window the monthly frequency does not have (P2) with no captures → 400', async () => {
+      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
+      await expect(service.assertExportScope('t1', { windowKey: '2026-11-P2' }, now)).rejects.toBeInstanceOf(BadRequestException);
+    });
+    it('the same window is allowed when captures exist for it (an older frequency)', async () => {
+      mockPrisma.visibilityCapture.count.mockResolvedValue(3);
+      await expect(service.assertExportScope('t1', { windowKey: '2026-11-P2' }, now)).resolves.toBeUndefined();
+    });
+    it('a malformed window key gives a plain 400 (never PNaN)', async () => {
+      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
+      await expect(service.assertExportScope('t1', { windowKey: '2026-11-X' }, now)).rejects.toThrow("That window isn't valid.");
+    });
+    it('a future month / future window → 400; this month and past months are fine', async () => {
+      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
+      await expect(service.assertExportScope('t1', { month: '2026-12' }, now)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.assertExportScope('t1', { windowKey: '2027-01-P1' }, now)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.assertExportScope('t1', { month: '2026-11' }, now)).resolves.toBeUndefined();
+      await expect(service.assertExportScope('t1', { windowKey: '2026-10-P1' }, now)).resolves.toBeUndefined();
+    });
+  });
 });
 
 describe('report pure helpers', () => {
@@ -382,26 +432,4 @@ describe('report pure helpers', () => {
     expect(rows.map((r) => r.label)).toEqual(['Ann', 'Bee', 'No rep assigned']);
   });
 
-  describe('assertExportScope (report export 400s before any file)', () => {
-    const now = new Date('2026-11-20T06:00:00Z');
-    it('a window the monthly frequency does not have (P2) with no captures → 400', async () => {
-      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
-      await expect(service.assertExportScope('t1', { windowKey: '2026-11-P2' }, now)).rejects.toBeInstanceOf(BadRequestException);
-    });
-    it('the same window is allowed when captures exist for it (an older frequency)', async () => {
-      mockPrisma.visibilityCapture.count.mockResolvedValue(3);
-      await expect(service.assertExportScope('t1', { windowKey: '2026-11-P2' }, now)).resolves.toBeUndefined();
-    });
-    it('a malformed window key gives a plain 400 (never PNaN)', async () => {
-      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
-      await expect(service.assertExportScope('t1', { windowKey: '2026-11-X' }, now)).rejects.toThrow("That window isn't valid.");
-    });
-    it('a future month / future window → 400; this month and past months are fine', async () => {
-      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
-      await expect(service.assertExportScope('t1', { month: '2026-12' }, now)).rejects.toBeInstanceOf(BadRequestException);
-      await expect(service.assertExportScope('t1', { windowKey: '2027-01-P1' }, now)).rejects.toBeInstanceOf(BadRequestException);
-      await expect(service.assertExportScope('t1', { month: '2026-11' }, now)).resolves.toBeUndefined();
-      await expect(service.assertExportScope('t1', { windowKey: '2026-10-P1' }, now)).resolves.toBeUndefined();
-    });
-  });
 });

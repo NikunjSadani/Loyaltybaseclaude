@@ -11,8 +11,10 @@
  *                        location check, reviewer, overall remark, then per CAMERA field (header = the field's LABEL)
  *                        a clickable photo link + decision + reason + reviewer + time + location.
  *   2. Review history  — one row per submitted version per photo (VisibilityCaptureSubmission + its review snapshot).
- *   3. Not captured    — in-scope outlets (the SAME rule as the report tiles) with no capture for a window of the scope:
- *                        "Not captured yet" while the window is open (IST), else "Missed".
+ *   3. Not captured    — in-scope outlets (visibilityUniverseWhere — the SAME rule as the report screen, with its
+ *                        `activeDuring` option) with no capture for a window of the scope: "Not captured yet" while the
+ *                        window is open (IST), "Missed" once closed, "Not started"; old-app windows per
+ *                        visibility-portal-go-live ("Not tracked" / "No approved record — part of this window…").
  *   4. About           — what each status / column means, scope, generated-at, counts (= the Visibility sheet).
  *
  * Photo links are ABSOLUTE on the tenant's primary portal host (`pickTenantDomain` → `tenantPortalLink`, the ticket
@@ -49,11 +51,17 @@ import {
 } from '../../../visibility/geo-fence.helper';
 import { windowsForMonth } from '../../../visibility/visibility-window.helper';
 import { isWindowInFrequency, visibilityReportScopeError, windowPhase, windowRangeUtc } from '../../../visibility/visibility-report-scope';
-import { isImportedVisibilityCapture, visibilityPortalGoLive } from '../../../visibility/visibility-portal-go-live';
-import { visibilityAddressableOutletWhere } from '../../../visibility/visibility-report.service';
+import {
+  classifyWindowAgainstGoLive,
+  IMPORTED_MONTH_NOTE,
+  isImportedVisibilityCapture,
+  visibilityPortalGoLive,
+} from '../../../visibility/visibility-portal-go-live';
+import { visibilityUniverseWhere } from '../../../visibility/visibility-scope.helper';
+import { windowClosedSafe } from '../../../visibility/visibility-metrics';
 import {
   VISIBILITY_STATUS_ORDER,
-  VISIBILITY_STATUS_WORDS,
+  VISIBILITY_WORDS,
   istHumanDateTime,
   locationWords,
   monthLabel,
@@ -106,10 +114,11 @@ const WINDOW_RE = /^(\d{4}-(?:0[1-9]|1[0-2]))-P[1-4]$/;
  */
 export const VISIBILITY_LINK_LIMIT = { perSheet: 60_000 };
 
-export const NOT_TRACKED_MESSAGE = "Not tracked for imported months — the old app's records only include approved visits";
+/** The one "Not tracked" row of an old-app window on the Not captured sheet (shared wording — visibility-portal-go-live). */
+export const NOT_TRACKED_MESSAGE = IMPORTED_MONTH_NOTE;
 
-/** Not-captured status for a closed window that was partly on the old app (it only exported approved visits). */
-export const PART_OLD_APP_STATUS = 'No approved record — part of this window was on the old app (it only sent approved visits)';
+/** Not-captured status for a closed window that was partly on the old app (shared word — visibility-report-labels). */
+export const PART_OLD_APP_STATUS = VISIBILITY_WORDS.PART_OLD_APP;
 
 /** The in-app path of the photo viewer page for a stored object key. */
 export function visibilityPhotoPath(key: string): string {
@@ -494,7 +503,10 @@ async function runVisibilityCaptures(
         importedWindowsSeen.add(c.windowKey);
       }
       windowsSeen.add(c.windowKey);
-      statusCounts.set(c.status, (statusCounts.get(c.status) ?? 0) + 1);
+      // A re-take / rejection left when its window closed can no longer be resubmitted -> "Not approved — window closed"
+      // (the report screen's rule, visibility-metrics plainStatusOf).
+      const statusWord = visibilityStatusWords(c.status, { windowClosed: windowClosedSafe(c.windowKey, ctx.now, freq) });
+      statusCounts.set(statusWord, (statusCounts.get(statusWord) ?? 0) + 1);
       // Review info must belong to the CURRENT version: a review older than this version's submission is a decision
       // carried forward from an earlier version (re-take flow) — never shown as the visit's reviewer.
       const submittedAtMs = c.receivedAt.getTime();
@@ -589,12 +601,13 @@ async function runVisibilityCaptures(
         c.outlet?.state ?? '',
         c.windowKey,
         imported ? SOURCE_IMPORTED : SOURCE_PORTAL,
-        visibilityStatusWords(c.status),
+        statusWord,
         rep.name,
         rep.code,
         rep.designation,
         people.manager(c.submittedBySalesUserId),
-        istHumanDateTime(c.capturedAt),
+        // Never a silent blank: a portal capture with no phone capture time reads "Not recorded".
+        c.capturedAt ? istHumanDateTime(c.capturedAt) : imported ? 'Not recorded (old app)' : 'Not recorded',
         istHumanDateTime(c.receivedAt),
         Math.max((c.currentVersion ?? 1) - 1, 0),
         location,
@@ -716,9 +729,12 @@ async function runVisibilityCaptures(
   const windowInfo = new Map(
     expectedAll.map((w) => {
       const range = windowRangeUtc(w, freq);
-      const old = goLive ? range.end.getTime() <= goLive.getTime() : importedCount > 0;
-      const partOld = !old && (importedWindowsSeen.has(w) || (goLive !== null && range.start.getTime() < goLive.getTime()));
-      return [w, { ...range, phase: windowPhase(w, freq, ctx.now), old, partOld }] as const;
+      // The shared per-window rule (visibility-portal-go-live) — the report screen classifies the same way.
+      const cls = classifyWindowAgainstGoLive(range, goLive, {
+        windowHoldsImported: importedWindowsSeen.has(w),
+        scopeHoldsImported: importedCount > 0,
+      });
+      return [w, { ...range, phase: windowPhase(w, freq, ctx.now), old: cls === 'old', partOld: cls === 'part-old' }] as const;
     }),
   );
   const oldWindows = expectedAll.filter((w) => windowInfo.get(w)!.old);
@@ -732,7 +748,7 @@ async function runVisibilityCaptures(
   let notStarted = 0;
   let partOldCount = 0;
   for (const w of oldWindows) {
-    await notCaptured.addRow([NOT_TRACKED_MESSAGE, '', '', '', '', '', '', '', '', '', w, 'Not tracked']);
+    await notCaptured.addRow([NOT_TRACKED_MESSAGE, '', '', '', '', '', '', '', '', '', w, VISIBILITY_WORDS.NOT_TRACKED]);
   }
   if (cfg.outletScope.length > 0 && expectedWindows.length > 0) {
     // Outlets that existed during the period: created before its end, not deactivated before it began (today's
@@ -742,7 +758,7 @@ async function runVisibilityCaptures(
       start: new Date(Math.min(...infos.map((i) => i.start.getTime()))),
       end: new Date(Math.max(...infos.map((i) => i.end.getTime()))),
     };
-    const inScope = visibilityAddressableOutletWhere(clientId, cfg.outletScope, cfg, activeDuring);
+    const inScope = visibilityUniverseWhere(clientId, cfg, { activeDuring });
     let oAfter: { outletCode: string; id: string } | null = null;
     for (;;) {
       const outlets = await prisma.outlet.findMany({
@@ -810,13 +826,13 @@ async function runVisibilityCaptures(
             status = PART_OLD_APP_STATUS;
             partOldCount++;
           } else if (info.phase === 'closed') {
-            status = 'Missed';
+            status = VISIBILITY_WORDS.MISSED;
             missed++;
           } else if (info.phase === 'open') {
-            status = 'Not captured yet';
+            status = VISIBILITY_WORDS.NOT_CAPTURED;
             notYet++;
           } else {
-            status = 'Not started';
+            status = VISIBILITY_WORDS.NOT_STARTED;
             notStarted++;
           }
           await notCaptured.addRow([
@@ -847,7 +863,7 @@ async function runVisibilityCaptures(
     ['Covers', scopeText],
     ['Generated on', `${istHumanDateTime(ctx.now)} (India time)`],
     ['Visits in the Visibility sheet', mainRows],
-    ...VISIBILITY_STATUS_ORDER.map((s): [string, number] => [`  ${VISIBILITY_STATUS_WORDS[s]}`, statusCounts.get(s) ?? 0]),
+    ...VISIBILITY_STATUS_ORDER.map((w): [string, number] => [`  ${w}`, statusCounts.get(w) ?? 0]),
     ['  of which imported from the old app', importedCount],
     ['Rows in the Review history sheet', historyRows],
     ...(notTracked
@@ -862,16 +878,17 @@ async function runVisibilityCaptures(
     ['STATUS', ''],
     ['Waiting for review', 'The rep has submitted the photos; nobody has decided on every photo yet.'],
     ['Approved', 'Every required photo was approved. The visit counts as done for that window.'],
-    ['Needs re-take', 'At least one photo was rejected. The rep must re-take it; the reason is in "Overall remark" and in the photo\'s own Reason column.'],
-    ['Rejected', 'The whole visit was rejected by the reviewer. The rep must capture it again.'],
+    ['Needs re-take', 'At least one photo was rejected and the window is still open. The rep must re-take it; the reason is in "Overall remark" and in the photo\'s own Reason column.'],
+    ['Rejected', 'The whole visit was rejected by the reviewer and the window is still open. The rep must capture it again.'],
+    [VISIBILITY_WORDS.CLOSED_NOT_APPROVED, 'Photos were sent back for a re-take, or the whole visit was rejected, and the window closed before a new capture. A closed window cannot be re-submitted, so this visit was not approved. It is final — not waiting on the rep.'],
     ['Not captured yet / Missed / Not started', 'Not captured sheet: an in-scope outlet with no visit for the window — "Not captured yet" while the window is open (India time), "Missed" once it has closed, "Not started" when the window has not begun yet.'],
-    ['No approved record — part of this window was on the old app', 'Not captured sheet: a closed window that was partly on the old app (it holds imported visits or began before this portal went live). The old app only sent approved visits, so the outlet may have been visited and not approved — it is not counted as Missed.'],
+    [VISIBILITY_WORDS.PART_OLD_APP, 'Not captured sheet: a closed window that was partly on the old app (it holds imported visits or began before this portal went live). The old app only sent approved visits, so the outlet may have been visited and not approved — it is not counted as Missed.'],
     ['', ''],
     ['COLUMNS', ''],
     ['Source', `"${SOURCE_PORTAL}" = captured in this portal. "${SOURCE_IMPORTED}" = history brought over from the previous app (no rep, location or review history was recorded there).`],
     ['Captured by / Rep code / Rep designation', 'The sales rep who submitted the visit.'],
     ['Manager', 'The rep\'s first active manager up the reporting chain (vacant positions are skipped), shown as "Name (Designation)".'],
-    ['Captured on / Submitted on', 'When the photo was taken on the phone / when it reached the server (India time).'],
+    ['Captured on / Submitted on', 'When the photo was taken on the phone / when it reached the server (India time). "Not recorded" = the phone sent no capture time ("Not recorded (old app)" for imported history).'],
     ['Re-takes', 'How many times the rep re-submitted this visit after a rejection.'],
     ['Location check', 'Whether the phone was inside the outlet\'s geo-fence: Inside fence / Outside fence / Unverifiable (no usable location), with the distance from the outlet and the phone\'s GPS accuracy.'],
     ['Duplicate photo', '"Yes" when the same photo was also used on another visit.'],

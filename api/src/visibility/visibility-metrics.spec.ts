@@ -1,5 +1,5 @@
 /**
- * Metric definitions (VISIBILITY-POSM-DESIGN.md §Metrics) — every number on the report, the admin tile, the
+ * Metric definitions (VISIBILITY-POSM-DESIGN.md §17) — every number on the report, the admin tile, the
  * Operations funnel and the Daily Ops Digest is defined here.
  *
  * Run: npx jest src/visibility/visibility-metrics.spec.ts
@@ -19,13 +19,15 @@ import {
   resolveMonth,
 } from './visibility-metrics';
 import {
-  isImportedCaptureFormValues,
+  classifyWindowAgainstGoLive,
   isImportedMonthRule,
-  isVendorImportKey,
+  isImportedVisibilityCapture,
+  isImportedVisibilityKey,
   isVisibilityImportedMonth,
   visibilityPortalGoLiveMonth,
-} from './visibility-import.helper';
+} from './visibility-portal-go-live';
 import { outletMasterFencePolicy } from './geo-fence.helper';
+import { VISIBILITY_WORDS, visibilityStatusWords } from './visibility-report-labels';
 
 const NOW = new Date('2026-11-20T06:30:00Z'); // 20 Nov 2026, 12:00 IST
 
@@ -39,6 +41,31 @@ describe('plain statuses', () => {
     expect(plainStatusOf(null, true)).toBe('MISSED');
     // A waiting capture in a closed window is still Waiting (never Missed).
     expect(plainStatusOf('SUBMITTED', true)).toBe('WAITING');
+  });
+
+  it('THE word list (pinned — the platform mirror lib/visibility-types.ts VISIBILITY_STATUS_WORDS pins the same strings)', () => {
+    expect(PLAIN_STATUS_LABEL).toEqual({
+      WAITING: 'Waiting for review',
+      APPROVED: 'Approved',
+      NEEDS_RETAKE: 'Needs re-take',
+      REJECTED: 'Rejected',
+      CLOSED_NOT_APPROVED: 'Not approved — window closed',
+      NOT_CAPTURED: 'Not captured yet',
+      MISSED: 'Missed',
+      NOT_TRACKED: 'Not tracked for imported months',
+      PART_OLD_APP: 'No approved record — part of this window was on the old app',
+    });
+    expect(VISIBILITY_WORDS.NOT_STARTED).toBe('Not started');
+    expect(visibilityStatusWords('CHANGES_REQUESTED', { windowClosed: true })).toBe('Not approved — window closed');
+    expect(visibilityStatusWords('REJECTED', { windowClosed: true })).toBe('Not approved — window closed');
+    expect(visibilityStatusWords('APPROVED', { windowClosed: true })).toBe('Approved');
+    expect(visibilityStatusWords('CHANGES_REQUESTED')).toBe('Needs re-take');
+  });
+
+  it('closed window partly on the old app with no capture → PART_OLD_APP (never Missed); a capture keeps its status', () => {
+    expect(plainStatusOf(null, true, false, true)).toBe('PART_OLD_APP');
+    expect(plainStatusOf(null, false, false, true)).toBe('NOT_CAPTURED');
+    expect(plainStatusOf('APPROVED', true, false, true)).toBe('APPROVED');
   });
 
   it('a re-take / rejection left when the window CLOSED is final: Not approved — window closed (never waiting on reps)', () => {
@@ -384,16 +411,15 @@ describe('review ACTIONS in a window (digest)', () => {
   });
 });
 
-describe('imported (old-app) history — visibility-import.helper', () => {
-  it('an imported capture = a photo stored under vendor-import/ (not "no submitting rep")', () => {
-    expect(isVendorImportKey('visibility-media/bajaj/vendor-import/prod/x/A1/2025-06_v1.jpg')).toBe(true);
-    expect(isVendorImportKey('vendor-import/x.jpg')).toBe(true);
-    expect(isVendorImportKey('visibility-media/bajaj/2026-11/A1/w1.jpg')).toBe(false);
-    expect(isVendorImportKey('visibility-media/bajaj/not-vendor-import-ish.jpg')).toBe(false);
-    expect(isImportedCaptureFormValues({ w1: 'visibility-media/bajaj/vendor-import/a.jpg' })).toBe(true);
-    expect(isImportedCaptureFormValues({ w1: { key: 'visibility-media/bajaj/vendor-import/a.jpg' } })).toBe(true);
-    expect(isImportedCaptureFormValues({ w1: { key: 'visibility-media/bajaj/2026-11/a.jpg' }, note: 'hi' })).toBe(false);
-    expect(isImportedCaptureFormValues(null)).toBe(false);
+describe('imported (old-app) history — visibility-portal-go-live (the one module)', () => {
+  it('an imported capture = a photo stored under /vendor-import/ (not "no submitting rep")', () => {
+    expect(isImportedVisibilityKey('visibility-media/bajaj/vendor-import/prod/x/A1/2025-06_v1.jpg')).toBe(true);
+    expect(isImportedVisibilityKey('visibility-media/bajaj/2026-11/A1/w1.jpg')).toBe(false);
+    expect(isImportedVisibilityKey('visibility-media/bajaj/not-vendor-import-ish.jpg')).toBe(false);
+    expect(isImportedVisibilityCapture({ w1: 'visibility-media/bajaj/vendor-import/a.jpg' })).toBe(true);
+    expect(isImportedVisibilityCapture({ w1: { key: 'visibility-media/bajaj/vendor-import/a.jpg' } })).toBe(true);
+    expect(isImportedVisibilityCapture({ w1: { key: 'visibility-media/bajaj/2026-11/a.jpg' }, note: 'hi' })).toBe(false);
+    expect(isImportedVisibilityCapture(null)).toBe(false);
   });
 
   it('imported month = before the portal go-live month; no go-live → a month holding captures', () => {
@@ -404,23 +430,33 @@ describe('imported (old-app) history — visibility-import.helper', () => {
     expect(isImportedMonthRule('2026-11', null, false)).toBe(false);
   });
 
-  it('go-live = the earliest month with a submitting rep; the loader counts only when there is no go-live', async () => {
-    const findFirst = jest.fn().mockResolvedValue({ windowKey: '2026-10-P2' });
+  it('go-live month = the IST month of the go-live INSTANT; the loader counts only when there is no go-live', async () => {
+    // 2026-09-30 19:00 UTC = 1 Oct 00:30 IST → go-live month 2026-10 (IST, not UTC).
+    const $queryRaw = jest.fn().mockResolvedValue([{ goLive: new Date('2026-09-30T19:00:00Z') }]);
     const count = jest.fn();
-    const prisma = { visibilityCapture: { findFirst, count } } as any;
+    const prisma = { $queryRaw, visibilityCapture: { count } } as any;
     expect(await visibilityPortalGoLiveMonth(prisma, 't1')).toBe('2026-10');
-    expect(findFirst.mock.calls[0][0]).toMatchObject({
-      where: { clientId: 't1', submittedBySalesUserId: { not: null } },
-      orderBy: { windowKey: 'asc' },
-    });
     expect(await isVisibilityImportedMonth(prisma, 't1', '2026-09')).toBe(true);
     expect(await isVisibilityImportedMonth(prisma, 't1', '2026-10')).toBe(false);
     expect(count).not.toHaveBeenCalled();
 
-    findFirst.mockResolvedValue(null);
+    $queryRaw.mockResolvedValue([{ goLive: null }]);
     count.mockResolvedValueOnce(12).mockResolvedValueOnce(0);
     expect(await isVisibilityImportedMonth(prisma, 't1', '2025-06')).toBe(true);
     expect(await isVisibilityImportedMonth(prisma, 't1', '2026-11')).toBe(false);
     expect(count.mock.calls[0][0]).toEqual({ where: { clientId: 't1', windowKey: { startsWith: '2025-06-P' } } });
+  });
+
+  it('per window: old (ended before go-live) / part-old (began before go-live or holds imported) / portal', () => {
+    const goLive = new Date('2026-11-05T09:31:00Z');
+    const r = (s: string, e: string) => ({ start: new Date(s), end: new Date(e) });
+    const none = { windowHoldsImported: false, scopeHoldsImported: false };
+    expect(classifyWindowAgainstGoLive(r('2026-09-30T18:30:00Z', '2026-10-31T18:30:00Z'), goLive, none)).toBe('old');
+    expect(classifyWindowAgainstGoLive(r('2026-10-31T18:30:00Z', '2026-11-30T18:30:00Z'), goLive, none)).toBe('part-old');
+    expect(classifyWindowAgainstGoLive(r('2026-11-30T18:30:00Z', '2026-12-31T18:30:00Z'), goLive, none)).toBe('portal');
+    expect(classifyWindowAgainstGoLive(r('2026-11-30T18:30:00Z', '2026-12-31T18:30:00Z'), goLive, { ...none, windowHoldsImported: true })).toBe('part-old');
+    // No portal capture yet: old only when the reported scope holds imported captures.
+    expect(classifyWindowAgainstGoLive(r('2025-05-31T18:30:00Z', '2025-06-30T18:30:00Z'), null, { windowHoldsImported: true, scopeHoldsImported: true })).toBe('old');
+    expect(classifyWindowAgainstGoLive(r('2026-10-31T18:30:00Z', '2026-11-30T18:30:00Z'), null, none)).toBe('portal');
   });
 });

@@ -567,7 +567,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(by('deoleo').visibility).toBeUndefined();
   });
 
-  describe('Visibility lines (VISIBILITY-POSM-DESIGN.md §Metrics)', () => {
+  describe('Visibility lines (VISIBILITY-POSM-DESIGN.md §17)', () => {
     const visOn = (features: Record<string, unknown>) => {
       prisma.client.findMany.mockResolvedValue([
         { id: 'bajaj', internalName: 'bajaj', status: 'ACTIVE', branding: {}, features },
