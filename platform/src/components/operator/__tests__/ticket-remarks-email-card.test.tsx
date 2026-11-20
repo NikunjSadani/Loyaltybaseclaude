@@ -78,4 +78,18 @@ describe('TicketRemarksEmailCard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('not a valid email address');
   });
+
+  it('clears the "Saved." timer on unmount (no late state update)', async () => {
+    getMock.mockResolvedValue({ success: true, data: { email: null, lastChange: null } });
+    putMock.mockResolvedValue({ success: true, data: { email: 'ok@bajaj.example', lastChange: null } });
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const { unmount } = render(<TicketRemarksEmailCard slug="bajaj" />);
+    fireEvent.change(await screen.findByLabelText('Ticket remarks email'), { target: { value: 'ok@bajaj.example' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByText('Saved.');
+    const before = clearSpy.mock.calls.length;
+    unmount();
+    expect(clearSpy.mock.calls.length).toBeGreaterThan(before);
+    clearSpy.mockRestore();
+  });
 });

@@ -383,7 +383,6 @@ export class GifsyService {
     return { ...user, clientId: slug };
   }
 
-  /** Confirm the target tenant exists (404 otherwise) — shared by GET + PUT. */
   // ── Ticket remarks email (per client; owner-approved 2026-11-20, tenant-scoped) ─────────────
   // GIFSY_ADMIN ONLY (strict role check — a GIFSY_STAFF never reads or writes it, whatever its
   // permissions). Stored as one ProgramSetting row per tenant; every change is audit-logged and the
@@ -464,6 +463,7 @@ export class GifsyService {
     return this.ticketRemarksEmailView(slug);
   }
 
+  /** Confirm the target tenant exists (404 otherwise) — shared by GET + PUT. */
   private async assertClientExists(slug: string): Promise<void> {
     const client = await this.prisma.client.findUnique({
       where: { id: slug },

@@ -1329,6 +1329,9 @@ export class AdminCoreService {
       // field/gifsySlaTargetHours. A leftover DB row (e.g. deoleo prod, pre-migration) must
       // not surface a dead knob in the settings payload — nothing reads it any more.
       if (AdminCoreService.RETIRED_SETTING_KEYS.has(row.settingKey)) continue;
+      // Gifsy-only support config: the client's ticket remarks inbox is managed on the Gifsy console
+      // and never surfaced through the tenant settings payload (which client admins read).
+      if (row.settingKey === TICKET_REMARKS_EMAIL_KEY) continue;
       settings[row.settingKey] = row.settingValue;
     }
 

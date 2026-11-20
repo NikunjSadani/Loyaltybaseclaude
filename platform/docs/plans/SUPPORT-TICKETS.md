@@ -83,6 +83,32 @@ reply is pinned to the request it read (`metadata.clientRemarks.requestedAt`).
    ticket or overwriting ESCALATED. On ANY 409 the UI reloads the ticket automatically, says what changed
    (e.g. "status: In Progress → Closed") and keeps the user's typed text.
 
+## The "Remarks needed" email (owner 2026-11-20)
+
+Rendered by `api/src/tickets/remarks-email.ts` (pure; data loaded by `TicketsService.loadRemarksEmailData`).
+Designed so the recipient (client admin or the client's ticket-remarks inbox) can act without guessing; single
+column, table layout, inline styles (mobile-friendly, no CSS grid). Subject:
+`Remarks needed: <TKT> · <Category> · Outlet <code>` (or `· no outlet linked`). Blocks, in order:
+
+1. **The ask** (highlighted): "<Gifsy person> (Gifsy support) needs your remarks:", the note verbatim, "Asked on
+   <IST>", and "Asked: <admin>" when sent to the inbox.
+2. **Open ticket & reply** button + "Please reply in the portal — replies to this email are not read." (true: the
+   MSG91 SMTP sender has no inbound/reply processing anywhere in the codebase).
+3. **Ticket**: number · category · priority · status "Awaiting your remarks" · raised on <date> (N days ago).
+4. **Issue**: subject + the original description (first message), truncated at 800 chars "(full text in the portal)".
+5. **Outlet**: code · name · type · program / sub-program (programName / programCategory) · city, state · KYC status
+   (latest submission). None → "Outlet: not linked"; lookup failure → "unavailable".
+6. **Raised by**: the same rule as the ticket screen; a salesperson also gets "Reports to <name> · <designation>" =
+   the first ACTIVE manager up the chain (`firstActiveApproverId`, vacant levels skipped) or "no active manager on record".
+7. **Context** (category, only what is cheaply available): POINTS → wallet balance; KYC → KYC status + submission
+   date; REDEMPTION / PAYOUT → an explicit "not linked to a specific order / payout" line (tickets carry no order /
+   payout reference). Other categories: no block.
+8. **Recent conversation**: last ≤ 3 client-visible messages (the client-desk filter — never GIFSY_ONLY), oldest
+   first, "<who> · <IST>: text" truncated at 300; the request note just written is excluded (it is the ask).
+
+Privacy: every value HTML-escaped; free text (note, description, messages) has phone numbers and email addresses
+masked ("[phone hidden]" / "[email hidden]"); no internal ids, no bank / KYC document data. All dates IST.
+
 ## Ticket remarks email (per client — owner-approved 2026-11-20, TENANT-SCOPED)
 
 Gifsy console → Clients → <client> → **Support tickets** card (GIFSY_ADMIN only; the card is not rendered for
@@ -99,7 +125,16 @@ refused), Save, saved/error states, "Last changed by X on date" from the audit l
   the portal. The Gifsy-only outcome note says "Email sent to <address> (client's ticket remarks inbox) — asked: <name>".
 - **Unset** (default — every tenant today incl. Deoleo) → byte-identical to before: the chosen admin's own email,
   "Hi <name>" greeting, outcome note "Email sent to <name> (<their email>)".
-- Not shown to client admins (optional read-only display deliberately not added).
+- Not shown to client admins (optional read-only display deliberately not added); the tenant settings payload
+  (`GET /v1/admin/settings`) never includes the key.
+- Validation is strict printable ASCII (letters, digits, `. _ % + ' -` in the local part; dotted labels + a 2+
+  letter TLD): spaces, lists (`,` `;`), quotes, backslashes, colons, angle brackets, control characters and
+  invisible format characters (e.g. U+200B zero-width space) are refused.
+- Where the email went is reported honestly everywhere: the response carries `emailRecipientKind` (`INBOX` |
+  `ADMIN`) + `emailRecipient`; the Gifsy toast and the Gifsy-only outcome note (sent or NOT sent) name "the
+  client's ticket remarks inbox <addr>" or the chosen admin accordingly.
+- Like every `/v1/gifsy/clients/:slug/*` route, a GIFSY_ADMIN may edit any client's address regardless of which
+  tenant they are currently assumed into (the slug in the URL decides; this is the console's normal model).
 
 ## Raised by / outlet
 

@@ -277,17 +277,29 @@ function EscalatePanel({ ticketId, assignees, assigneesError, onRetryAssignees, 
         setError(res.error);
       }
     } else {
-      const res = await api.post<{ emailSent?: boolean; emailError?: string; alreadyPending?: boolean; message?: string }>(
+      const res = await api.post<{
+        emailSent?: boolean; emailError?: string; alreadyPending?: boolean; message?: string;
+        emailRecipientKind?: 'INBOX' | 'ADMIN'; emailRecipient?: string | null;
+      }>(
         `/api/tickets/${ticketId}/request-client-remarks`, { clientAdminId: target, note: text.trim() },
       );
       setBusy(false);
       if (!res.success) { if (res.status === 409) onConflict(res.error); else setError(res.error); return; }
       if (res.data?.alreadyPending) {
         onDone(`${res.data.message ?? 'A remarks request to this client admin is already pending'}. Nothing was re-sent.`);
-      } else if (res.data?.emailSent === false) {
-        onDone(`Remarks requested, but the email was NOT sent (${res.data.emailError ?? 'unknown reason'}). The client admin was notified in-app only.`);
       } else {
-        onDone('Remarks requested. The client admin was notified in-app and by email.');
+        // Word it from where the email actually went: the client's ticket remarks inbox, or the admin.
+        const inbox = res.data?.emailRecipientKind === 'INBOX';
+        const where = inbox
+          ? `the client's ticket remarks inbox${res.data?.emailRecipient ? ` ${res.data.emailRecipient}` : ''}`
+          : `the client admin${res.data?.emailRecipient ? ` (${res.data.emailRecipient})` : ''}`;
+        if (res.data?.emailSent === false) {
+          onDone(`Remarks requested, but the email to ${where} was NOT sent (${res.data.emailError ?? 'unknown reason'}). The client admin was notified in-app only.`);
+        } else if (inbox) {
+          onDone(`Remarks requested. The client admin was notified in-app; email sent to ${where}.`);
+        } else {
+          onDone(`Remarks requested. The client admin was notified in-app and by email${res.data?.emailRecipient ? ` (${res.data.emailRecipient})` : ''}.`);
+        }
       }
     }
   };
