@@ -737,7 +737,19 @@ function tenantSections(t: TenantDigest): string {
       t.visibility,
       (v) => v.submitted === 0 && v.approved === 0 && v.rejected === 0 && v.pending === 0,
       (v) =>
-        metricLine('In window', [
+        v.month !== undefined
+          ? // PHOTO_APPROVAL tenants: review ACTIONS in the window + this month's two queues (Gifsy vs reps).
+            metricLine('In window', [
+              ['submitted', intIN(v.submitted)],
+              ['reviews done', intIN(v.reviewActions ?? v.approved + v.rejected)],
+              ['approved', intIN(v.approved)],
+              ['sent back / rejected', intIN(v.rejected)],
+            ]) +
+            metricLine(`Right now (${monthLabel(v.month)})`, [
+              ['waiting for review', intIN(v.waiting ?? 0), accentIf(v.waiting ?? 0, 'amber')],
+              ['needs re-take (waiting on reps)', intIN(v.needsRetake ?? 0)],
+            ])
+          : metricLine('In window', [
           ['submitted', intIN(v.submitted)],
           ['approved', intIN(v.approved)],
           ['rejected', intIN(v.rejected)],

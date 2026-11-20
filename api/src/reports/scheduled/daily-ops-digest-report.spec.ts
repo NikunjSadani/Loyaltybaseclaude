@@ -676,6 +676,18 @@ describe('buildDailyOpsDigest', () => {
     expect(html).toContain('data-section="Payouts"');
   });
 
+  it('Visibility (PHOTO_APPROVAL): review actions + the two current-month queues, in plain words', () => {
+    const t = busyTenant();
+    t.visibility = ok({ submitted: 12, approved: 7, rejected: 3, pending: 9, month: '2026-11', reviewActions: 10, waiting: 6, needsRetake: 3 });
+    const html = buildDailyOpsDigest(input([t])).html;
+    expect(html).toContain('reviews done');
+    expect(html).toContain('sent back / rejected');
+    expect(html).toContain('waiting for review');
+    expect(html).toContain('needs re-take (waiting on reps)');
+    expect(html).toContain('Right now (');
+    expect(html).not.toContain('pending review');
+  });
+
   it('hides empty Hubble / Visibility / Sales Import, shows them when present', () => {
     const quiet = buildDailyOpsDigest(input([quietTenant('deoleo', 'Deoleo')])).html;
     expect(quiet).not.toContain('Vouchers (Hubble)');

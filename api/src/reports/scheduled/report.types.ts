@@ -154,12 +154,23 @@ export interface MessagesSection {
 export interface VisibilitySection {
   /** VisibilityCaptureSubmission rows created in the window (incl. re-submissions). */
   submitted: number;
-  /** Captures reviewed APPROVED in the window. */
+  /**
+   * PHOTO_APPROVAL: review ACTIONS in the window that only approved photos. AMOUNT_UPLOAD (legacy): captures whose
+   * current status is APPROVED and reviewedAt is in the window.
+   */
   approved: number;
-  /** Captures reviewed REJECTED / CHANGES_REQUESTED in the window. */
+  /** PHOTO_APPROVAL: review ACTIONS that rejected ≥1 photo (re-take request / whole rejection). Legacy: current status. */
   rejected: number;
-  /** Captures awaiting review (SUBMITTED) right now. */
+  /** PHOTO_APPROVAL: Waiting for review + Needs re-take, current month, in scope. Legacy: all SUBMITTED right now. */
   pending: number;
+  /** PHOTO_APPROVAL only — the current IST month the pending figures count. Absent = the legacy lines. */
+  month?: string;
+  /** PHOTO_APPROVAL only — every review action in the window. */
+  reviewActions?: number;
+  /** PHOTO_APPROVAL only — captures Waiting for review (Gifsy) this month. */
+  waiting?: number;
+  /** PHOTO_APPROVAL only — captures that Need a re-take (waiting on reps) this month. */
+  needsRetake?: number;
 }
 
 /**

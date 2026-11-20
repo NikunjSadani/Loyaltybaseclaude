@@ -5,6 +5,8 @@ import { randomUUID } from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { TenantSettingsService } from '../../tenant/tenant-settings.service';
+import { loadMonthStatusCounts, loadReviewActions } from '../../visibility/visibility-metrics';
 import { Msg91Service } from '../../notifications/msg91.service';
 import { loadHolidaySet } from '../../common/holiday-calendar';
 import {
@@ -118,6 +120,8 @@ interface TenantMeta {
   hubble: boolean;
   salesImport: boolean;
   visibility: boolean;
+  /** features.visibilityCaptureMode is PHOTO_APPROVAL (the default when unset) — the capture-and-review flow. */
+  visibilityPhoto: boolean;
   /** features.requireLocation (location gate). */
   requireLocation: boolean;
 }
@@ -165,6 +169,8 @@ export class ScheduledReportsService {
     private readonly msg91: Msg91Service,
     // Owner 2026-11-18: the digest flags 194R TDS taken in excess, from the SAME 194R report the screen shows.
     private readonly tds: TdsService,
+    // Visibility digest lines (PHOTO_APPROVAL tenants): the in-scope rule needs the tenant's visibilityConfig.
+    private readonly tenantSettings: TenantSettingsService,
   ) {}
 
   async runDailyReports(
@@ -518,7 +524,7 @@ export class ScheduledReportsService {
         tds: await section('tds', c, () => this.tdsExcess(c, nowMs)),
         messages: await section('messages', c, () => this.messages(c, window)),
       };
-      if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window));
+      if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window, t.visibilityPhoto, nowMs));
       // Only for tenants with "Require location" ON (owner review 2026-11-19: Deoleo's email stays unchanged; a
       // switch-off tenant never loads it, so it can never degrade their section list).
       if (t.requireLocation) digest.location = await section('location', c, () => this.location(c, window, t.requireLocation));
@@ -863,7 +869,34 @@ export class ScheduledReportsService {
     return { otpFailed, smsFailed: byChannel('SMS'), whatsappFailed: byChannel('WHATSAPP'), broadcastFailed };
   }
 
-  private async visibility(clientId: string, w: DigestWindow): Promise<VisibilitySection> {
+  /**
+   * PHOTO_APPROVAL tenants (VISIBILITY-POSM-DESIGN.md §Metrics): approved / rejected = review ACTIONS in the window
+   * (a rejection followed by a same-day resubmit still counts — visibility-metrics countReviewActions); pending =
+   * Waiting for review + Needs re-take for the CURRENT IST month, in-scope outlets only (the report's rule), shown
+   * separately. AMOUNT_UPLOAD tenants keep the exact previous lines (visibilityLegacy).
+   */
+  private async visibility(clientId: string, w: DigestWindow, photo: boolean, nowMs: number): Promise<VisibilitySection> {
+    if (!photo) return this.visibilityLegacy(clientId, w);
+    const inWindow = this.range(w);
+    const submitted = await this.prisma.visibilityCaptureSubmission.count({ where: { clientId, createdAt: inWindow } });
+    const reviews = await loadReviewActions(this.prisma, clientId, new Date(w.startMs), new Date(w.endMs));
+    const cfg = (await this.tenantSettings.getEffectiveSettings(clientId)).visibilityConfig;
+    const month = istMonthKey(new Date(nowMs));
+    const counts = await loadMonthStatusCounts(this.prisma, clientId, cfg, month);
+    return {
+      submitted,
+      approved: reviews.approved,
+      rejected: reviews.rejected,
+      pending: counts.waiting + counts.needsRetake,
+      month,
+      reviewActions: reviews.actions,
+      waiting: counts.waiting,
+      needsRetake: counts.needsRetake,
+    };
+  }
+
+  /** The pre-month lines — AMOUNT_UPLOAD tenants only (byte-identical to before). */
+  private async visibilityLegacy(clientId: string, w: DigestWindow): Promise<VisibilitySection> {
     const inWindow = this.range(w);
     const submitted = await this.prisma.visibilityCaptureSubmission.count({ where: { clientId, createdAt: inWindow } });
     const approved = await this.prisma.visibilityCapture.count({ where: { clientId, status: 'APPROVED', reviewedAt: inWindow } });
@@ -1139,6 +1172,8 @@ export class ScheduledReportsService {
         hubble: features.hubbleVoucherEnabled === true,
         salesImport: features.salesImport === true,
         visibility: visibilityOn.has(c.id),
+        // TenantService.resolveVisibilityCaptureMode's rule: absent = PHOTO_APPROVAL.
+        visibilityPhoto: (features.visibilityCaptureMode ?? 'PHOTO_APPROVAL') === 'PHOTO_APPROVAL',
         requireLocation: features[LOCATION_REQUIRED_FEATURE] === true,
       };
     });
