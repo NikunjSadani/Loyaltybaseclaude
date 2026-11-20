@@ -64,7 +64,7 @@ function mockApi(opts: ApiOpts) {
       const w = opts.debtWallets ?? [];
       return ok({
         success: true,
-        data: { total: w.length, totalOwedPoints: w.reduce((n, x) => n + Number(x.owedPoints ?? 0), 0), limit: 1000, wallets: w },
+        data: { total: w.length, totalOwedPoints: w.reduce((n, x) => n + Number(x.owedPoints ?? 0), 0), limit: 1000, anyNegative: w.length > 0, program: null, wallets: w },
       });
     }
     if (url.includes('/reversal-engine/attention')) {
