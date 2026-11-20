@@ -584,10 +584,12 @@ and wallets-in-debt; correct by an adjustment if it happens.
 - Migration `20261119124400` (unpushed, edited in place) also adds `debtExposed`, `engineSource` and their CHECK terms.
 
 ### 8.9 Fix round 4 (re-audit of fix round 3, 2026-11-19/20) — branch `fix/wre-overreversal-debt`
-1. A position without `lotId` finds the credit's own lot through its credit row (`wallet_transactions.pointsLedgerId`),
-   so its expired points are counted (never taken twice). Only when neither link exists is the expiry history unknown —
-   then EVERY reversal that takes or owes points for it (recovered + owed > 0) writes a `REVERSAL_EXPIRY_UNTRACKED`
-   audit row, listed on the attention banner.
+1. ~~A position without `lotId` finds its lot through its credit row~~ — **corrected in round 5:** that fallback is
+   harmless but practically unreachable (the WP6 backfill sets `lotId` and `pointsLedgerId` from the same credit↔lot
+   pairs, so an unpaired backfilled credit has neither). Unpaired credits are **FLAGGED, not counted**: when the
+   credit's own lot can't be determined (no linked credit lot — `points > 0` — of THIS wallet), a reversal that takes or
+   owes points for it (recovered + owed > 0) writes ONE `REVERSAL_EXPIRY_UNTRACKED` audit row per reversal (listing
+   every affected position; the banner counts reversals). The SHADOW diff records `expiryKnown` per step.
 2. "Which reversal caused the current debt" (wallets-in-debt sources, `owedFromReversal`) is decided by the per-wallet
    movement `seq` on sequenced wallets — reversal rows after the last row that left the balance ≥ 0 — never by
    approvedAt / clock ties; one reversal touching two positions lists both (one line per allocation, React key per
@@ -602,6 +604,23 @@ and wallets-in-debt; correct by an adjustment if it happens.
 7. Group totals + negative split, and wallets-in-debt count / total / rows, are read in ONE REPEATABLE READ snapshot.
 8. SHADOW diff records `debtExposed` and `belowZero`; the Daily Ops Digest names the points owed next to the negative
    wallets ("8 negative wallets (3,549 pts owed)"); stale activity comment fixed.
+
+### 8.10 Fix round 5 (2026-11-20) — branch `fix/wre-overreversal-debt`
+- **A1** see §8.9 item 1 (corrected): unpaired credits flagged once per reversal; `expiryKnown` needs a credit lot of this
+  wallet; SHADOW diff carries `expiryKnown`.
+- **A2** wallets-in-debt: every read in ONE interactive read-only REPEATABLE READ transaction, lists grouped by wallet
+  once; group drill-down outlets read in the same snapshot as the totals; the digest's negative-wallet count and points
+  owed come from one aggregate.
+- **B1** a cheap probe answers "no wallet below zero" first (partial index `wallets_negative_balance_idx`, migration
+  `20261119124600` — additive, IF NOT EXISTS, one table; a plain CREATE INDEX like the other WRE index files since Prisma
+  runs each file in a transaction, so CONCURRENTLY is impossible; the partial index on a small table builds in moments).
+  A first-load failure with no known negative is a quiet "Couldn't check … Retry" line — never a red error on Deoleo.
+- **B2–B5** filter errors keep the header + dropdown with an inline Retry; programme changes dim the old numbers
+  (aria-busy); the summary names the programme; the export is `aria-disabled` while preparing and announces "Preparing
+  file…" / "Downloaded"; a note says wallets whose outlets are all inactive appear only under All programmes.
+- **B6** liability note grammar ("… pts owed by 1 wallet with a negative balance are not included").
+- **B7** a last row at or above zero without `seq` (pre-sequencing history) falls back to time (list + helper).
+- **B8** "Approved on" is a real date cell; deleted outlets are not listed.
 
 ## 9. One-off backfill (WP6, NOT built) + rollout
 **Backfill** (per wallet, own tx, advisory lock + wallet FOR UPDATE, resumable: skip wallets with movementSeq > 0):
