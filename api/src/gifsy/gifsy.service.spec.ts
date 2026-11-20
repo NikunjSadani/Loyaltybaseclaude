@@ -270,6 +270,14 @@ describe('GifsyService', () => {
         expect(res.appName).toBe('');
       });
 
+      it('appName: null CLEARS the key instead of throwing (no 500)', async () => {
+        mockPrisma.client.findFirst.mockResolvedValue(row({ displayName: 'Bajaj Consumer Care Ltd', appName: 'Old' }));
+        const res = await service.updateClient(gifsy, 'bajaj', { appName: null as unknown as string });
+        const written = mockPrisma.client.update.mock.calls[0][0].data.branding;
+        expect(written).not.toHaveProperty('appName');
+        expect(res.appName).toBe('');
+      });
+
       it('rejects an appName over 40 chars (after trim) before any write', async () => {
         mockPrisma.client.findFirst.mockResolvedValue(row({ displayName: 'X' }));
         await expect(service.updateClient(gifsy, 'bajaj', { appName: 'a'.repeat(41) })).rejects.toBeInstanceOf(BadRequestException);

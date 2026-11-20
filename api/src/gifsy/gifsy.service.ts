@@ -920,7 +920,8 @@ export class GifsyService {
     ] as const;
     // appName (the installed-app / tab / header name) is trimmed; blank clears the key so
     // every app surface falls back to displayName. Validated before any write.
-    const appName = dto.appName === undefined ? undefined : dto.appName.trim();
+    // null is treated as "clear" (class-validator's @IsOptional lets null through, so it must not reach .trim()).
+    const appName = dto.appName === undefined ? undefined : dto.appName === null ? '' : String(dto.appName).trim();
     if (appName !== undefined && appName.length > APP_NAME_MAX_LENGTH) {
       throw new BadRequestException(`App name must be at most ${APP_NAME_MAX_LENGTH} characters.`);
     }

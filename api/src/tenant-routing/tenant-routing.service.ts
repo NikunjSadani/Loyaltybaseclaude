@@ -168,7 +168,8 @@ export class TenantRoutingService {
 
     // Only a non-blank appName is exposed (blank = "not set" → key omitted, so a
     // tenant without one gets a byte-identical snapshot to before).
-    const appName = asString(b.appName)?.trim();
+    // Capped at 40 here too, so a value written outside the console (script / direct DB edit) can't grow unbounded.
+    const appName = asString(b.appName)?.trim().slice(0, 40);
     if (appName) branding.appName = appName;
 
     const logoUrl = asAssetUrl(b.logoUrl);
