@@ -641,6 +641,19 @@ and wallets-in-debt; correct by an adjustment if it happens.
   lists them all.
 - **6** Excel "Approved on" cells carry an explicit `dd-mmm-yyyy` number format.
 
+### 8.12 WP7 real-Postgres run (2026-11-20) — branch `fix/wre-overreversal-debt`
+- **F1 (engine bug, fixed)** two approvals of the same credit at once (200 ∥ 300 on a 500 credit) refused one with
+  "reversible 100 pts after 200 pts … never attributed". Cause: `lockReversalTargets` took `unallocatedApproved` from the
+  PRE-lock read (`v2PointsReversalCap`, used only to pick which wallets to lock) but re-read the positions AFTER the locks.
+  If the sibling committed in between, its 200 was in ρ (post-lock positions) AND still counted as an APPROVED reversal
+  with no allocation (pre-lock read) — counted twice. Fix: `unallocatedApproved` is re-read under the position locks
+  (READ COMMITTED → the sibling's allocation rows and ρ commit together, so it is counted once). The cap is unchanged:
+  300 ∥ 300 on a 500 credit still lets exactly one through.
+- **F2 (stale test)** expiry-first vs reversal: the expected B −500 / D 500 contradicted owner decision 1 (a credit's own
+  expired points are already recovered, never owed). Now B −100 / D 100 either order; expiry first books
+  alreadyExpired 400, recovered 0, owed 0.
+- Suite: 29 passed, 2 skipped (local disposable PG 15 only).
+
 ## 9. One-off backfill (WP6, NOT built) + rollout
 **Backfill** (per wallet, own tx, advisory lock + wallet FOR UPDATE, resumable: skip wallets with movementSeq > 0):
 1. Order rows by **chain-following** exact `balanceAfter` from 0 (δ = points for credits/guarded debits/vendor rows;
