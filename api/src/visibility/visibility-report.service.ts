@@ -267,10 +267,14 @@ export class VisibilityReportService {
         const at = Date.parse(r.reviewedAt);
         if (r.reviewedByUserId && Number.isFinite(at) && (!best || at > best.at)) best = { userId: r.reviewedByUserId, at };
       }
-      reviewerOf.set(c.id, {
-        userId: best?.userId ?? c.approvedByUserId ?? null,
-        at: c.reviewedAt ?? (best ? new Date(best.at) : null),
-      });
+      // A capture back in "Waiting for review" (fresh, or resubmitted after a re-take) shows only the review in
+      // progress on its CURRENT photos — never the previous version's decision, which would read as "reviewed".
+      reviewerOf.set(
+        c.id,
+        c.status === 'SUBMITTED'
+          ? { userId: best?.userId ?? null, at: best ? new Date(best.at) : null }
+          : { userId: best?.userId ?? c.approvedByUserId ?? null, at: c.reviewedAt ?? (best ? new Date(best.at) : null) },
+      );
     }
     const reviewerIds = [...new Set([...reviewerOf.values()].map((v) => v.userId).filter((v): v is string => !!v))];
     const reviewerName = new Map<string, string>();

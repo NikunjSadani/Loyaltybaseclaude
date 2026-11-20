@@ -237,6 +237,18 @@ describe('VisibilityReportService (month-wise)', () => {
     expect(ravi.groupLabel).toBe('Ravi (E1)');
   });
 
+  it('a resubmitted capture back in Waiting for review never shows the previous review as "reviewed"', async () => {
+    mockPrisma.visibilityCapture.findMany.mockImplementation(({ where }: any) =>
+      Promise.resolve(
+        capturesFor('2026-10')
+          .map((c) => (c.id === 'c2' ? { ...c, reviewedAt: new Date('2026-10-06T05:00:00Z'), approvedByUserId: 'rev1' } : c))
+          .filter((c) => where.windowKey.in.includes(c.windowKey)),
+      ),
+    );
+    const list = await service.gifsyOutlets(gifsy, { month: '2026-10', status: 'WAITING' });
+    expect(list.rows[0]).toMatchObject({ outletCode: 'A2', reviewedBy: null, reviewedOn: null });
+  });
+
   it('outlet list: group without groupKey → 400', async () => {
     await expect(service.gifsyOutlets(gifsy, { month: '2026-10', group: 'rep' })).rejects.toThrow(BadRequestException);
   });
