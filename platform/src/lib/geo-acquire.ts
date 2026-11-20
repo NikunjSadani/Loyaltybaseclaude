@@ -7,7 +7,9 @@
  *   • if a fix at or under `GEO_ACQUIRE_TARGET_ACCURACY_M` is ALREADY in hand → use it at once;
  *   • otherwise wait up to `GEO_ACQUIRE_MAX_MS` MORE for a good one, then the best-so-far (null if none).
  * `lockMs` on the returned fix is measured from the WATCH START (the pre-warm start), so it
- * reflects true time-to-lock including the head start. `handle.stop()` clears the watch (call on
+ * reflects true time-to-lock including the head start (it uses the reading's own timestamp).
+ * No path ever returns a reading older than `GEO_ACQUIRE_FRESHNESS_MS` — null instead. Only
+ * PERMISSION_DENIED ends a wait early; TIMEOUT / POSITION_UNAVAILABLE are transient (the cap decides). `handle.stop()` clears the watch (call on
  * unmount / after use) — idempotent, no leaks, no hanging.
  *
  * `acquirePreciseFix()` is the one-shot convenience for call sites that do NOT pre-warm: it
@@ -52,7 +54,7 @@ export interface AcquirePreciseFixOptions {
 
 /** A live background GPS watch that keeps the best fix and can be awaited + stopped. */
 export interface PreciseWatchHandle {
-  /** The best (lowest-accuracy) fix seen so far, or null. */
+  /** The best (lowest-accuracy) fix within the freshness window, or null (never a stale reading). */
   getBest(): PreciseFix | null;
   /**
    * Resolve a fix to USE now (never rejects):
@@ -77,10 +79,15 @@ export function startPreciseWatch(opts: AcquirePreciseFixOptions = {}): PreciseW
 
   const start = Date.now();
   let best: PreciseFix | null = null;
-  let bestAt = 0; // wall-clock (ms) when `best` was recorded — drives the freshness window.
+  let bestAt = 0; // wall-clock (ms) when the `best` reading was TAKEN — drives the freshness window.
   let watchId: number | null = null;
   let stopped = false;
-  let hadError = false;
+  // Only PERMISSION_DENIED (code 1) — or a watch that could not start at all — latches. TIMEOUT (3)
+  // and POSITION_UNAVAILABLE (2) are TRANSIENT on a cold/indoor start while the watch keeps running:
+  // they never settle a waiter and never latch; our own maxMs timer decides. A later position clears
+  // the latch (permission was granted after all).
+  let denied = false;
+  let watchFailed = false;
   // At most ONE in-flight acquisition, SHARED by every concurrent caller. Two photos seconds apart,
   // a photo + the submit-time fix, or a photo + a manual "Capture location" all JOIN the same
   // pending promise and receive the same best fix (same outlet, same few seconds → one fix is
@@ -102,46 +109,66 @@ export function startPreciseWatch(opts: AcquirePreciseFixOptions = {}): PreciseW
     w.resolve(fix);
   };
 
-  /** True when `best` is set, good enough, AND still within the freshness window. */
-  const freshGood = () =>
-    best !== null && best.accuracy <= targetAccuracyM && Date.now() - bestAt <= freshnessMs;
+  /**
+   * The best fix ONLY if its reading is within the freshness window; else null. EVERY return path
+   * (early-accept, cap, stop, short-circuit, getBest) goes through this, so a reading older than
+   * `freshnessMs` (e.g. the previous shop's, before the rep walked here) is never handed out — the
+   * caller gets null and shows its clear retake / location message instead.
+   */
+  const freshBest = (): PreciseFix | null =>
+    best !== null && Date.now() - bestAt <= freshnessMs ? best : null;
+
+  /** True when a fresh best fix exists AND is good enough to early-accept. */
+  const freshGood = () => {
+    const f = freshBest();
+    return f !== null && f.accuracy <= targetAccuracyM;
+  };
 
   const onPos = (pos: GeolocationPosition) => {
     const now = Date.now();
+    // The reading's OWN time (honest age): the position timestamp, clamped to `now` so a skewed
+    // device clock can never make a reading look newer than it is (or from the future).
+    const ts = typeof pos.timestamp === 'number' && Number.isFinite(pos.timestamp) ? pos.timestamp : now;
+    const takenAt = Math.min(ts, now);
+    if (now - takenAt > freshnessMs) return; // a cached/old reading is useless — ignore it outright.
+    denied = false; // a position arrived → permission is (now) granted; clear any latch.
     const candidate: PreciseFix = {
       lat: pos.coords.latitude,
       lng: pos.coords.longitude,
       accuracy: Math.round(pos.coords.accuracy),
-      lockMs: now - start,
+      lockMs: Math.max(0, takenAt - start),
     };
     // Keep the best (lowest-accuracy) fix — but RECENCY-AWARE: if the current best has aged out of
     // the freshness window (the rep may have moved since), replace it with this fresh fix even if
     // less accurate; otherwise keep the most accurate fix WITHIN the window. This prevents a stale
     // precise fix from an earlier spot from wrongly scoring the rep as far from the outlet.
-    if (best === null || now - bestAt > freshnessMs || candidate.accuracy < best.accuracy) {
+    if (freshBest() === null || candidate.accuracy < best!.accuracy) {
       best = candidate;
-      bestAt = now;
+      bestAt = takenAt;
     }
     // Early-accept: a good-enough, still-fresh fix ends a pending acquire immediately.
-    if (waiter && freshGood()) settleWaiter(best);
+    if (waiter && freshGood()) settleWaiter(freshBest());
   };
 
-  const onError = () => {
-    hadError = true;
-    // A pending acquire resolves with the best seen so far (never hang on an error).
-    settleWaiter(best);
+  const onError = (err?: GeolocationPositionError) => {
+    // TIMEOUT (3) / POSITION_UNAVAILABLE (2): transient — the watch keeps running; the cap decides.
+    if (!err || err.code !== 1) return;
+    // PERMISSION_DENIED (1): no fix is coming — settle every sharing caller now and latch.
+    denied = true;
+    settleWaiter(freshBest());
   };
 
   if (!noGeo) {
     try {
+      // NO `timeout`: the browser would fire TIMEOUT errors on a cold start while still searching.
+      // The per-acquire cap is enforced by our own maxMs timer instead.
       watchId = navigator.geolocation.watchPosition(onPos, onError, {
         enableHighAccuracy: true,
         maximumAge: 0,
-        timeout: maxMs,
       });
     } catch {
       watchId = null;
-      hadError = true;
+      watchFailed = true;
     }
   }
 
@@ -155,14 +182,15 @@ export function startPreciseWatch(opts: AcquirePreciseFixOptions = {}): PreciseW
         /* best-effort cleanup */
       }
     }
-    settleWaiter(best);
+    settleWaiter(freshBest());
   };
 
   const acquire = (): Promise<PreciseFix | null> => {
     // A good, still-fresh fix is already in hand → use it immediately (no wait).
-    if (freshGood()) return Promise.resolve(best);
-    // Stopped, unsupported, or already errored with nothing → resolve the best (possibly null) now.
-    if (stopped || (best === null && (noGeo || hadError))) return Promise.resolve(best);
+    if (freshGood()) return Promise.resolve(freshBest());
+    // Stopped, unsupported, watch failed to start, or permission denied → no better fix is coming:
+    // resolve the fresh best (possibly null) now.
+    if (stopped || noGeo || watchFailed || denied) return Promise.resolve(freshBest());
     // An acquisition is already in flight → JOIN it (same promise, same fix; no extra wait, and
     // the earlier caller is NOT settled early).
     if (waiter) return waiter.promise;
@@ -172,12 +200,12 @@ export function startPreciseWatch(opts: AcquirePreciseFixOptions = {}): PreciseW
     const promise = new Promise<PreciseFix | null>((resolve) => {
       resolveFn = resolve;
     });
-    const timer = setTimeout(() => settleWaiter(best), maxMs);
+    const timer = setTimeout(() => settleWaiter(freshBest()), maxMs);
     waiter = { promise, resolve: resolveFn, timer };
     return promise;
   };
 
-  return { getBest: () => best, acquire, stop };
+  return { getBest: freshBest, acquire, stop };
 }
 
 /**
