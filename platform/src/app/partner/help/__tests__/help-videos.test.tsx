@@ -58,8 +58,12 @@ describe('HV-P — partner Profile entry', () => {
     setIdentity({ helpVideos: true });
     vi.stubGlobal('fetch', vi.fn().mockImplementation(() => json(ME)));
     render(<ProfilePage />);
-    const link = await screen.findByText('Help & videos', {}, { timeout: 15_000 });
-    expect(link.closest('a')?.getAttribute('href')).toBe('/partner/help');
+    const entry = await screen.findByTestId('profile-help-videos', {}, { timeout: 15_000 });
+    expect(entry.getAttribute('href')).toBe('/partner/help');
+    // same row as the sales Profile entry: icon + title + subtitle
+    expect(entry.querySelector('svg')).not.toBeNull();
+    expect(entry.textContent).toContain('Help & videos');
+    expect(entry.textContent).toContain('Short videos on how to use the app');
   });
 
   it('HV-P2: flag OFF (Deoleo) or features absent → no link; only /api/auth/me requested', async () => {
@@ -70,6 +74,7 @@ describe('HV-P — partner Profile entry', () => {
       const { unmount } = render(<ProfilePage />);
       expect(await screen.findByText('Terms & Conditions', {}, { timeout: 15_000 })).toBeInTheDocument();
       expect(screen.queryByText('Help & videos')).toBeNull();
+      expect(screen.queryByTestId('profile-help-videos')).toBeNull();
       expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual(['/api/auth/me']);
       unmount();
       vi.unstubAllGlobals();

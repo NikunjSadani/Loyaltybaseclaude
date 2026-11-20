@@ -12,7 +12,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { ArrowLeft, ChevronRight, PlayCircle, RefreshCw, VideoOff } from 'lucide-react';
+import { ArrowLeft, ChevronRight, ListOrdered, PlayCircle, RefreshCw, VideoOff } from 'lucide-react';
 import { api } from '@/lib/api-client';
 import { Spinner } from '@/components/ui/spinner';
 
@@ -58,6 +58,25 @@ function useHelpLoad<T>(url: string): [Load<T>, () => void, () => Promise<boolea
     return false;
   }, [url]);
   return [load, retry, refresh];
+}
+
+/** "5 steps" / "1 step"; video guides read "Video · 5 steps". */
+export function guideMetaLabel(t: Pick<HelpTopicMember, 'videoUrl' | 'steps'>): string {
+  const n = t.steps.length;
+  const steps = `${n} step${n === 1 ? '' : 's'}`;
+  return t.videoUrl ? `Video · ${steps}` : steps;
+}
+
+/**
+ * Player box for a video of `ratio` = width / height. It always fills the width; its height follows the video's
+ * shape but is capped at 75vh (a portrait recording on a phone would otherwise be taller than the screen), and
+ * `object-fit: contain` letterboxes inside the box — never crops. Until the metadata arrives we assume PORTRAIT
+ * (9:16): every Bajaj guide is a portrait phone recording, so the box rarely jumps.
+ */
+export const DEFAULT_VIDEO_RATIO = 9 / 16;
+export function playerStyle(ratio: number): React.CSSProperties {
+  const r = Number.isFinite(ratio) && ratio > 0 ? ratio : DEFAULT_VIDEO_RATIO;
+  return { width: '100%', aspectRatio: String(r), maxHeight: '75vh', objectFit: 'contain' };
 }
 
 /** At most one SILENT token refresh per this window — a video that keeps failing then shows the error box. */
@@ -123,12 +142,17 @@ export function HelpTopicList({ apiBase, hrefBase, backHref }: { apiBase: string
                 className="flex items-center gap-3 px-4 py-3.5 hover:bg-gray-50 active:bg-gray-100 transition-colors"
                 data-testid="help-list-item"
               >
-                <div className="w-10 h-10 rounded-lg bg-gray-50 flex items-center justify-center shrink-0">
-                  {t.videoUrl ? <PlayCircle className="h-5 w-5 text-[var(--brand-primary)]" /> : <span className="text-xs font-semibold text-gray-400">{t.steps.length}</span>}
+                <div className="w-10 h-10 rounded-lg bg-gray-50 flex items-center justify-center shrink-0" aria-hidden="true">
+                  {t.videoUrl ? (
+                    <PlayCircle className="h-5 w-5 text-[var(--brand-primary)]" data-testid="help-list-icon-video" />
+                  ) : (
+                    <ListOrdered className="h-5 w-5 text-gray-400" data-testid="help-list-icon-steps" />
+                  )}
                 </div>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-gray-900">{t.title}</p>
                   {t.description && <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{t.description}</p>}
+                  <p className="text-[11px] text-gray-400 mt-0.5" data-testid="help-list-meta">{guideMetaLabel(t)}</p>
                 </div>
                 <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />
               </Link>
@@ -148,6 +172,8 @@ export function HelpTopicDetail({ apiBase, id, listHref }: { apiBase: string; id
   const videoRef = useRef<HTMLVideoElement>(null);
   const lastAutoRefresh = useRef(0);
   const resumeAt = useRef(0);
+  // width / height of the video, from its metadata; portrait until known (see playerStyle).
+  const [ratio, setRatio] = useState(DEFAULT_VIDEO_RATIO);
 
   // A <video> error gives no status code. The usual cause after a long pause is an EXPIRED media token (60 min),
   // so the first error re-reads the guide SILENTLY (fresh token) and resumes where it stopped; only a second
@@ -167,6 +193,7 @@ export function HelpTopicDetail({ apiBase, id, listHref }: { apiBase: string; id
 
   const onLoadedMetadata = () => {
     const v = videoRef.current;
+    if (v && v.videoWidth > 0 && v.videoHeight > 0) setRatio(v.videoWidth / v.videoHeight);
     if (v && resumeAt.current > 0) {
       try {
         v.currentTime = resumeAt.current;
@@ -219,7 +246,9 @@ export function HelpTopicDetail({ apiBase, id, listHref }: { apiBase: string; id
               key={load.data.videoUrl}
               ref={videoRef}
               data-testid="help-video"
-              className="w-full rounded-2xl bg-black aspect-video"
+              data-orientation={ratio < 1 ? 'portrait' : 'landscape'}
+              className="block mx-auto rounded-2xl bg-black"
+              style={playerStyle(ratio)}
               src={load.data.videoUrl}
               poster={load.data.posterUrl ?? undefined}
               controls

@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   User, CreditCard, Shield, Coins,
-  LogOut, ChevronRight, CheckCircle, Clock, AlertTriangle, RefreshCw,
+  LogOut, ChevronRight, CheckCircle, Clock, AlertTriangle, RefreshCw, PlayCircle,
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -387,14 +387,29 @@ export default function ProfilePage() {
         </CardContent>
       </Card>
 
+      {/* ── Help & videos (tenant flag helpVideos — read from the identity this page already loads, no extra
+             request). Same row as the sales Profile entry: icon + title + subtitle. ── */}
+      {identity.features?.helpVideos === true && (
+        <a
+          href="/partner/help"
+          data-testid="profile-help-videos"
+          className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200 hover:bg-gray-50 active:bg-gray-100 transition-colors"
+        >
+          <div className="p-2 rounded-lg shrink-0 bg-gray-50">
+            <span className="text-gray-500"><PlayCircle className="h-4 w-4" /></span>
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-gray-800">Help &amp; videos</p>
+            <p className="text-xs text-gray-400 mt-0.5 truncate">Short videos on how to use the app</p>
+          </div>
+          <ChevronRight className="h-4 w-4 text-gray-400 shrink-0" />
+        </a>
+      )}
+
       {/* ── Menu links ── */}
       {[
         ...(showVisibilityInvoices
           ? [{ label: 'Visibility Invoices', href: '/partner/invoices' }]
-          : []),
-        // Tenant flag helpVideos — read from the identity this page already loads (no extra request).
-        ...(identity.features?.helpVideos === true
-          ? [{ label: 'Help & videos', href: '/partner/help' }]
           : []),
         { label: 'Terms & Conditions', href: '#' },
         { label: 'Privacy Policy',     href: '#' },
