@@ -45,7 +45,9 @@ export function OperatorBanner() {
   if (!brand) return null;
 
   return (
-    <div className="sticky top-0 z-[60] flex items-center justify-center gap-3 bg-amber-500 text-amber-950 text-sm font-medium px-4 py-1.5 shadow">
+    // data-operator-banner: overlays (e.g. the Visibility review dialog) measure this to
+    // start below the banner instead of being covered by it.
+    <div data-operator-banner className="sticky top-0 z-[60] flex items-center justify-center gap-3 bg-amber-500 text-amber-950 text-sm font-medium px-4 py-1.5 shadow">
       <ShieldAlert className="w-4 h-4 shrink-0" />
       <span>
         Gifsy operator — working in <strong>{brand}</strong>
