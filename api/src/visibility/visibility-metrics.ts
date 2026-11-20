@@ -123,17 +123,22 @@ export function foldStatusCounts(
   return { month, submitted: waiting + needsRetake + approved + rejected, waiting, needsRetake, approved, rejected };
 }
 
-/** Status counts of a month's captures for IN-SCOPE outlets. An empty outletScope → all zeros (no query). */
+/**
+ * Status counts of a month's captures for IN-SCOPE outlets. An empty outletScope → all zeros (no query).
+ * `extraOutlet` narrows further (e.g. the admin dashboard's program filter) — ANDed with the in-scope rule.
+ */
 export async function loadMonthStatusCounts(
   prisma: Pick<MetricsPrisma, 'visibilityCapture'>,
   clientId: string,
   config: ScopeConfig,
   month: string,
+  extraOutlet?: Prisma.OutletWhereInput,
 ): Promise<MonthStatusCounts> {
   if (!config.outletScope?.length) return foldStatusCounts(month, []);
+  const universe = visibilityUniverseWhere(clientId, config);
   const rows = await prisma.visibilityCapture.groupBy({
     by: ['status'],
-    where: { ...monthCaptureWhere(clientId, month), outlet: visibilityUniverseWhere(clientId, config) },
+    where: { ...monthCaptureWhere(clientId, month), outlet: extraOutlet ? { AND: [universe, extraOutlet] } : universe },
     _count: { _all: true },
   });
   return foldStatusCounts(month, rows as Array<{ status: VisibilityCaptureStatus; _count: { _all: number } }>);

@@ -84,6 +84,7 @@ import {
   programNameIn,
 } from './dashboards/dashboard-program-filter';
 import { resolveVisibilityProgramLists } from '../visibility/visibility-scope.helper';
+import { loadMonthStatusCounts, resolveMonth } from '../visibility/visibility-metrics';
 import { isFastTrackRow } from '../kyc/kyc-fast-track.helper';
 import { kycAddressableOutletWhere, kycPendingAge, KYC_LATEST_SUBMISSION_SELECT } from './dashboards/kyc-pending-sla';
 import {
@@ -1965,10 +1966,22 @@ export class AdminCoreService {
    *   pendingVisibility → the capture's outlet is in the program.
    * Unfiltered, every `where` is exactly the pre-filter one (Deoleo byte-identical). An unknown
    * program matches nothing → zeros. `availablePrograms` = distinct trimmed outlet programs.
+   *
+   * Visibility (VISIBILITY-POSM-DESIGN.md §Metrics) — PHOTO_APPROVAL tenants only: MONTH-WISE (`visibilityMonth`,
+   * default the current IST month), in-scope outlets only (visibilityUniverseWhere): `pendingVisibility` = captures
+   * "Waiting for review" (Gifsy's queue) and `visibility.needsRetake` = "Needs re-take" (waiting on reps), shown
+   * separately. AMOUNT_UPLOAD tenants (no capture flow) keep the exact pre-month query and get `visibility: null`.
    */
-  async dashboardKpis(user: JwtPayload, programName?: unknown) {
+  async dashboardKpis(user: JwtPayload, programName?: unknown, visibilityMonth?: unknown) {
     const clientId = user.clientId;
     const program = normalizeFilterParam(programName, 'program');
+    let vMonth: string;
+    try {
+      vMonth = resolveMonth(visibilityMonth, new Date());
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+    const photoMode = (await this.tenant.resolveVisibilityCaptureMode(clientId)) === 'PHOTO_APPROVAL';
     // Program catalog (dropdown source + raw whitespace variants). Needed BEFORE the scoped queries only
     // when a program is selected; unfiltered it runs in parallel with them.
     const catalogP = loadProgramCatalog(this.prisma, clientId);
@@ -1991,14 +2004,17 @@ export class AdminCoreService {
           },
         }),
 
-        // Visibility (POSM) captures awaiting Gifsy approval (keyed per-outlet, clientId direct).
-        this.prisma.visibilityCapture.count({
-          where: {
-            clientId,
-            status: 'SUBMITTED',
-            ...(variants ? { outlet: { programName: programNameIn(variants) } } : {}),
-          },
-        }),
+        // Visibility (POSM) captures awaiting Gifsy approval. PHOTO_APPROVAL: month-wise in-scope counts (below);
+        // AMOUNT_UPLOAD: the unchanged all-time SUBMITTED count (keyed per-outlet, clientId direct).
+        photoMode
+          ? Promise.resolve(null)
+          : this.prisma.visibilityCapture.count({
+              where: {
+                clientId,
+                status: 'SUBMITTED',
+                ...(variants ? { outlet: { programName: programNameIn(variants) } } : {}),
+              },
+            }),
 
         // Audit item 1 (2026-11-19): liability = Σ POSITIVE balances only — a negative wallet (debt) never nets
         // against what other wallets can redeem. Unchanged for a tenant with no negative wallet (every Deoleo wallet).
@@ -2024,7 +2040,20 @@ export class AdminCoreService {
     const availablePrograms = catalog.available;
 
     // Suppress the visibility KPI for a tenant whose visibility module is OFF.
-    const pendingVisibility = visibilityEnabled ? pendingVisibilityRaw : 0;
+    let pendingVisibility = visibilityEnabled ? pendingVisibilityRaw ?? 0 : 0;
+    let visibility: { month: string; waiting: number; needsRetake: number } | null = null;
+    if (visibilityEnabled && photoMode) {
+      const cfg = (await this.tenantSettings.getEffectiveSettings(clientId)).visibilityConfig;
+      const counts = await loadMonthStatusCounts(
+        this.prisma,
+        clientId,
+        cfg,
+        vMonth,
+        variants ? { programName: programNameIn(variants) } : undefined,
+      );
+      pendingVisibility = counts.waiting;
+      visibility = { month: vMonth, waiting: counts.waiting, needsRetake: counts.needsRetake };
+    }
 
     const totalRedeemablePoints = walletAggregate._sum.redeemablePoints ?? 0;
     // Owner decisions D1/D2 (2026-11-19, every tenant): "points owed" = how far below zero balances are — Σ |negative
@@ -2050,6 +2079,9 @@ export class AdminCoreService {
       activePartners,
       pendingKyc,
       pendingVisibility,
+      // Additive (PHOTO_APPROVAL tenants with visibility ON; else null): the month the tile counts + its two
+      // queues — Waiting for review (Gifsy) and Needs re-take (waiting on reps).
+      visibility,
       totalRedeemablePoints,
       totalOwedPoints,
       owedWallets,

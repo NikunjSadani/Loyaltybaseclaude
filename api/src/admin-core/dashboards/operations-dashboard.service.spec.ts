@@ -34,6 +34,11 @@ const mockPrisma = {
     groupBy: jest.fn(),
     findMany: jest.fn(),
   },
+  visibilityImageHash: { findMany: jest.fn() },
+  visibilityFormVersion: { findMany: jest.fn() },
+  visibilityForm: { findUnique: jest.fn() },
+  client: { findUnique: jest.fn() },
+  kycSubmission: { findMany: jest.fn() },
   outlet: { count: jest.fn() },
   redemptionOrder: { findMany: jest.fn() },
 };
@@ -44,9 +49,11 @@ const mockTenant = {
     name: 'Deoleo',
     branding: { displayName: 'Deoleo' },
   }),
+  resolveVisibilityCaptureMode: jest.fn().mockResolvedValue('AMOUNT_UPLOAD'),
 };
 const mockTenantSettings = {
   getVisibilityEnabledUncached: jest.fn().mockResolvedValue(false),
+  getEffectiveSettings: jest.fn(),
 };
 const mockPayouts = {};
 
@@ -138,8 +145,9 @@ function primeDefaults() {
       { createdAt: plusH(0) }, // assert with now far in future → all >7d-ish; we override per test
     ]);
 
-  // visibility (disabled by default)
+  // visibility (disabled by default; AMOUNT_UPLOAD = the Deoleo-style legacy funnel)
   mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(false);
+  mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('AMOUNT_UPLOAD');
 }
 
 describe('OperationsDashboardService', () => {
@@ -229,7 +237,7 @@ describe('OperationsDashboardService', () => {
     expect(mockPrisma.visibilityCapture.groupBy).not.toHaveBeenCalled();
   });
 
-  it('returns the visibility funnel when enabled', async () => {
+  it('AMOUNT_UPLOAD tenant: the unchanged all-time funnel when enabled', async () => {
     mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(true);
     mockPrisma.visibilityCapture.groupBy.mockResolvedValue([
       { status: 'SUBMITTED', _count: { _all: 4 } },
@@ -258,6 +266,94 @@ describe('OperationsDashboardService', () => {
     expect(v.fraudFlagPct).toBe(0);
     // participation = 2 distinct / 10 addressable = 20%
     expect(v.participationPct).toBe(20);
+    // no month filter on the legacy path
+    expect(mockPrisma.visibilityCapture.groupBy.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
+  });
+
+  describe('PHOTO_APPROVAL tenant: month-wise funnel with real fraud flags', () => {
+    const schema = { captureGpsOnSubmit: false, fields: [{ id: 'w1', type: 'CAMERA', label: 'Window 1', geoFenceRequired: true }] };
+    const outlet = { latitude: 19.0, longitude: 72.8, partnerId: null };
+    const near = { lat: 19.0001, lng: 72.8, accuracy: 10 };
+    const far = { lat: 19.05, lng: 72.8, accuracy: 10 };
+    const cap = (id: string, status: string, geo = near, geoFenceOk: boolean | null = true) => ({
+      id, outletId: `o-${id}`, outletCode: id, outletName: id, windowKey: '2026-10-P1', status, formVersion: 1,
+      formValues: { w1: { key: `${id}.jpg`, geo } }, geoFenceOk, outlet,
+    });
+
+    beforeEach(() => {
+      jest.useFakeTimers({ now: new Date('2026-11-20T06:30:00Z'), doNotFake: ['nextTick', 'setImmediate'] });
+      mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(true);
+      mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('PHOTO_APPROVAL');
+      mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+        visibilityConfig: { outletScope: ['SSS'], frequencyPerMonth: 1, programs: [], subPrograms: [], geoFence: { enabled: true, radiusMeters: 200 } },
+      });
+      mockPrisma.visibilityCapture.groupBy.mockResolvedValue([
+        { status: 'SUBMITTED', _count: { _all: 1 } },
+        { status: 'APPROVED', _count: { _all: 2 } },
+        { status: 'CHANGES_REQUESTED', _count: { _all: 1 } },
+      ]);
+      const captures = [cap('a', 'APPROVED'), cap('b', 'APPROVED'), cap('c', 'SUBMITTED', far, null), cap('d', 'CHANGES_REQUESTED')];
+      mockPrisma.visibilityCapture.findMany.mockImplementation((args: any) =>
+        Promise.resolve(args.distinct ? [{ outletId: 'o-a' }, { outletId: 'o-b' }, { outletId: 'o-c' }, { outletId: 'o-d' }] : captures),
+      );
+      mockPrisma.visibilityImageHash.findMany.mockImplementation(({ where }: any) =>
+        Promise.resolve(
+          where.captureId
+            ? [{ captureId: 'b', hash: 'h1' }]
+            : [
+                { hash: 'h1', captureId: 'b', capture: { outletCode: 'b', windowKey: '2026-10-P1' } },
+                { hash: 'h1', captureId: 'old', capture: { outletCode: 'X9', windowKey: '2026-07-P1' } },
+              ],
+        ),
+      );
+      mockPrisma.visibilityFormVersion.findMany.mockResolvedValue([{ version: 1, formSchema: schema }]);
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.kycSubmission.findMany.mockResolvedValue([]);
+      mockPrisma.outlet.count.mockResolvedValue(8);
+    });
+    afterEach(() => jest.useRealTimers());
+
+    it('counts the picked month, splits waiting / needs re-take, approval rate over decided captures, real flags', async () => {
+      const res = await service.operations(user, '2026-10');
+      const v = res.visibility as any;
+      expect(v).toMatchObject({
+        mode: 'PHOTO_APPROVAL', month: '2026-10', submitted: 4, approved: 2, waiting: 1, needsRetake: 1, rejected: 0,
+        // 2 ÷ (2 + 1 + 0)
+        approvalRatePct: 66.7,
+        // b = duplicate of an older capture; c = photo outside the fence
+        flagged: 2, duplicate: 1, outsideFence: 1, fraudFlagPct: 50,
+        participatingOutlets: 4, inScopeOutlets: 8, participationPct: 50,
+      });
+      const where = mockPrisma.visibilityCapture.groupBy.mock.calls[0][0].where;
+      expect(where.windowKey).toEqual({ startsWith: '2026-10-P' });
+      expect(where.outlet).toMatchObject({ isActive: true });
+      expect(mockPrisma.outlet.count.mock.calls[0][0].where).toMatchObject({ isActive: true, outletType: { code: { in: ['SSS'] } } });
+    });
+
+    it('default month = current IST month; malformed month → 400', async () => {
+      const res = await service.visibilityFunnel(user, undefined);
+      expect((res.visibility as any).month).toBe('2026-11');
+      await expect(service.visibilityFunnel(user, 'nope')).rejects.toThrow('Invalid month');
+    });
+
+    it('no decided captures → approval rate null, not a fake 0 / 100', async () => {
+      mockPrisma.visibilityCapture.groupBy.mockResolvedValue([{ status: 'SUBMITTED', _count: { _all: 3 } }]);
+      const res = await service.operations(user, '2026-10');
+      expect((res.visibility as any).approvalRatePct).toBeNull();
+    });
+
+    it('flags list: the reason per capture, paged', async () => {
+      const res = await service.visibilityFlags(user, '2026-10', 1, 1);
+      expect(res).toMatchObject({ month: '2026-10', submitted: 4, flagged: 2, pagination: { page: 1, pageSize: 1, total: 2, pages: 2 } });
+      expect(res.rows[0]).toMatchObject({ outletCode: 'b', reasons: ['DUPLICATE_PHOTO'], duplicateOf: [{ outletCode: 'X9', windowKey: '2026-07-P1' }] });
+      const p2 = await service.visibilityFlags(user, '2026-10', 2, 1);
+      expect(p2.rows[0]).toMatchObject({ outletCode: 'c', reasons: ['OUTSIDE_FENCE'], outsidePhotos: ['Window 1'], status: 'WAITING' });
+    });
+
+    it('flags list 400s for an AMOUNT_UPLOAD tenant', async () => {
+      mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('AMOUNT_UPLOAD');
+      await expect(service.visibilityFlags(user, '2026-10')).rejects.toThrow('not enabled');
+    });
   });
 
   it('computes settlement latency from the manual redemption-order join', async () => {

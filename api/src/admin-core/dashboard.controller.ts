@@ -9,6 +9,7 @@ import { BILLING_PROGRESS_OUTLETS_KIND_ID } from '../exports/kinds/batch2/billin
 import { BillingComparisonDashboardService } from './dashboards/billing-comparison-dashboard.service';
 import { BILLING_COMPARISON_SLOWER_KIND_ID } from '../exports/kinds/batch2/billing-comparison.kind';
 import { ExportsService } from '../exports/exports.service';
+import { VisibilityMonthQueryDto } from '../visibility/dto/visibility-report.dto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -32,11 +33,18 @@ export class AdminDashboardController {
     private readonly billingComparisonSvc: BillingComparisonDashboardService,
   ) {}
 
-  /** Overview tiles + Payout Summary. Optional `program` (exact Outlet.programName; '' / absent = all). */
+  /**
+   * Overview tiles + Payout Summary. Optional `program` (exact Outlet.programName; '' / absent = all) and
+   * `visibilityMonth` (YYYY-MM, default current IST month — the Pending Visibility Approvals tile).
+   */
   @Get('kpis')
   @RequirePermission('reports:read')
-  kpis(@CurrentUser() user: JwtPayload, @Query('program') program?: unknown) {
-    return this.svc.dashboardKpis(user, program);
+  kpis(
+    @CurrentUser() user: JwtPayload,
+    @Query('program') program?: unknown,
+    @Query('visibilityMonth') visibilityMonth?: unknown,
+  ) {
+    return this.svc.dashboardKpis(user, program, visibilityMonth);
   }
 
   /**
@@ -122,8 +130,22 @@ export class AdminDashboardController {
   /** Operations — Gifsy operator view (payout health, ticket SLA, visibility, settlement). */
   @Get('operations')
   @RequirePermission('reports:read')
-  operationsDashboard(@CurrentUser() user: JwtPayload) {
-    return this.operations.operations(user);
+  operationsDashboard(@CurrentUser() user: JwtPayload, @Query('visibilityMonth') visibilityMonth?: unknown) {
+    return this.operations.operations(user, visibilityMonth);
+  }
+
+  /** The Visibility Program Funnel for one month (`month=YYYY-MM`, default current IST month). */
+  @Get('operations/visibility')
+  @RequirePermission('reports:read')
+  operationsVisibility(@CurrentUser() user: JwtPayload, @Query('month') month?: unknown) {
+    return this.operations.visibilityFunnel(user, month);
+  }
+
+  /** The captures behind "Flagged" (duplicate photo / outside the fence) for a month, paged (pageSize ≤ 200). */
+  @Get('operations/visibility/flags')
+  @RequirePermission('reports:read')
+  operationsVisibilityFlags(@CurrentUser() user: JwtPayload, @Query() q: VisibilityMonthQueryDto) {
+    return this.operations.visibilityFlags(user, q.month, q.page, q.pageSize);
   }
 
   /** Finance & Liability — MIS view (points liability, breakage, TDS, fund reconciliation). */

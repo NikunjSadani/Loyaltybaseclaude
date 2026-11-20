@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import {
   PayoutStatus,
   Prisma,
@@ -12,6 +12,14 @@ import { TenantService } from '../../tenant/tenant.service';
 import { TenantSettingsService } from '../../tenant/tenant-settings.service';
 import { PayoutsService } from '../../payouts/payouts.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { visibilityUniverseWhere } from '../../visibility/visibility-scope.helper';
+import {
+  approvalRatePct,
+  loadFraudFlags,
+  loadMonthStatusCounts,
+  monthCaptureWhere,
+  resolveMonth,
+} from '../../visibility/visibility-metrics';
 
 /**
  * Operations Dashboard — GET /v1/admin/dashboard/operations.
@@ -19,7 +27,9 @@ import { JwtPayload } from '../../common/decorators/current-user.decorator';
  * A single REAL aggregation of operational health for the caller's tenant:
  *  • payout fulfilment (success/failure/pending rates, pending ₹ liability, mode latency)
  *  • ticket SLA (open load, status/priority/category mix, MTTR, first-response, age buckets)
- *  • visibility funnel (only when the tenant has visibility ENABLED — else null)
+ *  • visibility funnel (only when the tenant has visibility ENABLED — else null). PHOTO_APPROVAL tenants: MONTH-WISE
+ *    (default current IST month) with real duplicate / outside-fence flags (visibility-metrics.ts); AMOUNT_UPLOAD
+ *    tenants: the unchanged all-time funnel.
  *  • redemption→payout settlement latency
  *
  * Tenant scope is resolved exactly like AdminCoreService.kycDashboard / dashboardKpis:
@@ -103,8 +113,9 @@ export class OperationsDashboardService {
     return (later.getTime() - earlier.getTime()) / OperationsDashboardService.HOUR_MS;
   }
 
-  async operations(user: JwtPayload) {
+  async operations(user: JwtPayload, visibilityMonth?: unknown) {
     const clientId = user.clientId;
+    const month = OperationsDashboardService.month(visibilityMonth);
     const generatedAt = new Date();
 
     // Tenant display name (best-effort; falls back to the slug if config is missing).
@@ -119,7 +130,7 @@ export class OperationsDashboardService {
     const [payouts, tickets, visibility, settlement] = await Promise.all([
       this.buildPayouts(clientId),
       this.buildTickets(clientId),
-      this.buildVisibility(clientId),
+      this.buildVisibility(clientId, month),
       this.buildSettlement(clientId),
     ]);
 
@@ -347,11 +358,106 @@ export class OperationsDashboardService {
   // VISIBILITY  (null when the tenant has the feature OFF)
   // ════════════════════════════════════════════════════════════════════════
 
-  private async buildVisibility(clientId: string) {
+  /** The visibility month (YYYY-MM, default the current IST month); 400 on a malformed value. */
+  private static month(input: unknown): string {
+    try {
+      return resolveMonth(input, new Date());
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+  }
+
+  /** GET operations/visibility — just the visibility block for a month (the card's month picker). */
+  async visibilityFunnel(user: JwtPayload, visibilityMonth?: unknown) {
+    return { visibility: await this.buildVisibility(user.clientId, OperationsDashboardService.month(visibilityMonth)) };
+  }
+
+  /**
+   * GET operations/visibility/flags — the captures behind "Flagged", with the reason (duplicate photo / photo
+   * outside the outlet fence), paged. PHOTO_APPROVAL tenants with visibility ON only (else 400 — there is no
+   * capture flow to flag).
+   */
+  async visibilityFlags(user: JwtPayload, visibilityMonth?: unknown, page = 1, pageSize = 50) {
+    const clientId = user.clientId;
+    const month = OperationsDashboardService.month(visibilityMonth);
+    const enabled = await this.tenantSettings.getVisibilityEnabledUncached(clientId);
+    const mode = await this.tenant.resolveVisibilityCaptureMode(clientId);
+    if (!enabled || mode !== 'PHOTO_APPROVAL') {
+      throw new BadRequestException('Visibility photo capture is not enabled for this tenant.');
+    }
+    const cfg = (await this.tenantSettings.getEffectiveSettings(clientId)).visibilityConfig;
+    const res = await loadFraudFlags(this.prisma, clientId, cfg, month, new Date(), cfg.frequencyPerMonth);
+    const p = Math.max(1, Math.floor(page) || 1);
+    const size = Math.min(200, Math.max(1, Math.floor(pageSize) || 50));
+    return {
+      month,
+      submitted: res.submitted,
+      flagged: res.flagged,
+      duplicate: res.duplicate,
+      outsideFence: res.outsideFence,
+      flagRatePct: res.flagRatePct,
+      rows: res.rows.slice((p - 1) * size, p * size),
+      pagination: { page: p, pageSize: size, total: res.rows.length, pages: Math.max(1, Math.ceil(res.rows.length / size)) },
+    };
+  }
+
+  private async buildVisibility(clientId: string, month: string) {
     // Canonical reader — uncached + fail-closed (treats a read error as OFF). When OFF,
     // return null so the FE hides the whole visibility card (no zero-filled fake funnel).
     const enabled = await this.tenantSettings.getVisibilityEnabledUncached(clientId);
     if (!enabled) return null;
+    // AMOUNT_UPLOAD tenants (no photo-capture flow) keep the exact pre-month funnel below.
+    const mode = await this.tenant.resolveVisibilityCaptureMode(clientId);
+    if (mode === 'PHOTO_APPROVAL') return this.buildPhotoVisibility(clientId, month);
+    return this.buildVisibilityLegacy(clientId);
+  }
+
+  /**
+   * PHOTO_APPROVAL funnel for ONE month (VISIBILITY-POSM-DESIGN.md §Metrics) — in-scope outlets only
+   * (visibilityUniverseWhere), the same definitions as the report:
+   *   submitted = this month's captures (any status) · approved / waiting / needs re-take / rejected by status;
+   *   approval rate = approved ÷ (approved + needs re-take + rejected) — decided captures only, null if none;
+   *   flagged = captures with a duplicate photo OR a photo outside the fence; fraud flag rate = flagged ÷ submitted;
+   *   participation = in-scope outlets with ≥1 capture this month ÷ in-scope outlets.
+   */
+  private async buildPhotoVisibility(clientId: string, month: string) {
+    const cfg = (await this.tenantSettings.getEffectiveSettings(clientId)).visibilityConfig;
+    const scoped = cfg.outletScope.length > 0;
+    const universe = visibilityUniverseWhere(clientId, cfg);
+    const [counts, flags, participating, inScope] = await Promise.all([
+      loadMonthStatusCounts(this.prisma, clientId, cfg, month),
+      loadFraudFlags(this.prisma, clientId, cfg, month, new Date(), cfg.frequencyPerMonth),
+      scoped
+        ? this.prisma.visibilityCapture.findMany({
+            where: { ...monthCaptureWhere(clientId, month), outlet: universe },
+            select: { outletId: true },
+            distinct: ['outletId'],
+          })
+        : Promise.resolve([] as Array<{ outletId: string }>),
+      scoped ? this.prisma.outlet.count({ where: universe }) : Promise.resolve(0),
+    ]);
+    return {
+      enabled: true,
+      mode: 'PHOTO_APPROVAL' as const,
+      month,
+      submitted: counts.submitted,
+      approved: counts.approved,
+      waiting: counts.waiting,
+      needsRetake: counts.needsRetake,
+      rejected: counts.rejected,
+      approvalRatePct: approvalRatePct(counts),
+      flagged: flags.flagged,
+      duplicate: flags.duplicate,
+      outsideFence: flags.outsideFence,
+      fraudFlagPct: flags.flagRatePct,
+      participatingOutlets: participating.length,
+      inScopeOutlets: inScope,
+      participationPct: OperationsDashboardService.pct(participating.length, inScope),
+    };
+  }
+
+  /** The pre-month funnel — AMOUNT_UPLOAD tenants only (byte-identical to before). */
+  private async buildVisibilityLegacy(clientId: string) {
 
     // Visibility (POSM) captures are keyed by (outlet, window); clientId is a direct column.
     // The new status model is SUBMITTED | APPROVED | REJECTED (no DRAFT/UNDER_REVIEW/FLAGGED).
