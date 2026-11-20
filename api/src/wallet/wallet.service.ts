@@ -2154,7 +2154,11 @@ export class WalletService {
     wallets: Map<string, Wallet>;
     unallocatedApproved: number;
   }> {
-    const { positions: unlocked, unallocatedApproved } = await this.v2PointsReversalCap(tx, key, { excludeReversalId });
+    // The pre-lock read only decides WHICH wallets to lock (§5 order). Its unallocatedApproved is NOT used: it was read
+    // before a concurrent sibling reversal of the same credit committed, so it would still count that sibling as "never
+    // attributed" while the positions re-read below (after the locks) already carry its ρ — the sibling counted twice
+    // (WP7 F1, 2026-11-20). Both are re-read under the locks, in one consistent post-lock view.
+    const { positions: unlocked } = await this.v2PointsReversalCap(tx, key, { excludeReversalId });
     const walletIds = [...new Set([...unlocked.map((p) => p.walletId), ...extraWalletIds])].sort();
     const wallets = new Map<string, Wallet>();
     const states = new Map<string, WalletState>();
@@ -2174,6 +2178,10 @@ export class WalletService {
     if (positions.some((p) => !wallets.has(p.walletId))) {
       throw new ConflictException('The credits being reversed changed concurrently — please retry');
     }
+    // Under the position locks: a sibling that applied first has committed its allocation rows AND its ρ together, so
+    // it is counted once (in ρ); a sibling still waiting for these locks has no allocation yet and is counted as
+    // unallocated (conservative — it will consume the credit when it applies).
+    const unallocatedApproved = await this.unallocatedApprovedReversals(tx, key, excludeReversalId);
     return { positions, states, wallets, unallocatedApproved };
   }
 
