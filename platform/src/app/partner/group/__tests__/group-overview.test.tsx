@@ -14,7 +14,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 
 // next/link → plain anchor for jsdom.
@@ -242,6 +242,19 @@ describe('GO Visibility — per-outlet capture status (read-only, flag-gated)', 
     expect(screen.queryByTestId('group-visibility-section')).not.toBeInTheDocument();
   });
 
+  it('a FAILED visibility request shows a visible error in the section (never hidden)', async () => {
+    stubFetch(AVAILABLE_PAYLOAD);
+    const base = global.fetch as unknown as (input: unknown) => Promise<unknown>;
+    vi.stubGlobal('fetch', vi.fn((input: unknown) =>
+      String(input).includes('/api/partner/group/visibility')
+        ? Promise.reject(new Error('network down'))
+        : base(input)));
+    render(<GroupOverviewPage />);
+
+    expect(await screen.findByTestId('group-visibility-error')).toHaveTextContent(/Couldn.t load visibility/);
+    expect(screen.getByTestId('group-visibility-section')).toBeInTheDocument();
+  });
+
   it('renders the counts summary + a status row per outlet when visibilityEnabled', async () => {
     stubFetch(AVAILABLE_PAYLOAD, { visibility: VISIBILITY_ON_PAYLOAD });
     render(<GroupOverviewPage />);
@@ -251,6 +264,40 @@ describe('GO Visibility — per-outlet capture status (read-only, flag-gated)', 
     const section = await screen.findByTestId('group-visibility-section');
     expect(section).toHaveTextContent('Approved');
     expect(section).toHaveTextContent('Under review');
+  });
+
+  // PHOTO_APPROVAL tenants (Bajaj): the API reads VisibilityCapture for the current window and
+  // the page shows the shared plain status words — never "No record" for every shop.
+  it('PHOTO_APPROVAL: shows the current window + plain status words per outlet', async () => {
+    stubFetch(AVAILABLE_PAYLOAD, {
+      visibility: {
+        available: true,
+        visibilityEnabled: true,
+        mode: 'PHOTO_APPROVAL',
+        windowKey: '2026-11-P1',
+        window: { startDay: 1, endDay: 30 },
+        counts: { total: 4, approved: 1, waiting: 1, needsRetake: 1, rejected: 0, notCaptured: 1, notInScope: 1 },
+        outlets: [
+          { outletCode: 'OUT-001', outletName: 'Sunrise Central', inScope: true, status: 'APPROVED', capturedAt: '2026-11-03', reviewedAt: '2026-11-04', version: 1 },
+          { outletCode: 'OUT-002', outletName: 'Sunrise North', inScope: true, status: 'SUBMITTED', capturedAt: '2026-11-05', reviewedAt: null, version: 1 },
+          { outletCode: 'OUT-003', outletName: 'Sunrise East', inScope: true, status: 'CHANGES_REQUESTED', capturedAt: '2026-11-05', reviewedAt: '2026-11-06', version: 2 },
+          { outletCode: 'OUT-004', outletName: 'Sunrise West', inScope: true, status: null, capturedAt: null, reviewedAt: null, version: null },
+          { outletCode: 'OUT-005', outletName: 'Sunrise Depot', inScope: false, status: null, capturedAt: null, reviewedAt: null, version: null },
+        ],
+      },
+    });
+    render(<GroupOverviewPage />);
+
+    const section = await screen.findByTestId('group-visibility-section');
+    const rows = await within(section).findAllByTestId('group-visibility-row');
+    expect(rows).toHaveLength(5);
+    expect(rows[0]).toHaveTextContent('Approved');
+    expect(rows[1]).toHaveTextContent('Waiting for review');
+    expect(rows[2]).toHaveTextContent('Needs re-take');
+    expect(rows[3]).toHaveTextContent('Not captured yet');
+    expect(rows[4]).toHaveTextContent('Not part of visibility');
+    expect(section).toHaveTextContent('1–30 Nov');
+    expect(section).not.toHaveTextContent('No record');
   });
 });
 

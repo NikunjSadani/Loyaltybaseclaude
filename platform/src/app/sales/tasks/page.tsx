@@ -11,9 +11,11 @@ import {
 import { KYCStatus } from '@/types';
 import { kycTaskHrefFor } from '@/lib/sales-kyc-link';
 import { fetchTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig } from '@/lib/task-config';
+import { istMonthKey } from '@/lib/ist-date';
 import {
   fetchOutletVisibilityStatuses,
   VISIBILITY_ELIGIBLE_OUTLET_TYPES,
+  VISIBILITY_STATUS_LOAD_ERROR,
   type VisibilityStatusMap,
 } from '@/lib/visibility-upload';
 import { getRole, canEnroll, type SalesRole } from '@/lib/sales-role';
@@ -281,6 +283,7 @@ export default function TasksPage() {
   const [schemeEnrolled,  setSchemeEnrolled]   = useState<Record<string, SchemeEnrolledMap>>({});
   const [visibilityItems, setVisibilityItems]  = useState<TaskItem[]>([]);
   const [visibilityMode,  setVisibilityMode]   = useState<'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD'>('PHOTO_APPROVAL');
+  const [visibilityLoadError, setVisibilityLoadError] = useState(false);
   const [loading,         setLoading]          = useState(true);
   const slug = useClientConfig().slug;
 
@@ -296,7 +299,8 @@ export default function TasksPage() {
     setRoleState(getRole());
 
     const headers = authHeader();
-    const currentMonth = new Date().toISOString().slice(0, 7);
+    // IST calendar month (same rule as the sales dashboard) — never the UTC month.
+    const currentMonth = istMonthKey(new Date());
 
     // Fetch eligible schemes (real, roster-based §13.4), outlets, and task config in
     // parallel. schemeApi.listSalesEligible() uses the api client (cookie auth) — no token read.
@@ -333,8 +337,10 @@ export default function TasksPage() {
           .catch(() => setVisibilityItems([]));
       }
       return fetchOutletVisibilityStatuses(codes, currentMonth).then((apiMap) => {
-        const merged: VisibilityStatusMap = apiMap;
-        setVisibilityItems(buildVisibilityTaskItems(visibleOutlets, merged, visibilityEnabled));
+        // null = could not load → no fake "capture pending" tasks; the page says so instead.
+        setVisibilityLoadError(apiMap === null);
+        const merged: VisibilityStatusMap = apiMap ?? {};
+        setVisibilityItems(apiMap === null ? [] : buildVisibilityTaskItems(visibleOutlets, merged, visibilityEnabled));
       });
     }).catch(() => {}).finally(() => setLoading(false));
   }, []);
@@ -554,6 +560,12 @@ export default function TasksPage() {
           </span>
         )}
       </div>
+
+      {visibilityLoadError && (
+        <p role="alert" data-testid="visibility-status-error" className="mb-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          Visibility tasks: {VISIBILITY_STATUS_LOAD_ERROR}
+        </p>
+      )}
 
       {/* Category list */}
       {loading ? (

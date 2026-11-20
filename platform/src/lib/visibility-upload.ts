@@ -127,17 +127,41 @@ function authHeader(): Record<string, string> {
 // ─── API client ───────────────────────────────────────────────────────────────
 
 /**
- * Fetch the visibility status for a list of outlet codes for a given month.
- * Returns an empty map on error or when the API is unavailable.
+ * Fetch the AMOUNT_UPLOAD (Excel record) visibility status for a list of outlet codes for a
+ * month — `GET /v1/visibility/outlet-statuses`. ONLY meaningful for an AMOUNT_UPLOAD tenant
+ * (a PHOTO_APPROVAL tenant gets a 400 — use the photo status instead); callers gate on
+ * `visibilityEnabled === true && visibilityCaptureMode === 'AMOUNT_UPLOAD'`.
+ *
+ * Returns the map on success (an outlet absent from it has no record for the month), or
+ * **null when the status could not be loaded** — callers must SAY so instead of treating the
+ * failure as "nothing captured" (the old {} made every outlet look pending). Requests are
+ * chunked to the backend's per-call cap.
  *
  * @param outletCodes  Array of outletCode strings (matching Outlet.outletCode in DB)
  * @param month        YYYY-MM string
  */
+// 250 codes per request (the server still accepts up to 2,000): each code is URL-encoded and some
+// outlet codes are long, so 250 keeps the query string well under proxy / header size limits (~8 KB).
+export const OUTLET_STATUS_CHUNK = 250;
+
 export async function fetchOutletVisibilityStatuses(
   outletCodes: string[],
   month: string,
-): Promise<VisibilityStatusMap> {
+): Promise<VisibilityStatusMap | null> {
   if (outletCodes.length === 0) return {};
+  const merged: VisibilityStatusMap = {};
+  for (let i = 0; i < outletCodes.length; i += OUTLET_STATUS_CHUNK) {
+    const part = await fetchOutletVisibilityStatusChunk(outletCodes.slice(i, i + OUTLET_STATUS_CHUNK), month);
+    if (part === null) return null;
+    Object.assign(merged, part);
+  }
+  return merged;
+}
+
+async function fetchOutletVisibilityStatusChunk(
+  outletCodes: string[],
+  month: string,
+): Promise<VisibilityStatusMap | null> {
   try {
     const params = new URLSearchParams({
       // Encode each code individually before joining on ','. Outlet IDs now accept any
@@ -151,13 +175,17 @@ export async function fetchOutletVisibilityStatuses(
     const res = await fetch(`/api/visibility/outlet-statuses?${params}`, {
       headers: { ...authHeader() },
     });
-    if (!res.ok) return {};
+    if (!res.ok) return null;
     const json = await res.json();
-    return (json.data as VisibilityStatusMap) ?? {};
+    if (json?.success === false || !json?.data || typeof json.data !== 'object') return null;
+    return json.data as VisibilityStatusMap;
   } catch {
-    return {};
+    return null;
   }
 }
+
+/** The message every surface shows when the amount-upload visibility status can't be loaded. */
+export const VISIBILITY_STATUS_LOAD_ERROR = "Couldn't load visibility status right now. Try again later.";
 
 // ─── Template generator ───────────────────────────────────────────────────────
 

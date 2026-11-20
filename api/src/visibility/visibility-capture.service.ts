@@ -45,6 +45,7 @@ import {
   PhotoReviews,
   applicableCameraFields,
 } from './visibility-form.helper';
+import { appendReviewEvents } from './visibility-review-events';
 import {
   VisibilityFormSchema,
   GpsCapture,
@@ -1097,6 +1098,22 @@ export class VisibilityCaptureService {
             submittedBySalesUserId: caller.id,
           },
         });
+
+        // Permanent review history (same transaction): who submitted which version, when.
+        await appendReviewEvents(tx, [
+          {
+            clientId: user.clientId,
+            captureId: capture.id,
+            outletId: outlet.id,
+            windowKey,
+            version,
+            action: version === 1 ? 'SUBMITTED' : 'RESUBMITTED',
+            statusAfter: 'SUBMITTED',
+            actorUserId: user.sub,
+            actorName: user.name ?? null,
+            createdAt: now,
+          },
+        ]);
 
         const { dupHashes } = await this.media.recordImageHashes(
           tx,

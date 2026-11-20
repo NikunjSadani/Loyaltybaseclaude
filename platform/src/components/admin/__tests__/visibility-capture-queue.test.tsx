@@ -140,16 +140,104 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     await waitFor(() => expect(rejectCapture).toHaveBeenCalledWith('cap-1', expect.objectContaining({ reasonCode: 'GEO_MISMATCH' })));
   });
 
-  it('VISQ5: a CHANGES_REQUESTED row renders the "Changes requested" label', async () => {
+  it('VISQ5: a CHANGES_REQUESTED row renders the plain "Needs re-take" label (and SUBMITTED reads "Waiting for review")', async () => {
     listCaptures.mockResolvedValue({
       success: true,
       data: {
-        captures: [{ ...ROW, status: 'CHANGES_REQUESTED' }],
-        pagination: { page: 1, limit: 25, total: 1, pages: 1 },
+        captures: [{ ...ROW, status: 'CHANGES_REQUESTED' }, { ...ROW, id: 'cap-2', status: 'SUBMITTED' }],
+        pagination: { page: 1, limit: 25, total: 2, pages: 1 },
       },
     });
     render(<VisibilityCaptureQueue />);
-    expect(await screen.findByText('Changes requested')).toBeInTheDocument();
+    const table = await screen.findByRole('table');
+    expect(await within(table).findByText('Needs re-take')).toBeInTheDocument();
+    expect(within(table).getByText('Waiting for review')).toBeInTheDocument();
+    // The status filter uses the same words (codes stay as the option values).
+    expect(screen.getByRole('option', { name: 'Needs re-take' })).toHaveAttribute('value', 'CHANGES_REQUESTED');
+  });
+
+  // ── Permanent review history (2026-11-20) ─────────────────────────────────────
+  const HISTORY = [
+    { id: 'e3', version: 2, action: 'PHOTO_REJECTED', statusAfter: 'CHANGES_REQUESTED', fieldId: 'ph2', fieldLabel: 'Shelf photo', reasonCode: 'BLURRY', reason: 'out of focus', actorUserId: 'g1', actorName: 'Asha Reviewer', backfilled: false, createdAt: '2026-07-20T09:00:00.000Z' },
+    { id: 'e2', version: 2, action: 'RESUBMITTED', statusAfter: 'SUBMITTED', fieldId: null, fieldLabel: null, reasonCode: null, reason: null, actorUserId: 'r1', actorName: 'Ravi Rep', backfilled: false, createdAt: '2026-07-19T09:00:00.000Z' },
+    { id: 'e1', version: 1, action: 'CAPTURE_REJECTED_ALL', statusAfter: 'REJECTED', fieldId: null, fieldLabel: null, reasonCode: 'WRONG_OUTLET', reason: null, actorUserId: null, actorName: null, backfilled: true, createdAt: '2026-07-18T09:00:00.000Z' },
+  ];
+
+  it('VISQ30: the dialog shows the review timeline with names, photo, reason and IST time', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: { ...MULTI_DETAIL, reviewHistory: HISTORY, lastReview: { actorName: 'Asha Reviewer', actorUserId: 'g1', at: '2026-07-20T09:00:00.000Z', action: 'PHOTO_REJECTED' } } } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const list = await screen.findByTestId('capture-review-history');
+    const e3 = within(list).getByTestId('history-e3');
+    expect(e3).toHaveTextContent('Asha Reviewer');
+    expect(e3).toHaveTextContent('Asked for a re-take of a photo');
+    expect(e3).toHaveTextContent('Shelf photo');
+    expect(e3).toHaveTextContent('Photo is blurry / unclear — out of focus');
+    expect(e3).toHaveTextContent('IST');
+    expect(within(list).getByTestId('history-e2')).toHaveTextContent('Ravi Rep');
+    // Unknown actor is never blank; a backfilled row says it came from earlier records.
+    expect(within(list).getByTestId('history-e1')).toHaveTextContent('Unknown user');
+    expect(within(list).getByTestId('history-e1')).toHaveTextContent('from earlier records');
+    // Newest first.
+    expect(within(list).getAllByTestId(/^history-/).map((n) => n.dataset.testid)).toEqual(['history-e3', 'history-e2', 'history-e1']);
+  });
+
+  it('VISQ31: header shows "Reviewed by <name> on <date time IST>" and Needs re-take shows per-photo remarks', async () => {
+    getCapture.mockResolvedValue({ success: true, data: { capture: { ...MULTI_DETAIL, reviewHistory: HISTORY, lastReview: { actorName: 'Asha Reviewer', actorUserId: 'g1', at: '2026-07-20T09:00:00.000Z', action: 'PHOTO_REJECTED' } } } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const by = await screen.findByTestId('capture-reviewed-by');
+    expect(by.textContent).toMatch(/^Reviewed by Asha Reviewer on .+ IST$/);
+    const remarks = screen.getByTestId('capture-retake-remarks');
+    expect(remarks).toHaveTextContent('Needs re-take');
+    expect(remarks).toHaveTextContent('Shelf photo — Photo is blurry / unclear');
+    // The approved photo is not listed as a re-take.
+    expect(remarks).not.toHaveTextContent('Front photo');
+  });
+
+  it('VISQ33: an IMPORTED old-app capture shows "Imported — old app approval", never the importing admin', async () => {
+    const at = '2025-06-20T06:30:00.000Z';
+    getCapture.mockResolvedValue({ success: true, data: { capture: {
+      ...DETAIL, status: 'APPROVED', imported: true, reviewedAt: at,
+      // The API nulls approvedBy for an imported capture; even if an old API sent it, it must not show.
+      approvedBy: { id: 'admin1', name: 'Gifsy Admin' },
+      reviewHistory: [{ id: 'e1', version: 1, action: 'CAPTURE_APPROVED_ALL', statusAfter: 'APPROVED', fieldId: null, fieldLabel: null, reasonCode: null, reason: null, actorUserId: null, actorName: 'Imported — old app approval', backfilled: true, createdAt: at }],
+      lastReview: { actorName: 'Imported — old app approval', actorUserId: null, at, action: 'CAPTURE_APPROVED_ALL' },
+    } } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const by = await screen.findByTestId('capture-reviewed-by');
+    expect(by.textContent).toMatch(/^Imported — old app approval on .+ IST$/);
+    expect(by).not.toHaveTextContent('Reviewed by');
+    const e1 = within(screen.getByTestId('capture-review-history')).getByTestId('history-e1');
+    expect(e1).toHaveTextContent('Imported — old app approval');
+    // A backfilled summary reads as the outcome ("Approved"), marked as from earlier records — not "Approved all photos".
+    expect(e1).toHaveTextContent('Approved');
+    expect(e1).not.toHaveTextContent('Approved all photos');
+    expect(e1).toHaveTextContent('from earlier records');
+    expect(screen.getByRole('dialog')).not.toHaveTextContent('Gifsy Admin');
+  });
+
+  it('VISQ34: when the WHOLE capture was rejected, each photo chip says "Rejected" (not "Needs re-take")', async () => {
+    const rej = { status: 'REJECTED', reasonCode: 'WRONG_OUTLET', reviewedAt: 'x', reviewedByUserId: 'g1' };
+    getCapture.mockResolvedValue({ success: true, data: { capture: {
+      ...MULTI_DETAIL, status: 'REJECTED', rejectionReasonCode: 'WRONG_OUTLET',
+      photoReviews: { ph1: rej, ph2: rej },
+      media: MULTI_DETAIL.media.map((m) => ({ ...m, review: rej })),
+    } } });
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    const chip = await screen.findByTestId('photo-review-ph2');
+    expect(chip).toHaveTextContent('Rejected');
+    expect(chip).not.toHaveTextContent('Needs re-take');
+  });
+
+  it('VISQ32: an unreviewed capture shows no "Reviewed by" line and falls back to submission history without events', async () => {
+    render(<VisibilityCaptureQueue />);
+    fireEvent.click(await screen.findByRole('button', { name: /review/i }));
+    expect(await screen.findByText(/Submission history \(1\)/)).toBeInTheDocument();
+    expect(screen.queryByTestId('capture-reviewed-by')).toBeNull();
+    expect(screen.queryByTestId('capture-retake-remarks')).toBeNull();
   });
 
   it('VISQ6: per-photo Approve/Reject calls reviewPhoto with the field id + decision', async () => {
@@ -383,7 +471,7 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     fireEvent.click(within(card1).getByRole('button', { name: /^Reject$/i }));
     fireEvent.click(within(card1).getByRole('button', { name: /Reject photo/i }));
     await waitFor(() => expect(reviewPhoto).toHaveBeenCalledWith('cap-1', expect.objectContaining({ fieldId: 'p1', decision: 'REJECTED' })));
-    await waitFor(() => expect(within(screen.getByTestId('photo-card-p1')).getByText(/Rejected/)).toBeInTheDocument());
+    await waitFor(() => expect(within(screen.getByTestId('photo-card-p1')).getByText(/Needs re-take/)).toBeInTheDocument());
     // Still reviewing: no "Decision saved / Next capture"; focus is on photo 2's first control.
     expect(screen.queryByTestId('capture-review-next')).not.toBeInTheDocument();
     expect(screen.getByRole('dialog')).toBeInTheDocument();

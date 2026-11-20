@@ -371,3 +371,85 @@ Export kind `visibility-captures` (`api/src/exports/kinds/batch1/visibility-capt
 - Tests: `visibility-captures.spec.ts` (workbook read-back), platform `app/visibility/photo/__tests__`, proxy +
   return-to role tests.
 
+## 17. Permanent review history + plain status words + Bajaj screen fixes (2026-11-20, owner-approved ⚠️ PLATFORM-WIDE, Track 2a)
+
+Branch `feat/visibility-review-history` (worktree `vis-history`). Not yet pushed / applied anywhere.
+
+### Review history (append-only)
+- **Why:** a resubmit nulls `rejectionReason/Code`, `approvedByUserId`, `reviewedAt` on the live `VisibilityCapture`
+  and resets `photoReviews`; submission versions keep only `SUBMITTED` + a photoReviews copy → "who sent back which
+  photo, when, why" was lost.
+- **Table** `visibility_review_events` (model `VisibilityReviewEvent`, enum `VisibilityReviewAction`), migration
+  **`20261120140000_visibility_review_events`** (additive, `lock_timeout 5s`, IF-NOT-EXISTS / DO-block guards, no FK so
+  history outlives a capture row). Columns: `clientId, captureId, outletId, windowKey, version, action, statusAfter?,
+  fieldId?, fieldLabel?` (snapshot) `, reasonCode?, reason?, actorUserId?, actorName?` (snapshot) `, backfilled, createdAt`.
+  Indexes `(clientId, windowKey)`, `(captureId)`.
+- **Actions:** `SUBMITTED` (v1) · `RESUBMITTED` (v>1) · `PHOTO_APPROVED` · `PHOTO_REJECTED` · `CAPTURE_APPROVED_ALL` ·
+  `CAPTURE_REJECTED_ALL` · `CHANGES_REQUESTED_RESULT` (a per-photo reject moved the capture INTO Needs re-take; written
+  once per transition).
+- **Writers (same transaction as the state change):** `VisibilityReviewService.persistReview` (per-photo, approve-all,
+  reject-all) and `VisibilityCaptureService.persistCapture` (submit / resubmit). Helper: `visibility-review-events.ts`
+  (`appendReviewEvents(tx, …)`). App code never updates/deletes events.
+- **Backfill (in the migration, runs only in the run that creates the table, rows `backfilled = true`) — only what
+  the old data can honestly tell, no invented per-photo decisions:**
+  - **Imported old-app captures** (Bajaj ~51k; any photo key contains `/vendor-import/` — one rule, `isImportedCapture`
+    in `api/src/visibility/visibility-review-events.ts`, mirrored in the SQL): exactly ONE `CAPTURE_APPROVED_ALL` event,
+    actor = **"Imported — old app approval"** with no actor id (the row's `approvedBy` is only the Gifsy admin who ran
+    the import), dated at the original approval (`reviewedAt`, else `updatedAt`/`createdAt`).
+  - **Every other capture:** one SUBMITTED/RESUBMITTED event per submission row (rep + name, at its `createdAt`) and ONE
+    summary event for the CURRENT outcome (APPROVED → CAPTURE_APPROVED_ALL · REJECTED → CAPTURE_REJECTED_ALL + reason ·
+    CHANGES_REQUESTED → CHANGES_REQUESTED_RESULT; nothing for Waiting for review), `statusAfter` filled. The UI shows these
+    as the outcome only ("Approved" / "Rejected" / "Sent back") marked "from earlier records".
+  - **Never aborts on bad dates:** all dates come from timestamp columns; the one JSON date read (latest sent-back photo
+    for a Needs re-take capture) goes through a NULL-on-error helper `_vre_safe_ts` (regex guard + EXCEPTION block,
+    created and dropped inside the migration) and falls back to `updatedAt`/`createdAt`.
+  - Deterministic ids `vrebf_<captureId>_<version>_<0 submit|1 review>`; the API also sorts same-timestamp events by
+    version + action rank (`compareEventsNewestFirst`).
+  - Proven on real Postgres (PGlite): `api/src/visibility/visibility-review-events.migration.spec.ts` (imported, garbage
+    dates, summaries, helper dropped, idempotent second run).
+- **Lost-update guard:** `persistReview` writes the capture only if it is still the row that was read (same status,
+  version, `updatedAt`) — Postgres re-checks under the row lock; a loser gets **409 "This visit was just changed by
+  someone else — reload"** and writes no event. Approving an already-approved photo is a no-op (no second event).
+- **Imported captures in the dialog:** `GET /captures/:id` returns `imported: true` and nulls `approvedBy`; the header
+  reads "Imported — old app approval on <date>" and the timeline never names the importing admin.
+- **Tenant wipe:** `api/prisma/wipe-tenant-data.ts` deletes `VisibilityReviewEvent` first in the Visibility tree.
+- **API:** `GET /v1/visibility/captures/:id` now also returns `reviewHistory[]` (newest first; actor name = snapshot,
+  else the user's current name, else null → UI "Unknown user") and `lastReview` (latest review of the CURRENT version).
+- **UI (admin capture dialog):** "Review history" timeline (who / what / which photo / reason / IST time; backfilled rows
+  say "from earlier records"); header "Reviewed by <name> on <date time IST>"; an orange **Needs re-take** remarks box
+  listing every sent-back photo + reason (the red banner still covers whole-capture Rejected).
+
+### Plain status words — ONE helper (`platform/src/lib/visibility-types.ts`)
+`VISIBILITY_STATUS_WORDS`: SUBMITTED **Waiting for review** · APPROVED **Approved** · CHANGES_REQUESTED **Needs re-take** ·
+REJECTED **Rejected** · no capture **Not captured yet** · window closed without approval **Missed**. Derived:
+`VISIBILITY_CAPTURE_STATUS_LABELS`, `visibilityStatusLabel(status, {windowClosed})`, `CAPTURE_UI_STATE_LABELS`
+(due/awaiting/approved/rejected/changes_requested/late), `captureUiStateLabel`, `VISIBILITY_SUMMARY_BUCKET_LABELS`,
+`reviewActionLabel`. Used by: admin queue + filter + dialog, admin coverage report tiles, sales visibility list, outlet
+"Visibility — this period" card, sales dashboard summary tiles, sales outlets badges, sales task subtitles, partner group
+page. Codes stay in data. The server-side Excel export's wording is NOT changed on this branch — it is handled in the
+report branch.
+- **Missed** is used only once the window has closed for good: a `late` row the rep can still act on (task list, sales
+  capture list) reads by its capture status instead (`actionableStateLabel`). A photo chip reads **Rejected** when the
+  whole capture was rejected (reject-all), **Needs re-take** for a per-photo send-back.
+- The dashboard 5-bucket logic is UNCHANGED (owner's earlier design): `partial` = "Partly approved" (Needs re-take with
+  ≥1 photo approved); `rejected` = "Rejected / Needs re-take" (rejected, or Needs re-take with nothing approved).
+
+### Bajaj screen fixes
+- **Partner group page** (`GET /v1/partner/group/visibility`): PHOTO_APPROVAL tenants now read `VisibilityCapture` for
+  the CURRENT window (IST, tenant frequency) — `mode: 'PHOTO_APPROVAL'`, `windowKey`, `window`, counts
+  `{total, approved, waiting, needsRetake, rejected, notCaptured, notInScope}`, rows with `inScope` (out-of-scope group
+  outlets listed as "Not part of visibility", not counted). AMOUNT_UPLOAD tenants: unchanged response (+ `mode`).
+  A FAILED request shows "Couldn't load visibility…" in the section (never hidden). The in-scope rule is a local
+  predicate for now — `TODO(integration): use visibilityUniverseWhere` (unified with the report at integration).
+- **Sales dashboard + Tasks** ask for the AMOUNT_UPLOAD month in IST (`istMonthKey`), not the UTC month.
+- **`GET /v1/visibility/outlet-statuses?outletCodes=&month=`** (was called by sales outlets/tasks/dashboard but did NOT
+  exist → 404 → silently empty): implemented for AMOUNT_UPLOAD tenants (`admin-programs/visibility.service.ts
+  getOutletStatuses`, controller `VisibilityOutletStatusesController`): visibility ON + mode AMOUNT_UPLOAD (PHOTO_APPROVAL →
+  400), partner logins 403, SALES callers limited to their downline's assigned outlets, ≤2,000 codes, month YYYY-MM.
+  FE `fetchOutletVisibilityStatuses` returns **null on failure** (chunks of 250 codes — keeps the URL well under header
+  limits; the server cap stays 2,000) and every caller shows
+  "Couldn't load visibility status" instead of fake "pending" tasks; the outlets page only calls it for
+  `visibilityEnabled && visibilityCaptureMode === 'AMOUNT_UPLOAD'` (tasks/dashboard already gated by mode).
+- Which tenants are AMOUNT_UPLOAD: mode defaults to PHOTO_APPROVAL and `bulkUpload` refuses other modes; per the docs
+  Deoleo launched with visibility OFF and Bajaj is PHOTO_APPROVAL — so most likely NO tenant is AMOUNT_UPLOAD today.
+  **Not DB-verified** (needs a read of `clients.features->>'visibilityCaptureMode'` on staging/prod).

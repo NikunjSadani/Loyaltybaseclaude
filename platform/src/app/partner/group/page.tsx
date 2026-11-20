@@ -25,6 +25,7 @@ import { Layers, Lock, ArrowLeft, Target, Eye, Trophy, ArrowUp, ArrowDown, Minus
 import { Spinner } from '@/components/ui/spinner';
 import { formatPoints } from '@/lib/utils';
 import { api } from '@/lib/api-client';
+import { VISIBILITY_STATUS_WORDS, visibilityStatusLabel, type VisibilityCaptureStatus } from '@/lib/visibility-types';
 
 /* ─── API contracts ───────────────────────────────────────────────────────────── */
 
@@ -89,13 +90,27 @@ type VisibilityStatus = 'APPROVED' | 'UNDER_REVIEW' | 'PENDING' | null;
 
 type GroupVisibility =
   | { available: false }
+  // The request FAILED (network / server error) — shown as a visible error, never hidden (no silent pass-through).
+  | { available: false; loadError: true }
   | { available: true; visibilityEnabled: false }
   | {
+      // AMOUNT_UPLOAD (Excel records) tenants — `mode` is absent on an older API.
       available: true;
       visibilityEnabled: true;
+      mode?: 'AMOUNT_UPLOAD';
       month:  string;
       counts: { total: number; approved: number; underReview: number; pending: number; noRecord: number };
       outlets: { outletCode: string; outletName: string; status: VisibilityStatus; dateOfCapture: string | null; approvedBy: string | null }[];
+    }
+  | {
+      // PHOTO_APPROVAL (photo capture + review) tenants — the CURRENT window's captures.
+      available: true;
+      visibilityEnabled: true;
+      mode: 'PHOTO_APPROVAL';
+      windowKey: string;
+      window: { startDay: number; endDay: number };
+      counts: { total: number; approved: number; waiting: number; needsRetake: number; rejected: number; notCaptured: number; notInScope: number };
+      outlets: { outletCode: string; outletName: string; inScope: boolean; status: VisibilityCaptureStatus | null; capturedAt: string | null; reviewedAt: string | null; version: number | null }[];
     };
 
 interface LeaderboardEntry {
@@ -434,6 +449,62 @@ function VisibilityCount({ label, value }: { label: string; value: number }) {
   );
 }
 
+/* PHOTO_APPROVAL tenants: the current window's photo captures, in the shared plain words. */
+
+type PhotoGroupVisibility = Extract<GroupVisibility, { mode: 'PHOTO_APPROVAL' }>;
+
+const PHOTO_STATUS_CLS: Record<VisibilityCaptureStatus, string> = {
+  APPROVED: 'bg-emerald-50 text-emerald-600',
+  SUBMITTED: 'bg-blue-50 text-blue-600',
+  CHANGES_REQUESTED: 'bg-orange-50 text-orange-700',
+  REJECTED: 'bg-red-50 text-red-600',
+};
+
+const VIS_MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function PhotoVisibilitySection({ state }: { state: PhotoGroupVisibility }) {
+  const { windowKey, window: win, counts, outlets } = state;
+  const m = /^(\d{4})-(\d{2})-P\d+$/.exec(windowKey ?? '');
+  const period = m && win ? `${win.startDay}–${win.endDay} ${VIS_MONTH_ABBR[Number(m[2]) - 1] ?? ''}` : windowKey;
+  return (
+    <SectionShell icon={<Eye className="h-3 w-3" />} title="Visibility" meta={period || undefined} testId="group-visibility-section">
+      <div className="grid grid-cols-5 gap-2 p-3 border-b border-gray-50">
+        <VisibilityCount label={VISIBILITY_STATUS_WORDS.APPROVED} value={counts?.approved ?? 0} />
+        <VisibilityCount label={VISIBILITY_STATUS_WORDS.SUBMITTED} value={counts?.waiting ?? 0} />
+        <VisibilityCount label={VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED} value={counts?.needsRetake ?? 0} />
+        <VisibilityCount label={VISIBILITY_STATUS_WORDS.REJECTED} value={counts?.rejected ?? 0} />
+        <VisibilityCount label={VISIBILITY_STATUS_WORDS.NOT_CAPTURED} value={counts?.notCaptured ?? 0} />
+      </div>
+      {(outlets?.length ?? 0) === 0 ? (
+        <div className="flex flex-col items-center gap-2 py-10">
+          <Eye className="h-7 w-7 text-gray-200" />
+          <p className="text-sm text-gray-400">No outlets to show</p>
+        </div>
+      ) : (
+        <div className="divide-y divide-gray-50">
+          {outlets.map((o) => (
+            <div key={o.outletCode} data-testid="group-visibility-row" className="px-4 py-2.5 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-gray-900 truncate">{o.outletName}</p>
+                <p className="text-[11px] text-gray-400 mt-0.5">
+                  {o.outletCode}
+                  {o.capturedAt ? ` · photos sent ${o.capturedAt}` : ''}
+                  {o.reviewedAt ? ` · reviewed ${o.reviewedAt}` : ''}
+                </p>
+              </div>
+              <span className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                !o.inScope ? 'bg-gray-50 text-gray-400' : o.status ? PHOTO_STATUS_CLS[o.status] ?? 'bg-gray-100 text-gray-500' : 'bg-gray-100 text-gray-500'
+              }`}>
+                {o.inScope ? visibilityStatusLabel(o.status) : 'Not part of visibility'}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </SectionShell>
+  );
+}
+
 function VisibilitySection({ state }: { state: Loadable<GroupVisibility> }) {
   if (state === 'loading') {
     return (
@@ -442,8 +513,18 @@ function VisibilitySection({ state }: { state: Loadable<GroupVisibility> }) {
       </SectionShell>
     );
   }
-  // Unavailable OR master toggle OFF → hide the section entirely.
+  if ('loadError' in state && state.loadError) {
+    return (
+      <SectionShell icon={<Eye className="h-3 w-3" />} title="Visibility" testId="group-visibility-section">
+        <p role="alert" data-testid="group-visibility-error" className="m-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          Couldn&apos;t load visibility for your outlets right now. Please try again later.
+        </p>
+      </SectionShell>
+    );
+  }
+  // Unavailable OR master toggle OFF (a successful answer) → hide the section entirely.
   if (!state.available || state.visibilityEnabled !== true) return null;
+  if (state.mode === 'PHOTO_APPROVAL') return <PhotoVisibilitySection state={state} />;
 
   const { month, counts, outlets } = state;
   return (
@@ -627,9 +708,11 @@ export default function GroupOverviewPage() {
       .then((res) => { if (!cancelled) setTargets(res.success ? res.data : { available: false }); })
       .catch(() => { if (!cancelled) setTargets({ available: false }); });
 
+    // Visibility: a FAILED request is shown as an error in the section (owner rule: no silent
+    // pass-through) — only a successful "not available / switched off" answer hides it.
     api.get<GroupVisibility>('/api/partner/group/visibility')
-      .then((res) => { if (!cancelled) setVisibility(res.success ? res.data : { available: false }); })
-      .catch(() => { if (!cancelled) setVisibility({ available: false }); });
+      .then((res) => { if (!cancelled) setVisibility(res.success && res.data ? res.data : { available: false, loadError: true }); })
+      .catch(() => { if (!cancelled) setVisibility({ available: false, loadError: true }); });
 
     api.get<GroupLeaderboard>('/api/partner/group/leaderboard')
       .then((res) => { if (!cancelled) setLeaderboard(res.success ? res.data : { available: false }); })

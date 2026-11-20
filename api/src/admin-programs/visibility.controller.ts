@@ -39,3 +39,25 @@ export class VisibilityController {
     return this.visibility.bulkUpload(user, file);
   }
 }
+
+/**
+ * GET /v1/visibility/outlet-statuses — AMOUNT_UPLOAD (Excel record) status per outlet for a
+ * month, for the SALES outlets / tasks / dashboard badges (`platform/src/lib/visibility-upload.ts`).
+ * Sales roles see only their downline's outlets; tenant admins see the tenant. Partner logins are
+ * refused in the service. Static path — no collision with the photo controllers' routes.
+ */
+@Controller('visibility')
+export class VisibilityOutletStatusesController {
+  constructor(private readonly visibility: VisibilityService) {}
+
+  @Get('outlet-statuses')
+  @Roles('SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR', 'CLIENT_ADMIN', 'MIS_USER', 'GIFSY_ADMIN')
+  @RequirePermission('visibility:read')
+  outletStatuses(
+    @CurrentUser() user: JwtPayload,
+    @Query('outletCodes') outletCodes?: string,
+    @Query('month') month?: string,
+  ) {
+    return this.visibility.getOutletStatuses(user, outletCodes, month);
+  }
+}

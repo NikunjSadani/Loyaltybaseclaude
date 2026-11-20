@@ -36,7 +36,8 @@ vi.mock('@/lib/gifsy-settings', () => ({
 vi.mock('@/lib/visibility', () => ({
   visibilityApi: { getSalesEligible: () => Promise.resolve({ success: true, data: { outlets: [{ outletCode: 'X' }] } }) },
 }));
-vi.mock('@/lib/visibility-types', () => ({
+vi.mock('@/lib/visibility-types', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/visibility-types')>()),
   summarizeVisibilityCaptures: () => ({ total: 5, approved: 2, partial: 0, in_review: 1, pending: 2, rejected: 0 }),
 }));
 vi.mock('@/lib/sales-tasks', () => ({

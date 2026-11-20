@@ -256,12 +256,94 @@ export const VISIBILITY_REJECT_REASON_LABELS: Record<VisibilityRejectReasonCode,
   OTHER: 'Other',
 };
 
+/**
+ * THE plain status words for Visibility (owner 2026-11-20) — the ONE place admin, sales and
+ * partner UI take a status label from. Codes stay in data; only the words shown change. The
+ * server-side Excel export's wording is NOT changed on this branch — it is handled in the report
+ * branch. Two extra words cover "no capture" rows:
+ * NOT_CAPTURED (window still open) and MISSED (window closed without an approved capture).
+ */
+export const VISIBILITY_STATUS_WORDS = {
+  SUBMITTED: 'Waiting for review',
+  APPROVED: 'Approved',
+  CHANGES_REQUESTED: 'Needs re-take',
+  REJECTED: 'Rejected',
+  NOT_CAPTURED: 'Not captured yet',
+  MISSED: 'Missed',
+} as const;
+
 /** Short human label for a capture status (sales + admin surfaces). */
 export const VISIBILITY_CAPTURE_STATUS_LABELS: Record<VisibilityCaptureStatus, string> = {
-  SUBMITTED: 'Submitted',
-  APPROVED: 'Approved',
-  REJECTED: 'Rejected',
-  CHANGES_REQUESTED: 'Changes requested',
+  SUBMITTED: VISIBILITY_STATUS_WORDS.SUBMITTED,
+  APPROVED: VISIBILITY_STATUS_WORDS.APPROVED,
+  REJECTED: VISIBILITY_STATUS_WORDS.REJECTED,
+  CHANGES_REQUESTED: VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED,
+};
+
+/**
+ * Plain label for a capture status code; null/absent = no capture → "Not captured yet",
+ * or "Missed" when `windowClosed`. An APPROVED capture is "Approved" even after the window
+ * closes. An unknown code is shown as-is (never blank).
+ */
+export function visibilityStatusLabel(
+  status: VisibilityCaptureStatus | string | null | undefined,
+  opts: { windowClosed?: boolean } = {},
+): string {
+  if (status == null || status === '') {
+    return opts.windowClosed ? VISIBILITY_STATUS_WORDS.MISSED : VISIBILITY_STATUS_WORDS.NOT_CAPTURED;
+  }
+  return VISIBILITY_CAPTURE_STATUS_LABELS[status as VisibilityCaptureStatus] ?? status;
+}
+
+/** Plain label for a window-derived UI state (D7) — same words as the status labels. */
+export const CAPTURE_UI_STATE_LABELS: Record<CaptureUiState, string> = {
+  due: VISIBILITY_STATUS_WORDS.NOT_CAPTURED,
+  awaiting: VISIBILITY_STATUS_WORDS.SUBMITTED,
+  approved: VISIBILITY_STATUS_WORDS.APPROVED,
+  rejected: VISIBILITY_STATUS_WORDS.REJECTED,
+  changes_requested: VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED,
+  late: VISIBILITY_STATUS_WORDS.MISSED,
+};
+
+/**
+ * Plain label for a row carrying a UI state AND (optionally) the capture status. The backend
+ * maps CHANGES_REQUESTED to windowState 'rejected', so the status wins: a CHANGES_REQUESTED
+ * capture reads "Needs re-take", never "Rejected".
+ */
+export function captureUiStateLabel(
+  state: CaptureUiState,
+  status?: VisibilityCaptureStatus | null,
+): string {
+  if (state === 'rejected' && status === 'CHANGES_REQUESTED') return VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED;
+  return CAPTURE_UI_STATE_LABELS[state] ?? state;
+}
+
+/**
+ * Label for a row the rep can STILL act on (a task / a capture button). Owner rule: "Missed" only
+ * once the window is closed for good — a `late` row that is still actionable is not missed yet,
+ * so it reads by its capture status instead ("Not captured yet" / "Rejected" / "Needs re-take" /
+ * "Waiting for review"). A non-actionable row keeps the normal state label.
+ */
+export function actionableStateLabel(
+  state: CaptureUiState,
+  status: VisibilityCaptureStatus | null | undefined,
+  actionable: boolean,
+): string {
+  if (state === 'late' && actionable) return visibilityStatusLabel(status ?? null);
+  return captureUiStateLabel(state, status ?? null);
+}
+
+/**
+ * Plain words for the dashboard 5-bucket summary (`classifyVisibilityCapture`). `partial` =
+ * a Needs re-take capture where some photos were already approved; `rejected` = rejected,
+ * or Needs re-take with no photo approved yet.
+ */
+export const VISIBILITY_SUMMARY_BUCKET_LABELS: Record<VisibilitySummaryBucket, string> = {
+  approved: VISIBILITY_STATUS_WORDS.APPROVED,
+  partial: 'Partly approved',
+  in_review: VISIBILITY_STATUS_WORDS.SUBMITTED,
+  pending: VISIBILITY_STATUS_WORDS.NOT_CAPTURED,
+  rejected: `${VISIBILITY_STATUS_WORDS.REJECTED} / ${VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED}`,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -529,6 +611,8 @@ export interface VisibilityCapture {
   distanceMeters: number | null;
   submittedBySalesUserId?: string | null;
   approvedByUserId?: string | null;
+  /** When the current version was last reviewed (reset on a resubmit). */
+  reviewedAt?: string | null;
   rejectionReasonCode?: VisibilityRejectReasonCode | string | null;
   rejectionReason?: string | null;
   /** Per-CAMERA-field review state (per-photo approval). Absent on legacy rows (= all pending). */
@@ -649,8 +733,77 @@ export interface VisibilityDuplicateMatch {
   windowKey: string;
 }
 
+/** Permanent review-history event kinds (mirrors the Prisma enum VisibilityReviewAction). */
+export type VisibilityReviewAction =
+  | 'SUBMITTED'
+  | 'RESUBMITTED'
+  | 'PHOTO_APPROVED'
+  | 'PHOTO_REJECTED'
+  | 'CAPTURE_APPROVED_ALL'
+  | 'CAPTURE_REJECTED_ALL'
+  | 'CHANGES_REQUESTED_RESULT';
+
+/** One permanent review-history event (append-only visibility_review_events). */
+export interface VisibilityReviewEvent {
+  id: string;
+  version: number;
+  action: VisibilityReviewAction;
+  statusAfter: VisibilityCaptureStatus | null;
+  fieldId: string | null;
+  fieldLabel: string | null;
+  reasonCode: string | null;
+  reason: string | null;
+  actorUserId: string | null;
+  /** Name snapshot at the time (falls back to the user's current name); null = unknown. */
+  actorName: string | null;
+  /** Reconstructed from data that predates the history table (best-effort). */
+  backfilled: boolean;
+  createdAt: string;
+}
+
+/**
+ * Who "reviewed" an imported old-app capture — the SAME text the API and the migration backfill use
+ * (api/src/visibility/visibility-review-events.ts IMPORTED_REVIEW_ACTOR_LABEL). The row's approvedBy is
+ * only the Gifsy admin who ran the import, so it is never shown as the reviewer.
+ */
+export const IMPORTED_REVIEW_ACTOR_LABEL = 'Imported — old app approval';
+
+/**
+ * Plain-words description of a review-history action. A backfilled whole-capture row is a SUMMARY of
+ * the capture's outcome rebuilt from earlier records (not a known "approved all photos" click), so it
+ * reads as the outcome only.
+ */
+export function reviewActionLabel(
+  e: Pick<VisibilityReviewEvent, 'action' | 'version' | 'statusAfter'> & { backfilled?: boolean },
+): string {
+  if (e.backfilled) {
+    if (e.action === 'CAPTURE_APPROVED_ALL') return 'Approved';
+    if (e.action === 'CAPTURE_REJECTED_ALL') return 'Rejected';
+    if (e.action === 'CHANGES_REQUESTED_RESULT') return `Sent back — "${VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED}"`;
+  }
+  switch (e.action) {
+    case 'SUBMITTED': return 'Submitted photos';
+    case 'RESUBMITTED': return `Re-took photos (version ${e.version})`;
+    case 'PHOTO_APPROVED': return 'Approved a photo';
+    case 'PHOTO_REJECTED': return 'Asked for a re-take of a photo';
+    case 'CAPTURE_APPROVED_ALL':
+      return e.statusAfter && e.statusAfter !== 'APPROVED'
+        ? `Approved all photos (still ${visibilityStatusLabel(e.statusAfter).toLowerCase()})`
+        : 'Approved all photos';
+    case 'CAPTURE_REJECTED_ALL': return 'Rejected the whole capture';
+    case 'CHANGES_REQUESTED_RESULT': return `Capture moved to "${VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED}"`;
+    default: return String(e.action);
+  }
+}
+
 /** Single-capture detail (GET /captures/:id) — the admin approval drawer payload. */
 export interface VisibilityCaptureDetail extends VisibilityCapture {
+  /** Permanent review timeline, newest first (absent on an older API). */
+  reviewHistory?: VisibilityReviewEvent[];
+  /** Imported old-app capture (photos under /vendor-import/) — reviewer = the old app, never an admin. */
+  imported?: boolean;
+  /** Latest review decision of the CURRENT version; null = not reviewed yet. */
+  lastReview?: { actorName: string | null; actorUserId: string | null; at: string; action: VisibilityReviewAction } | null;
   media: VisibilityMediaRef[];
   geo: VisibilityGeoRef[];
   geoFence: {

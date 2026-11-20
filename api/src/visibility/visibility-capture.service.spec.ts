@@ -44,6 +44,8 @@ const mockPrisma = {
     update: jest.fn(),
   },
   visibilityCaptureSubmission: { create: jest.fn() },
+  // Permanent review history: submit / resubmit append an event in the same tx.
+  visibilityReviewEvent: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
   visibilityImageHash: { findMany: jest.fn() },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   $transaction: jest.fn((arg: any) =>
@@ -174,6 +176,14 @@ describe('VisibilityCaptureService', () => {
     expect(createArg.status).toBe('SUBMITTED');
     expect(createArg.currentVersion).toBe(1);
     expect(mockMedia.recordImageHashes).toHaveBeenCalledWith(mockPrisma, 't1', 'cap1', ['hashA']);
+    // Permanent review history: one SUBMITTED event (v1, the rep as actor), written via the tx client.
+    expect(mockPrisma.visibilityReviewEvent.createMany).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.visibilityReviewEvent.createMany.mock.calls[0][0].data).toEqual([
+      expect.objectContaining({
+        clientId: 't1', captureId: 'cap1', outletId: 'o1', windowKey: createArg.windowKey, version: 1,
+        action: 'SUBMITTED', statusAfter: 'SUBMITTED', actorUserId: user.sub,
+      }),
+    ]);
   });
 
   // ── Geo-fence ────────────────────────────────────────────────────────────────
@@ -624,6 +634,10 @@ describe('VisibilityCaptureService', () => {
     expect(updateArg.currentVersion).toBe(2);
     expect(updateArg.rejectionReason).toBeNull();
     expect(updateArg.rejectionReasonCode).toBeNull();
+    // The cleared rejection survives in the permanent history; the resubmit itself is recorded.
+    expect(mockPrisma.visibilityReviewEvent.createMany.mock.calls[0][0].data).toEqual([
+      expect.objectContaining({ captureId: 'cap1', version: 2, action: 'RESUBMITTED', statusAfter: 'SUBMITTED', windowKey: CUR_WINDOW }),
+    ]);
   });
 
   it('refuses to resubmit a non-REJECTED capture', async () => {
@@ -636,6 +650,7 @@ describe('VisibilityCaptureService', () => {
     await expect(service.resubmitCapture(user, 'cap1', { formValues: nearFormValues })).rejects.toThrow(
       BadRequestException,
     );
+    expect(mockPrisma.visibilityReviewEvent.createMany).not.toHaveBeenCalled();
   });
 
   // ── Dup-hash surfacing ───────────────────────────────────────────────────────

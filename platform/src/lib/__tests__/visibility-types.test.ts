@@ -17,6 +17,14 @@ import {
   rejectedPhotoFieldIds,
   classifyVisibilityCapture,
   summarizeVisibilityCaptures,
+  VISIBILITY_STATUS_WORDS,
+  VISIBILITY_CAPTURE_STATUS_LABELS,
+  CAPTURE_UI_STATE_LABELS,
+  VISIBILITY_SUMMARY_BUCKET_LABELS,
+  visibilityStatusLabel,
+  captureUiStateLabel,
+  reviewActionLabel,
+  actionableStateLabel,
   type SalesEligibleOutlet,
   type VisibilityFormField,
   type VisibilityFormSchema,
@@ -286,5 +294,66 @@ describe('summarizeVisibilityCaptures', () => {
     expect(summarizeVisibilityCaptures([])).toEqual({
       total: 0, approved: 0, partial: 0, in_review: 0, pending: 0, rejected: 0,
     });
+  });
+});
+
+// ── Plain status words (owner 2026-11-20) — ONE helper for admin / sales / partner UI ──
+
+describe('plain visibility status words', () => {
+  it('maps every capture status code to the agreed words (codes unchanged)', () => {
+    expect(VISIBILITY_CAPTURE_STATUS_LABELS).toEqual({
+      SUBMITTED: 'Waiting for review',
+      APPROVED: 'Approved',
+      CHANGES_REQUESTED: 'Needs re-take',
+      REJECTED: 'Rejected',
+    });
+    expect(VISIBILITY_STATUS_WORDS.NOT_CAPTURED).toBe('Not captured yet');
+    expect(VISIBILITY_STATUS_WORDS.MISSED).toBe('Missed');
+  });
+
+  it('visibilityStatusLabel: null → Not captured yet / Missed (closed window); unknown code shown as-is', () => {
+    expect(visibilityStatusLabel(null)).toBe('Not captured yet');
+    expect(visibilityStatusLabel(undefined, { windowClosed: true })).toBe('Missed');
+    expect(visibilityStatusLabel('APPROVED', { windowClosed: true })).toBe('Approved');
+    expect(visibilityStatusLabel('SOMETHING_NEW')).toBe('SOMETHING_NEW');
+  });
+
+  it('UI-state labels use the same words; a CHANGES_REQUESTED status beats the backend "rejected" state', () => {
+    expect(CAPTURE_UI_STATE_LABELS).toEqual({
+      due: 'Not captured yet', awaiting: 'Waiting for review', approved: 'Approved',
+      rejected: 'Rejected', changes_requested: 'Needs re-take', late: 'Missed',
+    });
+    expect(captureUiStateLabel('rejected', 'CHANGES_REQUESTED')).toBe('Needs re-take');
+    expect(captureUiStateLabel('rejected', 'REJECTED')).toBe('Rejected');
+  });
+
+  it('dashboard bucket labels reuse the words', () => {
+    expect(VISIBILITY_SUMMARY_BUCKET_LABELS.in_review).toBe('Waiting for review');
+    expect(VISIBILITY_SUMMARY_BUCKET_LABELS.pending).toBe('Not captured yet');
+    expect(VISIBILITY_SUMMARY_BUCKET_LABELS.rejected).toBe('Rejected / Needs re-take');
+  });
+
+  it('actionableStateLabel: a late row the rep can still act on never reads "Missed"', () => {
+    expect(actionableStateLabel('late', null, true)).toBe('Not captured yet');
+    expect(actionableStateLabel('late', 'REJECTED', true)).toBe('Rejected');
+    expect(actionableStateLabel('late', 'CHANGES_REQUESTED', true)).toBe('Needs re-take');
+    // Window closed and nothing to do → Missed (the owner's rule).
+    expect(actionableStateLabel('late', null, false)).toBe('Missed');
+    expect(actionableStateLabel('rejected', 'CHANGES_REQUESTED', true)).toBe('Needs re-take');
+    expect(actionableStateLabel('due', null, true)).toBe('Not captured yet');
+  });
+
+  it('backfilled whole-capture rows read as the outcome only (no invented "all photos" click)', () => {
+    expect(reviewActionLabel({ action: 'CAPTURE_APPROVED_ALL', version: 1, statusAfter: 'APPROVED', backfilled: true })).toBe('Approved');
+    expect(reviewActionLabel({ action: 'CAPTURE_REJECTED_ALL', version: 1, statusAfter: 'REJECTED', backfilled: true })).toBe('Rejected');
+    expect(reviewActionLabel({ action: 'CHANGES_REQUESTED_RESULT', version: 1, statusAfter: 'CHANGES_REQUESTED', backfilled: true })).toBe('Sent back — "Needs re-take"');
+    expect(reviewActionLabel({ action: 'CAPTURE_APPROVED_ALL', version: 1, statusAfter: 'APPROVED', backfilled: false })).toBe('Approved all photos');
+  });
+
+  it('review-history action labels are plain words', () => {
+    expect(reviewActionLabel({ action: 'PHOTO_REJECTED', version: 1, statusAfter: 'CHANGES_REQUESTED' })).toBe('Asked for a re-take of a photo');
+    expect(reviewActionLabel({ action: 'RESUBMITTED', version: 3, statusAfter: 'SUBMITTED' })).toBe('Re-took photos (version 3)');
+    expect(reviewActionLabel({ action: 'CAPTURE_APPROVED_ALL', version: 1, statusAfter: 'SUBMITTED' })).toBe('Approved all photos (still waiting for review)');
+    expect(reviewActionLabel({ action: 'CHANGES_REQUESTED_RESULT', version: 1, statusAfter: 'CHANGES_REQUESTED' })).toBe('Capture moved to "Needs re-take"');
   });
 });

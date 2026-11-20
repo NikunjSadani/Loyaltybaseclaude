@@ -19,10 +19,11 @@ import { istDateKey } from '@/lib/ist-date';
 import {
   fetchOutletVisibilityStatuses,
   VISIBILITY_ELIGIBLE_OUTLET_TYPES,
+  VISIBILITY_STATUS_LOAD_ERROR,
   type VisibilityStatusMap,
 } from '@/lib/visibility-upload';
 import { visibilityApi } from '@/lib/visibility';
-import { classifyVisibilityCapture, type VisibilitySummaryBucket } from '@/lib/visibility-types';
+import { classifyVisibilityCapture, VISIBILITY_SUMMARY_BUCKET_LABELS, type VisibilitySummaryBucket } from '@/lib/visibility-types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
 
@@ -163,11 +164,12 @@ const VIS_LABEL: Record<string, string> = {
 /** Photo-approval (PHOTO_APPROVAL mode) visibility badge — the 5-status model shared with the
  *  sales dashboard summary card (classifyVisibilityCapture). Bajaj-scoped. */
 const VIS_BUCKET_BADGE: Record<VisibilitySummaryBucket, { label: string; cls: string }> = {
-  approved:  { label: 'Approved',  cls: 'bg-emerald-50 text-emerald-700' },
-  partial:   { label: 'Partial',   cls: 'bg-amber-50 text-amber-700' },
-  in_review: { label: 'In review', cls: 'bg-blue-50 text-blue-700' },
-  pending:   { label: 'Pending',   cls: 'bg-gray-100 text-gray-600' },
-  rejected:  { label: 'Rejected',  cls: 'bg-red-50 text-red-700' },
+  // Labels = the shared plain status words (VISIBILITY_SUMMARY_BUCKET_LABELS).
+  approved:  { label: VISIBILITY_SUMMARY_BUCKET_LABELS.approved,  cls: 'bg-emerald-50 text-emerald-700' },
+  partial:   { label: VISIBILITY_SUMMARY_BUCKET_LABELS.partial,   cls: 'bg-amber-50 text-amber-700' },
+  in_review: { label: VISIBILITY_SUMMARY_BUCKET_LABELS.in_review, cls: 'bg-blue-50 text-blue-700' },
+  pending:   { label: VISIBILITY_SUMMARY_BUCKET_LABELS.pending,   cls: 'bg-gray-100 text-gray-600' },
+  rejected:  { label: VISIBILITY_SUMMARY_BUCKET_LABELS.rejected,  cls: 'bg-red-50 text-red-700' },
 };
 
 /* ─── Page ──────────────────────────────────────────────────────────────────── */
@@ -195,6 +197,7 @@ export default function SalesOutletsPage() {
   const { label: outletTypeLabel } = useOutletTypeLabels();
 
   const [visibilityMap, setVisibilityMap] = useState<VisibilityStatusMap>({});
+  const [visibilityLoadError, setVisibilityLoadError] = useState(false);
   // Photo-approval (PHOTO_APPROVAL) per-outlet 5-status, keyed by outletCode (Bajaj). Only
   // in-scope outlets appear here → "visibility applicable" is implicit in map membership.
   const [visPhotoByCode, setVisPhotoByCode] = useState<Record<string, VisibilitySummaryBucket>>({});
@@ -276,12 +279,26 @@ export default function SalesOutletsPage() {
     // Bajaj uses the PHOTO_APPROVAL badge below (visPhotoByCode); skip the amount-upload
     // path entirely so the two never render a double "Visibility:" pill on one outlet.
     if (isBajaj) return;
+    // The amount-upload status exists ONLY for an AMOUNT_UPLOAD tenant with visibility ON —
+    // any other tenant has no Excel records, so it never asks (no badge, no false "pending").
+    const gs = getGifsySettings();
+    if (gs.visibilityEnabled !== true || gs.visibilityCaptureMode !== 'AMOUNT_UPLOAD') {
+      setVisibilityMap({}); setVisibilityLoadError(false);
+      return;
+    }
     const eligibleCodes = outlets
       .filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type))
       .map((o) => o.outletCode);
     if (eligibleCodes.length === 0) return;
+    let cancelled = false;
     fetchOutletVisibilityStatuses(eligibleCodes, period)
-      .then((map) => { if (Object.keys(map).length > 0) setVisibilityMap(map); });
+      .then((map) => {
+        if (cancelled) return;
+        // null = could not load → say so (never pretend nothing was captured).
+        setVisibilityLoadError(map === null);
+        setVisibilityMap(map ?? {});
+      });
+    return () => { cancelled = true; };
   }, [period, outlets, isBajaj]);
 
   // Photo-approval visibility status per outlet (Bajaj) — the CURRENT window's 5-status from
@@ -405,6 +422,11 @@ export default function SalesOutletsPage() {
 
   return (
     <div className="space-y-2.5 fade-in">
+      {visibilityLoadError && (
+        <p role="alert" data-testid="visibility-status-error" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          {VISIBILITY_STATUS_LOAD_ERROR}
+        </p>
+      )}
       {/* Row 1: title + view toggle */}
       <div className="flex items-center justify-between gap-2">
         <h1 className="text-xl font-bold text-gray-900">

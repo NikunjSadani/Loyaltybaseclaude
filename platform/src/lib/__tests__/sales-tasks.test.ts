@@ -101,6 +101,18 @@ describe('ST — buildPhotoCaptureTaskItems (PHOTO_APPROVAL mode)', () => {
     expect(items.every((i) => i.priority === 'high')).toBe(true);
   });
 
+  it('ST8: a late but still actionable task never says "Missed" (owner: Missed only after the window closes)', () => {
+    const items = buildPhotoCaptureTaskItems(resp([
+      outlet({ outletId: 'late',    windowState: 'late' }),
+      outlet({ outletId: 'lateRej', windowState: 'late', status: 'REJECTED', captureId: 'c2', rejectionReason: 'Blurry' }),
+    ]));
+    expect(items.map((i) => i.subtitle)).toEqual([
+      'Not captured yet — overdue, capture visibility now',
+      'Rejected — re-take the photos: Blurry',
+    ]);
+    expect(items.some((i) => /Missed/.test(i.subtitle ?? ''))).toBe(false);
+  });
+
   it('ST7: null / empty response → no items', () => {
     expect(buildPhotoCaptureTaskItems(null)).toEqual([]);
     expect(buildPhotoCaptureTaskItems(undefined)).toEqual([]);
