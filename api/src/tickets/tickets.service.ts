@@ -865,7 +865,7 @@ export class TicketsService {
    */
   private async loadRemarksEmailData(
     ticket: TicketRow,
-    ask: Pick<RemarksEmailData, 'askerName' | 'note' | 'askedAt' | 'askedAdminName' | 'toInbox' | 'link'> & {
+    ask: Pick<RemarksEmailData, 'askerName' | 'note' | 'askedAt' | 'askedAdminName' | 'toInbox' | 'hasCc' | 'ccOnly' | 'link'> & {
       excludeMessageId: string | null;
     },
   ): Promise<RemarksEmailData> {
@@ -875,6 +875,8 @@ export class TicketsService {
       askedAt: ask.askedAt,
       askedAdminName: ask.askedAdminName,
       toInbox: ask.toInbox,
+      hasCc: ask.hasCc,
+      ccOnly: ask.ccOnly,
       link: ask.link,
       now: new Date(),
       ticket: {
@@ -1125,6 +1127,8 @@ export class TicketsService {
       askedAt: p.askedAt ?? new Date(),
       askedAdminName: p.targetName,
       toInbox,
+      hasCc: cc.length > 0,
+      ccOnly: recipientKind === 'CC_ONLY',
       link,
       excludeMessageId: p.requestNoteId ?? null,
     });

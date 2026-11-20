@@ -24,6 +24,10 @@ export interface RemarksEmailData {
   askedAdminName: string;
   /** True when the email goes to the client's ticket remarks inbox (not the admin personally). */
   toInbox: boolean;
+  /** True when the client's CC list is copied on this email (2026-11-21). */
+  hasCc?: boolean;
+  /** True when the CC list receives it AS the recipients because the asked admin has no email (2026-11-21). */
+  ccOnly?: boolean;
   link: string;
   now: Date;
   ticket: {
@@ -126,17 +130,26 @@ export function renderRemarksEmail(d: RemarksEmailData): { subject: string; html
   const subject = remarksEmailSubject(d);
   const blocks: string[] = [];
 
-  blocks.push(`<tr><td style="padding:0 0 10px;${FONT}">${para(d.toInbox ? 'Hello,' : `Hi ${d.askedAdminName},`)}</td></tr>`);
+  // Shared readers (the inbox / CC list) may have no portal account — they are told who was asked and to
+  // ask that person to reply. The plain "chosen admin, no CC" email (every tenant's default) is unchanged.
+  const shared = d.toInbox || !!d.hasCc || !!d.ccOnly;
+  const asked = d.askedAdminName?.trim() || 'your team';
+  blocks.push(`<tr><td style="padding:0 0 10px;${FONT}">${para(d.toInbox || d.ccOnly ? 'Hello,' : `Hi ${d.askedAdminName},`)}</td></tr>`);
 
   // 1. THE ASK — highlighted
-  const askMeta = [`Asked on ${istDateTime(d.askedAt)}`, ...(d.toInbox ? [`Asked: ${d.askedAdminName}`] : [])].join(' · ');
+  const askMeta = [`Asked on ${istDateTime(d.askedAt)}`, ...(shared ? [`Asked: ${asked}`] : [])].join(' · ');
+  const sharedLines: string[] = [];
+  if (d.ccOnly) sharedLines.push(`Sent to your programme's ticket remarks CC list because ${asked} has no email address on file.`);
+  else if (d.toInbox) sharedLines.push("Sent to your programme's ticket remarks inbox.");
+  if (d.hasCc) sharedLines.push("If you received this as a Cc, you're copied for information.");
+  if (shared) sharedLines.push(`Ask ${asked} (or another client admin) to reply in the portal.`);
   blocks.push(
     `<tr><td style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:12px 14px;${FONT}" data-block="ask">`
-    + para(`${d.askerName} (Gifsy support) needs your remarks:`, 'font-weight:bold;padding-bottom:6px')
+    + para(`${d.askerName} (Gifsy support) needs ${shared ? `remarks from ${asked}` : 'your remarks'}:`, 'font-weight:bold;padding-bottom:6px')
     + para(maskContactDetails(d.note), 'padding-bottom:6px')
     + `<p style="margin:0;font-size:12px;color:#6b7280;${FONT}">${e(askMeta)}</p>`
-    + (d.toInbox
-      ? `<p style="margin:6px 0 0;font-size:12px;color:#6b7280;${FONT}">Sent to your programme's ticket remarks inbox. ${e(d.askedAdminName)} (or another client admin) can reply in the portal.</p>`
+    + (sharedLines.length
+      ? `<p style="margin:6px 0 0;font-size:12px;color:#6b7280;${FONT}">${e(sharedLines.join(' '))}</p>`
       : '')
     + `</td></tr>`,
   );
@@ -144,8 +157,8 @@ export function renderRemarksEmail(d: RemarksEmailData): { subject: string; html
   // 2. Button + honest reply line
   blocks.push(
     `<tr><td style="padding:14px 0 0;${FONT}" data-block="action">`
-    + `<a href="${e(d.link)}" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;font-weight:bold;font-size:14px;padding:10px 18px;border-radius:6px">Open ticket &amp; reply</a>`
-    + `<p style="margin:8px 0 0;font-size:12px;color:#6b7280">Please reply in the portal — replies to this email are not read.</p>`
+    + `<a href="${e(d.link)}" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;font-weight:bold;font-size:14px;padding:10px 18px;border-radius:6px">${shared ? 'Open ticket (portal login needed)' : 'Open ticket &amp; reply'}</a>`
+    + `<p style="margin:8px 0 0;font-size:12px;color:#6b7280">${shared ? `Replies go through the portal — replies to this email are not read.` : 'Please reply in the portal — replies to this email are not read.'}</p>`
     + `</td></tr>`,
   );
 
@@ -154,7 +167,7 @@ export function renderRemarksEmail(d: RemarksEmailData): { subject: string; html
     ['Number', d.ticket.number],
     ['Category', CATEGORY_LABEL[d.ticket.category] ?? d.ticket.category],
     ['Priority', PRIORITY_LABEL[d.ticket.priority] ?? d.ticket.priority],
-    ['Status', 'Awaiting your remarks'],
+    ['Status', shared ? `Awaiting remarks from ${asked}` : 'Awaiting your remarks'],
     ['Raised on', `${istDate(d.ticket.createdAt)} (${age(d.ticket.createdAt, d.now)})`],
   ])).replace('<tr>', '<tr data-block="ticket">'));
 
