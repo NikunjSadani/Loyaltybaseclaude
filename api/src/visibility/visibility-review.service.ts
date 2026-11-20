@@ -33,6 +33,7 @@ import {
   VISIBILITY_REJECT_REASON_CODES,
 } from './dto/visibility-capture.dto';
 import { isGifsyOperator } from '../common/tenant-scope';
+import { appendReviewEvents, ReviewEventInput } from './visibility-review-events';
 
 /**
  * The controlled reject-reason vocabulary for the Visibility review queue (D12).
@@ -135,6 +136,7 @@ export class VisibilityReviewService {
   private async persistReview(
     capture: { id: string; currentVersion: number },
     data: Prisma.VisibilityCaptureUncheckedUpdateInput,
+    events: ReviewEventInput[],
   ) {
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.visibilityCapture.update({ where: { id: capture.id }, data });
@@ -142,8 +144,28 @@ export class VisibilityReviewService {
         where: { captureId: capture.id, version: capture.currentVersion },
         data: { photoReviews: data.photoReviews ?? Prisma.JsonNull },
       });
+      // Permanent review history — same transaction, so a decision is never stored without its event.
+      await appendReviewEvents(tx, events);
       return updated;
     });
+  }
+
+  /** The common identity of a review event for this capture + reviewer. */
+  private eventBase(
+    capture: { id: string; clientId: string; outletId: string; windowKey: string; currentVersion: number },
+    user: JwtPayload,
+    at: Date,
+  ) {
+    return {
+      clientId: capture.clientId,
+      captureId: capture.id,
+      outletId: capture.outletId,
+      windowKey: capture.windowKey,
+      version: capture.currentVersion,
+      actorUserId: user.sub,
+      actorName: user.name ?? null,
+      createdAt: at,
+    };
   }
 
   /**
@@ -209,7 +231,23 @@ export class VisibilityReviewService {
       rejectionReasonCode: null,
       ...(derived === 'APPROVED' ? { approvedByUserId: user.sub } : {}),
     };
-    const updated = await this.persistReview(capture, data);
+    const base = this.eventBase(capture, user, now);
+    const events: ReviewEventInput[] = [
+      {
+        ...base,
+        action: decision === 'APPROVED' ? 'PHOTO_APPROVED' : 'PHOTO_REJECTED',
+        statusAfter: derived,
+        fieldId,
+        fieldLabel: field.label ?? null,
+        reasonCode: decision === 'REJECTED' ? reasonCode : null,
+        reason: decision === 'REJECTED' ? reason ?? null : null,
+      },
+    ];
+    // The capture just moved INTO Needs re-take → record the result explicitly.
+    if (derived === 'CHANGES_REQUESTED' && capture.status !== 'CHANGES_REQUESTED') {
+      events.push({ ...base, action: 'CHANGES_REQUESTED_RESULT', statusAfter: derived });
+    }
+    const updated = await this.persistReview(capture, data, events);
     return { capture: updated };
   }
 
@@ -256,7 +294,7 @@ export class VisibilityReviewService {
       photoReviews: Object.keys(next).length
         ? (next as unknown as Prisma.InputJsonValue)
         : Prisma.JsonNull,
-    });
+    }, [{ ...this.eventBase(capture, user, now), action: 'CAPTURE_APPROVED_ALL', statusAfter: derived }]);
     return { capture: updated };
   }
 
@@ -302,7 +340,13 @@ export class VisibilityReviewService {
       photoReviews: Object.keys(next).length
         ? (next as unknown as Prisma.InputJsonValue)
         : Prisma.JsonNull,
-    });
+    }, [{
+      ...this.eventBase(capture, user, now),
+      action: 'CAPTURE_REJECTED_ALL',
+      statusAfter: 'REJECTED',
+      reasonCode,
+      reason: reason ?? null,
+    }]);
     return { capture: updated };
   }
 
@@ -397,6 +441,7 @@ export class VisibilityReviewService {
       capture.id,
       capture.imageHashes.map((h) => h.hash),
     );
+    const { reviewHistory, lastReview } = await this.loadReviewHistory(capture.clientId, capture.id, capture.currentVersion);
 
     return {
       capture: {
@@ -414,8 +459,56 @@ export class VisibilityReviewService {
           captureAccuracy: capture.captureAccuracy,
         },
         duplicateMatches: dupMatches,
+        // Permanent review timeline (newest first) + the latest review decision of the
+        // CURRENT version (header "Reviewed by <name> on <date>"; null = not reviewed yet).
+        reviewHistory,
+        lastReview,
       },
     };
+  }
+
+  /**
+   * The capture's permanent review history (visibility_review_events), newest first. The actor's
+   * name is the snapshot taken at the time; a row with no snapshot (backfill without a user match)
+   * falls back to the user's CURRENT name, else null (the UI says "Unknown user" — never blank).
+   */
+  private async loadReviewHistory(clientId: string, captureId: string, currentVersion: number) {
+    const rows = await this.prisma.visibilityReviewEvent.findMany({
+      where: { clientId, captureId },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+    const missing = [
+      ...new Set(rows.filter((r) => !r.actorName && r.actorUserId).map((r) => r.actorUserId as string)),
+    ];
+    const names = new Map<string, string>();
+    if (missing.length > 0) {
+      const users = await this.prisma.user.findMany({
+        where: { id: { in: missing } },
+        select: { id: true, name: true },
+      });
+      for (const u of users) names.set(u.id, u.name);
+    }
+    const reviewHistory = rows.map((r) => ({
+      id: r.id,
+      version: r.version,
+      action: r.action,
+      statusAfter: r.statusAfter,
+      fieldId: r.fieldId,
+      fieldLabel: r.fieldLabel,
+      reasonCode: r.reasonCode,
+      reason: r.reason,
+      actorUserId: r.actorUserId,
+      actorName: r.actorName ?? (r.actorUserId ? names.get(r.actorUserId) ?? null : null),
+      backfilled: r.backfilled,
+      createdAt: r.createdAt,
+    }));
+    const latest = reviewHistory.find(
+      (e) => e.version === currentVersion && e.action !== 'SUBMITTED' && e.action !== 'RESUBMITTED',
+    );
+    const lastReview = latest
+      ? { actorName: latest.actorName, actorUserId: latest.actorUserId, at: latest.createdAt, action: latest.action }
+      : null;
+    return { reviewHistory, lastReview };
   }
 
   /** Other captures (this tenant) sharing any of the given image hashes (dup flag). */

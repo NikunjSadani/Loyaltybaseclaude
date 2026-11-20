@@ -346,6 +346,17 @@ enum VisibilityCaptureStatus {
   CHANGES_REQUESTED
 }
 
+// Append-only Visibility review-history event kinds (VisibilityReviewEvent).
+enum VisibilityReviewAction {
+  SUBMITTED // v1 capture by a sales rep
+  RESUBMITTED // re-capture after Needs re-take / Rejected (version n>1)
+  PHOTO_APPROVED // one photo approved (per-photo review)
+  PHOTO_REJECTED // one photo sent back (per-photo review) — reasonCode/reason set
+  CAPTURE_APPROVED_ALL // approve-all
+  CAPTURE_REJECTED_ALL // reject-all (whole capture) — reasonCode/reason set
+  CHANGES_REQUESTED_RESULT // a per-photo rejection moved the capture INTO Needs re-take
+}
+
 enum TicketStatus {
   OPEN
   IN_PROGRESS
@@ -1936,6 +1947,36 @@ model VisibilityCaptureSubmission {
   @@index([clientId, windowKey])
   @@index([captureId])
   @@map("visibility_capture_submissions")
+}
+
+// PERMANENT, append-only review history of a VisibilityCapture (who / when / what / which photo
+// / why). The live capture row resets its review attribution on every resubmit, so this table is
+// the only lasting record. Written in the SAME transaction as every submit / resubmit / review
+// path; never updated or deleted by app code. actorName is a snapshot at the time of the action.
+// `backfilled` = reconstructed by the migration from pre-existing data (best-effort).
+model VisibilityReviewEvent {
+  id          String                   @id @default(cuid())
+  clientId    String
+  captureId   String
+  outletId    String
+  windowKey   String
+  version     Int
+  action      VisibilityReviewAction
+  // The capture status right AFTER this event (null for some backfilled rows).
+  statusAfter VisibilityCaptureStatus?
+  fieldId     String?
+  // Snapshot of the photo field's label at the time of the event.
+  fieldLabel  String?
+  reasonCode  String?
+  reason      String?
+  actorUserId String?
+  actorName   String?
+  backfilled  Boolean                  @default(false)
+  createdAt   DateTime                 @default(now())
+
+  @@index([clientId, windowKey])
+  @@index([captureId])
+  @@map("visibility_review_events")
 }
 
 // Per-image content hash for duplicate-photo detection: flag when the same photo reappears
