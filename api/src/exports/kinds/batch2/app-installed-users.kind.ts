@@ -2,8 +2,9 @@
  * App Adoption → "Download installed users (Excel)" — GET /v1/push/adoption/installed-users (owner 2026-11-16).
  *
  * One row per user who has ≥ 1 `pwa_install` row (i.e. opened the app as an installed/home-screen app), newest first
- * install first. Columns: Name · Phone · Role · Role Group · Outlet Code · Outlet Name · Platforms Installed ·
- * First Installed · Last Seen · Notifications Enabled · User Status.
+ * install first. Columns: Name · Phone · Role · Role Group · ASM (tenant's level name) · Zone · State · City · Outlet
+ * Code · Outlet Name · Platforms Installed · First Installed · Last Seen · Notifications Enabled · User Status, plus an
+ * "About" sheet explaining the area columns (reports/area/user-area.ts — owner 2026-11-20).
  *
  * Population — the SAME as the App Adoption page's "Installed to home screen" number (`tenantInstallWhere` in
  * push/pwa-adoption.service.ts is the one definition both use), so the page number and the unfiltered file's row
@@ -44,6 +45,7 @@ import { tenantInstallWhere } from '../../../push/pwa-adoption.service';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxCell, XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { parseQueryDto } from './kind-support';
+import { areaCell, loadUserAreaResolver, type AreaPrisma, type UserAreaResolver } from '../../../reports/area/user-area';
 
 export interface InstalledUsersParams {
   roleGroup: InstalledUsersRoleGroup | null;
@@ -51,11 +53,19 @@ export interface InstalledUsersParams {
   since: string | null;
 }
 
+/**
+ * Column headers. 'ASM' is the DEFAULT header of the area column — the written file uses the tenant's own name for
+ * that level (installedUsersHeaders(asmHeader)). Area columns (owner 2026-11-20) sit right after the role columns.
+ */
 export const INSTALLED_USERS_HEADERS = [
   'Name',
   'Phone',
   'Role',
   'Role Group',
+  'ASM',
+  'Zone',
+  'State',
+  'City',
   'Outlet Code',
   'Outlet Name',
   'Platforms Installed',
@@ -64,6 +74,13 @@ export const INSTALLED_USERS_HEADERS = [
   'Notifications Enabled',
   'User Status',
 ] as const;
+
+/** The headers as written: the ASM column carries the tenant's own name for the ASM level. */
+export function installedUsersHeaders(asmHeader: string): string[] {
+  return INSTALLED_USERS_HEADERS.map((h) => (h === 'ASM' ? asmHeader : h));
+}
+
+export const INSTALLED_USERS_ABOUT_SHEET = 'About';
 
 /** Users read per batch (keeps every `IN (...)` list small). */
 export const INSTALLED_USERS_CHUNK = 1000;
@@ -161,7 +178,11 @@ function platformsLabel(platforms: Set<string>): string {
 }
 
 /** Read everything and build every row in memory (no bytes written). */
-async function buildRows(ctx: ExportRunContext, clientId: string, p: InstalledUsersParams): Promise<XlsxCell[][]> {
+async function buildRows(
+  ctx: ExportRunContext,
+  clientId: string,
+  p: InstalledUsersParams,
+): Promise<{ rows: XlsxCell[][]; area: UserAreaResolver | null }> {
   const { prisma } = ctx;
   // ── 1. One row per installed user: first install + last seen (tenant-pinned, shared population). ──
   const groups = await prisma.pwaInstall.groupBy({
@@ -176,7 +197,11 @@ async function buildRows(ctx: ExportRunContext, clientId: string, p: InstalledUs
     .filter((g): g is { userId: string; first: Date; last: Date | null } => !!g.first)
     .filter((g) => !since || g.first.getTime() >= since.getTime())
     .sort((a, b) => b.first.getTime() - a.first.getTime() || a.userId.localeCompare(b.userId));
-  if (!ordered.length) return [];
+  if (!ordered.length) return { rows: [], area: null };
+
+  // Area columns (ASM / Zone / State / City): the tenant's hierarchy + outlet geography, read ONCE (4 queries)
+  // whatever the row count — see reports/area/user-area.ts.
+  const area = await loadUserAreaResolver(prisma as unknown as AreaPrisma, clientId);
 
   // Per-tenant outlet-type display names ("Retailer" / "Wholesaler" …): displayName ?? OutletType.name.
   const typeDisplay = new Map<string, string>();
@@ -234,11 +259,16 @@ async function buildRows(ctx: ExportRunContext, clientId: string, p: InstalledUs
       if (!u) continue; // other role group (or not a current user of this tenant)
       const group = roleGroupOf(u.role);
       const outlet = u.channelPartner?.outlets[0];
+      const a = area.resolve({ id: u.id, role: u.role });
       rows.push([
         u.name ?? '',
         normalizePhoneLast10(u.phone) ?? u.phone ?? '',
         roleLabel(clientId, u, typeDisplay),
         group ? GROUP_LABEL[group] : 'Other',
+        areaCell(a.asm), // full lists — an Excel cell holds them; nothing is cut
+        areaCell(a.zone),
+        areaCell(a.state),
+        areaCell(a.city),
         outlet?.outletCode ?? (group === 'partner' ? u.channelPartner?.partnerCode ?? '' : ''),
         outlet?.name ?? '',
         platformsLabel(platforms.get(u.id) ?? new Set()),
@@ -249,17 +279,17 @@ async function buildRows(ctx: ExportRunContext, clientId: string, p: InstalledUs
       ]);
     }
   }
-  return rows;
+  return { rows, area };
 }
 
 async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
   const clientId = requireTenant(ctx.user);
 
   // 1. Build every row in memory — nothing has been written to the response yet.
-  const rows = await buildRows(ctx, clientId, p);
+  const { rows, area } = await buildRows(ctx, clientId, p);
 
   // 2. Nobody matched → an honest "0 users" answer instead of an empty file (no personal data → no audit row).
-  if (!rows.length) throw new NotFoundException(INSTALLED_USERS_NONE_MESSAGE);
+  if (!rows.length || !area) throw new NotFoundException(INSTALLED_USERS_NONE_MESSAGE);
 
   // 3. Audit BEFORE any byte leaves: who, which tenant, exactly how many rows, which filters. A failure here rejects
   //    the run before the workbook is started, so the caller gets an error response and no file.
@@ -281,10 +311,17 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
   });
 
   // 4. Only now write the workbook.
-  const sheet = await out.addSheet('Installed users', [...INSTALLED_USERS_HEADERS], {
-    widths: [26, 14, 16, 10, 16, 30, 22, 18, 18, 12, 14],
+  const sheet = await out.addSheet('Installed users', installedUsersHeaders(area.asmHeader), {
+    widths: [26, 14, 16, 10, 24, 16, 18, 18, 16, 30, 22, 18, 18, 12, 14],
   });
   for (const r of rows) await sheet.addRow(r);
+
+  // 5. "About" — how to read the area columns (not data rows; not counted).
+  const about = await out.addSheet(INSTALLED_USERS_ABOUT_SHEET, ['About this report', ''], { widths: [22, 120] });
+  const [asmNote, geoNote, blankNote] = area.notes;
+  await about.addRow([area.asmHeader, asmNote]);
+  await about.addRow(['Zone / State / City', geoNote]);
+  await about.addRow(['Not set / Not in hierarchy', blankNote]);
   return { rowCount: rows.length };
 }
 

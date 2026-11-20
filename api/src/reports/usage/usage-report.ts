@@ -21,6 +21,9 @@
  *     assigned to them (SalesUserAssignment). Managers without directly-assigned outlets have none;
  *   • admins / Gifsy staff / vendors: none.
  * Filtering by programme or region therefore keeps only users who have one.
+ *
+ * Area columns (ASM · Zone · State · City, owner 2026-11-20) are separate from programme / region and come from the
+ * shared resolver in reports/area/user-area.ts (sales hierarchy + outlet master; 4 tenant-wide reads).
  */
 import { BadRequestException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -32,6 +35,12 @@ import {
   type UsageReportQueryDto,
   type UsageSort,
 } from '../dto/usage-report.dto';
+import {
+  cachedUserAreaResolver,
+  loadUserAreaResolver,
+  type AreaPrisma,
+  type UserAreaResolver,
+} from '../area/user-area';
 
 export const USAGE_MAX_RANGE_DAYS = 366;
 export const USAGE_DEFAULT_RANGE_DAYS = 30;
@@ -63,6 +72,13 @@ export interface UsageRow {
   status: string;
   programmes: string[];
   regions: string[];
+  /** Area (owner 2026-11-20) — reports/area/user-area.ts: FULL sorted lists, never empty ("Not set" / "Above ASM
+   *  level" / "Not in sales hierarchy" / "Group — N outlets" when missing / not applicable). The page caps the display;
+   *  the Excel writes everything. */
+  asm: string[];
+  zone: string[];
+  state: string[];
+  city: string[];
   daysActive: number;
   /** Days with duration/medium tracking (visits > 0) — 0 for days before the feature shipped. */
   trackedDays: number;
@@ -109,7 +125,9 @@ export interface UsageReport {
   range: { from: string; to: string; days: number };
   /** First IST day with duration/medium tracking for this tenant (null = no tracked activity yet). */
   trackingStartedOn: string | null;
-  notes: { duration: string; region: string };
+  notes: { duration: string; region: string; area: string[] };
+  /** The ASM column's header — the tenant's own name for the ASM level ("ASM" by default). */
+  asmHeader: string;
   filters: { roles: string[]; programs: string[]; regions: string[] };
   applied: { role: string | null; program: string | null; region: string | null; sort: UsageSort; includeInactive: boolean };
   totals: UsageTotals;
@@ -298,6 +316,22 @@ async function runAggregate(prisma: PrismaService, clientId: string, p: UsagePar
   );
 }
 
+/**
+ * Area columns (reports/area/user-area.ts): 4 tenant-wide reads, sequential, independent of the row count — run in
+ * their own short transaction under the same statement timeout + friendly-503 guard as the aggregate, and cached per
+ * tenant for USER_AREA_CACHE_TTL_MS so sorting / filtering / paging the page does not reload the hierarchy.
+ */
+function loadUsageArea(prisma: PrismaService, clientId: string): Promise<UserAreaResolver> {
+  return cachedUserAreaResolver(clientId, () =>
+    guardUsageQuery(
+      prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${USAGE_QUERY_TIMEOUT_MS}`);
+        return loadUserAreaResolver(tx as unknown as AreaPrisma, clientId);
+      }, { maxWait: 5_000, timeout: USAGE_QUERY_TIMEOUT_MS + 5_000 }),
+    ),
+  );
+}
+
 /** Build the whole report (all matching rows, sorted). Reads: users, outlets, assignments, one grouped aggregate. */
 export async function buildUsageReport(
   prisma: PrismaService,
@@ -337,11 +371,18 @@ export async function buildUsageReport(
     select: {
       salesUser: { select: { userId: true } },
       outlet: { select: { programName: true, state: true, deletedAt: true, clientId: true } },
+      // A rep assigned at the owner covers its outlets; assigned at a PARENT group, it also covers the group's child
+      // outlets (Outlet.parentId) — the same rule as the ASM column (reports/area/user-area.ts).
       partner: {
-        select: { clientId: true, outlets: { where: { deletedAt: null }, select: { programName: true, state: true } } },
+        select: {
+          clientId: true,
+          outlets: { where: { deletedAt: null }, select: { programName: true, state: true } },
+          childOutlets: { where: { deletedAt: null }, select: { programName: true, state: true } },
+        },
       },
     },
   });
+  const area = await loadUsageArea(prisma, clientId);
 
   // ── programme / region per user + the dropdown catalogues (all tenant outlets) ──
   const links = new Map<string, Link>();
@@ -364,7 +405,10 @@ export async function buildUsageReport(
     const uid = a.salesUser?.userId;
     if (!uid) continue;
     if (a.outlet && !a.outlet.deletedAt && a.outlet.clientId === clientId) addLink(links, uid, a.outlet.programName, a.outlet.state);
-    if (a.partner && a.partner.clientId === clientId) for (const o of a.partner.outlets) addLink(links, uid, o.programName, o.state);
+    if (a.partner && a.partner.clientId === clientId) {
+      for (const o of a.partner.outlets ?? []) addLink(links, uid, o.programName, o.state);
+      for (const o of a.partner.childOutlets ?? []) addLink(links, uid, o.programName, o.state);
+    }
   }
   for (const [uid, region] of salesRegion) {
     // An explicit employee-record region wins over the outlet-derived states for that sales user.
@@ -393,6 +437,7 @@ export async function buildUsageReport(
     const activeSeconds = num(a?.activeSeconds);
     const phoneDays = num(a?.phoneDays);
     const computerDays = num(a?.computerDays);
+    const where = area.resolve({ id: u.id, role: u.role as string });
     inScope.push({
       userId: u.id,
       name: u.name ?? '',
@@ -401,6 +446,10 @@ export async function buildUsageReport(
       status: u.status as string,
       programmes,
       regions,
+      asm: where.asm,
+      zone: where.zone,
+      state: where.state,
+      city: where.city,
       daysActive: num(a?.daysActive),
       trackedDays,
       visits: num(a?.visits),
@@ -452,7 +501,8 @@ export async function buildUsageReport(
     timezone: 'Asia/Kolkata',
     range,
     trackingStartedOn: started?.[0]?.day ?? null,
-    notes: { duration: USAGE_DURATION_NOTE, region: USAGE_REGION_NOTE },
+    notes: { duration: USAGE_DURATION_NOTE, region: USAGE_REGION_NOTE, area: area.notes },
+    asmHeader: area.asmHeader,
     filters: { roles, programs: sortStrings(allPrograms), regions: sortStrings(allRegions) },
     applied: { role: p.role, program: p.program, region: p.region, sort: p.sort, includeInactive: p.includeInactive },
     totals,

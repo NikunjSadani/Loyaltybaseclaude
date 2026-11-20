@@ -20,7 +20,7 @@ const fetchMock = vi.fn();
 function row(over: Partial<UsageReportPage['rows'][number]> = {}): UsageReportPage['rows'][number] {
   return {
     userId: 'u1', name: 'Asha Retail', phone: '9876500001', role: 'SSS', status: 'ACTIVE',
-    programmes: ['Gold'], regions: ['Maharashtra'], daysActive: 5, trackedDays: 4, visits: 7, minutes: 50,
+    programmes: ['Gold'], regions: ['Maharashtra'], asm: ['Priya Mehta'], zone: ['West'], state: ['Maharashtra'], city: ['Pune'], daysActive: 5, trackedDays: 4, visits: 7, minutes: 50,
     avgMinutesPerDay: 12.5, appDays: 4, browserDays: 0, phoneDays: 4, computerDays: 0, device: 'Phone',
     firstSeenAt: '2026-11-10T04:00:00.000Z', lastSeenAt: '2026-11-19T10:00:00.000Z', ...over,
   };
@@ -106,6 +106,39 @@ describe('Usage Report page', () => {
     expect(within(tr).getByText('Gold')).toBeTruthy();
     expect(within(tr).getByText('Phone')).toBeTruthy();
     expect(within(tr).getByText('12.5')).toBeTruthy();
+  });
+
+  it('area columns sit right after Role (tenant ASM header), above-ASM is labelled, and the notes explain them', async () => {
+    fetchMock.mockResolvedValue(ok(report({
+      asmHeader: 'Area Manager',
+      notes: { duration: 'x', region: 'r', area: ['ASM line: the manager this user reports to.', 'Geo line.', 'Not set line.'] },
+      rows: [row(), row({ userId: 'u2', name: 'Zed ZH', role: 'SALES_STATE_HEAD', asm: ['Above Area Manager level'], zone: ['North'], state: ['Delhi'], city: ['Not set'] })],
+      totalRows: 2,
+    })));
+    render(<UsagePage />);
+    await screen.findByText('Asha Retail');
+    const headers = screen.getAllByRole('columnheader').map((h) => h.textContent);
+    expect(headers.slice(0, 7)).toEqual(['User', 'Role', 'Area Manager', 'Zone', 'State', 'City', 'Mobile']);
+    const cells = within(screen.getByText('Asha Retail').closest('tr')!).getAllByRole('cell').map((c) => c.textContent);
+    expect(cells.slice(0, 6)).toEqual(['Asha Retail', 'SSS', 'Priya Mehta', 'West', 'Maharashtra', 'Pune']);
+    const zh = within(screen.getByText('Zed ZH').closest('tr')!).getAllByRole('cell').map((c) => c.textContent);
+    expect(zh.slice(2, 6)).toEqual(['Above Area Manager level', 'North', 'Delhi', 'Not set']);
+    expect(screen.getAllByTestId('usage-area-note').map((n) => n.textContent)).toEqual([
+      'ASM line: the manager this user reports to.', 'Geo line.', 'Not set line.',
+    ]);
+  });
+
+  it('a long area list is capped at 5 with "+N more"; the full list is in the tooltip and expands on click', async () => {
+    const cities = ['A', 'B', 'C', 'D', 'E', 'F', 'G']
+    fetchMock.mockResolvedValue(ok(report({ rows: [row({ city: cities })] })));
+    render(<UsagePage />);
+    await screen.findByText('Asha Retail');
+    const cell = within(screen.getByText('Asha Retail').closest('tr')!).getAllByRole('cell')[5];
+    expect(cell.getAttribute('title')).toBe('A, B, C, D, E, F, G');
+    expect(cell.textContent).toBe('A, B, C, D, E+2 more');
+    fireEvent.click(within(cell).getByRole('button', { name: '+2 more' }));
+    expect(cell.textContent).toBe('A, B, C, D, E, F, Gshow less');
+    expect(within(cell).getByRole('button', { name: 'show less' }).getAttribute('aria-expanded')).toBe('true');
   });
 
   it('no tracked data yet → says so instead of a date', async () => {
