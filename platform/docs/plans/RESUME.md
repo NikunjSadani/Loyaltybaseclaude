@@ -137,7 +137,7 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 4. **Metro / Non-Metro for 71 Bajaj outlets** — DONE 2026-11-16 (71 updated; Metro 1,657 / Non Metro 4,834).
 5. **October files from Bajaj**: the October **rewards** file and the October **cases** file — import when received.
    **Never run a points compute for Apr 2025 – Oct 2026** (paid by the vendor; imported).
-6. Owner process items still open: `gifsy-deployer` over-privilege review; stray `gifsy` `tdsPolicy` row from the F1 bug
+6. Owner process items still open: ~~`gifsy-deployer` over-privilege review~~ DONE 2026-11-20 (deployer stripped to the 7 roles in `terraform/iam.tf`; laptop ops use the KEYLESS `gifsy-ops` account via `--account=<owner> --impersonate-service-account=gifsy-ops@gifsy-platform.iam.gserviceaccount.com`; IAM snapshot before the change kept by the operator); stray `gifsy` `tdsPolicy` row from the F1 bug
    (harmless; delete when convenient); rotate the Hubble client secret (was shared in a screenshot).
 7. **After the 2026-11-19 prod release.** DONE 2026-11-19: Bajaj `gifsyRejectFastTrack` ON (Deoleo unset), verified
    read-only; Daily Ops Digest prod recipients = 4 `@gifsy.in` addresses, verified; `reports-run-prod` 300 s / 0 retries;
