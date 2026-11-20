@@ -95,8 +95,34 @@ describe('TicketRemarksEmailCard (To + CC)', () => {
     await screen.findByText(/Never changed/);
     type(toInput(), 'not-an-email'); enter(toInput());
     expect(await screen.findByRole('alert')).toHaveTextContent('"not-an-email" is not a valid email address.');
+    // Save is disabled WITH the reason while the bad entry is in the draft; the draft stays editable.
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(screen.getByText('Fix or remove the highlighted address to save.')).toBeInTheDocument();
+    expect(toInput()).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(putMock).not.toHaveBeenCalled();
+    type(toInput(), 'ok@bajaj.example'); // fixing it clears the block
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
+  it('uses the server rule (e.g. "a@b" without a TLD is refused client-side too)', async () => {
+    getMock.mockResolvedValue(view([], []));
+    render(<TicketRemarksEmailCard slug="bajaj" />);
+    await screen.findByText(/Never changed/);
+    type(ccInput(), 'a@b'); enter(ccInput());
+    expect(await screen.findByRole('alert')).toHaveTextContent('"a@b" is not a valid email address.');
+  });
+
+  it('a draft at the cap stays editable (input never disabled while it has text)', async () => {
+    getMock.mockResolvedValue(view(['1@b.com', '2@b.com', '3@b.com', '4@b.com', '5@b.com'], []));
+    render(<TicketRemarksEmailCard slug="bajaj" />);
+    await screen.findByText('1@b.com');
+    expect(toInput()).toBeDisabled(); // full, nothing typed
+    fireEvent.click(screen.getByRole('button', { name: 'Remove 5@b.com from To' }));
+    type(toInput(), 'bad, 6@b.com,'); // invalid first → kept in the draft
+    expect(await screen.findByRole('alert')).toHaveTextContent('"bad" is not a valid email address.');
+    expect(toInput()).toBeEnabled();
+    expect(toInput()).toHaveValue('bad, 6@b.com');
   });
 
   it('an address already in To cannot be added to CC', async () => {
@@ -107,14 +133,18 @@ describe('TicketRemarksEmailCard (To + CC)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('a@bajaj.example is already in To — an address can be in only one list.');
   });
 
-  it('caps To at 5 (input disabled at the limit, extra entries refused)', async () => {
+  it('paste beyond the cap: truncated at 5, extras named, Save still works', async () => {
     getMock.mockResolvedValue(view(['1@b.com', '2@b.com', '3@b.com', '4@b.com'], []));
+    putMock.mockResolvedValue(view(['1@b.com', '2@b.com', '3@b.com', '4@b.com', '5@b.com'], []));
     render(<TicketRemarksEmailCard slug="bajaj" />);
     await screen.findByText('1@b.com');
-    type(toInput(), '5@b.com, 6@b.com,');
-    expect(await screen.findByRole('alert')).toHaveTextContent('At most 5 To addresses.');
+    type(toInput(), '5@b.com, 6@b.com, 7@b.com,');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Only 5 To addresses allowed — 2 not added: 6@b.com, 7@b.com');
     expect(screen.getByText('5@b.com')).toBeInTheDocument();
-    expect(toInput()).toBeDisabled();
+    expect(toInput()).toHaveValue('');
+    expect(toInput()).toBeDisabled(); // full and no draft
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(putMock).toHaveBeenCalledWith(URL, { to: ['1@b.com', '2@b.com', '3@b.com', '4@b.com', '5@b.com'], cc: [] }));
   });
 
   it('shows the server error on save, and load failures with Retry', async () => {

@@ -23,13 +23,15 @@ export const TICKET_REMARKS_EMAIL_AUDIT = 'TICKET_REMARKS_EMAIL';
 export const MAX_TO = 5;
 export const MAX_CC = 10;
 
-const MAX_LEN = 254;
+// ⚠ COPIED VERBATIM into platform/src/lib/ticket-remarks-email-rule.ts (the console's pre-check); a
+// platform test pins the two sources together — change both or that test fails.
+export const MAX_LEN = 254;
 // One address, printable-ASCII only: local part = letters, digits and . _ % + ' -; domain = labels of
 // letters, digits and '-' separated by dots, ending in a 2+ letter TLD. Refuses spaces, lists (, ;),
 // quotes, backslashes, colons, angle brackets, control chars (\p{Cc}) and invisible format chars
 // (\p{Cf}, e.g. U+200B zero-width space) — anything that could hide a second/different address.
-const EMAIL_RE = /^[A-Za-z0-9._%+'-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}$/;
-const INVISIBLE_RE = /[\p{Cc}\p{Cf}]/u;
+export const EMAIL_RE = /^[A-Za-z0-9._%+'-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}$/;
+export const INVISIBLE_RE = /[\p{Cc}\p{Cf}]/u;
 
 export interface TicketRemarksRecipients {
   to: string[];
