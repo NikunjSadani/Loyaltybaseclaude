@@ -614,13 +614,45 @@ and wallets-in-debt; correct by an adjustment if it happens.
 - **B1** a cheap probe answers "no wallet below zero" first (partial index `wallets_negative_balance_idx`, migration
   `20261119124600` — additive, IF NOT EXISTS, one table; a plain CREATE INDEX like the other WRE index files since Prisma
   runs each file in a transaction, so CONCURRENTLY is impossible; the partial index on a small table builds in moments).
-  A first-load failure with no known negative is a quiet "Couldn't check … Retry" line — never a red error on Deoleo.
+  (Superseded by §8.11 item 2: a failed first load is now a loud alert; quiet only on the server's `anyNegative: false`.)
 - **B2–B5** filter errors keep the header + dropdown with an inline Retry; programme changes dim the old numbers
   (aria-busy); the summary names the programme; the export is `aria-disabled` while preparing and announces "Preparing
   file…" / "Downloaded"; a note says wallets whose outlets are all inactive appear only under All programmes.
 - **B6** liability note grammar ("… pts owed by 1 wallet with a negative balance are not included").
 - **B7** a last row at or above zero without `seq` (pre-sequencing history) falls back to time (list + helper).
 - **B8** "Approved on" is a real date cell; deleted outlets are not listed.
+
+### 8.11 Fix round 6 (2026-11-20) — branch `fix/wre-overreversal-debt`
+- **1** wallets-in-debt snapshot: explicit transaction `timeout` 30 s / `maxWait` 10 s (Prisma's 5 s / 2 s defaults
+  expire under load) and every heavy read capped — the last-row-at-or-above-zero is a `groupBy` (max seq / time) over
+  the LISTED wallets only; reversal rows are read only for listed wallets and only AFTER that seq (else time); allocations
+  only for those reversals (skipped when there are none).
+- **2** the response carries `anyNegative` (the tenant-wide probe answer, programme-independent). The screen is quiet ONLY
+  when the server said `anyNegative: false`; any failed first load is a red `role=alert` with Retry (the round-5 quiet
+  line is gone — the screen never stays quiet on an unknown answer).
+- **3** the summary / programme note name the programme of the numbers SHOWN (`data.program`), also while a new
+  programme loads and after a failed load.
+- **4** the probe is raw SQL with a LITERAL `< 0` (`WalletService.anyWalletBelowZero`) so the partial index is provable
+  by the planner. If migration `20261119124600`'s `lock_timeout` trips, the migration is recorded failed and later deploys
+  block with P3009 → `npx prisma migrate resolve --rolled-back 20261119124600_wre_idx_wallets_negative_balance`, then
+  re-deploy. (The note lives HERE, not in the migration file: that file is already applied on staging and is kept
+  byte-for-byte — never edit an applied migration.)
+- **5** an untracked-expiry attention item carries `walletIds` = every wallet in the audit row's `positions`; the banner
+  lists them all.
+- **6** Excel "Approved on" cells carry an explicit `dd-mmm-yyyy` number format.
+
+### 8.12 WP7 real-Postgres run (2026-11-20) — branch `fix/wre-overreversal-debt`
+- **F1 (engine bug, fixed)** two approvals of the same credit at once (200 ∥ 300 on a 500 credit) refused one with
+  "reversible 100 pts after 200 pts … never attributed". Cause: `lockReversalTargets` took `unallocatedApproved` from the
+  PRE-lock read (`v2PointsReversalCap`, used only to pick which wallets to lock) but re-read the positions AFTER the locks.
+  If the sibling committed in between, its 200 was in ρ (post-lock positions) AND still counted as an APPROVED reversal
+  with no allocation (pre-lock read) — counted twice. Fix: `unallocatedApproved` is re-read under the position locks
+  (READ COMMITTED → the sibling's allocation rows and ρ commit together, so it is counted once). The cap is unchanged:
+  300 ∥ 300 on a 500 credit still lets exactly one through.
+- **F2 (stale test)** expiry-first vs reversal: the expected B −500 / D 500 contradicted owner decision 1 (a credit's own
+  expired points are already recovered, never owed). Now B −100 / D 100 either order; expiry first books
+  alreadyExpired 400, recovered 0, owed 0.
+- Suite: 29 passed, 2 skipped (local disposable PG 15 only).
 
 ## 9. One-off backfill (WP6, NOT built) + rollout
 **Backfill** (per wallet, own tx, advisory lock + wallet FOR UPDATE, resumable: skip wallets with movementSeq > 0):

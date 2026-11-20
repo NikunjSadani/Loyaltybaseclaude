@@ -79,7 +79,7 @@ export interface ReversalAttention {
   }>;
   expiryOffsetCappedTotal?: number;
   /** Fix round 3: V2 reversals that booked debt on a credit whose expiry history isn't linked (no lot). */
-  expiryUntracked?: Array<{ at: string; creditReversalId: string; walletId: string | null; outletCode: string | null; owed: number | null; recovered?: number | null; action: string }>;
+  expiryUntracked?: Array<{ at: string; creditReversalId: string; walletId: string | null; /** round 6: EVERY affected wallet (a reversal can span wallets) */ walletIds?: string[]; outletCode: string | null; owed: number | null; recovered?: number | null; action: string }>;
   expiryUntrackedTotal?: number;
   refusals?: Refusal[];
   refusalsTotal?: number;
@@ -92,6 +92,13 @@ function fmtSince(iso: string | null): string {
   if (!iso) return 'an unknown time';
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString('en-IN');
+}
+
+/** Round 6 (item 5): every wallet an untracked-expiry reversal touched — not only the first. */
+export function untrackedWallets(u: { walletId: string | null; walletIds?: string[] }): string {
+  const ids = u.walletIds && u.walletIds.length ? u.walletIds : u.walletId ? [u.walletId] : [];
+  if (!ids.length) return '';
+  return ids.length === 1 ? ` · wallet ${ids[0]}` : ` · ${ids.length} wallets: ${ids.join(', ')}`;
 }
 
 export default function ReversalEngineAttentionBanner({ canLiftPause = false }: { canLiftPause?: boolean }) {
@@ -252,6 +259,7 @@ export default function ReversalEngineAttentionBanner({ canLiftPause = false }: 
                   <li key={`${u.creditReversalId}-${i}`} className="break-words">
                     {fmtSince(u.at)} · reversal {u.creditReversalId}
                     {u.outletCode ? ` · outlet ${u.outletCode}` : ''}
+                    {untrackedWallets(u)}
                     {u.recovered ? ` · ${u.recovered} pts taken` : ''}
                     {u.owed ? ` · ${u.owed} pts booked as debt` : ''} — {u.action}
                   </li>
