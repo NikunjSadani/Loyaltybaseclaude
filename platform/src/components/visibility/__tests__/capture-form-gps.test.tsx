@@ -154,3 +154,47 @@ describe('CFG-AUDIT', () => {
     expect((getByRole('button', { name: /capture photo/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+/**
+ * CFG-RACE — owner 2026-11-20: tapping Submit while a geotag photo's GPS fix is still pending showed
+ * '"Window 1" is required.' for a second, then went through on the next tap.
+ * RACE1: while the photo's fix is pending (upload already done) Submit is disabled and reads "Getting location…".
+ * RACE2: once the fix lands, Submit is enabled and submits the photo with no "is required" error.
+ */
+describe('CFG-RACE — no false "is required" while a photo is getting its location', () => {
+  const raceSchema: VisibilityFormSchema = {
+    captureGpsOnSubmit: false,
+    fields: [{ id: 'w1', type: 'CAMERA', label: 'Window 1', required: true, order: 1, geotag: true, noGallery: false }],
+  };
+
+  it('RACE1 + RACE2: Submit blocked during the fix, then submits cleanly', async () => {
+    let deliver: ((p: GeolocationPosition) => void) | null = null;
+    getCurrentPosition.mockImplementation((success: (p: GeolocationPosition) => void) => { deliver = success; });
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { container, getByRole, queryByText } = render(<VisibilityCaptureForm schema={raceSchema} onSubmit={onSubmit} />);
+    fireCapture(container);
+
+    // Upload resolves, GPS still pending → button disabled + "Getting location…"
+    // The form's submit button is the LAST button (the camera's own button also reads "Getting location…").
+    const submitBtn = () => { const all = container.querySelectorAll('button'); return all[all.length - 1] as HTMLButtonElement; };
+    await waitFor(() => expect(submitBtn().textContent).toMatch(/getting location/i));
+    const btn = submitBtn();
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(btn);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(queryByText(/is required/)).toBeNull();
+
+    // Fix lands → photo stored → Submit enabled → submits with the photo, no error
+    deliver!(goodPos());
+    const submit = await waitFor(() => {
+      const b = submitBtn();
+      expect(b.textContent).toMatch(/submit capture/i);
+      expect(b.disabled).toBe(false);
+      return b;
+    });
+    fireEvent.click(submit);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].w1).toMatchObject({ key: 'visibility-media/t1/x.jpg' });
+    expect(queryByText(/is required/)).toBeNull();
+  });
+});
