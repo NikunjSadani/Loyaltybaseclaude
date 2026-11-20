@@ -181,7 +181,7 @@ describe('Gifsy: escalate dialog', () => {
     await waitFor(() => expect(postMock).toHaveBeenCalledWith('/api/tickets/t1/request-client-remarks', {
       clientAdminId: 'cadmin1', note: 'Confirm invoice',
     }));
-    expect(await screen.findByText(/email was NOT sent/)).toBeInTheDocument();
+    expect(await screen.findByText(/email to the client admin was NOT sent \(the client admin has no email address on file\)/)).toBeInTheDocument();
   });
 
   it('shows the server error inline', async () => {
@@ -782,5 +782,45 @@ describe('round 3', () => {
     expect(internal).toHaveAttribute('aria-pressed', 'true');
     expect(reply).toHaveAttribute('aria-pressed', 'false');
     expect(internal.querySelector('svg')).not.toBeNull();
+  });
+});
+
+describe('remarks toast names where the email went (follow-up)', () => {
+  const ask = async () => {
+    fireEvent.click(await screen.findByRole('button', { name: /Escalate/ }));
+    const panel = await screen.findByRole('group', { name: 'Escalate ticket' });
+    fireEvent.click(within(panel).getByLabelText('Ask client admin for remarks'));
+    const sel = within(panel).getByLabelText('Client admin');
+    await waitFor(() => expect(within(sel).getByRole('option', { name: 'Deoleo Admin' })).toBeInTheDocument());
+    fireEvent.change(sel, { target: { value: 'cadmin1' } });
+    fireEvent.change(within(panel).getByLabelText('What do you need from the client admin?'), { target: { value: 'x' } });
+    fireEvent.click(within(panel).getByRole('button', { name: 'Send request' }));
+  };
+
+  it('INBOX → "notified in-app; email sent to the client\'s ticket remarks inbox <addr>"', async () => {
+    routeGet({ list: [baseTicket()] });
+    postMock.mockResolvedValue({ success: true, data: { emailSent: true, emailRecipientKind: 'INBOX', emailRecipient: 'tickets@deoleo.example' } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    await ask();
+    expect(await screen.findByText("Remarks requested. The client admin was notified in-app; email sent to the client's ticket remarks inbox tickets@deoleo.example.")).toBeInTheDocument();
+  });
+
+  it('INBOX failure → names the inbox', async () => {
+    routeGet({ list: [baseTicket()] });
+    postMock.mockResolvedValue({ success: true, data: { emailSent: false, emailError: 'relay down', emailRecipientKind: 'INBOX', emailRecipient: 'tickets@deoleo.example' } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    await ask();
+    expect(await screen.findByText(/email to the client's ticket remarks inbox tickets@deoleo\.example was NOT sent \(relay down\)/)).toBeInTheDocument();
+  });
+
+  it('ADMIN → "notified in-app and by email (<addr>)"', async () => {
+    routeGet({ list: [baseTicket()] });
+    postMock.mockResolvedValue({ success: true, data: { emailSent: true, emailRecipientKind: 'ADMIN', emailRecipient: 'ca@deoleo.example' } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    await ask();
+    expect(await screen.findByText('Remarks requested. The client admin was notified in-app and by email (ca@deoleo.example).')).toBeInTheDocument();
   });
 });

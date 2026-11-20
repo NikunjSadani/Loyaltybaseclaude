@@ -122,3 +122,31 @@ describe('GifsyService ticket remarks email', () => {
     }
   });
 });
+
+describe('ticket remarks email — strict printable-ASCII validation (follow-up)', () => {
+  it.each([
+    ['zero-width space U+200B', 'tickets\u200B@bajaj.example'],
+    ['zero-width joiner U+200D', 'tickets@baj\u200Daj.example'],
+    ['BOM U+FEFF inside', 'tick\uFEFFets@bajaj.example'],
+    ['control char', 'tickets\u0007@bajaj.example'],
+    ['backslash', 'tick\\ets@bajaj.example'],
+    ['colon', 'mailto:tickets@bajaj.example'],
+    ['angle brackets', '<tickets@bajaj.example>'],
+    ['quotes', '"tickets"@bajaj.example'],
+    ['non-ASCII letter', 'tickéts@bajaj.example'],
+    ['no TLD', 'tickets@bajaj'],
+    ['leading-dash label', 'tickets@-bajaj.example'],
+  ])('rejects %s', (_label, raw) => {
+    expect(() => parseTicketRemarksEmailInput(raw)).toThrow(BadRequestException);
+  });
+
+  it('a stored value with an invisible char is never used', () => {
+    expect(readTicketRemarksEmail({ email: 'tickets\u200B@bajaj.example' })).toBeNull();
+  });
+
+  it('still accepts ordinary addresses (plus, dots, hyphens, apostrophe, sub-domains)', () => {
+    for (const ok of ['support+tickets@bajaj.example', "o'neil@mail.bajaj-consumer.co.in", 'a.b_c-d%x@sub.domain.in']) {
+      expect(parseTicketRemarksEmailInput(ok)).toBe(ok.toLowerCase());
+    }
+  });
+});

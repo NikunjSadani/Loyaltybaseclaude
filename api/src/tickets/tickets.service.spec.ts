@@ -894,4 +894,55 @@ describe('TicketsService', () => {
         .rejects.toBeInstanceOf(ForbiddenException);
     });
   });
+
+  describe('remarks email recipient wording (follow-up)', () => {
+    it('inbox: response carries recipientKind INBOX + address', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { email: 'tickets@deoleo.example' } });
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      expect(res).toMatchObject({ emailSent: true, emailRecipientKind: 'INBOX', emailRecipient: 'tickets@deoleo.example' });
+    });
+
+    it('inbox failure: the note names the INBOX, not the admin', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { email: 'tickets@deoleo.example' } });
+      mockMsg91.sendEmail.mockRejectedValue(new Error('relay down'));
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      expect(res).toMatchObject({ emailSent: false, emailRecipientKind: 'INBOX', emailRecipient: 'tickets@deoleo.example' });
+      expect(mockPrisma.ticketMessage.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          internalVisibility: 'GIFSY_ONLY',
+          message: "Email to the client's ticket remarks inbox tickets@deoleo.example was NOT sent: the mail relay refused or timed out. Deoleo Admin was notified in-app only.",
+        }),
+      });
+    });
+
+    it('admin: response carries recipientKind ADMIN + their address; failure note names the admin', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      const ok = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      expect(ok).toMatchObject({ emailSent: true, emailRecipientKind: 'ADMIN', emailRecipient: 'ca@deoleo.example' });
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      const noAddr = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin2', note: 'pls' }, 'x');
+      expect(noAddr).toMatchObject({ emailSent: false, emailRecipientKind: 'ADMIN', emailRecipient: null });
+      expect(mockPrisma.ticketMessage.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ message: expect.stringMatching(/^Email to Deoleo Admin 2 was NOT sent: the client admin has no email address on file/) }),
+      });
+    });
+  });
+
+  describe('tenant settings payload never carries the inbox (follow-up)', () => {
+    it('GET /v1/admin/settings skips ticketRemarksEmail', async () => {
+      const { AdminCoreService } = await import('../admin-core/admin-core.service');
+      const prisma = { programSetting: { findMany: jest.fn().mockResolvedValue([
+        { settingKey: 'ticketRemarksEmail', settingValue: { email: 'tickets@deoleo.example' } },
+        { settingKey: 'someOtherKey', settingValue: 1 },
+      ]) } };
+      const svc = Object.create(AdminCoreService.prototype) as any;
+      svc.prisma = prisma;
+      const res = await svc.getSettings(clientAdmin);
+      expect(res.settings).toHaveProperty('someOtherKey', 1);
+      expect(res.settings).not.toHaveProperty('ticketRemarksEmail');
+      expect(JSON.stringify(res)).not.toContain('tickets@deoleo.example');
+    });
+  });
 });

@@ -99,7 +99,16 @@ refused), Save, saved/error states, "Last changed by X on date" from the audit l
   the portal. The Gifsy-only outcome note says "Email sent to <address> (client's ticket remarks inbox) — asked: <name>".
 - **Unset** (default — every tenant today incl. Deoleo) → byte-identical to before: the chosen admin's own email,
   "Hi <name>" greeting, outcome note "Email sent to <name> (<their email>)".
-- Not shown to client admins (optional read-only display deliberately not added).
+- Not shown to client admins (optional read-only display deliberately not added); the tenant settings payload
+  (`GET /v1/admin/settings`) never includes the key.
+- Validation is strict printable ASCII (letters, digits, `. _ % + ' -` in the local part; dotted labels + a 2+
+  letter TLD): spaces, lists (`,` `;`), quotes, backslashes, colons, angle brackets, control characters and
+  invisible format characters (e.g. U+200B zero-width space) are refused.
+- Where the email went is reported honestly everywhere: the response carries `emailRecipientKind` (`INBOX` |
+  `ADMIN`) + `emailRecipient`; the Gifsy toast and the Gifsy-only outcome note (sent or NOT sent) name "the
+  client's ticket remarks inbox <addr>" or the chosen admin accordingly.
+- Like every `/v1/gifsy/clients/:slug/*` route, a GIFSY_ADMIN may edit any client's address regardless of which
+  tenant they are currently assumed into (the slug in the URL decides; this is the console's normal model).
 
 ## Raised by / outlet
 

@@ -130,12 +130,6 @@ export class GifsyController {
   }
 
   /**
-   * PUT /v1/gifsy/clients/:slug/wallet-settings — write the target tenant's wallet
-   * money settings, delegating to the SAME conversion-rate / points-expiry / floor
-   * writes the tenant Settings panel uses (money path — conversion rate is validated
-   * hard and can never be 0/negative). GIFSY_ADMIN only.
-   */
-  /**
    * GET/PUT /v1/gifsy/clients/:slug/ticket-remarks-email — the client's shared "ticket remarks"
    * inbox. GIFSY_ADMIN ONLY: deliberately NO @RequirePermission, so a GIFSY_STAFF can never reach
    * these routes (same owner-only posture as otp-templates); the service re-checks the role.
@@ -156,6 +150,12 @@ export class GifsyController {
     return this.gifsy.setTicketRemarksEmail(user, slug, dto);
   }
 
+  /**
+   * PUT /v1/gifsy/clients/:slug/wallet-settings — write the target tenant's wallet
+   * money settings, delegating to the SAME conversion-rate / points-expiry / floor
+   * writes the tenant Settings panel uses (money path — conversion rate is validated
+   * hard and can never be 0/negative). GIFSY_ADMIN only.
+   */
   @Put('clients/:slug/wallet-settings')
   @Roles('GIFSY_ADMIN')
   // Per-tenant conversion rate / points expiry / floors = money path → finance key (D-B2).

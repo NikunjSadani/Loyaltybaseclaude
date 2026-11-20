@@ -108,6 +108,11 @@ function cancellationText(requestedFromName: string, clientReason?: string): str
     : `Gifsy support has withdrawn the request for remarks from ${requestedFromName}.`;
 }
 
+/** The remarks email outcome: sent or not, and to whom (the client's inbox vs the chosen admin). */
+export type RemarksEmailOutcome =
+  | { sent: true; recipientKind: 'INBOX' | 'ADMIN'; address: string }
+  | { sent: false; reason: string; recipientKind: 'INBOX' | 'ADMIN'; address: string | null };
+
 /** Tenant-wide stat-card counts for the admin list. */
 export interface TicketSummary {
   total: number;
@@ -822,6 +827,9 @@ export class TicketsService {
       message: `Remarks requested from ${target.name}`,
       requestedFrom: target,
       emailSent: email.sent,
+      // Where the email went (or was meant to go): the client's ticket remarks inbox, or the chosen admin.
+      emailRecipientKind: email.recipientKind,
+      emailRecipient: email.address,
       ...(email.sent ? {} : { emailError: email.reason }),
     };
   }
@@ -843,15 +851,26 @@ export class TicketsService {
     note: string;
     callerOrigin: string;
     actorId: string;
-  }): Promise<{ sent: true } | { sent: false; reason: string }> {
-    const notSent = async (reason: string) => {
-      await this.recordEmailOutcome(p.ticket.id, p.actorId, `Email to ${p.targetName} was NOT sent: ${reason}. They were notified in-app only.`);
-      return { sent: false as const, reason };
+  }): Promise<RemarksEmailOutcome> {
+    // Who the email is (or was meant to be) for — set once the recipient is resolved; every note and
+    // the response are worded from it (the client's inbox vs the chosen admin).
+    let recipientKind: 'INBOX' | 'ADMIN' = 'ADMIN';
+    let to = '';
+    const describe = () =>
+      recipientKind === 'INBOX'
+        ? `the client's ticket remarks inbox ${to}`
+        : `${p.targetName}${to ? ` (${to})` : ''}`;
+    const notSent = async (reason: string): Promise<RemarksEmailOutcome> => {
+      await this.recordEmailOutcome(
+        p.ticket.id,
+        p.actorId,
+        `Email to ${describe()} was NOT sent: ${reason}. ${p.targetName} was notified in-app only.`,
+      );
+      return { sent: false, reason, recipientKind, address: to || null };
     };
     // Each prep step reports its OWN failure — a lookup error is never passed off as "no email on file".
     // Recipient: the client's shared "ticket remarks email" when one is set (ONLY that address — the
     // chosen admin is named in the body and still gets the bell); otherwise the chosen admin's own email.
-    let to = '';
     let toInbox = false;
     try {
       const inboxRow = await this.prisma.programSetting.findUnique({
@@ -862,6 +881,7 @@ export class TicketsService {
       if (inbox) {
         to = inbox;
         toInbox = true;
+        recipientKind = 'INBOX';
       } else {
         const u = await this.prisma.user.findFirst({ where: { id: p.targetId }, select: { email: true } });
         to = (u?.email ?? '').trim();
@@ -920,7 +940,7 @@ export class TicketsService {
       p.actorId,
       `${toInbox ? `Email sent to ${to} (client's ticket remarks inbox) — asked: ${p.targetName}` : `Email sent to ${p.targetName} (${to})`} with link ${link}.${linkNote ? ` Note: ${linkNote}.` : ''}`,
     );
-    return { sent: true };
+    return { sent: true, recipientKind, address: to };
   }
 
   /**

@@ -16,8 +16,12 @@ export const TICKET_REMARKS_EMAIL_KEY = 'ticketRemarksEmail';
 export const TICKET_REMARKS_EMAIL_AUDIT = 'TICKET_REMARKS_EMAIL';
 
 const MAX_LEN = 254;
-// One address: local@domain.tld — no spaces, commas or semicolons (a list is refused, not split).
-const EMAIL_RE = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
+// One address, printable-ASCII only: local part = letters, digits and . _ % + ' -; domain = labels of
+// letters, digits and '-' separated by dots, ending in a 2+ letter TLD. Refuses spaces, lists (, ;),
+// quotes, backslashes, colons, angle brackets, control chars (\p{Cc}) and invisible format chars
+// (\p{Cf}, e.g. U+200B zero-width space) — anything that could hide a second/different address.
+const EMAIL_RE = /^[A-Za-z0-9._%+'-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}$/;
+const INVISIBLE_RE = /[\p{Cc}\p{Cf}]/u;
 
 /** The stored address, or null when unset / unreadable. */
 export function readTicketRemarksEmail(settingValue: unknown): string | null {
@@ -36,8 +40,12 @@ export function readTicketRemarksEmail(settingValue: unknown): string | null {
 export function parseTicketRemarksEmailInput(input: unknown): string | null {
   if (input === null || input === undefined) return null;
   if (typeof input !== 'string') throw new BadRequestException('Ticket remarks email must be text.');
+  // trim() strips ASCII/Unicode whitespace but NOT zero-width chars — those are refused below.
   const email = input.trim().toLowerCase();
   if (!email) return null;
+  if (INVISIBLE_RE.test(input)) {
+    throw new BadRequestException('The email address contains invisible or control characters — retype it.');
+  }
   if (/[,;\s]/.test(email)) {
     throw new BadRequestException('Enter ONE email address — a list of addresses is not allowed.');
   }
