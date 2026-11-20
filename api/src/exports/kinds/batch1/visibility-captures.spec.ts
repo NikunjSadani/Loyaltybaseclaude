@@ -11,6 +11,8 @@ import type { JwtPayload } from '../../../common/decorators/current-user.decorat
 import { TenantService } from '../../../tenant/tenant.service';
 import { TenantSettingsService } from '../../../tenant/tenant-settings.service';
 import { visibilityUniverseWhere } from '../../../visibility/visibility-scope.helper';
+import { clearVisibilityGoLiveCache } from '../../../visibility/visibility-portal-go-live';
+import { FakeOutletRow, matchOutlet } from '../../../visibility/outlet-where-testkit-spec';
 import {
   VISIBILITY_CAPTURES_KIND,
   VISIBILITY_HISTORY_HEADERS,
@@ -30,6 +32,8 @@ interface Outlet {
   programName: string | null; programCategory: string | null; partnerId: string | null;
   latitude?: number | null; longitude?: number | null; type: string; inScope: boolean;
   createdAt?: Date; deactivatedAt?: Date | null;
+  /** Today's isActive (default: not deactivated). */ isActive?: boolean;
+  /** approvedAt of the partner's KYC submissions (needs a partnerId). */ kycApprovedAt?: Array<Date | null>;
 }
 interface Capture {
   id: string; clientId: string; outletId: string; outletCode: string; outletName: string; windowKey: string;
@@ -57,6 +61,16 @@ interface Db {
 }
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Fixture outlet → the evaluator's row (in scope = type code RET; no partner unless set). */
+function asFakeOutlet(o: Outlet): FakeOutletRow {
+  return {
+    id: o.id, clientId: o.clientId, outletCode: o.outletCode, typeCode: o.inScope ? 'RET' : 'OTHER',
+    deactivatedAt: o.deactivatedAt ?? null, isActive: o.isActive ?? !o.deactivatedAt,
+    createdAt: o.createdAt ?? new Date('2025-01-01T00:00:00Z'), partnerId: o.partnerId,
+    programName: o.programName, programCategory: o.programCategory, partnerKycApprovedAt: o.kycApprovedAt,
+  };
+}
 
 function fakePrisma(db: Db) {
   const calls: Record<string, any[]> = {};
@@ -149,11 +163,11 @@ function fakePrisma(db: Db) {
     },
     channelPartner: { findMany: async () => [] },
     outlet: {
+      // The REAL in-scope rule, evaluated in memory (outlet-where-testkit) — incl. keyset paging.
+      count: async (a: any) => db.outlets.filter((o) => matchOutlet(asFakeOutlet(o), a.where)).length,
       findMany: async (a: any) => {
         log('outlet.findMany', a);
-        const ks = a.where.AND?.[1]?.OR?.[0]?.outletCode ? a.where.AND[1].OR : null;
-        let rows = db.outlets.filter((o) => o.clientId === T && o.inScope);
-        if (ks) rows = rows.filter((o) => o.outletCode > ks[0].outletCode.gt || (o.outletCode === ks[1].outletCode && o.id > ks[1].id.gt));
+        let rows = db.outlets.filter((o) => matchOutlet(asFakeOutlet(o), a.where));
         rows = [...rows].sort((x, y) => cmp(x.outletCode, y.outletCode) || cmp(x.id, y.id)).slice(0, a.take);
         return rows.map((o) => ({ ...o, createdAt: o.createdAt ?? new Date('2025-01-01T00:00:00Z'), deactivatedAt: o.deactivatedAt ?? null, outletType: { name: o.type } }));
       },
@@ -287,6 +301,7 @@ const NOW = new Date('2026-11-20T06:00:00Z');
 
 async function run(db: Db, params: Record<string, unknown> = {}, now = NOW, freq = 1) {
   const prisma = fakePrisma(db);
+  clearVisibilityGoLiveCache(); // go-live is cached per tenant — each run reads its own fixture
   const res = await runKindToBuffer(VISIBILITY_CAPTURES_KIND, params, { prisma, moduleRef: services(true, freq), user, now });
   const back = readBack(res.buffer);
   const sheet = (n: string) => back.rows[n] as unknown[][];
@@ -454,11 +469,9 @@ describe('visibility report export (visibility-captures)', () => {
     expect(rows).toEqual([
       ['A005', 'Shop 5', 'Retailer', 'RLP', 'Elite', 'Pune', 'MH', 'Rahul Rep', 'E100', 'Sunil Manager (ASM)', '2026-11-P1', 'Not captured yet'],
     ]);
-    // The SAME in-scope rule as the report tiles, narrowed to outlets alive during the window (IST November).
+    // An OPEN window uses today's in-scope rule (the report screen's per-window rule — visibilityWindowUniverseWhere).
     expect(prisma.calls['outlet.findMany'][0].where).toEqual(
-      visibilityUniverseWhere(T, { outletScope: SCOPE, programs: [], subPrograms: [] }, {
-        activeDuring: { start: new Date('2026-10-31T18:30:00Z'), end: new Date('2026-11-30T18:30:00Z') },
-      }),
+      visibilityUniverseWhere(T, { outletScope: SCOPE, programs: [], subPrograms: [] }),
     );
   });
 
@@ -493,12 +506,35 @@ describe('visibility report export (visibility-captures)', () => {
       ['A002', '2026-10-P1', 'Missed'],
       ['A004', '2026-10-P1', 'Missed'],
     ]);
-    // The outlet query is the tiles' rule narrowed to outlets alive during October (IST).
+    // A CLOSED window: the rule narrowed to outlets that existed, were active and KYC-approved during October (IST).
     expect(prisma.calls['outlet.findMany'][0].where).toEqual(
       visibilityUniverseWhere(T, { outletScope: SCOPE, programs: [], subPrograms: [] }, {
         activeDuring: { start: new Date('2026-09-30T18:30:00Z'), end: new Date('2026-10-31T18:30:00Z') },
       }),
     );
+  });
+
+  it('Not captured, CLOSED window: an outlet KYC-approved only AFTER the window is not Missed; no approval date → creation date (About says so)', async () => {
+    const db = baseDb();
+    db.captures.push({ ...db.captures[0], id: 'sep1', windowKey: '2026-09-P1', outletCode: 'A001', receivedAt: at('2026-09-05T06:00:00Z') });
+    // o1: approved in September (before October ended) → expected in October → Missed.
+    db.outlets.find((o) => o.id === 'o1')!.partnerId = 'p1';
+    db.outlets.find((o) => o.id === 'o1')!.kycApprovedAt = [at('2026-09-10T00:00:00Z')];
+    // o2: KYC approved on 10 Nov — not capturable in October → not listed.
+    db.outlets.find((o) => o.id === 'o2')!.partnerId = 'p2';
+    db.outlets.find((o) => o.id === 'o2')!.kycApprovedAt = [null, at('2026-11-10T00:00:00Z')];
+    // o4: partner with no approval date on record → falls back to its creation date (2025) → Missed.
+    db.outlets.find((o) => o.id === 'o4')!.partnerId = 'p4';
+    db.outlets.find((o) => o.id === 'o4')!.kycApprovedAt = [null];
+    const { sheet } = await run(db, { month: '2026-10' });
+    const rows = sheet('Not captured').slice(1).map((r) => [r[0], r[11]]);
+    expect(rows.map((r) => r[0])).toEqual(['A001', 'A003', 'A004', 'A005']);
+    expect(rows.every((r) => r[1] === 'Missed')).toBe(true);
+    const about = Object.fromEntries(sheet('About').slice(1).map((r) => [String(r[0]).trim(), r[1]]));
+    expect(String(about['NOT CAPTURED'])).toContain('KYC was approved before the window ended');
+    expect(String(about['NOT CAPTURED'])).toContain('use the date they were added instead');
+    // o3, o4, o5 have no KYC approval date (o3/o5 no partner, o4 none recorded).
+    expect(String(about['NOT CAPTURED'])).toContain('(3 outlets in this file had no KYC approval date.)');
   });
 
   it('Not captured: a window that has not begun → "Not started" (twice-a-month programme, early in the month)', async () => {

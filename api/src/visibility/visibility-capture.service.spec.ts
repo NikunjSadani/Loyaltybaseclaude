@@ -17,7 +17,8 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { VisibilityCaptureService, haversineMeters } from './visibility-capture.service';
+import { Prisma } from '@prisma/client';
+import { CAPTURE_JUST_REVIEWED_MESSAGE, VisibilityCaptureService, haversineMeters } from './visibility-capture.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { TenantService } from '../tenant/tenant.service';
@@ -639,6 +640,29 @@ describe('VisibilityCaptureService', () => {
     expect(mockPrisma.visibilityReviewEvent.createMany.mock.calls[0][0].data).toEqual([
       expect.objectContaining({ captureId: 'cap1', version: 2, action: 'RESUBMITTED', statusAfter: 'SUBMITTED', windowKey: CUR_WINDOW }),
     ]);
+  });
+
+  it('resubmit guards against a concurrent review: writes only if the row is still the one read (status, version, updatedAt); else 409 and nothing written', async () => {
+    const readAt = new Date('2026-11-20T05:00:00Z');
+    const row = { id: 'cap1', status: 'REJECTED', outletId: 'o1', currentVersion: 1, windowKey: CUR_WINDOW, updatedAt: readAt };
+    mockPrisma.visibilityCapture.findFirst.mockImplementation((args: { where?: { status?: string } }) =>
+      Promise.resolve(args?.where?.status === 'APPROVED' ? null : row),
+    );
+    mockPrisma.visibilityCapture.findUnique.mockResolvedValue(row);
+    // A review landed between the read and the write → the guarded update matches no row.
+    mockPrisma.visibilityCapture.update.mockReset();
+    mockPrisma.visibilityCapture.update.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('No record found', { code: 'P2025', clientVersion: 'test' }),
+    );
+    await expect(service.resubmitCapture(user, 'cap1', { formValues: nearFormValues })).rejects.toThrow(
+      new ConflictException(CAPTURE_JUST_REVIEWED_MESSAGE),
+    );
+    expect(mockPrisma.visibilityCapture.update.mock.calls[0][0].where).toEqual({
+      id: 'cap1', status: 'REJECTED', currentVersion: 1, updatedAt: readAt,
+    });
+    expect(CAPTURE_JUST_REVIEWED_MESSAGE).toBe('This visit was just reviewed — reload');
+    expect(mockPrisma.visibilityCaptureSubmission.create).not.toHaveBeenCalled();
+    expect(mockPrisma.visibilityReviewEvent.createMany).not.toHaveBeenCalled();
   });
 
   it('refuses to resubmit a non-REJECTED capture', async () => {

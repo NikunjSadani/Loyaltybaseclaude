@@ -250,6 +250,16 @@ describe('VISRPT — VisibilityReportView', () => {
     expect((await screen.findAllByText('No approved record — part of this window was on the old app')).length).toBeGreaterThan(0);
   });
 
+  it('VISRPT14: a closed window shows how "in scope then" is decided (KYC approval date + fallback); an open one does not', async () => {
+    const { unmount } = render(<VisibilityReportView variant="admin" />);
+    await screen.findByText(/^Coverage — /);
+    expect(screen.queryByTestId('report-past-window-scope')).not.toBeInTheDocument();
+    unmount();
+    getReport.mockResolvedValue({ success: true, data: { ...REPORT, pastWindowScopeNote: 'For a closed window an outlet counts only if its KYC was approved before the window ended.' } });
+    render(<VisibilityReportView variant="admin" />);
+    expect(await screen.findByTestId('report-past-window-scope')).toHaveTextContent('KYC was approved before the window ended');
+  });
+
   it('VISRPT12: definitions are keyboard toggletips; tabs move with arrow keys; the coverage bar has a text alternative', async () => {
     render(<VisibilityReportView variant="admin" />);
     await screen.findByText(/^Coverage — /);

@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, VisibilityCaptureStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { TenantService } from '../tenant/tenant.service';
@@ -46,6 +46,7 @@ import {
   applicableCameraFields,
 } from './visibility-form.helper';
 import { appendReviewEvents } from './visibility-review-events';
+import { noteVisibilityPortalCapture } from './visibility-portal-go-live';
 import {
   VisibilityFormSchema,
   GpsCapture,
@@ -66,6 +67,9 @@ import {
   visibilityUniverseWhere,
   withVisibilityProgramWhere,
 } from './visibility-scope.helper';
+
+/** 409 text when a resubmit lost a race with a review of the same capture (lost-update guard). */
+export const CAPTURE_JUST_REVIEWED_MESSAGE = 'This visit was just reviewed — reload';
 
 /** Object-key tenant folder for all visibility media (mirrors VisibilityMediaService). */
 const MEDIA_FOLDER_PREFIX = 'visibility-media/';
@@ -637,6 +641,8 @@ export class VisibilityCaptureService {
       currentVersion: number;
       formValues?: Prisma.JsonValue | null;
       photoReviews?: Prisma.JsonValue | null;
+      /** The row as read before the transaction — the resubmit's lost-update guard compares against it. */
+      updatedAt?: Date | null;
     } | null,
     /** Location gate: the phone's submit-time fix + clock (requireLocation tenants only; see visibility-location.helper). */
     gateInput: { captureGeo?: unknown; clientNow?: unknown } = {},
@@ -1057,9 +1063,21 @@ export class VisibilityCaptureService {
             },
           });
         } else if (current.status === 'REJECTED' || current.status === 'CHANGES_REQUESTED') {
-          version = current.currentVersion + 1;
-          capture = await tx.visibilityCapture.update({
-            where: { id: current.id },
+          // Lost-update guard (same rule as the review side, persistReview): the carried-forward reviews were built
+          // from the row as READ before this transaction (`existing`). Write only if it is still exactly that row
+          // (status, version, updatedAt) — Postgres re-checks this WHERE under the row lock — so a per-photo review
+          // that landed in between is never silently overwritten while its event stays in the history. The loser
+          // gets a 409 and writes nothing (no submission, no event).
+          const seen = existing ?? current;
+          version = seen.currentVersion + 1;
+          try {
+            capture = await tx.visibilityCapture.update({
+            where: {
+              id: current.id,
+              status: seen.status as VisibilityCaptureStatus,
+              currentVersion: seen.currentVersion,
+              ...(seen.updatedAt ? { updatedAt: seen.updatedAt } : {}),
+            },
             data: {
               // Re-opened for re-review (always SUBMITTED): the rejected photo(s) are now
               // pending again; a whole-capture REJECTED re-capture carries no reviews.
@@ -1086,12 +1104,21 @@ export class VisibilityCaptureService {
               updatedAt: now,
             },
           });
+          } catch (e) {
+            if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+              throw new ConflictException(CAPTURE_JUST_REVIEWED_MESSAGE);
+            }
+            throw e;
+          }
         } else {
           // SUBMITTED (awaiting review) — a fresh submit cannot silently overwrite it.
           throw new BadRequestException(
             'This outlet already has a capture awaiting review for the current window.',
           );
         }
+
+        // A portal capture can move the tenant's go-live only if it had none yet (cache entry null) — drop that entry.
+        if (version === 1) noteVisibilityPortalCapture(user.clientId);
 
         await tx.visibilityCaptureSubmission.create({
           data: {

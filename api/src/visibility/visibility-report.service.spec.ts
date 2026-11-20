@@ -15,6 +15,8 @@ import {
   VisibilityReportService, tallySlots, breakdown, groupKeyOf, IMPORTED_LABEL, ReportSlot, reviewerOfCapture,
 } from './visibility-report.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { clearVisibilityGoLiveCache } from './visibility-portal-go-live';
+import { visibilityUniverseWhere } from './visibility-scope.helper';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -81,6 +83,7 @@ function wireFixture(
   const g = opts.goLive === undefined ? '2026-01' : opts.goLive;
   const goLiveAt = g === null ? null : g instanceof Date ? g : new Date(`${g}-01T00:00:00+05:30`);
   const importedWindows = opts.importedWindows ?? [];
+  clearVisibilityGoLiveCache(); // go-live is cached per tenant — each fixture sets its own
   mockPrisma.$queryRaw.mockImplementation((q: { sql: string; values: unknown[] }) => {
     if (q.sql.includes('MIN("receivedAt")')) return Promise.resolve([{ goLive: goLiveAt }]);
     // importedWindowKeys: DISTINCT windowKey among the asked keys holding a /vendor-import/ photo.
@@ -202,22 +205,44 @@ describe('VisibilityReportService (month-wise)', () => {
     expect(res.month).toBe('2026-10');
   });
 
-  it('uses THE single in-scope rule (isActive KYC-approved + kycIntent + type scope) for outlets AND captures', async () => {
-    await service.gifsyReport(gifsy, { month: '2026-10' });
-    const outletWhere = mockPrisma.outlet.findMany.mock.calls[0][0].where;
-    expect(outletWhere).toEqual({
+  it('uses THE per-window in-scope rule for outlets AND captures: closed window = existed + KYC-approved then; open = today', async () => {
+    await service.gifsyReport(gifsy, { month: '2026-10' }); // October is CLOSED (clock 20 Nov)
+    const closedWhere = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+    expect(closedWhere).toEqual(
+      visibilityUniverseWhere('t1', baseConfig, {
+        activeDuring: { start: new Date('2026-09-30T18:30:00Z'), end: new Date('2026-10-31T18:30:00Z') },
+      }),
+    );
+    expect(mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where.outlet).toEqual(closedWhere);
+    mockPrisma.outlet.findMany.mockClear();
+    mockPrisma.visibilityCapture.findMany.mockClear();
+    await service.gifsyReport(gifsy, { month: '2026-11' }); // November is OPEN → today's rule
+    const openWhere = mockPrisma.outlet.findMany.mock.calls[0][0].where;
+    expect(openWhere).toEqual({
       clientId: 't1', deletedAt: null, deactivatedAt: null, isActive: true,
       OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
       outletType: { code: { in: ['SSS'] } },
     });
-    expect(mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where.outlet).toEqual(outletWhere);
+    expect(mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where.outlet).toEqual(openWhere);
+  });
+
+  it('an outlet in scope for one window but not another only gets a slot where it is in scope', async () => {
+    wireFixture({ config: { frequencyPerMonth: 2 } });
+    // P1 (closed) universe holds o1..o4 only (o5 KYC-approved after P1); P2 (open) holds all five.
+    mockPrisma.outlet.findMany.mockImplementation(({ where }: any) =>
+      Promise.resolve(where.createdAt ? OUTLETS.filter((o) => o.id !== 'o5') : OUTLETS),
+    );
+    mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+    const res = await service.gifsyReport(gifsy, { month: '2026-11' }, ); // clock 20 Nov: P1 (1-15) closed, P2 open
+    expect(res.summary).toMatchObject({ inScope: 9, missed: 4, notCaptured: 5 });
+    expect(res.pastWindowScopeNote).toMatch(/KYC was approved before the window ended/);
   });
 
   it('APPLIES-TO: the program narrowing lands on outlets and captures together', async () => {
     wireFixture({ config: { programs: ['RLP'] } });
     const res = await service.gifsyReport(gifsy, { month: '2026-10' });
     const outletWhere = mockPrisma.outlet.findMany.mock.calls[0][0].where;
-    expect(outletWhere.AND[0].isActive).toBe(true);
+    expect(outletWhere.AND[0].AND[1].OR[0].isActive).toBe(true); // closed window: active-then branch
     expect(mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where.outlet).toEqual(outletWhere);
     expect(res.programs).toEqual(['RLP']);
   });

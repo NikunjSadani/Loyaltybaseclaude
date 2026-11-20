@@ -2,7 +2,14 @@
  * visibilityPortalGoLive / isImportedVisibilityCapture — imported old-app history is recognised by the re-hosted photo
  * path (/vendor-import/), never by "no rep recorded"; go-live = the earliest receive time of a non-imported capture.
  */
-import { isImportedVisibilityCapture, visibilityPortalGoLive, VISIBILITY_IMPORTED_KEY_MARKER } from './visibility-portal-go-live';
+import {
+  clearVisibilityGoLiveCache,
+  isImportedVisibilityCapture,
+  visibilityPortalGoLive,
+  VISIBILITY_IMPORTED_KEY_MARKER,
+} from './visibility-portal-go-live';
+
+beforeEach(() => clearVisibilityGoLiveCache());
 import { isWindowInFrequency, visibilityReportScopeError, windowRangeUtc } from './visibility-report-scope';
 
 describe('isImportedVisibilityCapture', () => {

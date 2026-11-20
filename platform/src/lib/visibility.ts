@@ -41,7 +41,6 @@ import type {
   VisibilityFormSchema,
   VisibilityPhotoDecision,
   VisibilityRejectReasonCode,
-  VisibilityReport,
 } from '@/lib/visibility-types';
 
 const BASE = '/api/visibility';
@@ -290,13 +289,7 @@ export const visibilityApi = {
     );
   },
 
-  // ── Reports (GIFSY + tenant read-only, D15) ────────────────────────────────
-  getReport(windowKey?: string) {
-    return api.get<VisibilityReport>(`${BASE}/report${qs({ windowKey })}`);
-  },
-  getTenantReport(windowKey?: string) {
-    return api.get<VisibilityReport>(`${BASE}/report/tenant${qs({ windowKey })}`);
-  },
+  // ── Reports: the month report lives in lib/visibility-report.ts (visibilityReportApi); the Excel export here ──
   /**
    * Browser-facing URL of the xlsx Visibility report (auth-gated). `windowKey` = one window; `month` (`YYYY-MM`) = a
    * whole month; neither = the current month (server default).

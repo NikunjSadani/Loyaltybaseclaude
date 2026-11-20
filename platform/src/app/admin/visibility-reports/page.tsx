@@ -13,10 +13,26 @@
 
 import { BarChart3, FileSpreadsheet } from 'lucide-react';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import { useAdminSession } from '@/lib/admin-session';
 import { VisibilityReportView } from '@/components/admin/VisibilityReportView';
 
 export default function VisibilityReportsPage() {
   const captureMode = useGifsySettings().visibilityCaptureMode ?? 'PHOTO_APPROVAL';
+  const { role } = useAdminSession();
+
+  // The report/tenant routes are CLIENT_ADMIN-only — say so plainly instead of showing a generic 403.
+  if (role && role !== 'CLIENT_ADMIN') {
+    return (
+      <div className="space-y-5 fade-in">
+        <h1 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+          <BarChart3 className="w-5 h-5 text-[var(--brand-primary)]" /> Visibility Reports
+        </h1>
+        <p data-testid="visibility-reports-client-admin-only" className="text-sm text-gray-600 bg-white rounded-2xl border border-gray-100 px-4 py-6">
+          Visibility reports are available to client admins.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5 fade-in">

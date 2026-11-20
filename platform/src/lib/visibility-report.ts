@@ -98,6 +98,8 @@ export interface MonthReport {
   importedMonthNote?: string;
   /** When this portal started capturing (ISO; earliest non-imported capture). null = no portal capture yet. */
   portalGoLive?: string | null;
+  /** Present when a closed window is selected: how "in scope then" is decided (KYC approval date + its fallback). */
+  pastWindowScopeNote?: string;
   summary: StatusTally;
   notCounted: { outOfScope: number; otherWindow: number };
   breakdowns: Record<ReportGroup, BreakdownRow[]>;

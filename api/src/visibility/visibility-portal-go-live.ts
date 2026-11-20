@@ -28,16 +28,12 @@ export const VISIBILITY_IMPORTED_KEY_MARKER = '/vendor-import/';
 export const IMPORTED_MONTH_NOTE =
   "Not tracked for imported months — the old app's records only include approved visits, so coverage and Missed cannot be worked out.";
 
-/** True when a stored media key is a re-hosted old-app photo. Pure. */
-export function isImportedVisibilityKey(key: unknown): boolean {
-  return typeof key === 'string' && key.includes(VISIBILITY_IMPORTED_KEY_MARKER);
-}
-
 /** True when any stored media value of the capture points at a re-hosted old-app photo. Pure. */
 export function isImportedVisibilityCapture(formValues: unknown): boolean {
   if (!formValues || typeof formValues !== 'object' || Array.isArray(formValues)) return false;
   for (const v of Object.values(formValues as Record<string, unknown>)) {
-    if (isImportedVisibilityKey(readMediaValue(v).key)) return true;
+    const { key } = readMediaValue(v);
+    if (key && key.includes(VISIBILITY_IMPORTED_KEY_MARKER)) return true;
   }
   return false;
 }
@@ -45,11 +41,41 @@ export function isImportedVisibilityCapture(formValues: unknown): boolean {
 /** Anything with a `$queryRaw` (PrismaService, a transaction client). */
 export type VisibilityGoLiveReader = { $queryRaw: <T = unknown>(query: Prisma.Sql) => Promise<T> };
 
+/** Per-tenant in-memory cache of the go-live instant (the aggregate casts every capture's formValues to text). */
+const GO_LIVE_TTL_MS = 5 * 60_000;
+const goLiveCache = new Map<string, { at: number; value: Date | null }>();
+
+/**
+ * Drop the cached go-live of one tenant (or all). Called when a capture is CREATED in the portal (a first portal
+ * capture moves go-live), and by tests. Cheap — no query.
+ */
+export function clearVisibilityGoLiveCache(clientId?: string): void {
+  if (clientId === undefined) goLiveCache.clear();
+  else goLiveCache.delete(clientId);
+}
+
+/**
+ * A portal capture was just created. It can only move go-live when the tenant had NO portal capture yet (cached null)
+ * — any later capture is after an existing go-live — so only that entry is dropped. No query.
+ */
+export function noteVisibilityPortalCapture(clientId: string): void {
+  const hit = goLiveCache.get(clientId);
+  if (hit && hit.value === null) goLiveCache.delete(clientId);
+}
+
 /**
  * The tenant's portal go-live instant: MIN(receivedAt) over captures whose stored values reference no imported photo.
- * null when every capture is imported (or there are none). One indexed-by-tenant aggregate.
+ * null when every capture is imported (or there are none). One tenant-scoped aggregate, CACHED per tenant for 5 minutes
+ * (cleared when a portal capture is created) — callers run it once per report / dashboard load, never per window or
+ * outlet. `now` is injectable for tests.
  */
-export async function visibilityPortalGoLive(prisma: VisibilityGoLiveReader, clientId: string): Promise<Date | null> {
+export async function visibilityPortalGoLive(
+  prisma: VisibilityGoLiveReader,
+  clientId: string,
+  now: number = Date.now(),
+): Promise<Date | null> {
+  const hit = goLiveCache.get(clientId);
+  if (hit && now - hit.at < GO_LIVE_TTL_MS) return hit.value;
   const rows = await prisma.$queryRaw<Array<{ goLive: Date | null }>>(Prisma.sql`
     SELECT MIN("receivedAt") AS "goLive"
     FROM "visibility_captures"
@@ -57,17 +83,14 @@ export async function visibilityPortalGoLive(prisma: VisibilityGoLiveReader, cli
       AND ("formValues" IS NULL OR "formValues"::text NOT LIKE ${`%${VISIBILITY_IMPORTED_KEY_MARKER}%`})
   `);
   const v = Array.isArray(rows) ? rows[0]?.goLive : null;
-  return v ? new Date(v) : null;
+  const value = v ? new Date(v) : null;
+  goLiveCache.set(clientId, { at: now, value });
+  return value;
 }
 
 /** The go-live instant's IST month `YYYY-MM` (null = no portal capture yet). */
 export function goLiveMonthOf(goLive: Date | null): string | null {
   return goLive ? istMonthKey(goLive) : null;
-}
-
-/** Loader form of {@link goLiveMonthOf}. */
-export async function visibilityPortalGoLiveMonth(prisma: VisibilityGoLiveReader, clientId: string): Promise<string | null> {
-  return goLiveMonthOf(await visibilityPortalGoLive(prisma, clientId));
 }
 
 /**

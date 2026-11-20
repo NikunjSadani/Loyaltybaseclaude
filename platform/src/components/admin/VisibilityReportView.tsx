@@ -374,6 +374,12 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
               {report.subPrograms?.length ? ` · Sub-Programs: ${report.subPrograms.join(', ')}` : ''}
               {' · '}{report.frequencyPerMonth}× per month
             </p>
+            {report.pastWindowScopeNote && (
+              <p data-testid="report-past-window-scope" className="flex items-start gap-1.5 text-[11px] text-gray-500 mt-1">
+                <Info className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden="true" />
+                <span>{report.pastWindowScopeNote}</span>
+              </p>
+            )}
           </div>
 
           {/* Breakdowns */}

@@ -84,13 +84,7 @@ describe('visibilityApi method → URL/verb map', () => {
     expect(calls[3].body).toEqual({ reasonCode: 'BLURRY', reason: 'too dark' });
   });
 
-  it('reports get + tenant + export url (window scoping)', () => {
-    visibilityApi.getReport('2026-07-P1');
-    visibilityApi.getTenantReport();
-    expect(calls.map((c) => `${c.verb} ${c.url}`)).toEqual([
-      'GET /api/visibility/report?windowKey=2026-07-P1',
-      'GET /api/visibility/report/tenant',
-    ]);
+  it('export url (window scoping)', () => {
     expect(visibilityApi.exportUrl('2026-07-P1')).toBe('/api/visibility/report/export?windowKey=2026-07-P1');
     expect(visibilityApi.exportUrl()).toBe('/api/visibility/report/export');
     expect(visibilityApi.exportUrl(undefined, '2026-10')).toBe('/api/visibility/report/export?month=2026-10');

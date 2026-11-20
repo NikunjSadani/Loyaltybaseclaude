@@ -57,7 +57,11 @@ import {
   isImportedVisibilityCapture,
   visibilityPortalGoLive,
 } from '../../../visibility/visibility-portal-go-live';
-import { visibilityUniverseWhere } from '../../../visibility/visibility-scope.helper';
+import {
+  VISIBILITY_KYC_DATE_FALLBACK_NOTE,
+  VISIBILITY_NO_KYC_DATE_WHERE,
+  visibilityWindowUniverseWhere,
+} from '../../../visibility/visibility-scope.helper';
 import { windowClosedSafe } from '../../../visibility/visibility-metrics';
 import {
   VISIBILITY_STATUS_ORDER,
@@ -750,77 +754,71 @@ async function runVisibilityCaptures(
   for (const w of oldWindows) {
     await notCaptured.addRow([NOT_TRACKED_MESSAGE, '', '', '', '', '', '', '', '', '', w, VISIBILITY_WORDS.NOT_TRACKED]);
   }
+  let noKycDateOutlets = 0;
   if (cfg.outletScope.length > 0 && expectedWindows.length > 0) {
-    // Outlets that existed during the period: created before its end, not deactivated before it began (today's
-    // outlet type / programme are used — their history is not kept). Checked again per window below.
-    const infos = [...windowInfo.values()];
-    const activeDuring = {
-      start: new Date(Math.min(...infos.map((i) => i.start.getTime()))),
-      end: new Date(Math.max(...infos.map((i) => i.end.getTime()))),
-    };
-    const inScope = visibilityUniverseWhere(clientId, cfg, { activeDuring });
-    let oAfter: { outletCode: string; id: string } | null = null;
-    for (;;) {
-      const outlets = await prisma.outlet.findMany({
-        where: oAfter
-          ? {
-              AND: [
-                inScope,
-                { OR: [{ outletCode: { gt: oAfter.outletCode } }, { outletCode: oAfter.outletCode, id: { gt: oAfter.id } }] },
-              ],
-            }
-          : inScope,
-        select: {
-          id: true,
-          outletCode: true,
-          name: true,
-          city: true,
-          state: true,
-          programName: true,
-          programCategory: true,
-          createdAt: true,
-          deactivatedAt: true,
-          outletType: { select: { name: true } },
-        },
-        orderBy: [{ outletCode: 'asc' }, { id: 'asc' }],
-        take: BATCH1_PAGE_SIZE,
-      });
-      if (outlets.length === 0) break;
-      const lastO = outlets[outlets.length - 1];
-      oAfter = { outletCode: lastO.outletCode, id: lastO.id };
-      const ids = outlets.map((o) => o.id);
-      const have = await prisma.visibilityCapture.findMany({
-        where: { clientId, outletId: { in: ids }, windowKey: { in: expectedWindows } },
-        select: { outletId: true, windowKey: true },
-      });
-      const haveSet = new Set(have.map((h) => `${h.outletId}|${h.windowKey}`));
-      // Only ACTIVE, non-deleted reps.
-      const assignments = await prisma.salesUserAssignment.findMany({
-        where: { unassignedAt: null, outletId: { in: ids }, salesUser: { clientId, deletedAt: null, isActive: true } },
-        select: { outletId: true, salesUserId: true },
-        orderBy: [{ assignedAt: 'desc' }, { id: 'asc' }],
-      });
-      const repsByOutlet = new Map<string, string[]>();
-      for (const a of assignments) {
-        if (!a.outletId) continue;
-        const list = repsByOutlet.get(a.outletId) ?? [];
-        if (!list.includes(a.salesUserId)) list.push(a.salesUserId);
-        repsByOutlet.set(a.outletId, list);
+    // Per window, THE per-window universe (visibilityWindowUniverseWhere — the report screen uses the same call): a
+    // CLOSED window = outlets that existed, were active and KYC-approved during it; an open / not-started window =
+    // today's in-scope outlets. Outlet type / programme are today's values (their history is not kept).
+    for (const w of expectedWindows) {
+      const info = windowInfo.get(w)!;
+      const inScope = visibilityWindowUniverseWhere(clientId, cfg, { start: info.start, end: info.end, closed: info.phase === 'closed' });
+      if (info.phase === 'closed') {
+        noKycDateOutlets = Math.max(
+          noKycDateOutlets,
+          await prisma.outlet.count({ where: { AND: [inScope, VISIBILITY_NO_KYC_DATE_WHERE] } }),
+        );
       }
-      for (const o of outlets) {
-        const reps = repsByOutlet.get(o.id) ?? [];
-        const repPeople = reps.map((id) => people.person(id));
-        const managers = [...new Set(reps.map((id) => people.manager(id)).filter(Boolean))];
-        for (const w of expectedWindows) {
-          if (haveSet.has(`${o.id}|${w}`)) continue;
-          const info = windowInfo.get(w)!;
-          const created = o.createdAt ? new Date(o.createdAt).getTime() : 0;
-          if (created >= info.end.getTime()) continue; // the outlet did not exist yet in that window
-          if (info.phase === 'closed') {
-            if (o.deactivatedAt && new Date(o.deactivatedAt).getTime() <= info.start.getTime()) continue;
-          } else if (o.deactivatedAt) {
-            continue; // an open / future window only expects outlets that are active today
-          }
+      let oAfter: { outletCode: string; id: string } | null = null;
+      for (;;) {
+        const outlets = await prisma.outlet.findMany({
+          where: oAfter
+            ? {
+                AND: [
+                  inScope,
+                  { OR: [{ outletCode: { gt: oAfter.outletCode } }, { outletCode: oAfter.outletCode, id: { gt: oAfter.id } }] },
+                ],
+              }
+            : inScope,
+          select: {
+            id: true,
+            outletCode: true,
+            name: true,
+            city: true,
+            state: true,
+            programName: true,
+            programCategory: true,
+            outletType: { select: { name: true } },
+          },
+          orderBy: [{ outletCode: 'asc' }, { id: 'asc' }],
+          take: BATCH1_PAGE_SIZE,
+        });
+        if (outlets.length === 0) break;
+        const lastO = outlets[outlets.length - 1];
+        oAfter = { outletCode: lastO.outletCode, id: lastO.id };
+        const ids = outlets.map((o) => o.id);
+        const have = await prisma.visibilityCapture.findMany({
+          where: { clientId, outletId: { in: ids }, windowKey: { in: [w] } },
+          select: { outletId: true, windowKey: true },
+        });
+        const haveSet = new Set(have.map((h) => h.outletId));
+        // Only ACTIVE, non-deleted reps.
+        const assignments = await prisma.salesUserAssignment.findMany({
+          where: { unassignedAt: null, outletId: { in: ids }, salesUser: { clientId, deletedAt: null, isActive: true } },
+          select: { outletId: true, salesUserId: true },
+          orderBy: [{ assignedAt: 'desc' }, { id: 'asc' }],
+        });
+        const repsByOutlet = new Map<string, string[]>();
+        for (const a of assignments) {
+          if (!a.outletId) continue;
+          const list = repsByOutlet.get(a.outletId) ?? [];
+          if (!list.includes(a.salesUserId)) list.push(a.salesUserId);
+          repsByOutlet.set(a.outletId, list);
+        }
+        for (const o of outlets) {
+          if (haveSet.has(o.id)) continue;
+          const reps = repsByOutlet.get(o.id) ?? [];
+          const repPeople = reps.map((id) => people.person(id));
+          const managers = [...new Set(reps.map((id) => people.manager(id)).filter(Boolean))];
           let status: string;
           if (info.phase === 'closed' && info.partOld) {
             status = PART_OLD_APP_STATUS;
@@ -850,8 +848,8 @@ async function runVisibilityCaptures(
             status,
           ]);
         }
+        if (outlets.length < BATCH1_PAGE_SIZE) break;
       }
-      if (outlets.length < BATCH1_PAGE_SIZE) break;
     }
   }
 
@@ -914,7 +912,7 @@ async function runVisibilityCaptures(
         ? `This month is imported old-app history${goLive ? ` (the portal went live on ${istHumanDateTime(goLive)})` : ''}. The old app only sent approved visits, so missing visits cannot be told apart from rejected ones — the sheet is not filled for imported months.`
         : cfg.outletScope.length === 0
           ? 'No outlet types are in the Visibility scope yet, so no outlet is listed as not captured.'
-          : `Outlets in the Visibility scope (same rule as the report screen) that existed during the window: created before the window ended and not deactivated before it began. Outlet type and programme are today's values. Only active assigned reps are shown.${goLive ? ` This portal went live on ${istHumanDateTime(goLive)}; earlier windows are old-app history.` : ''}${oldWindows.length ? ` Not tracked (old app only): ${oldWindows.join(', ')}.` : ''}`,
+          : `Outlets in the Visibility scope (same rule as the report screen), per window: a closed window lists outlets that existed then — created before the window ended, not deactivated before it began, and KYC-approved before it ended; an open window lists today's in-scope outlets. Outlet type and programme are today's values. Only active assigned reps are shown. ${VISIBILITY_KYC_DATE_FALLBACK_NOTE}${noKycDateOutlets > 0 ? ` (${noKycDateOutlets} outlet${noKycDateOutlets === 1 ? '' : 's'} in this file had no KYC approval date.)` : ''}${goLive ? ` This portal went live on ${istHumanDateTime(goLive)}; earlier windows are old-app history.` : ''}${oldWindows.length ? ` Not tracked (old app only): ${oldWindows.join(', ')}.` : ''}`,
     ],
     ...(earlierFreqWindows.length
       ? ([[

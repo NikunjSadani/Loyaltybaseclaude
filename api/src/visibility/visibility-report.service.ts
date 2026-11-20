@@ -8,7 +8,12 @@ import {
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isGifsyOperator } from '../common/tenant-scope';
 import { visibilityReportScopeError, windowRangeUtc } from './visibility-report-scope';
-import { visibilityProgramScope, visibilityUniverseWhere } from './visibility-scope.helper';
+import { Prisma } from '@prisma/client';
+import {
+  VISIBILITY_KYC_DATE_FALLBACK_NOTE,
+  visibilityProgramScope,
+  visibilityWindowUniverseWhere,
+} from './visibility-scope.helper';
 import {
   monthCaptureWhere,
   monthWindows,
@@ -265,7 +270,6 @@ export class VisibilityReportService {
     const selectedKeys = sel.selected.map((w) => w.key);
     const closedByKey = new Map(sel.selected.map((w) => [w.key, w.closed]));
     const scoped = config.outletScope.length > 0;
-    const universe = visibilityUniverseWhere(clientId, config);
     // Old-app history, per window (visibility-portal-go-live — the same rule as the Excel report's Not-captured sheet):
     // 'old' (ended before the portal went live) → only what the old app recorded, never "Missed"; 'part-old' (began
     // before go-live / holds imported visits) → a closed window with no capture is "No approved record — part of this
@@ -289,41 +293,63 @@ export class VisibilityReportService {
     // An IMPORTED month = every selected window is old-app history: coverage / Missed are not tracked.
     const importedMonth = sel.selected.length > 0 && sel.selected.every((w) => classByKey.get(w.key) === 'old');
 
-    const outlets = scoped
-      ? await this.prisma.outlet.findMany({
-          where: universe,
-          select: { id: true, outletCode: true, name: true, programName: true, programCategory: true },
-          orderBy: { outletCode: 'asc' },
-        })
-      : [];
-
-    const captures = scoped
-      ? await this.prisma.visibilityCapture.findMany({
-          where: { clientId, windowKey: { in: selectedKeys }, outlet: universe },
-          select: {
-            id: true,
-            outletId: true,
-            windowKey: true,
-            status: true,
-            capturedAt: true,
-            receivedAt: true,
-            reviewedAt: true,
-            photoReviews: true,
-            // Only to tell an imported old-app record (photo path under vendor-import/) from a portal capture.
-            formValues: true,
-            approvedByUserId: true,
-            submittedBySalesUserId: true,
-            submittedBy: { select: { employeeCode: true, user: { select: { name: true } } } },
-          },
-        })
-      : [];
-
-    // Loud, never silent: captures in the selection we do NOT count, and why.
-    const outOfScope = await this.prisma.visibilityCapture.count({
-      where: scoped
-        ? { clientId, windowKey: { in: selectedKeys }, NOT: { outlet: universe } }
-        : { clientId, windowKey: { in: selectedKeys } },
-    });
+    // In scope PER WINDOW — THE per-window universe the Excel "Not captured" sheet uses (visibilityWindowUniverseWhere):
+    // a CLOSED window counts the outlets that existed, were active and KYC-approved during it; an open window counts
+    // today's in-scope outlets. Tiles, breakdowns, the outlet list and notCounted all follow it.
+    const universeByKey = new Map(
+      sel.selected.map((w) => {
+        const range = windowRangeUtc(w.key, freq);
+        return [w.key, visibilityWindowUniverseWhere(clientId, config, { ...range, closed: w.closed })] as const;
+      }),
+    );
+    type ReportOutlet = { id: string; outletCode: string; name: string; programName: string | null; programCategory: string | null };
+    const outletById = new Map<string, ReportOutlet>();
+    const inScopeByKey = new Map<string, Set<string>>();
+    const captureSelect = {
+      id: true,
+      outletId: true,
+      windowKey: true,
+      status: true,
+      capturedAt: true,
+      receivedAt: true,
+      reviewedAt: true,
+      photoReviews: true,
+      // Only to tell an imported old-app record (photo path under vendor-import/) from a portal capture.
+      formValues: true,
+      approvedByUserId: true,
+      submittedBySalesUserId: true,
+      submittedBy: { select: { employeeCode: true, user: { select: { name: true } } } },
+    } as const;
+    const captures: Array<Prisma.VisibilityCaptureGetPayload<{ select: typeof captureSelect }>> = [];
+    // Loud, never silent: captures in the selection we do NOT count (outlet not in that window's scope), and why.
+    let outOfScope = 0;
+    if (!scoped) {
+      outOfScope = await this.prisma.visibilityCapture.count({ where: { clientId, windowKey: { in: selectedKeys } } });
+    }
+    for (const key of scoped ? selectedKeys : []) {
+      const where = universeByKey.get(key)!;
+      const rows = await this.prisma.outlet.findMany({
+        where,
+        select: { id: true, outletCode: true, name: true, programName: true, programCategory: true },
+        orderBy: { outletCode: 'asc' },
+      });
+      const ids = new Set<string>();
+      for (const o of rows) {
+        ids.add(o.id);
+        if (!outletById.has(o.id)) outletById.set(o.id, o);
+      }
+      inScopeByKey.set(key, ids);
+      captures.push(
+        ...(await this.prisma.visibilityCapture.findMany({
+          where: { clientId, windowKey: { in: [key] }, outlet: where },
+          select: captureSelect,
+        })),
+      );
+      outOfScope += await this.prisma.visibilityCapture.count({
+        where: { clientId, windowKey: { in: [key] }, NOT: { outlet: where } },
+      });
+    }
+    const outlets = [...outletById.values()].sort((x, y) => (x.outletCode < y.outletCode ? -1 : x.outletCode > y.outletCode ? 1 : 0));
     const otherWindow = sel.windowKey
       ? 0
       : await this.prisma.visibilityCapture.count({
@@ -375,6 +401,7 @@ export class VisibilityReportService {
       const repId = repByOutlet.get(o.id) ?? null;
       const managerId = repId ? managerByRep.get(repId) ?? null : null;
       for (const key of selectedKeys) {
+        if (!inScopeByKey.get(key)?.has(o.id)) continue; // not in scope for THIS window (e.g. approved after it closed)
         const c = capByKey.get(`${o.id}|${key}`) ?? null;
         const wClass = classByKey.get(key) ?? 'portal';
         // Old-app window: only the visits the old app recorded are listed (no capture = not tracked, not a slot).
@@ -412,12 +439,13 @@ export class VisibilityReportService {
     }
     return {
       config, sel, slots, notCounted: { outOfScope, otherWindow }, outletsInScope: outlets.length, importedMonth, goLive,
+      anyClosed: sel.selected.some((w) => w.closed),
     };
   }
 
   /** The month report: tiles + breakdowns. */
   private async computeReport(clientId: string, q: { month?: string; windowKey?: string }) {
-    const { config, sel, slots, notCounted, outletsInScope, importedMonth, goLive } = await this.buildSlots(clientId, q);
+    const { config, sel, slots, notCounted, outletsInScope, importedMonth, goLive, anyClosed } = await this.buildSlots(clientId, q);
     const t = tallySlots(slots, !importedMonth);
     const programScope = visibilityProgramScope(config);
     const allClosed = sel.selected.length > 0 && sel.selected.every((w) => w.closed);
@@ -440,6 +468,8 @@ export class VisibilityReportService {
       ...(importedMonth ? { importedMonthNote: IMPORTED_MONTH_NOTE } : {}),
       /** When this portal started capturing (earliest non-imported capture); null = no portal capture yet. */
       portalGoLive: goLive ? goLive.toISOString() : null,
+      /** Present when a closed window is selected: how "in scope then" is decided (KYC date, with its fallback). */
+      ...(anyClosed ? { pastWindowScopeNote: VISIBILITY_KYC_DATE_FALLBACK_NOTE } : {}),
       summary: t,
       notCounted,
       breakdowns: {

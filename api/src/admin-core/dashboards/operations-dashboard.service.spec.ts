@@ -15,6 +15,7 @@ import { TenantService } from '../../tenant/tenant.service';
 import { TenantSettingsService } from '../../tenant/tenant-settings.service';
 import { PayoutsService } from '../../payouts/payouts.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { clearVisibilityGoLiveCache } from '../../visibility/visibility-portal-go-live';
 
 const HOUR = 1000 * 60 * 60;
 const base = new Date('2026-06-27T00:00:00.000Z');
@@ -308,6 +309,7 @@ describe('OperationsDashboardService', () => {
       );
       // Portal went live long before the months under test (no imported month by default).
       mockPrisma.$queryRaw.mockResolvedValue([{ goLive: new Date('2026-01-05T06:00:00Z') }]);
+      clearVisibilityGoLiveCache();
       const captures = [cap('a', 'APPROVED'), cap('b', 'APPROVED'), cap('c', 'SUBMITTED', far, null), cap('d', 'CHANGES_REQUESTED')];
       mockPrisma.visibilityCapture.findMany.mockImplementation((args: any) =>
         Promise.resolve(args.distinct ? [{ outletId: 'o-a' }, { outletId: 'o-b' }, { outletId: 'o-c' }, { outletId: 'o-d' }] : captures),
@@ -365,6 +367,7 @@ describe('OperationsDashboardService', () => {
 
     it('imported month (before portal go-live): participation is not tracked (null + note), never ÷ today\'s outlets', async () => {
       mockPrisma.$queryRaw.mockResolvedValue([{ goLive: new Date('2026-11-05T06:00:00Z') }]);
+      clearVisibilityGoLiveCache();
       const v = (await service.operations(user, '2026-10')).visibility as any;
       expect(v).toMatchObject({ importedMonth: true, participationPct: null });
       expect(v.importedMonthNote).toMatch(/Not tracked for imported months/);

@@ -110,7 +110,8 @@ const ALL_NAV_ITEMS = [
   { href: '/admin/scheme-reports', label: 'Scheme Reports', icon: FileBarChart2, featureFlag: null, tenantReportOnly: true },
   // Visibility (POSM) capture management is GIFSY-only (config / form / approve-reject queue).
   { href: '/admin/visibility', label: 'Visibility (POSM)', icon: Eye, featureFlag: null, gifsyOnly: true },
-  // Tenant read-only POSM coverage reports — shown to tenant admins (CLIENT_ADMIN / MIS_USER) only.
+  // Tenant read-only POSM month report + Excel — CLIENT_ADMIN only (the backend report/tenant[/outlets] routes are
+  // @Roles('CLIENT_ADMIN'); a MIS_USER would get a 403), so the item is hidden from MIS_USER.
   { href: '/admin/visibility-reports', label: 'Visibility Reports', icon: FileBarChart2, featureFlag: null, tenantReportOnly: true },
   {
     href: '/admin/invoices',
@@ -287,7 +288,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         // Master Visibility switch gates the Visibility Approval page AND (ANDed with its own
         // featureFlag) the Visibility Invoices group — both hidden when Visibility is OFF.
         if (item.href === '/admin/visibility') return visibilityEnabled;
-        if (item.href === '/admin/visibility-reports') return visibilityEnabled;
+        if (item.href === '/admin/visibility-reports') return visibilityEnabled && adminSession.role === 'CLIENT_ADMIN';
         if (item.href === '/admin/invoices' && !visibilityEnabled) return false;
         if (!item.featureFlag) return true;
         return !!(features as unknown as Record<string, boolean>)[item.featureFlag];

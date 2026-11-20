@@ -319,7 +319,9 @@ surface shares (written once); §17.2–17.5 describe each surface.
     old-app photos there, BAJAJ-PROD-OUTLET-IMPORT §8). Never "no submitting rep" (a removed rep nulls that column — shown
     *Rep (no longer on file)*). The review-events migration SQL uses the same string.
   - *Portal go-live* = the INSTANT of the earliest capture with no imported photo (`visibilityPortalGoLive`, MIN
-    `receivedAt`); go-live month = its IST month.
+    `receivedAt`); go-live month = its IST month. Cached per tenant in memory for 5 min (one aggregate per report /
+    dashboard load, never per window or outlet); a tenant's cached "no go-live yet" is dropped when its first portal
+    capture is created (`noteVisibilityPortalCapture`).
   - *Per window* (`classifyWindowAgainstGoLive`): **old** = ended at/before go-live (no go-live yet: the reported scope
     holds imported captures) → only what the old app recorded, no "Missed"; **part-old** = holds imported captures or
     began before go-live → a closed window with no capture is *No approved record — part of this window was on the old
@@ -329,13 +331,19 @@ surface shares (written once); §17.2–17.5 describe each surface.
     report screen, the Operations funnel and the digest.
 - **In scope — THE single rule** `visibilityUniverseWhere` (`visibility-scope.helper.ts`): not deleted · not deactivated ·
   **`isActive: true` (KYC-approved)** · kycIntent not NOT_INTERESTED / PARKED · outletType.code ∈ `outletScope` · optional
-  programs / sub-programs. Option `activeDuring: {start, end}` (Excel Not-captured sheet, past windows): created before
-  `end` and active today or deactivated after `start` (deactivation flips `isActive` off and only hits active outlets).
+  programs / sub-programs. **Per window** (`visibilityWindowUniverseWhere` — the report screen AND the Excel call it for
+  every window, so their counts are identical; proven by `visibility-report-excel-parity.spec.ts`): an OPEN / not-started
+  window uses today's rule; a CLOSED window uses `activeDuring` = the outlets a rep could have been asked to capture THEN —
+  created before the window ended · active today or deactivated after it began (deactivation flips `isActive` off and only
+  hits active outlets) · **KYC-approved before it ended** (the partner has a `KycSubmission.approvedAt` < end; approval is
+  what brings a partner's outlets live). Fallback: an outlet with no partner or no approval date on record (imported /
+  bulk-loaded live) uses its creation date — stated on the Excel About sheet (with the count) and on the screen
+  (`pastWindowScopeNote`).
   Why `isActive`: a pending-KYC outlet the rep can never see was reported as *Missed* under the old KYC "addressable"
   universe (that universe stays for KYC program-health only). The SAME rule drives the rep capture list, weekly reminder,
   admin "outlets in scope", report screen, Excel, both dashboards, digest, submit / resubmit (`loadInScopeOutlet`, a 400
   with a plain reason from `visibilityOutOfScopeReason`), the outlet status card, the sales team view and the partner
-  group page (§17.5). Known limit: a past period uses TODAY's outlet type / programme / KYC state (no outlet history).
+  group page (§17.5). Known limit: a past period uses TODAY's outlet type / programme / KYC intent (no outlet history).
 - **Plain status words — one list per side, same strings, pinned by a test on each side:** API `VISIBILITY_WORDS`
   (`visibility-report-labels.ts` → `PLAIN_STATUS_LABEL` in `visibility-metrics.ts`, the Excel, status report, digest);
   platform `VISIBILITY_STATUS_WORDS` (`lib/visibility-types.ts` → `lib/visibility-report.ts`, queue / dialog, sales,
@@ -379,10 +387,13 @@ lists come from ONE slot table, so they always add up. **Not counted, shown loud
 outlet is no longer in scope, and (all-windows view) captures in a window the current frequency does not have
 (`notCounted`) — the screen states the count and that every one of them is in the month's Excel export (the month
 export reads every window key P1..P4 and every capture, in scope or not). Definitions are keyboard /
-touch toggletips, the breakdown tabs are ARIA tabs (arrow keys), and the coverage bar has a text alternative + legend. Known limit: "in scope" for a past month
-uses TODAY's outlet state (there is no per-month outlet snapshot). **Exports on the screen (admin AND client admin):**
+touch toggletips, the breakdown tabs are ARIA tabs (arrow keys), and the coverage bar has a text alternative + legend. In scope is
+decided PER WINDOW (§17.1): a closed window counts the outlets that existed, were active and KYC-approved then (an outlet
+gets a slot only in the windows it was in scope for). **Exports on the screen (admin AND client admin):**
 *Export Excel* = one window (pick one when the month has several); *Export <month>* = the whole selected month
-(background → Downloads page). Response also carries `portalGoLive` (ISO / null).
+(background → Downloads page). Response also carries `portalGoLive` (ISO / null) and, when a closed window is selected,
+`pastWindowScopeNote`. The client-admin page (`/admin/visibility-reports`) is CLIENT_ADMIN-only like its routes: hidden
+from the MIS_USER nav, and a direct visit by another role reads "Visibility reports are available to client admins".
 
 **Admin tile** (`GET /v1/admin/dashboard/kpis?visibilityMonth=`): `pendingVisibility` = **every** in-scope capture still
 **Waiting for review, any month** (Gifsy's whole queue — an older capture still waiting is never dropped);
@@ -439,7 +450,8 @@ Export kind `visibility-captures` (`api/src/exports/kinds/batch1/visibility-capt
 - **Sheet "Review history"** — one row per submitted version per photo (`VisibilityCaptureSubmission` + its
   `photoReviews` snapshot). An older version without a snapshot reads "Not recorded". Imported captures have no
   submission rows. Full who/when history for whole-capture rejects is recorded from the next release (noted on About).
-- **Sheet "Not captured"** — in-scope outlets (`visibilityUniverseWhere` with its `activeDuring` option — §17.1) with
+- **Sheet "Not captured"** — in-scope outlets PER WINDOW (`visibilityWindowUniverseWhere` — §17.1, the same call as the
+  report screen; About states the KYC-date rule + how many outlets used the creation-date fallback) with
   no capture for an expected window: assigned ACTIVE rep(s) + manager; status **"Not captured yet"** (window open, IST),
   **"Missed"** (closed) or **"Not started"** (not begun). Expected windows = the CURRENT frequency's windows only
   (history not stored). Old-app windows per the §17.1 go-live rule: an 'old' window → one row "Not tracked for imported
@@ -513,6 +525,8 @@ Export kind `visibility-captures` (`api/src/exports/kinds/batch1/visibility-capt
 - **Lost-update guard:** `persistReview` writes the capture only if it is still the row that was read (same status,
   version, `updatedAt`) — Postgres re-checks under the row lock; a loser gets **409 "This visit was just changed by
   someone else — reload"** and writes no event. Approving an already-approved photo is a no-op (no second event).
+  The **resubmit** has the same guard against the row it read (status, version, `updatedAt`): if a review landed in
+  between, **409 "This visit was just reviewed — reload"** and nothing is written (no version, no event).
 - **Imported captures in the dialog:** `GET /captures/:id` returns `imported: true` and nulls `approvedBy`; the header
   reads "Imported — old app approval on <date>" and the timeline never names the importing admin.
 - **Tenant wipe:** `api/prisma/wipe-tenant-data.ts` deletes `VisibilityReviewEvent` first in the Visibility tree.

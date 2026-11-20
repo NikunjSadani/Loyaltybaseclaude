@@ -22,9 +22,11 @@ import {
   classifyWindowAgainstGoLive,
   isImportedMonthRule,
   isImportedVisibilityCapture,
-  isImportedVisibilityKey,
   isVisibilityImportedMonth,
-  visibilityPortalGoLiveMonth,
+  clearVisibilityGoLiveCache,
+  noteVisibilityPortalCapture,
+  goLiveMonthOf,
+  visibilityPortalGoLive,
 } from './visibility-portal-go-live';
 import { outletMasterFencePolicy } from './geo-fence.helper';
 import { VISIBILITY_WORDS, visibilityStatusWords } from './visibility-report-labels';
@@ -413,9 +415,7 @@ describe('review ACTIONS in a window (digest)', () => {
 
 describe('imported (old-app) history — visibility-portal-go-live (the one module)', () => {
   it('an imported capture = a photo stored under /vendor-import/ (not "no submitting rep")', () => {
-    expect(isImportedVisibilityKey('visibility-media/bajaj/vendor-import/prod/x/A1/2025-06_v1.jpg')).toBe(true);
-    expect(isImportedVisibilityKey('visibility-media/bajaj/2026-11/A1/w1.jpg')).toBe(false);
-    expect(isImportedVisibilityKey('visibility-media/bajaj/not-vendor-import-ish.jpg')).toBe(false);
+    expect(isImportedVisibilityCapture({ w1: 'visibility-media/bajaj/not-vendor-import-ish.jpg' })).toBe(false);
     expect(isImportedVisibilityCapture({ w1: 'visibility-media/bajaj/vendor-import/a.jpg' })).toBe(true);
     expect(isImportedVisibilityCapture({ w1: { key: 'visibility-media/bajaj/vendor-import/a.jpg' } })).toBe(true);
     expect(isImportedVisibilityCapture({ w1: { key: 'visibility-media/bajaj/2026-11/a.jpg' }, note: 'hi' })).toBe(false);
@@ -435,16 +435,52 @@ describe('imported (old-app) history — visibility-portal-go-live (the one modu
     const $queryRaw = jest.fn().mockResolvedValue([{ goLive: new Date('2026-09-30T19:00:00Z') }]);
     const count = jest.fn();
     const prisma = { $queryRaw, visibilityCapture: { count } } as any;
-    expect(await visibilityPortalGoLiveMonth(prisma, 't1')).toBe('2026-10');
+    clearVisibilityGoLiveCache();
+    expect(goLiveMonthOf(await visibilityPortalGoLive(prisma, 't1'))).toBe('2026-10');
     expect(await isVisibilityImportedMonth(prisma, 't1', '2026-09')).toBe(true);
     expect(await isVisibilityImportedMonth(prisma, 't1', '2026-10')).toBe(false);
     expect(count).not.toHaveBeenCalled();
 
     $queryRaw.mockResolvedValue([{ goLive: null }]);
+    clearVisibilityGoLiveCache('t1');
     count.mockResolvedValueOnce(12).mockResolvedValueOnce(0);
     expect(await isVisibilityImportedMonth(prisma, 't1', '2025-06')).toBe(true);
     expect(await isVisibilityImportedMonth(prisma, 't1', '2026-11')).toBe(false);
     expect(count.mock.calls[0][0]).toEqual({ where: { clientId: 't1', windowKey: { startsWith: '2025-06-P' } } });
+  });
+
+  it('go-live is cached per tenant for 5 minutes (one aggregate per load, not per window / outlet); clear drops it', async () => {
+    clearVisibilityGoLiveCache();
+    const $queryRaw = jest.fn().mockResolvedValue([{ goLive: new Date('2026-11-05T09:31:00Z') }]);
+    const prisma = { $queryRaw } as any;
+    const t0 = Date.parse('2026-11-20T06:00:00Z');
+    await visibilityPortalGoLive(prisma, 'a', t0);
+    await visibilityPortalGoLive(prisma, 'a', t0 + 60_000);
+    await visibilityPortalGoLive(prisma, 'a', t0 + 4 * 60_000);
+    expect($queryRaw).toHaveBeenCalledTimes(1);
+    await visibilityPortalGoLive(prisma, 'b', t0); // per tenant
+    expect($queryRaw).toHaveBeenCalledTimes(2);
+    await visibilityPortalGoLive(prisma, 'a', t0 + 5 * 60_000); // TTL expired
+    expect($queryRaw).toHaveBeenCalledTimes(3);
+    clearVisibilityGoLiveCache('a'); // a portal capture was created
+    $queryRaw.mockResolvedValue([{ goLive: new Date('2026-11-01T09:31:00Z') }]);
+    expect((await visibilityPortalGoLive(prisma, 'a', t0 + 5 * 60_000 + 1))?.toISOString()).toBe('2026-11-01T09:31:00.000Z');
+    expect($queryRaw).toHaveBeenCalledTimes(4);
+  });
+
+  it('a new portal capture drops the cache only when the tenant had no go-live yet', async () => {
+    clearVisibilityGoLiveCache();
+    const $queryRaw = jest.fn().mockResolvedValue([{ goLive: null }]);
+    const prisma = { $queryRaw } as any;
+    const t0 = Date.parse('2026-11-20T06:00:00Z');
+    expect(await visibilityPortalGoLive(prisma, 'n', t0)).toBeNull();
+    noteVisibilityPortalCapture('n');
+    $queryRaw.mockResolvedValue([{ goLive: new Date('2026-11-20T05:59:00Z') }]);
+    expect(await visibilityPortalGoLive(prisma, 'n', t0 + 1)).not.toBeNull();
+    expect($queryRaw).toHaveBeenCalledTimes(2);
+    noteVisibilityPortalCapture('n'); // already live → cache kept
+    await visibilityPortalGoLive(prisma, 'n', t0 + 2);
+    expect($queryRaw).toHaveBeenCalledTimes(2);
   });
 
   it('per window: old (ended before go-live) / part-old (began before go-live or holds imported) / portal', () => {

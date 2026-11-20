@@ -847,29 +847,6 @@ export interface VisibilityCaptureDetail extends VisibilityCapture {
 // Coverage report (GET /report, /report/tenant)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Coverage summary for a window — captured / pending / rejected / missed + %. */
-export interface VisibilityCoverageSummary {
-  denominator: number;
-  captured: number;
-  pending: number;
-  rejected: number;
-  missed: number;
-  coveragePct: number;
-}
-
-/** GET /report (+ /report/tenant) — window coverage report (D15). */
-export interface VisibilityReport {
-  windowKey: string;
-  windowClosed: boolean;
-  frequencyPerMonth: number;
-  outletScope: string[];
-  /** APPLIES-TO program narrowing — present only when non-empty (absent = every program). */
-  programs?: string[];
-  /** APPLIES-TO sub-program narrowing — present only when non-empty (absent = every sub-program). */
-  subPrograms?: string[];
-  summary: VisibilityCoverageSummary;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // PURE form-logic helpers — the SAME rules the backend enforces at submit
 // (mirrors evaluateClause / evaluateVisibleWhen / isFieldRequired /

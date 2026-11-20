@@ -74,11 +74,17 @@ export function visibilityUniverseWhere(
   cfg: VisibilityProgramScopeLike & { outletScope: ReadonlyArray<string> },
   opts: {
     /**
-     * A PAST period [start, end) instead of today (the Excel report's "Not captured" sheet): outlets that EXISTED and
-     * were in scope during it — created before `end`, and either active today or deactivated only after `start`
-     * (deactivation flips isActive off, and only an active outlet can be deactivated, so a later-deactivated outlet
-     * was KYC-approved then). Outlet type / programme / KYC intent are today's values (their history is not kept).
-     * Omitted → today's universe (every other caller).
+     * A CLOSED period [start, end) instead of today: outlets a rep could have been asked to capture THEN —
+     *   - created before `end`;
+     *   - active today, or deactivated only after `start` (deactivation flips isActive off and only ever hits an
+     *     active outlet);
+     *   - KYC-approved before `end`: KYC approval is what brings a partner's outlets live (kyc.service approve →
+     *     outlet.updateMany isActive:true), so the outlet's partner must have a KycSubmission with `approvedAt < end`.
+     *     FALLBACK (stated on the Excel About sheet + the report screen): an outlet with no partner, or whose partner
+     *     has no KYC submission with an approval date (imported / bulk-loaded live), has no approval timestamp —
+     *     its creation date is used instead (`createdAt < end`, above). {@link VISIBILITY_NO_KYC_DATE_WHERE}.
+     * Outlet type / programme / KYC intent are today's values (their history is not kept).
+     * Omitted → today's universe (every other caller, and every open / not-started window).
      */
     activeDuring?: { start: Date; end: Date };
   } = {},
@@ -94,10 +100,38 @@ export function visibilityUniverseWhere(
       AND: [
         { OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }] },
         { OR: [{ isActive: true, deactivatedAt: null }, { deactivatedAt: { gt: start } }] },
+        { OR: [{ partner: { kycSubmissions: { some: { approvedAt: { lt: end } } } } }, VISIBILITY_NO_KYC_DATE_WHERE] },
       ],
     },
     cfg,
   );
+}
+
+/**
+ * Outlets with NO KYC approval timestamp (no partner, or the partner has no KycSubmission with an `approvedAt` —
+ * imported / bulk-loaded live). For a closed window their creation date stands in for the approval date.
+ */
+export const VISIBILITY_NO_KYC_DATE_WHERE: Prisma.OutletWhereInput = {
+  OR: [{ partnerId: null }, { partner: { kycSubmissions: { none: { approvedAt: { not: null } } } } }],
+};
+
+/** The plain sentence the Excel About sheet and the report screen show about the fallback above. */
+export const VISIBILITY_KYC_DATE_FALLBACK_NOTE =
+  'For a closed window an outlet counts only if it existed and its KYC was approved before the window ended. Outlets with no KYC approval date on record (brought in already live, e.g. imported) use the date they were added instead.';
+
+/**
+ * THE per-window universe — the report screen AND the Excel "Not captured" sheet call this for every window, so both
+ * count the same outlets: a CLOSED window uses the past-period rule (`activeDuring` = that window); an open or
+ * not-started window uses today's rule.
+ */
+export function visibilityWindowUniverseWhere(
+  clientId: string,
+  cfg: VisibilityProgramScopeLike & { outletScope: ReadonlyArray<string> },
+  window: { start: Date; end: Date; closed: boolean },
+): Prisma.OutletWhereInput {
+  return window.closed
+    ? visibilityUniverseWhere(clientId, cfg, { activeDuring: { start: window.start, end: window.end } })
+    : visibilityUniverseWhere(clientId, cfg);
 }
 
 /**
