@@ -258,7 +258,7 @@ header comment ↔ platform `auth-refresh.ts`, pinned by invariant tests on both
   suspended vendor, revoked staff grant) are not re-run on a handoff; each of those flows stamps + sweeps the
   user, which excludes the successor (`revokedAt` / `sessionsInvalidBefore`).
 
-#### 2026-11-20 — logout-risk round (C1–M4) + security re-audit (S-H1, S-L2, S-L6) — CURRENT DESIGN
+#### 2026-11-20 — logout-risk round (C1–M4) + security re-audit (S-H1, S-L2, S-L6) — partly SUPERSEDED by the final round below
 > Supersedes the H4 "stored pair, < 60 min" rule and the post-recovery auto-reload above.
 
 **Owner requirement:** "users very likely shift to another app; this must NOT make them log in."
@@ -313,7 +313,7 @@ lineage forward (`rotatedFromId`, ≤ 50 hops) to the live tip and:
   page's skipped session check on `expired=1` is therefore only ever reached with a dead session).
 - **H1:** wrong/expired redemption OTP → 400 (was 401). Every session 401 carries `x-auth-failure: session`
   (proxy + API `JwtAuthGuard`); `SessionExpiryGuard` ignores 401s without it. Login OTP 401s stay under
-  `/api/auth/*` (always ignored by the guard). KYC / scheme OTPs were already 400.
+  `/api/auth/*` (always ignored by the guard). [Correction, final round: KYC consent and scheme OTPs were 401 too — now 400.]
 - **H2/H3:** no automatic reload after recovery (unsaved input, camera-captured POSM photos); the banner
   clears and a `session:restored` window event lets a page opt in to re-fetch.
 - **H4:** the guard's refresh exchange has a 7 s timeout (a stuck request no longer holds the Web Lock).
@@ -346,3 +346,83 @@ Today `user_sessions.token` / `refreshToken` hold the live access/refresh tokens
    rotating the successor forward (like C1's renew-forward) for in-grace siblings too.
 4. Rollout: dual-write hash + plaintext for one release, backfill hashes, switch reads, then null the
    plaintext columns. Migration + code change on the hottest auth path → own build + dual audit.
+
+#### 2026-11-20 — final round (lane A security + lane B logout) — CURRENT DESIGN
+> Supersedes in the section above: "second handback → strict kill", "device mismatch → strict kill", the
+> 2-per-24 h alarm, the version-sensitive fingerprint, "KYC / scheme OTPs were already 400" (they were 401;
+> now 400), and the 7 s guard timeout.
+
+**Owner rule:** app switching must NEVER force a login; detection of real theft must stay.
+
+**Post-grace replay of a rotated token — decision order** (`AuthService.handbackUnusedSuccessor`):
+1. Within 6 s of a handback in this lineage (the replayed token's own `handedBackAt` or a later link's) →
+   converge on the live tip's stored pair; audited `AUTH_EVENT REFRESH_HANDOFF_REPEAT` (M-1, LOW2). Checked
+   BEFORE the "used" check, like the holder in-grace path.
+2. The replayed token was itself handed back earlier (outside its 6 s) → 401 + this lineage ends +
+   `SECURITY_EVENT refresh_handback_refused / handed_back_token_replayed` (LOW1).
+3. No live tip → strict reuse kill (all sessions, stamp, `SECURITY_EVENT refresh_token_reuse`).
+4. Any link USED → strict reuse kill (thief detection).
+5. Tip naturally expired → plain 401.
+6. Fingerprint UNKNOWN (no client UA — older frontend, or untrusted header) → plain 401, no alarm, no kill.
+7. Fingerprint MISMATCH → 401 + THIS lineage ends + `SECURITY_EVENT … device_mismatch` — no all-device kill.
+8. ≥ 5 handbacks in this lineage within 24 h → 401 + this lineage ends + `SECURITY_EVENT … handback_cap_reached`.
+9. Otherwise renew forward from the live tip (conditional claim: unused, never handed back). This may repeat
+   when the handback REPLY itself was lost (H-A a) — as long as the newest tip is unused and the device matches.
+- "Ends this lineage" = revoke the replayed token's descendants only (the device that presented it must sign in
+  again; whoever else holds that lineage — e.g. a thief who rotated first — is cut off). The user's OTHER devices
+  have their own lineages and stay signed in.
+- After a COMMITTED handback nothing else runs before the response: audit row, 24 h count and the repeat alarm
+  (`SECURITY_EVENT repeated_unused_successor_handoff` at ≥ 5 per user per 24 h) run in the background; a failed
+  write is logged and counted (`handbackAuditFailures`).
+
+**Device fingerprint (M-2):** SHA-256 of browser FAMILY + OS FAMILY + mobile flag (no version numbers) — a
+Chrome / iOS / Android update does not change it. Built from the browser's `x-client-*` headers when our Next
+server forwards them WITH the internal secret; a trusted call without them → UNKNOWN; an untrusted/direct call →
+the request's own User-Agent.
+
+**Server-to-server secret (security MED):** `x-gifsy-no-first-use` and `x-client-*` are honoured by the API only
+with `x-internal-proxy-secret` = env `INTERNAL_PROXY_SECRET` (constant-time compare). Fail-safe while unset:
+first use is always marked; fingerprints come from the request's own UA. The proxy strips all of these headers
+(and the secret header) from client input.
+- ⚠️ Until the secret is configured on BOTH services, browser refreshes reach the API with Node's User-Agent
+  (the Next server's) — every browser then has the SAME fingerprint, so device binding is effectively OFF
+  (handbacks still require an unused tip; strict kill on use is unaffected). Configure it with the deploy.
+
+**Required env / secret wiring (owner / coordinator adds; NOT done in this branch):**
+1. Create Secret Manager secrets (random, ≥ 32 chars, generated without a trailing newline, e.g.
+   `openssl rand -hex 32 | tr -d '\n'`): `INTERNAL_PROXY_SECRET_STAGING` and `INTERNAL_PROXY_SECRET` (prod).
+2. `deploy-staging.yml`: add `INTERNAL_PROXY_SECRET=INTERNAL_PROXY_SECRET_STAGING:latest` to `--set-secrets`
+   of BOTH `gcloud run deploy gifsy-api-staging` AND `gcloud run deploy gifsy-frontend-staging`; add it to the
+   staging secrets preflight list.
+3. `deploy.yml` (prod): same — `INTERNAL_PROXY_SECRET=INTERNAL_PROXY_SECRET:latest` on BOTH `gifsy-api` and
+   `gifsy-frontend` deploys; add to the prod preflight list.
+4. Grant the API and frontend runtime service accounts `roles/secretmanager.secretAccessor` on the new secrets
+   (same as the other `--set-secrets` entries). Local dev: optional (unset = fail-safe).
+- Not needed by the migrate / worker jobs.
+
+**Logout-path fixes (lane B):**
+- Guard exchange timeout 10 s (covers browser → route → API; Next→API gives up at 5 s; the API never commits
+  later than 4 s after receipt). `AbortSignal.timeout` falls back to `AbortController` + timer (older Safari, M-3).
+- While the session is alive-but-unreachable, callers get a typed transient error (503, `transient: true`,
+  `x-session-transient: 1`, "Connection problem — please retry.") instead of the raw 401 — downloads, Voucher
+  Dispersal and Sales Import show that text, never "your session has expired".
+- Reconnecting page: "Sign in again" link appears after ~2 min (user's choice); auto-retry stops after 30 min
+  (Retry still works).
+- Wrong / expired OTPs are 400 everywhere outside `/api/auth/*`: redemption, scheme enrollment, KYC consent.
+
+**Residual risks (precise):**
+- The fingerprint is a COARSE device class, not a secret: a thief who has the victim's (old) refresh cookie AND
+  uses the same browser family on the same OS family (e.g. Chrome on Android) passes the device check. Such a
+  thief can take over a lineage only while its newest session is UNUSED (the victim lost the response or is
+  offline). The victim's next request with the old token then either converges (within 6 s) or finds the tip
+  used by the thief → strict kill of every session + alarm. At most 5 handbacks per lineage per day; ≥ 5 per
+  user per day alarms.
+- A thief with a different device class gets nothing (401) and the attempt ends that lineage — if the victim
+  was using that lineage, the victim's device must sign in again (a thief can cause that one-device logout,
+  never an all-device one).
+- A thief who rotates FIRST from a stolen LIVE token (classic race): the victim's next refresh is a replay;
+  same device class + thief hasn't used it yet → the victim is renewed forward and the thief's session is
+  revoked by that rotation; thief used it → strict kill + alarm; different device class → lineage ends (thief
+  cut off) + alarm, victim signs in again on that device.
+- Until `INTERNAL_PROXY_SECRET` is set on both services, device binding is off for browser traffic (see above).
+- LOW4 (pre-existing, from the re-audit): acknowledged, no change in this branch.
