@@ -232,7 +232,7 @@ header comment ↔ platform `auth-refresh.ts`, pinned by invariant tests on both
 - **H3/M1/M2/L3:** `SessionExpiryGuard`: a transient refresh is handled ONCE per refresh outcome (not per
   waiting caller), never logs out, shows a `role=status` "Reconnecting…" banner with "Retry now", retries in
   the background with backoff (2/4/8/16/30 s), waits for the `online` event when offline, and after recovery
-  reloads ONCE (≤ 1 per 10 min) — never if the user typed on the page (banner instead). Any successful
+  reloads ONCE (≤ 1 per 10 min) [⚠️ SUPERSEDED: no automatic reload any more — see next section] — never if the user typed on the page (banner instead). Any successful
   `/api` response clears it. A background retry that finds the session dead → login.
 - **M4:** refreshes are serialised across tabs (Web Lock `gifsy-session-refresh`); a tab that waited skips
   its exchange if another tab refreshed < 5 s ago (shared cookie jar).
@@ -241,7 +241,7 @@ header comment ↔ platform `auth-refresh.ts`, pinned by invariant tests on both
   holds the old token; its retry within 6 s gets the successor (grace), and since H4 a later replay gets it
   while unused (< 60 min); only a replay after the successor was used is treated as theft.
 
-**H4 — owner decision 2026-11-20 (middle option), implemented**
+**H4 — owner decision 2026-11-20 (middle option)** — ⚠️ SUPERSEDED by the next section (renew-forward, device binding, one handback, no 60-min cap)
 - A revoked refresh token replayed OUTSIDE the 6 s grace is handed back its successor's STORED pair (no new
   rotation, no chain fork) **only while that successor has never been used**: `user_sessions.firstUsedAt IS
   NULL` (set ONCE, awaited, by the JWT guard on the first request authenticated with the successor's access
@@ -257,3 +257,92 @@ header comment ↔ platform `auth-refresh.ts`, pinned by invariant tests on both
   served) keeps the lenient window open for that session until its 60-min bound. Gates (deactivated partner,
   suspended vendor, revoked staff grant) are not re-run on a handoff; each of those flows stamps + sweeps the
   user, which excludes the successor (`revokedAt` / `sessionsInvalidBefore`).
+
+#### 2026-11-20 — logout-risk round (C1–M4) + security re-audit (S-H1, S-L2, S-L6) — CURRENT DESIGN
+> Supersedes the H4 "stored pair, < 60 min" rule and the post-recovery auto-reload above.
+
+**Owner requirement:** "users very likely shift to another app; this must NOT make them log in."
+
+**Never-used-successor handback (H4 → C1 + S-H1), how it works now.** A rotated refresh token replayed
+OUTSIDE the 6 s grace (typically: the response that carried its successor was lost on an app switch) walks the
+lineage forward (`rotatedFromId`, ≤ 50 hops) to the live tip and:
+1. **Strict kill** (revoke all + stamp + `SECURITY_EVENT refresh_token_reuse`, with a `reason`) if ANY link was
+   USED — `firstUsedAt` set by (a) the JWT guard on the first request authenticated with that session's
+   access token (sid-bound tokens only, set once, awaited, per-instance memo; NOT for server calls flagged
+   `x-gifsy-no-first-use`, which the Next server actions send when they use a token the proxy minted in the
+   same request), or (b) the session's own holder refreshing it (the normal claim now sets it).
+2. **Device binding (S-H1a):** every refresh-minted session stores `createdFingerprint` = SHA-256 of the
+   browser User-Agent + `sec-ch-ua-platform` + `sec-ch-ua-mobile` (forwarded by the proxy / route handler as
+   `x-client-*`; the API's own UA would be Node's). A handback requires the replaying request's fingerprint to
+   equal the FIRST successor's creator fingerprint; mismatch or missing → strict kill (`device_mismatch`).
+3. **At most one handback per step (S-H1b):** the renewal claims the tip CONDITIONALLY (`revokedAt`,
+   `firstUsedAt`, `handedBackAt` all NULL) and stamps `handedBackAt`. A later replay of the same old token →
+   strict kill (`second_handback`); only a concurrent replay of the SAME resume (within 6 s of the handback)
+   converges on the renewed pair.
+4. **Renew forward (C1):** otherwise the tip is rotated with the normal rules (gates, in-tx logout-all check,
+   deadline) → the client gets a FRESH pair; single lineage; no age cap — bounded only by the tip's 30-day
+   sliding session (an expired tip → plain 401, no alarm).
+5. **Audit (S-H1c):** each handback writes `AUTH_EVENT` / `REFRESH_HANDOFF_UNUSED_SUCCESSOR` with its own
+   AuditAction `REFRESH_HANDOFF`; ≥ 2 handbacks for one user within 24 h → `SECURITY_EVENT
+   repeated_unused_successor_handoff`. The Daily Ops Digest has a Gifsy-wide "Sign-in security" line: reuse
+   kills, users with repeated handbacks, failed first-use marks (S-L2: a failed mark is logged as an error and
+   written as `AUTH_EVENT first_use_mark_failed`).
+
+**S-H1(d) — residual risk, precisely (for the owner).** What a thief can still do:
+- With the victim's refresh cookie AND the victim's exact User-Agent + client-hint headers (the fingerprint is
+  a header hash, not a device secret — it can be copied by anyone who sees the victim's request headers,
+  e.g. the same malware/proxy that stole the cookie): if the cookie is an OLD (rotated) token whose successor
+  the victim has NOT used yet (victim lost the response / offline), the thief can take over that lineage ONCE
+  (one handback per step). The victim's next use of the old token then hits `second_handback` → strict kill
+  (both lose the session, `SECURITY_EVENT`). The victim's next use of a token the thief already used → strict
+  kill. So the thief gets at most one session until the victim returns, and the return is detected.
+- With the victim's CURRENT (live, not yet rotated) refresh cookie: unchanged from classic rotation — whoever
+  refreshes first wins; the other side's next refresh is a replay → if the winner already used the new session
+  (or is on another device) → strict kill + alarm; the device binding stops the "thief rotates first, victim
+  is handed the thief's session, both share it forever" pattern (S-H1).
+- Without the victim's headers: any post-grace replay from another device is a strict kill.
+- Not covered by design: a thief who controls the victim's device/browser (can read everything anyway).
+- Legit edge that still logs out: the same device losing the response of the HANDBACK itself and replaying
+  the old token again > 6 s later (`second_handback`), or a browser update between the rotation and the
+  replay (UA changed → `device_mismatch`). Both are rare; both are owner-visible in the digest.
+
+**Logout-risk fixes (frontend / proxy)**
+- **C2:** a page load whose refresh fails TRANSIENTLY (after the one 200 ms retry) gets a self-contained
+  "Reconnecting…" page (503, no-store) that reloads the SAME URL with backoff (2/4/8/16/30 s, then 60 s;
+  Retry button; on `online` and tab-visible). Only a DEAD refresh goes to `/auth/login?expired=1` (the login
+  page's skipped session check on `expired=1` is therefore only ever reached with a dead session).
+- **H1:** wrong/expired redemption OTP → 400 (was 401). Every session 401 carries `x-auth-failure: session`
+  (proxy + API `JwtAuthGuard`); `SessionExpiryGuard` ignores 401s without it. Login OTP 401s stay under
+  `/api/auth/*` (always ignored by the guard). KYC / scheme OTPs were already 400.
+- **H2/H3:** no automatic reload after recovery (unsaved input, camera-captured POSM photos); the banner
+  clears and a `session:restored` window event lets a page opt in to re-fetch.
+- **H4:** the guard's refresh exchange has a 7 s timeout (a stuck request no longer holds the Web Lock).
+- **M4 / Low:** "Retry now" in every banner state (incl. offline); retries on `online`, tab-visible and focus;
+  after the fast backoff it keeps retrying every 60 s. Copy: "Reconnecting…" only for 503/network/timeout;
+  "Something went wrong" for other statuses; no "unsaved changes kept" claim. Banner moved to the TOP (safe-area)
+  so it never covers bottom navigation or a submit bar.
+
+**Deploy order (M3) — verified in the workflows:** both `deploy-staging.yml` and `deploy.yml` run
+`prisma migrate deploy` as a Cloud Run job with `--execute-now --wait` BEFORE `gcloud run deploy` of the API,
+and the frontend deploys after the API (prod: `needs: deploy-api`; staging: `needs: [test, deploy-api-staging]`).
+Belt-and-braces: the JWT guard now selects only `id` + `expiresAt`, so the per-request hot path never depends
+on the new columns; a first-use mark before the migration would fail loudly and the request still succeeds.
+
+**Migrations (S-L6):** `20261120130000_user_session_first_used_at` (edited in place — never applied anywhere):
+adds `firstUsedAt` and, only in the run that creates it (DO-block guard), backfills `firstUsedAt = createdAt`
+for LIVE sessions (~1.2k rows on prod, one small UPDATE) so pre-deploy sessions never qualify for a handback;
+adds `handedBackAt`, `createdFingerprint`. `20261120130100_audit_action_refresh_handoff`: AuditAction
+`REFRESH_HANDOFF` (own migration — a new enum value can't be used in the transaction that adds it).
+
+**S-M1 — follow-up PROPOSAL (not implemented; owner decision needed): stop storing usable tokens in clear.**
+Today `user_sessions.token` / `refreshToken` hold the live access/refresh tokens in plaintext, so a DB read
+(backup, replica, SQL access) yields working sessions. Proposal:
+1. Store `refreshTokenHash = SHA-256(refreshToken)` (unique index) instead of the token; look up by hash.
+2. Store no access token at all (the JWT is self-contained; the `sid` claim already binds it to the row).
+3. Consequence for the grace/handback design: the in-grace convergence currently RETURNS THE STORED pair of
+   the successor; without stored tokens it must instead MINT a fresh access token for the successor's
+   session and hand back a refresh token — which needs either (a) a second, deterministic refresh secret
+   per session (e.g. HMAC(serverKey, sessionId‖version)) that can be recomputed, or (b) converging by
+   rotating the successor forward (like C1's renew-forward) for in-grace siblings too.
+4. Rollout: dual-write hash + plaintext for one release, backfill hashes, switch reads, then null the
+   plaintext columns. Migration + code change on the hottest auth path → own build + dual audit.
