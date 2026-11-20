@@ -536,7 +536,7 @@ describe('SchemeEnrollmentService', () => {
       mockPrisma.otpCode.update.mockResolvedValue({});
 
       const err = await verify('000000').catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('Invalid OTP. 2 attempt(s) remaining.');
       // ONE conditional UPDATE … RETURNING bound to this row + its cap
       expect(mockPrisma.$queryRaw).toHaveBeenCalledTimes(1);
@@ -553,17 +553,17 @@ describe('SchemeEnrollmentService', () => {
       mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otpE', code: '424242', attempts: 0, maxAttempts: 3 });
       mockPrisma.$queryRaw.mockResolvedValueOnce([{ attempts: 3 }]); // two parallel guesses claimed first
       const err = await verify('000000').catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('Invalid OTP. 0 attempt(s) remaining.');
     });
 
-    it('#3 verify OTP: the "mark used" is conditional — already used → 401 "OTP not found or expired"', async () => {
+    it('#3 verify OTP: the "mark used" is conditional — already used → 400 "OTP not found or expired"', async () => {
       primeSalesStandalone(rosterRow);
       mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otpE', code: '424242', attempts: 0, maxAttempts: 3 });
       mockPrisma.otpCode.updateMany.mockImplementation(async ({ data }: any) =>
         (data?.verifiedAt ? { count: 0 } : { count: 1 }));
       const err = await verify('424242').catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('OTP not found or expired');
       expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
         where: { id: 'otpE', verifiedAt: null }, data: { verifiedAt: expect.any(Date) },
@@ -589,23 +589,23 @@ describe('SchemeEnrollmentService', () => {
       expect(mockPrisma.otpCode.updateMany.mock.calls.filter((c: any[]) => c[0]?.data?.verifiedAt)).toHaveLength(0); // never marked verified
     });
 
-    it('L1 wording: a lost claim on a code that EXPIRED meanwhile → 401 "OTP not found or expired"', async () => {
+    it('L1 wording: a lost claim on a code that EXPIRED meanwhile → 400 "OTP not found or expired"', async () => {
       primeSalesStandalone(rosterRow);
       mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otpE', code: '424242', attempts: 0, maxAttempts: 3 });
       mockPrisma.$queryRaw.mockResolvedValue([]);
       mockPrisma.otpCode.findUnique.mockResolvedValue({ expiresAt: new Date(Date.now() - 1000), verifiedAt: null });
       const err = await verify('424242').catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('OTP not found or expired');
     });
 
-    it('L1 wording: a lost claim on a code that is GONE → 401 "OTP not found or expired"', async () => {
+    it('L1 wording: a lost claim on a code that is GONE → 400 "OTP not found or expired"', async () => {
       primeSalesStandalone(rosterRow);
       mockPrisma.otpCode.findFirst.mockResolvedValue({ id: 'otpE', code: '424242', attempts: 0, maxAttempts: 3 });
       mockPrisma.$queryRaw.mockResolvedValue([]);
       mockPrisma.otpCode.findUnique.mockResolvedValue(null);
       const err = await verify('424242').catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('OTP not found or expired');
     });
 

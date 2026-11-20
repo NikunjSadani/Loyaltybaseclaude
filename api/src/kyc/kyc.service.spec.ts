@@ -6993,7 +6993,7 @@ describe('KycService', () => {
         .consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '123456' })
         .catch((e) => e);
       expect(err).toBeInstanceOf(HttpException);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
     });
 
     it('scopes the OTP lookup to the KYC_CONSENT purpose', async () => {
@@ -7056,7 +7056,7 @@ describe('KycService', () => {
         .catch((e) => e);
 
       expect(err).toBeInstanceOf(HttpException);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
     });
 
@@ -7066,7 +7066,7 @@ describe('KycService', () => {
       const err = await service
         .consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
         .catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('Invalid OTP. 1 attempt(s) remaining.');
       expect(mockPrisma.$queryRaw).toHaveBeenCalledTimes(1);
       expect(mockPrisma.$queryRaw.mock.calls[0][0].values).toEqual(['o3', 3]);
@@ -7079,7 +7079,7 @@ describe('KycService', () => {
       const err = await service
         .consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '000000' })
         .catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('Invalid OTP. 0 attempt(s) remaining.');
     });
 
@@ -7100,7 +7100,7 @@ describe('KycService', () => {
       mockPrisma.$queryRaw.mockResolvedValueOnce([]);
       mockPrisma.otpCode.findUnique.mockResolvedValueOnce({ expiresAt: new Date(Date.now() - 1000), verifiedAt: null });
       const err = await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('OTP not found or expired');
       expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
     });
@@ -7110,7 +7110,7 @@ describe('KycService', () => {
       mockPrisma.$queryRaw.mockResolvedValueOnce([]);
       mockPrisma.otpCode.findUnique.mockResolvedValueOnce(null);
       const err = await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('OTP not found or expired');
     });
 
@@ -7131,7 +7131,7 @@ describe('KycService', () => {
         id: 's1', status: 'DRAFT', userId: 'user1', proposedPartner: null, partner: { phone: '9000000002', ownerName: 'O', outlets: [] },
       });
       const err = await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('OTP not found or expired');
       expect(mockPrisma.otpCode.findFirst).not.toHaveBeenCalled();
       expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
@@ -7145,7 +7145,7 @@ describe('KycService', () => {
       mockPrisma.otpCode.updateMany.mockImplementation(async ({ data }: any) =>
         (data?.verifiedAt ? { count: 0 } : { count: 1 }));
       const err = await service.consent(rep, { submissionId: 's1', mobile: '9000000001', otp: '111111' }).catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(err.message).toBe('OTP not found or expired');
       expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
         where: { id: 'o7', verifiedAt: null }, data: { verifiedAt: expect.any(Date) },
@@ -7222,7 +7222,7 @@ describe('KycService', () => {
         .catch((e) => e);
 
       expect(err).toBeInstanceOf(HttpException);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       expect(mockPrisma.consentRecord.create).not.toHaveBeenCalled();
     });
   });
@@ -8958,7 +8958,7 @@ describe('KycService', () => {
           .consent(isr1, { submissionId: 'sub-1', mobile: '9000000001', otp: '123456' })
           .catch((e: unknown) => e);
         expect(isNotAssigned(err)).toBe(false);
-        expect((err as HttpException).getStatus()).toBe(401); // reached the OTP lookup
+        expect((err as HttpException).getStatus()).toBe(400); // reached the OTP lookup
       });
     });
 
@@ -9221,7 +9221,7 @@ describe('KycService', () => {
           .consent(asm1, { submissionId: 'sub-1', mobile: '9000000001', otp: '123456' })
           .catch((e: unknown) => e);
         expect(isNotAssigned(consented)).toBe(false);
-        expect((consented as HttpException).getStatus()).toBe(401); // reached the OTP lookup
+        expect((consented as HttpException).getStatus()).toBe(400); // reached the OTP lookup
       });
 
       it('the soft-deleted SO themselves is still refused (no live SalesUser)', async () => {
@@ -9895,7 +9895,7 @@ describe('KycService', () => {
       const rowA2 = rows.find((r) => r.code === codeA2 && r.referenceId === 'subA')!;
       expect(rowA2.expiresAt.getTime()).toBeLessThanOrEqual(Date.now()); // A's earlier code is now invalid
       const err = await service.consent(rep, { submissionId: 'subA', mobile: '7795096288', otp: codeA2 }).catch((e) => e);
-      expect(err.getStatus()).toBe(401);
+      expect(err.getStatus()).toBe(400);
       // B's code is still live throughout.
       const rowB = rows.find((r) => r.referenceId === 'subB')!;
       expect(rowB.expiresAt.getTime()).toBeGreaterThan(Date.now());

@@ -6827,9 +6827,13 @@ function mapTxType(type: string): 'earn' | 'redeem' | 'hold' | 'expire' | 'credi
   }
 }
 
-/** 401 Unauthorized for OTP failures (source returned HTTP 401 here). */
+/**
+ * Wrong / expired consent OTP → 400 (was 401). 401 is reserved for SESSION authentication: SessionExpiryGuard
+ * treats a marked 401 as session expiry (refresh / resend / login), which a business OTP failure must never
+ * trigger (auth refresh round, 2026-11-20). The messages are unchanged.
+ */
 class UnauthorizedOtp extends HttpException {
   constructor(message: string) {
-    super(message, 401);
+    super(message, 400);
   }
 }

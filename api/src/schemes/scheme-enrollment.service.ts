@@ -781,7 +781,7 @@ export class SchemeEnrollmentService {
       },
       orderBy: { createdAt: 'desc' },
     });
-    if (!rec) throw new HttpException('OTP not found or expired', HttpStatus.UNAUTHORIZED);
+    if (!rec) throw new HttpException('OTP not found or expired', HttpStatus.BAD_REQUEST);
     if (rec.attempts >= rec.maxAttempts) {
       throw new HttpException('OTP locked due to too many attempts. Request a new OTP.', HttpStatus.TOO_MANY_REQUESTS);
     }
@@ -791,7 +791,7 @@ export class SchemeEnrollmentService {
     if (claimed === null) {
       // Refused: re-read so a code superseded/expired or pruned meanwhile gets the honest message (L1).
       const why = await whyOtpClaimRefused(this.prisma, rec.id);
-      if (why !== 'SPENT') throw new HttpException('OTP not found or expired', HttpStatus.UNAUTHORIZED);
+      if (why !== 'SPENT') throw new HttpException('OTP not found or expired', HttpStatus.BAD_REQUEST);
       throw new HttpException('OTP locked due to too many attempts. Request a new OTP.', HttpStatus.TOO_MANY_REQUESTS);
     }
     const fixedOtp = isFixedOtpAllowed() ? process.env.FIXED_OTP : undefined;
@@ -799,11 +799,11 @@ export class SchemeEnrollmentService {
     if (!matches) {
       // From the atomic claim's post-increment value — exact under parallel guesses (not the stale read).
       const remaining = Math.max(0, rec.maxAttempts - claimed);
-      throw new HttpException(`Invalid OTP. ${remaining} attempt(s) remaining.`, HttpStatus.UNAUTHORIZED);
+      throw new HttpException(`Invalid OTP. ${remaining} attempt(s) remaining.`, HttpStatus.BAD_REQUEST);
     }
-    // Conditional consume: a parallel correct verify that lost the race gets the not-found 401.
+    // Conditional consume: a parallel correct verify that lost the race gets the not-found 400 (never 401: that is reserved for session expiry).
     if (!(await markOtpUsed(this.prisma, rec.id))) {
-      throw new HttpException('OTP not found or expired', HttpStatus.UNAUTHORIZED);
+      throw new HttpException('OTP not found or expired', HttpStatus.BAD_REQUEST);
     }
     return { verified: true, phone };
   }
