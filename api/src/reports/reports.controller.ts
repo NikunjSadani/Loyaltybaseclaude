@@ -8,6 +8,8 @@ import { ReportFormat, ReportRangeQueryDto, TdsReportQueryDto } from './dto/repo
 import { ExportsService } from '../exports/exports.service';
 import { UsageReportQueryDto } from './dto/usage-report.dto';
 import { LocationComplianceQueryDto } from './dto/location-compliance.dto';
+import { RedemptionReportQueryDto } from './dto/redemption-report.dto';
+import { REDEMPTION_LIGHT_MAX_ROWS, resolveRedemptionParams } from './redemptions/redemption-report.query';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -127,6 +129,45 @@ export class ReportsController {
   ) {
     if (query.format === ReportFormat.XLSX) return this.exports.respond(res, user, 'location-compliance', query);
     return this.respond(await this.reports.locationCompliance(user, query));
+  }
+
+  /**
+   * GET /v1/reports/redemptions — on-screen summary for the Reports hub "Redemption report" card (totals, per-status
+   * counts, whether the Excel will be prepared in the background, zone/state picker values).
+   * Roles = the payments-report precedent (money + personal data): GIFSY_ADMIN + CLIENT_ADMIN, NOT MIS_USER.
+   * Tenant: CLIENT_ADMIN / assumed operator pinned to the JWT tenant; un-assumed GIFSY_ADMIN must pass ?clientId=.
+   */
+  @Get('redemptions')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('reports:read')
+  async redemptions(@CurrentUser() user: JwtPayload, @Query() query: RedemptionReportQueryDto) {
+    return this.reports.redemptionSummary(user, query);
+  }
+
+  /**
+   * GET /v1/reports/redemptions/export — the 'redemption-report' Excel kind (Redemptions · Status history · Summary ·
+   * About). ≤ 31 days AND ≤ 5,000 orders streams now (200); a longer range or more orders is prepared on the Downloads
+   * page (202). 0 rows → 404. The default range (current IST month) is filled in HERE so a queued request stores
+   * explicit dates. An un-assumed owner's unknown ?clientId= → 400 (checked by the count).
+   */
+  @Get('redemptions/export')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('reports:read')
+  async redemptionsExport(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: RedemptionReportQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const p = resolveRedemptionParams(query, user, new Date());
+    const raw = { ...query, from: p.from, to: p.to };
+    const orders = await this.reports.redemptionCount(user, raw);
+    if (orders > REDEMPTION_LIGHT_MAX_ROWS) {
+      // Many orders inside a short range: same kind, but always through the Downloads page.
+      const queued = await this.exports.request(user, 'redemption-report', raw, res.req);
+      res.status(202);
+      return queued;
+    }
+    return this.exports.respond(res, user, 'redemption-report', raw);
   }
 
   @Get('kyc-status')

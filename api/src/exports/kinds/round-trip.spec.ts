@@ -71,6 +71,11 @@ const CASES: Record<string, Array<Record<string, unknown>>> = {
     { bucket: 'P0_20', month: '2026-10', program: 'Gold', outletType: 'RETAIL', managerId: 'su-1' },
     { bucket: 'NO_TARGET', month: '2026-11', program: '' },
   ],
+  'redemption-report': [
+    {},
+    { from: '2025-11-01', to: '2025-11-30' },
+    { clientId: 'bajaj', from: '2025-01-01', to: '2025-11-30', status: 'DELIVERED', rewardType: 'CASH', zone: 'West', state: 'Maharashtra' },
+  ],
   'billing-comparison-slower': [
     {},
     { month: '2026-10', program: 'Gold', outletType: 'RETAIL', managerId: 'su-1' },

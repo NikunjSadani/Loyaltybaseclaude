@@ -8,6 +8,8 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
 import { DownloadActionStatus } from '@/components/exports/download-action-status'
+import { REDEMPTION_REPORT_HIDDEN_ROLES, RedemptionReportCard } from './redemption-report-card'
+import { useAdminSession } from '@/lib/admin-session'
 
 interface ReportConfig {
   id: string
@@ -20,6 +22,8 @@ interface ReportConfig {
   href?: string
   /** Listed only when this probe answers `{ enabled: true }` — same roles as the report itself (round-3 #1). */
   enabledProbe?: string
+  /** Rendered by its own card component (filters + live summary) instead of the generic ReportCard. */
+  custom?: 'redemption'
 }
 
 const allReports: ReportConfig[] = [
@@ -34,6 +38,7 @@ const allReports: ReportConfig[] = [
   { id: 'billing-trends', name: 'Billing Trends Report', description: 'Month-over-month billing by channel partner class, territory, and SKU', category: 'business', endpoint: '/api/reports/billing-trends', filters: ['dateFrom', 'dateTo', 'partnerClass', 'state', 'skuCode'] },
   { id: 'scheme-performance', name: 'Scheme Performance Report', description: 'Target vs achievement per scheme, with payout accrued and eligibility rate', category: 'business', endpoint: '/api/reports/scheme-performance', filters: ['schemeId', 'dateFrom', 'dateTo', 'partnerClass'] },
   { id: 'target-vs-sales', name: 'Target vs Sales Performance', description: 'Target vs actual per outlet, month, and KPI over a selected period (preview up to 3 months on screen; download up to 15 months). Months with no uploaded data appear as blank cells.', category: 'business', endpoint: '/api/admin/reports/target-vs-sales', href: '/admin/reports/target-vs-sales', filters: [] },
+  { id: 'redemption-report', name: 'Redemption report', description: 'Every redemption order with stage times, outlet, sales hierarchy, delivery tracking and cash payout reference', category: 'business', endpoint: '/api/reports/redemptions/export', filters: [], custom: 'redemption' },
   { id: 'sku-performance', name: 'SKU Performance Report', description: 'Sales volume and value by SKU across channel partner types', category: 'business', endpoint: '/api/reports/sku-performance', filters: ['dateFrom', 'dateTo', 'category', 'state'] },
   { id: 'outlet-growth', name: 'Outlet Growth Report', description: 'New outlet activations, KYC conversions, and inactive outlet tracking', category: 'business', endpoint: '/api/reports/outlet-growth', filters: ['dateFrom', 'dateTo', 'partnerClass', 'state'] },
   // Finance
@@ -146,7 +151,11 @@ export default function ReportsPage() {
   // (GIFSY_ADMIN / MIS_USER / CLIENT_ADMIN), so the tile shows exactly when the report would answer. Hidden until the
   // probe answers and on any failure — switch-off tenants (Deoleo) see the list unchanged.
   const enabled = useEnabledProbes(allReports)
-  const reports = allReports.filter((r) => !r.enabledProbe || enabled[r.enabledProbe] === true)
+  // The Redemption report is GIFSY_ADMIN / CLIENT_ADMIN only (API @Roles) — hidden for MIS users.
+  const { role } = useAdminSession()
+  const reports = allReports
+    .filter((r) => !r.enabledProbe || enabled[r.enabledProbe] === true)
+    .filter((r) => r.custom !== 'redemption' || !REDEMPTION_REPORT_HIDDEN_ROLES.includes(role))
   const categories = ['all', 'operational', 'business', 'finance', 'engagement']
   const filtered = activeCategory === 'all' ? reports : reports.filter(r => r.category === activeCategory)
 
@@ -170,7 +179,7 @@ export default function ReportsPage() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-        {filtered.map(report => <ReportCard key={report.id} report={report} />)}
+        {filtered.map(report => report.custom === 'redemption' ? <RedemptionReportCard key={report.id} /> : <ReportCard key={report.id} report={report} />)}
       </div>
     </div>
   )
