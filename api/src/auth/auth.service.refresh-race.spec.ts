@@ -415,26 +415,38 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
     const DAY = 24 * 60 * 60_000;
     seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0', createdAt: new Date(Date.now() - 4 * DAY), revokedAt: new Date(Date.now() - 3 * DAY) });
-    seedSession(db, { id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', rotatedFromId: 's0', createdAt: new Date(Date.now() - 3 * DAY) });
+    seedSession(db, {
+      id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', rotatedFromId: 's0', createdAt: new Date(Date.now() - 3 * DAY),
+      createdFingerprint: 'fp-victim', firstUsedAt: new Date(Date.now() - 3 * DAY), // the victim has been USING s1
+    });
     const { svc } = buildService(db);
 
-    await expect(svc.refreshToken('R0')).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(svc.refreshToken('R0', { fingerprint: 'fp-victim' })).rejects.toBeInstanceOf(UnauthorizedException);
 
     expect(db.liveSessions('u1')).toHaveLength(0); // the live successor s1 is killed, not handed out
     expect(db.users.get('u1')!.sessionsInvalidBefore).toBeInstanceOf(Date);
     expect(db.audit.filter((a) => a.metadata?.event === 'refresh_token_reuse')).toHaveLength(1);
   });
 
-  it('B2/H4 bound: refresh response LOST, client returns 70 min later (successor older than the 60-min window) → forced re-login', async () => {
+  it.each([
+    ['70 minutes', 70 * 60_000],
+    ['2 days', 2 * 24 * 60 * 60_000],
+  ])('C1: refresh response LOST (app switch), same device returns %s later with the OLD token → renewed forward, stays logged in', async (_l, ago) => {
     const db = new FakeDb();
     seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
-    // R0 was rotated to R1 70 minutes ago; the browser never received R1 (lost response).
-    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0', createdAt: new Date(Date.now() - 2 * 60 * 60_000), revokedAt: new Date(Date.now() - 70 * 60_000) });
-    seedSession(db, { id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', rotatedFromId: 's0', createdAt: new Date(Date.now() - 70 * 60_000) });
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0', createdAt: new Date(Date.now() - ago - 60 * 60_000), revokedAt: new Date(Date.now() - ago) });
+    seedSession(db, { id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', rotatedFromId: 's0', createdAt: new Date(Date.now() - ago), createdFingerprint: 'fp-phone' });
     const { svc } = buildService(db);
 
-    await expect(svc.refreshToken('R0')).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(db.liveSessions('u1')).toHaveLength(0);
+    const res = await svc.refreshToken('R0', { fingerprint: 'fp-phone' });
+
+    expect(res.refreshToken).not.toBe('R1'); // a FRESH pair (renewed forward), not the stale stored one
+    expect(db.createCount).toBe(1);
+    const live = db.liveSessions('u1');
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({ rotatedFromId: 's1', refreshToken: res.refreshToken, createdFingerprint: 'fp-phone' });
+    expect(db.sessions.get('s1')!.handedBackAt).toBeInstanceOf(Date);
+    expect(db.audit.filter((a) => a.entityType === 'SECURITY_EVENT')).toHaveLength(0);
   });
 
   // ── S2: a logout-all style stamp + sweep inside ONE transaction vs a concurrent refresh ─────
@@ -570,65 +582,93 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     expect(CLIENT_TIMEOUT_MS + RETRY_DELAY_MS + 500 /* transit */).toBeLessThanOrEqual(ROTATION_GRACE_MS);
   });
 
-  // ── H4 (owner decision 2026-11-20): a NEVER-USED successor is handed back after grace ─────────
+  // ── H4 / C1 / S-H1 (owner decisions 2026-11-20): never-used successor, made safe ─────────────
   const lostResponseSetup = (successorUsed: boolean) => {
     const db = new FakeDb();
     seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
-    // R0 rotated to R1 30s ago; the client never received R1 (lost response) — or did and used it.
+    // R0 rotated to R1 30s ago on the phone (fp-phone); the phone never received R1 — or did and used it.
     seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0', revokedAt: new Date(Date.now() - 30_000) });
     seedSession(db, {
       id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', token: 'A1', rotatedFromId: 's0',
-      createdAt: new Date(Date.now() - 30_000), firstUsedAt: successorUsed ? new Date(Date.now() - 20_000) : null,
+      createdAt: new Date(Date.now() - 30_000), createdFingerprint: 'fp-phone',
+      firstUsedAt: successorUsed ? new Date(Date.now() - 20_000) : null,
     });
     return db;
   };
 
-  it('H4: lost response, old token replayed 30s later, successor NEVER used → handed back the stored successor pair (no kill, info audit)', async () => {
-    const db = lostResponseSetup(false);
-    const { svc } = buildService(db);
-
-    await expect(svc.refreshToken('R0')).resolves.toEqual({ accessToken: 'A1', refreshToken: 'R1' });
-
-    expect(db.createCount).toBe(0); // converged — no new rotation, no chain fork
-    expect(db.liveSessions('u1').map((r) => r.id)).toEqual(['s1']);
-    expect(db.users.get('u1')!.sessionsInvalidBefore).toBeNull();
-    expect(db.audit.filter((a) => a.entityType === 'SECURITY_EVENT')).toHaveLength(0);
-    expect(db.audit.filter((a) => a.metadata?.event === 'REFRESH_HANDOFF_UNUSED_SUCCESSOR')).toHaveLength(1);
-  });
-
-  it('H4: successor already USED → strict: the old-token replay kills everything + SECURITY_EVENT', async () => {
+  it('H4: successor USED → strict: the old-token replay kills everything + SECURITY_EVENT', async () => {
     const db = lostResponseSetup(true);
     const { svc } = buildService(db);
 
-    await expect(svc.refreshToken('R0')).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(svc.refreshToken('R0', { fingerprint: 'fp-phone' })).rejects.toBeInstanceOf(UnauthorizedException);
     expect(db.liveSessions('u1')).toHaveLength(0);
     expect(db.audit.filter((a) => a.metadata?.event === 'refresh_token_reuse')).toHaveLength(1);
   });
 
-  it('H4: ATTACKER replays a stolen old token first and USES the session → the legitimate replay is killed (strict), attacker cut off too', async () => {
+  it('S-H1a: a thief replaying the stolen old token from ANOTHER device → strict kill, gets nothing', async () => {
     const db = lostResponseSetup(false);
     const { svc } = buildService(db);
 
-    const stolen = await svc.refreshToken('R0'); // attacker: handed the never-used successor…
-    expect(stolen.refreshToken).toBe('R1');
-    db.sessions.get('s1')!.firstUsedAt = new Date(); // …and uses it (JWT guard first-use mark)
-
-    await expect(svc.refreshToken('R0')).rejects.toBeInstanceOf(UnauthorizedException); // legit replay
-    expect(db.sessions.get('s1')!.revokedAt).toBeInstanceOf(Date); // attacker's session revoked
-    expect(db.liveSessions('u1')).toHaveLength(0);
-    expect(db.audit.filter((a) => a.metadata?.event === 'refresh_token_reuse')).toHaveLength(1);
-  });
-
-  it('H4 concurrency: two simultaneous post-grace replays of the same old token both converge on the SAME unused successor', async () => {
-    const db = lostResponseSetup(false);
-    const { svc } = buildService(db);
-
-    const [a, b] = await Promise.all([svc.refreshToken('R0'), svc.refreshToken('R0')]);
-
-    expect(a).toEqual({ accessToken: 'A1', refreshToken: 'R1' });
-    expect(b).toEqual(a);
+    await expect(svc.refreshToken('R0', { fingerprint: 'fp-thief' })).rejects.toBeInstanceOf(UnauthorizedException);
     expect(db.createCount).toBe(0);
-    expect(db.liveSessions('u1').map((r) => r.id)).toEqual(['s1']);
+    expect(db.liveSessions('u1')).toHaveLength(0);
+    expect(db.audit.filter((a) => a.metadata?.reason === 'device_mismatch')).toHaveLength(1);
+  });
+
+  it('S-H1: thief ROTATES FIRST from the stolen live token, the user later replays it → not shared (device mismatch) → strict kill', async () => {
+    const db = new FakeDb();
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' }); // live; stolen
+    const { svc } = buildService(db);
+
+    const thief = await svc.refreshToken('R0', { fingerprint: 'fp-thief' }); // thief rotates first: R0 → T1 (unused)
+    expect(thief.refreshToken).toBeTruthy();
+    db.sessions.get('s0')!.revokedAt = new Date(Date.now() - 60_000); // … the user comes back later
+
+    await expect(svc.refreshToken('R0', { fingerprint: 'fp-phone' })).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(db.liveSessions('u1')).toHaveLength(0); // the thief's session is revoked too
+    expect(db.audit.filter((a) => a.metadata?.reason === 'device_mismatch')).toHaveLength(1);
+  });
+
+  it('S-H1b: at most ONE handback — the same old token replayed again later (after grace) → strict kill', async () => {
+    const db = lostResponseSetup(false);
+    const { svc } = buildService(db);
+
+    const first = await svc.refreshToken('R0', { fingerprint: 'fp-phone' }); // renewed forward: s1 → s2
+    expect(first.refreshToken).toBeTruthy();
+    for (const r of db.sessions.values()) if (r.handedBackAt) r.handedBackAt = new Date(Date.now() - 60_000);
+
+    await expect(svc.refreshToken('R0', { fingerprint: 'fp-phone' })).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(db.liveSessions('u1')).toHaveLength(0);
+    expect(db.audit.filter((a) => a.metadata?.reason === 'second_handback')).toHaveLength(1);
+  });
+
+  it('S-H1b concurrency: two simultaneous post-grace replays of the same old token (one resume) → ONE renewal, both get the SAME pair', async () => {
+    const db = lostResponseSetup(false);
+    const { svc } = buildService(db);
+
+    const [a, b] = await Promise.all([
+      svc.refreshToken('R0', { fingerprint: 'fp-phone' }),
+      svc.refreshToken('R0', { fingerprint: 'fp-phone' }),
+    ]);
+
+    expect(b).toEqual(a);
+    expect(db.createCount).toBe(1); // exactly one renewal minted
+    expect(db.liveSessions('u1')).toHaveLength(1);
     expect(db.audit.filter((x) => x.entityType === 'SECURITY_EVENT')).toHaveLength(0);
+    expect(db.audit.filter((x) => x.metadata?.event === 'REFRESH_HANDOFF_UNUSED_SUCCESSOR')).toHaveLength(1);
+  });
+
+  it('H4: once the renewed session is USED, a stale replay of the old token → strict kill', async () => {
+    const db = lostResponseSetup(false);
+    const { svc } = buildService(db);
+
+    const renewed = await svc.refreshToken('R0', { fingerprint: 'fp-phone' });
+    const s2 = [...db.sessions.values()].find((r) => r.refreshToken === renewed.refreshToken)!;
+    s2.firstUsedAt = new Date(); // JWT guard first-use mark
+    for (const r of db.sessions.values()) if (r.handedBackAt) r.handedBackAt = new Date(Date.now() - 60_000);
+
+    await expect(svc.refreshToken('R0', { fingerprint: 'fp-phone' })).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(db.liveSessions('u1')).toHaveLength(0);
   });
 });

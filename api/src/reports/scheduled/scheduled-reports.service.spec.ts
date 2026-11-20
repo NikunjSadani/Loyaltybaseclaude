@@ -184,9 +184,13 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       expect(bajaj).toContain('data-section="Location"');
       expect(bajaj).toContain('blocked outside the 200 m fence <strong style="color:#b45309;">2</strong>');
       expect(deoleo).not.toContain('data-section="Location"');
-      // Loaded ONLY for the switch-on tenant — Deoleo is never queried.
-      expect(prisma.auditLog.count).toHaveBeenCalledTimes(1);
-      for (const [arg] of prisma.auditLog.count.mock.calls) {
+      // Loaded ONLY for the switch-on tenant — Deoleo is never queried. (Other auditLog counts — the
+      // Gifsy-wide sign-in security line — are not tenant-scoped and are excluded here.)
+      const locCalls = prisma.auditLog.count.mock.calls.filter(
+        ([a]: any) => a.where.entityType !== 'SECURITY_EVENT' && a.where.entityType !== 'AUTH_EVENT',
+      );
+      expect(locCalls).toHaveLength(1);
+      for (const [arg] of locCalls) {
         expect(arg.where.entityType).toBe('LOCATION_FENCE_BLOCK');
         expect(arg.where.metadata).toEqual({ path: ['clientId'], equals: 'bajaj' });
       }

@@ -287,7 +287,7 @@ export function needsAttention(t: TenantDigest): string[] {
  * Gifsy-wide (not tenant) attention items: run notices (a shared input failed, the window was capped…),
  * Gifsy-wide OTP failures (pre-login + Gifsy staff, or their load failure) and Voucher Dispersal.
  */
-export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gifsyOtpFailed' | 'runNotices'>): AttentionItem[] {
+export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gifsyOtpFailed' | 'runNotices' | 'authEvents'>): AttentionItem[] {
   const out: AttentionItem[] = (input.runNotices ?? []).map((text) => ({ text, events: 1 }));
   const otp = input.gifsyOtpFailed;
   if (otp && !otp.ok) out.push({ text: `Couldn't load the Gifsy-wide OTP failures (${otp.error})`, events: 1 });
@@ -297,6 +297,20 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
     }
     if (otp.data.gifsyStaff > 0) {
       out.push({ text: `${plural(otp.data.gifsyStaff, 'OTP', 'OTPs')} to Gifsy staff failed delivery`, events: otp.data.gifsyStaff });
+    }
+  }
+  const auth = input.authEvents;
+  if (auth && !auth.ok) out.push({ text: `Couldn't load the sign-in security events (${auth.error})`, events: 1 });
+  else if (auth && auth.ok) {
+    const a = auth.data;
+    if (a.reuseKills > 0) {
+      out.push({ text: `Sign-in security: ${plural(a.reuseKills, 'refresh-token reuse', 'refresh-token reuses')} detected — all sessions of the user revoked`, events: a.reuseKills });
+    }
+    if (a.repeatedHandbacks > 0) {
+      out.push({ text: `Sign-in security: ${plural(a.repeatedHandbacks, 'user', 'users')} with repeated session handbacks in 24 h (possible shared stolen session — review)`, events: a.repeatedHandbacks });
+    }
+    if (a.firstUseMarkFailures > 0) {
+      out.push({ text: `Sign-in security: ${plural(a.firstUseMarkFailures, 'session first-use mark', 'session first-use marks')} failed to save`, events: a.firstUseMarkFailures });
     }
   }
   const vd = input.voucherDispersal;
@@ -411,7 +425,7 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
 }
 
 /** Gifsy-wide bullets (text only). */
-export function gifsyWideAttention(input: Pick<DigestInput, 'voucherDispersal' | 'gifsyOtpFailed' | 'runNotices'>): string[] {
+export function gifsyWideAttention(input: Pick<DigestInput, 'voucherDispersal' | 'gifsyOtpFailed' | 'runNotices' | 'authEvents'>): string[] {
   return gifsyWideItems(input).map((a) => a.text);
 }
 
@@ -445,6 +459,7 @@ export function failedSections(input: DigestInput): Array<{ key: string; label: 
   }
   if (input.gifsyOtpFailed && !input.gifsyOtpFailed.ok) out.push({ key: 'gifsy/otp', label: 'Gifsy-wide OTP failures' });
   if (input.voucherDispersal && !input.voucherDispersal.ok) out.push({ key: 'gifsy/voucher-dispersal', label: 'Voucher dispersal' });
+  if (input.authEvents && !input.authEvents.ok) out.push({ key: 'gifsy/auth-events', label: 'Sign-in security events' });
   return out;
 }
 

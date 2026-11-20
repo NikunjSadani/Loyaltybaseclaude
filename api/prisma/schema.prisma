@@ -63,6 +63,8 @@ enum AuditAction {
   REJECT
   EXPORT
   IMPORT
+  // Auth H4/C1: a never-used-successor handback to a post-grace replay (info event, not a security event).
+  REFRESH_HANDOFF
 }
 
 enum KycStatus {
@@ -719,6 +721,12 @@ model UserSession {
   // handed this session back only while firstUsedAt IS NULL (and the session is < 60 min old); once it
   // has been used, reuse detection is strict. Nullable, additive, no backfill.
   firstUsedAt  DateTime?
+  // S-H1(b): set atomically when this session is handed back to a post-grace replay of its predecessor —
+  // at most ONE handback per successor (a later replay of the same old token is strict reuse).
+  handedBackAt DateTime?
+  // S-H1(a): SHA-256 of the client User-Agent (+ sec-ch-ua-platform / -mobile) of the request that CREATED this
+  // session. A handback requires the replaying request to come from the same device fingerprint.
+  createdFingerprint String?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 

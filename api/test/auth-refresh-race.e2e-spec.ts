@@ -207,17 +207,51 @@ d(`AuthService.refreshToken × real Postgres [${MODE ?? 'skipped'}]`, () => {
     expect(await prisma.auditLog.count({ where: { entityType: 'SECURITY_EVENT', entityId: userId } })).toBe(1);
   });
 
-  it('H4: lost response — the old token replayed 30s later while the successor was NEVER used → handed back the same pair, info audit, no kill', async () => {
+  it.each([
+    ['30 seconds', 30_000],
+    ['2 hours', 2 * HOUR],
+    ['2 days', 48 * HOUR],
+  ])('C1: lost response — the old token replayed %s later from the SAME device, successor never used → renewed forward, stays logged in', async (_l, ago) => {
     const { userId, sessionId, refreshToken } = await seedUserWithSession();
-    const first = await auth.refreshToken(refreshToken); // rotation whose response the client "lost"
-    await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 30_000) } });
+    const first = await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }); // response "lost"
+    await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - ago) } });
 
-    const replay = await auth.refreshToken(refreshToken);
+    const replay = await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' });
 
-    expect(replay).toEqual(first); // converged on the stored successor pair, no fork
-    expect(await prisma.userSession.count({ where: { rotatedFromId: sessionId } })).toBe(1);
+    expect(replay.refreshToken).not.toBe(first.refreshToken); // a FRESH pair (renewed forward)
+    const b = await prisma.userSession.findFirstOrThrow({ where: { rotatedFromId: sessionId } });
+    expect(b.handedBackAt).toBeInstanceOf(Date);
+    expect(b.revokedAt).toBeInstanceOf(Date);
+    const c = await prisma.userSession.findFirstOrThrow({ where: { rotatedFromId: b.id } });
+    expect(c.refreshToken).toBe(replay.refreshToken);
+    expect(c.createdFingerprint).toBe(b.createdFingerprint); // bound to the same device
     expect(await liveSessions(userId)).toBe(1);
     expect(await prisma.auditLog.count({ where: { entityType: 'SECURITY_EVENT', entityId: userId } })).toBe(0);
-    expect(await prisma.auditLog.count({ where: { entityType: 'AUTH_EVENT', entityId: userId } })).toBe(1);
+    expect(await prisma.auditLog.count({ where: { entityType: 'AUTH_EVENT', entityId: userId, action: 'REFRESH_HANDOFF' } })).toBe(1);
+  });
+
+  it('S-H1a: the old token replayed from a DIFFERENT device → strict kill + SECURITY_EVENT, nothing renewed', async () => {
+    const { userId, sessionId, refreshToken } = await seedUserWithSession();
+    await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' });
+    await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 2 * HOUR) } });
+
+    await expect(auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-thief' })).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(await liveSessions(userId)).toBe(0);
+    expect(await prisma.auditLog.count({ where: { entityType: 'SECURITY_EVENT', entityId: userId } })).toBe(1);
+  });
+
+  itServer('S-H1b: two CONCURRENT post-grace replays of the same old token → exactly one renewal, both get the same pair', async () => {
+    const { userId, sessionId, refreshToken } = await seedUserWithSession();
+    await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' });
+    await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 2 * HOUR) } });
+
+    const [a, b] = await Promise.all([
+      auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }),
+      auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }),
+    ]);
+
+    expect(b).toEqual(a);
+    expect(await liveSessions(userId)).toBe(1);
+    expect(await prisma.auditLog.count({ where: { entityType: 'SECURITY_EVENT', entityId: userId } })).toBe(0);
   });
 });

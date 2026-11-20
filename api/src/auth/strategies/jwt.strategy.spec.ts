@@ -16,6 +16,8 @@ const mockPrisma = {
   // updateMany drives the fire-and-forget sliding-session bump; default to a resolved
   // promise so the guard's `.catch(...)` always has a thenable to attach to.
   userSession: { findFirst: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+  // S-L2: a failed first-use mark writes an audit row (best-effort).
+  auditLog: { create: jest.fn().mockResolvedValue({}) },
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -67,14 +69,14 @@ describe('JwtStrategy', () => {
     });
 
     // ── H4: first-use mark (set ONCE per session) ─────────────────────────────────
-    it('FU1: the FIRST request on a never-used session marks firstUsedAt once (set-once WHERE), awaited before returning', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), firstUsedAt: null });
+    it('FU1: the FIRST request with a sid-bound token marks firstUsedAt once (set-once WHERE), awaited', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
       let marked = false;
       mockPrisma.userSession.updateMany.mockImplementationOnce(async () => {
         marked = true;
         return { count: 1 };
       });
-      const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo' };
+      const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' };
 
       await strategy.validate(REQ, payload as any);
 
@@ -85,17 +87,47 @@ describe('JwtStrategy', () => {
       });
     });
 
-    it('FU2: an already-used session makes NO first-use write (no DB write per request)', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), firstUsedAt: new Date() });
+    it('FU2: per-instance memo — the 2nd request on the same session makes NO write (never a write per request)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' };
+      await strategy.validate(REQ, payload as any);
+      await strategy.validate(REQ, payload as any);
+      await strategy.validate(REQ, payload as any);
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('FU3: a failed first-use write never fails the request, but is LOUD (audit row, S-L2)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.updateMany.mockRejectedValueOnce(new Error('db down'));
+      const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' };
+      await expect(strategy.validate(REQ, payload as any)).resolves.toEqual(payload);
+      expect(mockPrisma.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          entityType: 'AUTH_EVENT',
+          metadata: expect.objectContaining({ event: 'first_use_mark_failed', sessionId: 'sess_1' }),
+        }),
+      });
+    });
+
+    it('FU4 (M2): a legacy token WITHOUT sid never marks first use (it could match the wrong session)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
       await strategy.validate(REQ, { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo' } as any);
       expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
     });
 
-    it('FU3: a failed first-use write never fails the request', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), firstUsedAt: null });
-      mockPrisma.userSession.updateMany.mockRejectedValueOnce(new Error('db down'));
-      const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo' };
-      await expect(strategy.validate(REQ, payload as any)).resolves.toEqual(payload);
+    it('FU5 (M1): a server-side call flagged x-gifsy-no-first-use (same-request proxy rotation) does NOT count as use', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      await strategy.validate(
+        { headers: { ...REQ.headers, 'x-gifsy-no-first-use': '1' } },
+        { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' } as any,
+      );
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('FU6 (M3): the session lookup selects only id + expiresAt (no dependency on newer columns)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      await strategy.validate(REQ, { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' } as any);
+      expect(mockPrisma.userSession.findFirst.mock.calls[0][0].select).toEqual({ id: true, expiresAt: true });
     });
 
     it('S5: stamps the user active (fire-and-forget) on a valid session', async () => {

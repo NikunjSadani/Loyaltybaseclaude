@@ -50,29 +50,15 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
           expiresAt: { gt: new Date() },
         };
 
-    const session = await this.prisma.userSession.findFirst({ where });
+    // M3 — explicit select: only the columns this guard needs, so it never depends on newer columns
+    // (the deploy runs migrations before the API takes traffic; this keeps the hot path independent of it).
+    const session = await this.prisma.userSession.findFirst({ where, select: { id: true, expiresAt: true } });
 
     if (!session) {
       throw new UnauthorizedException('Session expired or revoked — please log in again.');
     }
 
-    // ── H4: mark the session's FIRST authenticated use (exactly once per session) ──
-    // refreshToken hands a replayed, already-rotated predecessor its successor ONLY while that
-    // successor has never been used; this stamp is what ends that leniency. It is AWAITED (so a
-    // request that used the session can't race ahead of the mark) but costs one write per session
-    // lifetime only — every later request sees firstUsedAt set and skips it. `firstUsedAt: null` in
-    // the WHERE makes it set-once under concurrency. A failed write must not fail the user's request;
-    // it is logged loudly (the residual effect: the lenient window stays open for this session).
-    if (session.firstUsedAt === null) {
-      try {
-        await this.prisma.userSession.updateMany({
-          where: { id: session.id, firstUsedAt: null },
-          data:  { firstUsedAt: new Date() },
-        });
-      } catch (err) {
-        this.logger.warn(`Could not mark first use of session ${session.id}: ${(err as Error)?.message ?? err}`);
-      }
-    }
+    await this.markFirstUse(req, payload, session.id);
 
     // ── Sliding session: roll expiresAt forward on activity (fire-and-forget) ────
     // A valid access re-mints the idle window to now + SESSION_TTL_DAYS, so an
@@ -106,4 +92,53 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
     return payload; // Becomes req.user
   }
+
+  /**
+   * H4/S-H1 — mark the session's FIRST authenticated use. refreshToken hands a replayed old token its
+   * successor only while every link is still unused; this mark ends that leniency for this session.
+   *  - M2/S-L3: only for tokens bound to their session (`sid`) — a legacy sid-less token matches ANY
+   *    live session of the user and could mark the wrong one. (Every token minted since the sid change
+   *    carries it; a sid-less token could only still be valid within ACCESS_TTL of that deploy.)
+   *  - M1: a server-side call made in the SAME request in which the proxy just rotated the session
+   *    (`x-gifsy-no-first-use: 1`, sent by the Next server actions in that case) is not proof the
+   *    browser received the new session — it must not count as use.
+   *  - Set-once and cheap: `WHERE firstUsedAt IS NULL` (concurrency-safe) and a per-instance memo, so
+   *    each session costs at most one write per API instance — never a write per request. AWAITED, so
+   *    the mark lands before the request that used the session proceeds.
+   *  - S-L2: a failed mark never fails the request, but it is LOUD (error log + audit row the Daily Ops
+   *    Digest counts): until it lands, the lenient handback stays open for this session.
+   */
+  private async markFirstUse(req: unknown, payload: JwtPayload, sessionId: string): Promise<void> {
+    if (!payload.sid || payload.sid !== sessionId) return;
+    if (this.firstUseMarked.has(sessionId)) return;
+    const headers = ((req as { headers?: Record<string, unknown> } | undefined)?.headers ?? {}) as Record<string, unknown>;
+    if (headers['x-gifsy-no-first-use'] === '1') return;
+    try {
+      await this.prisma.userSession.updateMany({
+        where: { id: sessionId, firstUsedAt: null },
+        data:  { firstUsedAt: new Date() },
+      });
+      if (this.firstUseMarked.size >= JwtStrategy.FIRST_USE_MEMO_MAX) this.firstUseMarked.clear();
+      this.firstUseMarked.add(sessionId);
+    } catch (err) {
+      const message = (err as Error)?.message ?? String(err);
+      this.logger.error(`Could not mark first use of session ${sessionId}: ${message}`);
+      this.prisma.auditLog
+        .create({
+          data: {
+            action: 'UPDATE',
+            entityType: 'AUTH_EVENT',
+            entityId: payload.sub,
+            actorId: payload.sub,
+            targetUserId: payload.sub,
+            metadata: { event: 'first_use_mark_failed', sessionId, clientId: payload.clientId, error: message.slice(0, 300) },
+          },
+        })
+        .catch(() => undefined); // the DB may be the thing that is failing — the error log above stands
+    }
+  }
+
+  /** Sessions already marked as used by THIS instance (bounded; cleared when full). */
+  private readonly firstUseMarked = new Set<string>();
+  private static readonly FIRST_USE_MEMO_MAX = 50_000;
 }

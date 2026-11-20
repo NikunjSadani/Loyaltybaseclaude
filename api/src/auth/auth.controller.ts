@@ -3,6 +3,7 @@ import {
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
+import { sessionFingerprint } from './session-fingerprint';
 import { SendOtpDto, VerifyOtpDto, RefreshTokenDto, AssumeTenantDto } from './dto/auth.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { Public, Roles } from '../common/decorators/roles.decorator';
@@ -61,17 +62,29 @@ export class AuthController {
     @Headers('x-refresh-budget-ms') budgetHeader?: string,
     // Secondary, shorten-only cap (epoch ms) for time lost before receipt (cold start) — see service.
     @Headers('x-refresh-deadline') deadlineHeader?: string,
+    // S-H1(a): the BROWSER's User-Agent + UA client hints, forwarded by the Next proxy / route handler
+    // (this request's own User-Agent is Node's). A direct caller falls back to its own User-Agent.
+    @Headers('x-client-user-agent') clientUa?: string,
+    @Headers('x-client-ua-platform') clientPlatform?: string,
+    @Headers('x-client-ua-mobile') clientMobile?: string,
+    @Headers('user-agent') ownUa?: string,
   ) {
     const receivedAt = Date.now();
     const budget = Number(budgetHeader);
     const budgetMs = Number.isFinite(budget) && budget > 0 ? budget : undefined;
     const deadline = Number(deadlineHeader);
     const clientDeadlineMs = Number.isFinite(deadline) && deadline > 0 ? deadline : undefined;
+    const fingerprint = sessionFingerprint({
+      userAgent: clientUa || ownUa,
+      platform: clientPlatform,
+      mobile: clientMobile,
+    });
     // L1: lets staging confirm the headers actually arrive through the proxy chain.
     this.logger.debug(
-      `refresh: x-refresh-budget-ms=${budgetMs ?? 'absent'} x-refresh-deadline=${clientDeadlineMs !== undefined ? 'present' : 'absent'}`,
+      `refresh: x-refresh-budget-ms=${budgetMs ?? 'absent'} x-refresh-deadline=${clientDeadlineMs !== undefined ? 'present' : 'absent'} ` +
+        `x-client-user-agent=${clientUa ? 'present' : 'absent'}`,
     );
-    return this.authService.refreshToken(dto.refreshToken, { budgetMs, receivedAt, clientDeadlineMs });
+    return this.authService.refreshToken(dto.refreshToken, { budgetMs, receivedAt, clientDeadlineMs, fingerprint });
   }
 
   /** Verify token is valid and return current user info */

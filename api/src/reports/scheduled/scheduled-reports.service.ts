@@ -543,7 +543,19 @@ export class ScheduledReportsService {
 
     const voucherDispersal = await section('voucher-dispersal', 'gifsy', () => this.voucherDispersal(window, nowMs));
 
-    return { window, dateLabel, tenants: out, gifsyOtpFailed, voucherDispersal, runNotices, sharedFailures };
+    // Gifsy-wide sign-in security (auth refresh, 2026-11-20) — never tenant-scoped, never dropped.
+    const authWindow = { gte: new Date(window.startMs), lt: new Date(window.endMs) };
+    const authCount = (entityType: string, event: string) =>
+      this.prisma.auditLog.count({
+        where: { entityType, createdAt: authWindow, metadata: { path: ['event'], equals: event } },
+      });
+    const authEvents = await section('auth-events', 'gifsy', async () => ({
+      reuseKills: await authCount('SECURITY_EVENT', 'refresh_token_reuse'),
+      repeatedHandbacks: await authCount('SECURITY_EVENT', 'repeated_unused_successor_handoff'),
+      firstUseMarkFailures: await authCount('AUTH_EVENT', 'first_use_mark_failed'),
+    }));
+
+    return { window, dateLabel, tenants: out, gifsyOtpFailed, voucherDispersal, authEvents, runNotices, sharedFailures };
   }
 
   /**

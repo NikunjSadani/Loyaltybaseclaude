@@ -333,6 +333,12 @@ export interface DigestInput {
   tenants: TenantDigest[];
   /** Gifsy-wide OTP delivery failures in the window: pre-login (no user) + Gifsy staff users (clientId 'gifsy'). */
   gifsyOtpFailed?: SectionResult<{ preLogin: number; gifsyStaff: number }>;
+  /**
+   * Gifsy-wide sign-in security in the window (auth refresh, 2026-11-20): refresh-token reuse kills,
+   * repeated never-used-successor handbacks for one user (possible shared stolen session), and failed
+   * first-use marks (the lenient handback stays open until they land). Hidden when all zero.
+   */
+  authEvents?: SectionResult<{ reuseKills: number; repeatedHandbacks: number; firstUseMarkFailures: number }>;
   /** Gifsy-wide Voucher Dispersal; hidden when every figure is zero, "couldn't load" when it failed. */
   voucherDispersal?: SectionResult<VoucherDispersalSection>;
   /**
