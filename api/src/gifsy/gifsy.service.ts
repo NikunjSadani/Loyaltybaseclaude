@@ -441,7 +441,7 @@ export class GifsyService {
     const where = { clientId_settingKey: { clientId: slug, settingKey: TICKET_REMARKS_EMAIL_KEY } };
     const prior = await this.prisma.programSetting.findUnique({ where, select: { settingValue: true } });
     const before = readTicketRemarksRecipients(prior?.settingValue);
-    const next = parseTicketRemarksRecipientsInput(dto, before.cc);
+    const next = parseTicketRemarksRecipientsInput(dto, before);
     const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
     if (same(before.to, next.to) && same(before.cc, next.cc)) return this.ticketRemarksEmailView(slug);
     const value = ticketRemarksSettingValue(next);

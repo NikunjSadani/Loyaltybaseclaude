@@ -124,6 +124,23 @@ describe('GifsyService ticket remarks email', () => {
     expect(tx.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({ to: ['new@b.com'], cc: ['c@d.com'], email: 'new@b.com' });
   });
 
+  it('{ to } alone keeps the stored CC; { cc } alone keeps the stored To', async () => {
+    const { svc, prisma, tx } = makeService();
+    prisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { to: ['a@b.com'], cc: ['c@d.com'] } });
+    await svc.setTicketRemarksEmail(owner, 'bajaj', { to: ['x@b.com'] });
+    expect(tx.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({ to: ['x@b.com'], cc: ['c@d.com'], email: 'x@b.com' });
+
+    const second = makeService();
+    second.prisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { to: ['a@b.com'], cc: ['c@d.com'] } });
+    await second.svc.setTicketRemarksEmail(owner, 'bajaj', { cc: ['e@f.com'] });
+    expect(second.tx.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({ to: ['a@b.com'], cc: ['e@f.com'], email: 'a@b.com' });
+  });
+
+  it('{ cc } alone that collides with the stored To → 400 (no silent removal)', () => {
+    expect(() => parseTicketRemarksRecipientsInput({ cc: ['a@b.com'] }, { to: ['a@b.com'], cc: [] }))
+      .toThrow('a@b.com cannot be in both To and CC — keep it in one list.');
+  });
+
   it('old single-address record reads as To = [email], CC = [] (GET)', async () => {
     const { svc, prisma } = makeService();
     prisma.programSetting.findUnique.mockResolvedValue({ settingValue: { email: 'Tickets@Bajaj.Example' } });

@@ -119,13 +119,15 @@ function parseList(input: unknown, name: 'To' | 'CC', max: number): string[] {
 /**
  * Validates the console body `{ to?, cc?, email? }` into the lists to store.
  *   - `to` / `cc`: arrays of addresses — trimmed, lowercased, deduped; blanks ignored; To ≤ 5, CC ≤ 10.
- *   - An address in BOTH lists → 400 naming it.
- *   - Legacy `{ email }` (no `to` / `cc` keys) → To = [email] (or [] when blank), CC = `currentCc`
- *     unchanged — an old single-address client never silently wipes the CC list.
+ *   - A key that is ABSENT (undefined) leaves that stored list unchanged (`{ to }` alone never wipes CC,
+ *     `{ cc }` alone never wipes To); `[]` / null clears it.
+ *   - An address in BOTH lists (after merging with the unchanged one) → 400 naming it.
+ *   - Legacy `{ email }` (no `to` / `cc` keys) → To = [email] (or [] when blank), CC = current CC
+ *     unchanged (minus the new To) — an old single-address client never silently wipes the CC list.
  */
 export function parseTicketRemarksRecipientsInput(
   body: { to?: unknown; cc?: unknown; email?: unknown },
-  currentCc: string[] = [],
+  current: TicketRemarksRecipients = { to: [], cc: [] },
 ): TicketRemarksRecipients {
   const usesLists = body.to !== undefined || body.cc !== undefined;
   let to: string[];
@@ -134,12 +136,12 @@ export function parseTicketRemarksRecipientsInput(
     if (body.email !== undefined && body.email !== null && body.email !== '') {
       throw new BadRequestException('Send either `email` (legacy) or `to` / `cc` lists, not both.');
     }
-    to = parseList(body.to, 'To', MAX_TO);
-    cc = parseList(body.cc, 'CC', MAX_CC);
+    to = body.to === undefined ? [...current.to] : parseList(body.to, 'To', MAX_TO);
+    cc = body.cc === undefined ? [...current.cc] : parseList(body.cc, 'CC', MAX_CC);
   } else {
     const e = parseTicketRemarksEmailInput(body.email);
     to = e ? [e] : [];
-    cc = currentCc.filter((x) => !to.includes(x));
+    cc = current.cc.filter((x) => !to.includes(x));
   }
   const both = to.filter((e) => cc.includes(e));
   if (both.length) {
