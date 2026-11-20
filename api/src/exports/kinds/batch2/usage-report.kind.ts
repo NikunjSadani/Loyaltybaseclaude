@@ -31,6 +31,7 @@ import {
 } from '../../../reports/usage/usage-report';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import { parseQueryDto } from './kind-support';
+import { areaCell } from '../../../reports/area/user-area';
 
 /** 'ASM' is the default header — the file uses the tenant's own ASM level name (usageReportHeaders). */
 export const USAGE_REPORT_HEADERS = [
@@ -105,10 +106,10 @@ export function usageReportCells(r: UsageRow): XlsxCell[] {
     r.name,
     normalizePhoneLast10(r.phone) ?? r.phone ?? '',
     r.role.replace(/_/g, ' '),
-    r.asm,
-    r.zone,
-    r.state,
-    r.city,
+    areaCell(r.asm), // full lists in the file (the page caps the display)
+    areaCell(r.zone),
+    areaCell(r.state),
+    areaCell(r.city),
     STATUS_LABEL[r.status] ?? r.status,
     r.programmes.join(', '),
     r.regions.join(', '),

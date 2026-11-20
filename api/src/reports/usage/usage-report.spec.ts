@@ -14,6 +14,7 @@ import {
   type UsageParams,
 } from './usage-report';
 import { ReportsService } from '../reports.service';
+import { clearUserAreaCache } from '../area/user-area';
 import {
   USAGE_ABOUT_SHEET,
   USAGE_REPORT_HEADERS,
@@ -21,6 +22,8 @@ import {
   USAGE_REPORT_NONE_MESSAGE,
 } from '../../exports/kinds/batch2/usage-report.kind';
 import { startPgliteTestDb, type PgliteTestDb } from '../../common/testing/pglite-testkit-spec';
+
+beforeEach(() => clearUserAreaCache()); // the per-tenant area cache must never leak between tests
 
 // 2026-11-20 12:00 IST
 const NOW = new Date('2026-11-20T06:30:00.000Z');
@@ -206,6 +209,8 @@ describe('resolveUsageParams', () => {
 
 // ─── Build ──────────────────────────────────────────────────────────────────────────────────────────────────
 describe('buildUsageReport', () => {
+  beforeEach(() => clearUserAreaCache()); // every test builds from its own fixtures
+
   it('TENANT ISOLATION: every read is pinned to the caller tenant; another tenant never appears', async () => {
     const prisma = fakePrisma();
     const r = await buildUsageReport(prisma as any, 'bajaj', params({ includeInactive: true }), NOW);
@@ -267,11 +272,13 @@ describe('buildUsageReport', () => {
     expect(r2.rows.map((x) => x.userId)).not.toContain('off');
   });
 
-  it('runs the aggregate in a transaction with a statement timeout', async () => {
+  it('runs the aggregate AND the area reads each in a transaction with a statement timeout', async () => {
     const prisma = fakePrisma();
     await buildUsageReport(prisma as any, 'bajaj', params(), NOW);
-    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
     expect(prisma.$transaction.mock.calls[0][1]).toMatchObject({ timeout: USAGE_QUERY_TIMEOUT_MS + 5_000 });
+    expect(prisma.$transaction.mock.calls[1][1]).toMatchObject({ timeout: USAGE_QUERY_TIMEOUT_MS + 5_000 });
+    expect(prisma.$executeRawUnsafe).toHaveBeenCalledTimes(2);
     expect(prisma.$executeRawUnsafe).toHaveBeenCalledWith(`SET LOCAL statement_timeout = ${USAGE_QUERY_TIMEOUT_MS}`);
   });
 
@@ -364,17 +371,18 @@ describe('buildUsageReport', () => {
       const x = by.get(id)!;
       return [x.asm, x.zone, x.state, x.city];
     };
-    expect(area('s1')).toEqual(['Zara ASM', 'West', 'Maharashtra', 'Pune']); // SO → its ASM; geo of its assigned outlet
-    expect(area('s2')).toEqual(['Zara ASM', 'West', 'Gujarat, Maharashtra', 'Pune, Surat']); // ASM self; whole downline
-    expect(area('r1')).toEqual(['Zara ASM', 'West', 'Maharashtra', 'Pune']); // outlet geo + assigned rep's ASM
-    expect(area('idle')).toEqual(['Not set', 'Not set', 'Gujarat', 'Vadodara']); // no rep, blank zone → "Not set"
-    expect(area('a1')).toEqual(Array(4).fill('Not in sales hierarchy'));
+    expect(area('s1')).toEqual([['Zara ASM'], ['West'], ['Maharashtra'], ['Pune']]); // SO → its ASM; its outlet's geo
+    expect(area('s2')).toEqual([['Zara ASM'], ['West'], ['Gujarat', 'Maharashtra'], ['Pune', 'Surat']]); // whole downline
+    expect(area('r1')).toEqual([['Zara ASM'], ['West'], ['Maharashtra'], ['Pune']]); // outlet geo + assigned rep's ASM
+    expect(area('idle')).toEqual([['Not set'], ['Not set'], ['Gujarat'], ['Vadodara']]); // no rep, blank zone
+    expect(area('a1')).toEqual(Array(4).fill(['Not in sales hierarchy']));
     expect(r.asmHeader).toBe('ASM');
     expect(r.notes.area).toHaveLength(3);
   });
 
   it('2,000 users → the same number of DB reads as 10 users (area data is batch-loaded, never per row)', async () => {
     const reads = async (n: number) => {
+      clearUserAreaCache();
       const fx = fixtures();
       for (let i = 0; i < n; i++) {
         fx.users.push({ id: `b${i}`, clientId: 'bajaj', name: `U${i}`, phone: '9', role: i % 2 ? 'SSS' : 'SALES_SO', status: 'ACTIVE', salesUser: null });
@@ -391,6 +399,40 @@ describe('buildUsageReport', () => {
     expect(big.rows).toBe(small.rows + 1_990);
     expect(big.calls).toBe(small.calls);
     expect(big.calls).toBe(9); // aggregate + start day + users + outlets + assignments + 4 area reads
+  });
+
+  it('(cache) re-sorting / filtering the same tenant within ~60 s does not reload the area data', async () => {
+    const prisma = fakePrisma();
+    await buildUsageReport(prisma as any, 'bajaj', params(), NOW);
+    await buildUsageReport(prisma as any, 'bajaj', params({ sort: 'name', role: 'SSS' }), NOW);
+    expect(prisma.salesUser.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.salesHierarchyLevel.findMany).toHaveBeenCalledTimes(1);
+    expect(prisma.user.findMany).toHaveBeenCalledTimes(2); // the report's own reads still run each time
+    const other = fakePrisma();
+    await buildUsageReport(other as any, 'deoleo', params(), NOW);
+    expect(other.salesUser.findMany).toHaveBeenCalledTimes(1); // keyed by tenant
+  });
+
+  it('(guard) an area-read timeout → the same friendly 503, and the failure is not cached', async () => {
+    const prisma = fakePrisma();
+    const realTx = prisma.$transaction.getMockImplementation()!;
+    prisma.$transaction
+      .mockImplementationOnce(realTx) // aggregate
+      .mockRejectedValueOnce(new Error('canceling statement due to statement timeout (57014)')); // area reads
+    await expect(buildUsageReport(prisma as any, 'bajaj', params(), NOW)).rejects.toThrow(USAGE_TIMEOUT_MESSAGE);
+    await expect(buildUsageReport(prisma as any, 'bajaj', params(), NOW)).resolves.toBeTruthy(); // retried, not cached
+  });
+
+  it('(8) Region: a rep assigned at a PARENT group gets the child outlets’ region too', async () => {
+    const fx = fixtures();
+    fx.assignments.push({
+      salesUserId: 'su-s1', outletId: null as never, partnerId: 'P-group' as never,
+      salesUser: { userId: 's1', clientId: 'bajaj' },
+      outlet: null as never,
+      partner: { clientId: 'bajaj', outlets: [], childOutlets: [{ programName: 'Silver', state: 'Goa' }] } as never,
+    });
+    const r = await buildUsageReport(fakePrisma(fx) as any, 'bajaj', params(), NOW);
+    expect(r.rows.find((x) => x.userId === 's1')!.regions).toEqual(['Goa', 'Maharashtra']);
   });
 
   it('filters: role, programme (case-insensitive), region — totals follow the filter', async () => {
@@ -578,7 +620,7 @@ describe("export kind 'usage-report'", () => {
     const first = w.rows[0];
     expect(first[0]).toBe('Asha Retail');
     expect(first[1]).toBe('9876500001');
-    expect(first.slice(3, 7)).toEqual(['Zara ASM', 'West', 'Maharashtra', 'Pune']); // area
+    expect(first.slice(3, 7)).toEqual(['Zara ASM', 'West', 'Maharashtra', 'Pune']); // area (full lists, joined)
     expect(first[12]).toBe(50); // minutes
     expect(w.rows.slice(0, 7).map((r) => r[0])).not.toContain('Deoleo Retail');
     expect(w.rows.slice(0, 7).map((r) => r[0])).not.toContain('Off Retail');

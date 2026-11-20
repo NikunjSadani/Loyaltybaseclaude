@@ -286,7 +286,7 @@ describe('app-installed-users export kind', () => {
     const about = readBook(buffer).sheets[INSTALLED_USERS_ABOUT_SHEET].aoa;
     expect(about[0][0]).toBe('About this report');
     expect(about.slice(1).map((r) => r[0])).toEqual(['ASM', 'Zone / State / City', 'Not set / Not in hierarchy']);
-    expect(String(about[1][1])).toMatch(/ABOVE the ASM level are left blank/);
+    expect(String(about[1][1])).toMatch(/above the ASM level show "Above ASM level"/);
     expect(String(about[3][1])).toMatch(/Not in sales hierarchy/);
   }, XLSX_TIMEOUT);
 

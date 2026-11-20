@@ -13,12 +13,13 @@ export interface UsageRow {
   status: string
   programmes: string[]
   regions: string[]
-  /** Area (owner 2026-11-20): ASM name ('' above the ASM level), zone, state, city — "Not set" /
-   *  "Not in sales hierarchy" when missing / not applicable. */
-  asm: string
-  zone: string
-  state: string
-  city: string
+  /** Area (owner 2026-11-20): FULL sorted lists, never empty — "Not set" / "Above ASM level" /
+   *  "Not in sales hierarchy" / "Group — N outlets" when missing / not applicable. The page shows the first
+   *  AREA_PAGE_MAX_VALUES (+N more, expandable); the Excel writes every value. */
+  asm: string[]
+  zone: string[]
+  state: string[]
+  city: string[]
   daysActive: number
   trackedDays: number
   visits: number
@@ -88,7 +89,16 @@ export const USAGE_ENDPOINT = '/api/reports/usage'
 /** The server's 404 text when an export matches nobody (export kind 'usage-report'). */
 export const USAGE_NO_MATCH_RE = /matched these filters/i
 
+/** Area values shown in one table cell before "+N more" (mirrors the API's AREA_MAX_VALUES). */
+export const AREA_PAGE_MAX_VALUES = 5
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** An area list for one table cell: the first `max` values and how many more are hidden. */
+export function areaPreview(values: readonly string[] | null | undefined, max = AREA_PAGE_MAX_VALUES): { shown: string; hidden: number; full: string } {
+  const list = (values ?? []).filter(Boolean)
+  return { shown: list.slice(0, max).join(', '), hidden: Math.max(0, list.length - max), full: list.join(', ') }
+}
 
 /** Today's IST calendar date, and the date `days − 1` before it (YYYY-MM-DD). */
 export function defaultIstRange(now: Date = new Date(), days = 30): { from: string; to: string } {

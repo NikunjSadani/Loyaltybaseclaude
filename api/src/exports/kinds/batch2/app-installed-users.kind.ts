@@ -45,7 +45,7 @@ import { tenantInstallWhere } from '../../../push/pwa-adoption.service';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxCell, XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { parseQueryDto } from './kind-support';
-import { loadUserAreaResolver, type AreaPrisma, type UserAreaResolver } from '../../../reports/area/user-area';
+import { areaCell, loadUserAreaResolver, type AreaPrisma, type UserAreaResolver } from '../../../reports/area/user-area';
 
 export interface InstalledUsersParams {
   roleGroup: InstalledUsersRoleGroup | null;
@@ -265,10 +265,10 @@ async function buildRows(
         normalizePhoneLast10(u.phone) ?? u.phone ?? '',
         roleLabel(clientId, u, typeDisplay),
         group ? GROUP_LABEL[group] : 'Other',
-        a.asm,
-        a.zone,
-        a.state,
-        a.city,
+        areaCell(a.asm), // full lists — an Excel cell holds them; nothing is cut
+        areaCell(a.zone),
+        areaCell(a.state),
+        areaCell(a.city),
         outlet?.outletCode ?? (group === 'partner' ? u.channelPartner?.partnerCode ?? '' : ''),
         outlet?.name ?? '',
         platformsLabel(platforms.get(u.id) ?? new Set()),
