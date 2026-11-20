@@ -5,8 +5,9 @@
  * (VISIBILITY-POSM-DESIGN.md D15). Shared by BOTH the GIFSY admin report tab and
  * the tenant read-only report page.
  *
- *   - `variant="admin"`  → reads visibilityApi.getReport + shows the Excel export.
- *   - `variant="tenant"` → reads visibilityApi.getTenantReport, NO export.
+ *   - `variant="admin"`  → reads visibilityApi.getReport.
+ *   - `variant="tenant"` → reads visibilityApi.getTenantReport.
+ *   Both show the Excel export (window + whole month); the server pins a client admin to their own tenant.
  *
  * Coverage tiles (denominator / captured / pending / rejected / missed + %) with a
  * window selector derived from the report's own frequencyPerMonth. It does NOT import
@@ -109,7 +110,9 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
           </select>
           {report?.windowClosed && <span className="text-[11px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">closed</span>}
         </div>
-        {variant === 'admin' && (
+        {/* Excel export on BOTH variants (owner 2026-11-20: client admins download their own tenant's file;
+            GET report/export allows GIFSY_ADMIN + CLIENT_ADMIN and pins a client admin to their own clientId). */}
+        {(
           <div className="flex flex-col items-end gap-1">
             <button onClick={handleExport} disabled={exportAction.blocked}
               className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white text-sm font-medium rounded-lg hover:bg-[var(--brand-primary-dark)] transition-colors disabled:opacity-60">
