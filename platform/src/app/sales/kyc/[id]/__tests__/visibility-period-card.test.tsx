@@ -6,7 +6,8 @@
  *       current window is due / missing / rejected
  * VPC2: no Capture CTA when the current window is satisfied (approved) or the rep
  *       may not capture (canCapture:false)
- * VPC3: an out-of-scope outlet hides the card entirely
+ * VPC3: an out-of-scope outlet with no reason hides the card entirely
+ * VPC4: an out-of-scope outlet with a reason shows the reason and no Capture button
  */
 
 import React, { Suspense, act } from 'react';
@@ -127,5 +128,21 @@ describe('VPC — Visibility — this period card', () => {
     await waitFor(() => expect(getOutletStatus).toHaveBeenCalled());
     await screen.findAllByText('Mehta Distributors'); // page hydrated
     expect(screen.queryByTestId('visibility-period-card')).toBeNull();
+  });
+
+  it('VPC4: out of scope WITH a reason (e.g. not KYC-approved) → the reason, and NO Capture button', async () => {
+    getOutletStatus.mockResolvedValue({
+      success: true,
+      data: status({
+        inScope: false,
+        canCapture: false,
+        notInScopeReason: 'This outlet is not KYC-approved yet — visibility can be captured once its KYC is approved.',
+      }),
+    });
+    await renderPage();
+    expect(await screen.findByTestId('visibility-not-in-scope')).toHaveTextContent(
+      'This outlet is not KYC-approved yet — visibility can be captured once its KYC is approved.',
+    );
+    expect(screen.queryByTestId('visibility-capture-cta')).toBeNull();
   });
 });

@@ -120,7 +120,7 @@ function makePrisma() {
     messageDeliveryReceipt: { groupBy: jest.fn().mockResolvedValue([]) },
     otpCode: { count: jest.fn().mockResolvedValue(0) },
     whatsappBroadcastRecipient: { count: jest.fn().mockResolvedValue(0) },
-    visibilityCapture: { count: jest.fn().mockResolvedValue(0) },
+    visibilityCapture: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]), groupBy: jest.fn().mockResolvedValue([]) },
     visibilityCaptureSubmission: { count: jest.fn().mockResolvedValue(0) },
     // Location line: recorded "outside the fence" refusals (LOCATION_FENCE_BLOCK audit rows).
     auditLog: { count: jest.fn().mockResolvedValue(0) },
@@ -146,6 +146,12 @@ const emailed = (endMs: number, status: 'sent' | 'degraded' = 'sent', startMs = 
 });
 
 /** 194R report used by the digest's TDS section (owner 2026-11-18: over-withholding is flagged). */
+// Visibility digest lines (PHOTO_APPROVAL tenants) read the tenant's visibilityConfig for the in-scope rule.
+const tenantSettingsMock = {
+  getEffectiveSettings: jest.fn().mockResolvedValue({
+    visibilityConfig: { outletScope: ['SSS'], frequencyPerMonth: 1, programs: [], subPrograms: [], geoFence: { enabled: true, radiusMeters: 200 } },
+  }),
+};
 const tdsMock = {
   report194R: jest.fn().mockResolvedValue({ rows: [], summary: { totalExcessDeductedPaise: 0n, excessRetailerCount: 0 } }),
 };
@@ -170,7 +176,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     prisma = makePrisma();
     store = prisma.programSetting;
     sendEmail = jest.fn().mockResolvedValue(undefined);
-    svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never);
+    svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never, tenantSettingsMock as never);
   });
 
   describe('Location line (LOCATION-GATE.md)', () => {
@@ -328,7 +334,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       prisma = makePrisma();
       store = prisma.programSetting;
       setRecipients({ dailyDigest: ['ops@gifsy.in'] });
-      svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never);
+      svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never, tenantSettingsMock as never);
       svc.clock = () => NOW;
       setState({ running: { startedAt: new Date(NOW - 5 * 60_000).toISOString(), token: 'slow' } });
       expect((await svc.runDailyReports(NOW)).reports[0].status).toBe('in-progress');
@@ -559,6 +565,69 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(by('bajaj').salesImport).toBeDefined();
     expect(by('deoleo').salesImport).toBeUndefined();
     expect(by('deoleo').visibility).toBeUndefined();
+  });
+
+  describe('Visibility lines (VISIBILITY-POSM-DESIGN.md §Metrics)', () => {
+    const visOn = (features: Record<string, unknown>) => {
+      prisma.client.findMany.mockResolvedValue([
+        { id: 'bajaj', internalName: 'bajaj', status: 'ACTIVE', branding: {}, features },
+      ]);
+    };
+
+    it('PHOTO_APPROVAL: reviews = one per capture per day (a rejection then same-day resubmit still counts); waiting = EVERY month', async () => {
+      visOn({}); // absent mode = PHOTO_APPROVAL
+      const t = new Date(WIN.startMs + 60 * 60_000).toISOString();
+      prisma.visibilityCaptureSubmission.count.mockResolvedValue(3);
+      prisma.visibilityCapture.findMany.mockResolvedValue([
+        {
+          id: 'c1', status: 'SUBMITTED', reviewedAt: new Date(t), photoReviews: {},
+          submissions: [{ photoReviews: { w1: { status: 'REJECTED', reasonCode: 'BLURRY', reviewedAt: t, reviewedByUserId: 'g' } } }],
+        },
+        { id: 'c2', status: 'APPROVED', reviewedAt: new Date(t), photoReviews: { w1: { status: 'APPROVED', reviewedAt: t, reviewedByUserId: 'g' } } },
+      ]);
+      // NOW = 13 Nov 2026 (frequency 1 → the November window is still open). October's 1 capture is still waiting.
+      prisma.visibilityCapture.groupBy.mockImplementation((args: { by: string[] }) =>
+        Promise.resolve(
+          args.by.includes('status')
+            ? [
+                { status: 'SUBMITTED', windowKey: '2026-11-P1', _count: { _all: 4 } },
+                { status: 'CHANGES_REQUESTED', windowKey: '2026-11-P1', _count: { _all: 2 } },
+              ]
+            : [
+                { windowKey: '2026-10-P1', _count: { _all: 1 } },
+                { windowKey: '2026-11-P1', _count: { _all: 4 } },
+              ],
+        ),
+      );
+      const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+      const v = input.tenants[0].visibility!;
+      expect(v).toEqual({
+        ok: true,
+        data: {
+          submitted: 3, approved: 1, rejected: 1,
+          // Everything still open: 5 waiting for review (any month) + 2 waiting on reps.
+          pending: 7, month: '2026-11', reviewActions: 2,
+          waiting: 4, waitingAllMonths: 5, waitingEarlierMonths: 1, needsRetake: 2, waitingOnReps: 2, closedNotApproved: 0,
+        },
+      });
+      // Review actions read the capture trail (updatedAt superset); pending = this month, in-scope outlets.
+      expect(prisma.visibilityCapture.findMany.mock.calls[0][0].where).toEqual({ clientId: 'bajaj', updatedAt: { gte: new Date(WIN.startMs) } });
+      const g = prisma.visibilityCapture.groupBy.mock.calls[0][0].where;
+      expect(g.windowKey.startsWith).toMatch(/^\d{4}-\d{2}-P$/);
+      expect(g.outlet).toMatchObject({ clientId: 'bajaj', isActive: true });
+      // The legacy status-count queries are not used for a photo tenant.
+      expect(prisma.visibilityCapture.count).not.toHaveBeenCalled();
+    });
+
+    it('AMOUNT_UPLOAD: the exact previous lines (no month, no review-action reconstruction)', async () => {
+      visOn({ visibilityCaptureMode: 'AMOUNT_UPLOAD' });
+      prisma.visibilityCapture.count.mockResolvedValue(1);
+      const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+      const v = input.tenants[0].visibility!;
+      expect(v).toEqual({ ok: true, data: { submitted: 0, approved: 1, rejected: 1, pending: 1 } });
+      expect(prisma.visibilityCapture.findMany).not.toHaveBeenCalled();
+      expect(prisma.visibilityCapture.groupBy).not.toHaveBeenCalled();
+    });
   });
 
   it('payouts (H1): credit payouts PAID/FAILED by the RECORDED time (updatedAt), never paidAt; outlets + still-open', async () => {

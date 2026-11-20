@@ -14,7 +14,7 @@ import {
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { validateFormSchema } from './visibility-form.helper';
 import { SetVisibilityConfigDto, ScopeOutletsQueryDto } from './dto/visibility-admin.dto';
-import { resolveVisibilityProgramLists, withVisibilityProgramWhere } from './visibility-scope.helper';
+import { resolveVisibilityProgramLists, visibilityUniverseBase, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 /**
  * VisibilityAdminService — GIFSY_ADMIN authoring for the Visibility (POSM) feature:
@@ -190,26 +190,28 @@ export class VisibilityAdminService {
   // ── Outlets in scope (admin view) ────────────────────────────────────────────
 
   /**
-   * The addressable outlets in the tenant's configured scope: outletType.code ∈
-   * config.outletScope AND not soft-deleted / deactivated. An empty scope yields no
-   * outlets (an `in: []` match). Optional name/code/zone/state filters narrow further.
+   * The outlets in visibility scope — THE single in-scope rule (visibilityUniverseWhere: not soft-deleted /
+   * deactivated, KYC-approved `isActive`, kycIntent not NOT_INTERESTED / PARKED, outletType.code ∈
+   * config.outletScope, and the optional programs / subPrograms narrowing). An empty scope yields no outlets
+   * (an `in: []` match). Optional name/code/zone/state filters narrow further.
    */
   async listOutletsInScope(clientId: string, filters: ScopeOutletsQueryDto = {}) {
     await this.assertEnabled(clientId);
     const config = await this.getConfig(clientId);
 
-    const where: Prisma.OutletWhereInput = {
-      clientId,
-      deletedAt: null,
-      deactivatedAt: null,
-      outletType: { code: { in: config.outletScope } },
-    };
+    // THE single in-scope rule (visibilityUniverseBase — the same outlets the report counts and reps can capture).
+    // It owns the top-level OR (kycIntent), so the text search goes under AND.
+    const where: Prisma.OutletWhereInput = { ...visibilityUniverseBase(clientId, config.outletScope) };
     if (filters.zone) where.zone = filters.zone;
     if (filters.state) where.state = filters.state;
     if (filters.q) {
-      where.OR = [
-        { name: { contains: filters.q, mode: 'insensitive' } },
-        { outletCode: { contains: filters.q, mode: 'insensitive' } },
+      where.AND = [
+        {
+          OR: [
+            { name: { contains: filters.q, mode: 'insensitive' } },
+            { outletCode: { contains: filters.q, mode: 'insensitive' } },
+          ],
+        },
       ];
     }
 

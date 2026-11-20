@@ -29,7 +29,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 // READ-ONLY reuse of the visibility window-key math (pure helper, no DI) — the VISIBILITY
 // pseudo-KPI's "current window" MUST use the same formula the capture/notify services use.
 import { currentWindowKey } from '../visibility/visibility-window.helper';
-import { VisibilityProgramScopeLike, visibilityProgramMatches } from '../visibility/visibility-scope.helper';
+import { visibilityUniverseWhere } from '../visibility/visibility-scope.helper';
 import { resolveTenantFeatures } from '../common/tenant-features.helper';
 import { pickDeliveryDefaults } from '../partner/delivery-defaults.helper';
 import { mapBounded } from '../common/map-bounded';
@@ -731,23 +731,31 @@ export class SalesService {
     ) => aggregateTargetMet(subtree, tMap, aMap, outletsByUser, passes, code ? valuePredByCode.get(code) : undefined);
 
     // ── VISIBILITY pseudo-KPI data (enabled tenants only; READ-ONLY from visibility) ──────────
-    // Denominator (per subtree): in-scope (outletType ∈ visibilityConfig.outletScope), KYC-APPROVED
-    // and active outlets — AFTER the same type/program filters the other KPIs apply (`passes`).
-    // Numerator: of those, outlets with an APPROVED VisibilityCapture in the CURRENT window.
-    // One findMany over the root subtree's outlet ids (windowKey + status filtered) — no N+1.
+    // Denominator (per subtree): outlets in visibility scope by THE single rule (visibilityUniverseWhere — the
+    // report, dashboards and rep capture list count the same outlets) — AFTER the same type/program filters the
+    // other KPIs apply (`passes`). Numerator: of those, outlets with an APPROVED VisibilityCapture in the CURRENT
+    // window. One in-scope query + one capture findMany over the root subtree's outlet ids — no N+1.
     let visScope: string[] = [];
-    // APPLIES-TO (D12): visibility programs/subPrograms narrow the type scope further (empty = all).
-    let visProgramCfg: VisibilityProgramScopeLike | null = null;
     const approvedVisOutletIds = new Set<string>();
+    const visInScopeIds = new Set<string>();
     if (visibilityEnabled) {
       const cfg = (await this.tenantSettings.getEffectiveSettings(user.clientId)).visibilityConfig;
       visScope = cfg.outletScope ?? [];
-      visProgramCfg = cfg;
       // REUSE the capture/notify services' exact window-key math (frequency-driven IST windows).
       const windowKey = currentWindowKey(new Date(), cfg.frequencyPerMonth);
       const allOutletIds = new Set<string>();
       for (const arr of outletsByUser.values()) for (const o of arr) allOutletIds.add(o.id);
       if (visScope.length > 0 && allOutletIds.size > 0) {
+        // THE single in-scope rule (visibilityUniverseWhere — the report / dashboards / rep capture list use the
+        // same one): active, KYC-approved, not deactivated / deleted, not Not-interested / Parked, type + programs.
+        const ids = [...allOutletIds];
+        for (let i = 0; i < ids.length; i += 5000) {
+          const rows = await this.prisma.outlet.findMany({
+            where: { AND: [{ id: { in: ids.slice(i, i + 5000) } }, visibilityUniverseWhere(user.clientId, cfg)] },
+            select: { id: true },
+          });
+          for (const r of rows) visInScopeIds.add(r.id);
+        }
         const caps = await this.prisma.visibilityCapture.findMany({
           where: {
             clientId: user.clientId,
@@ -771,11 +779,7 @@ export class SalesService {
           if (seen.has(o.id)) continue;
           seen.add(o.id);
           if (!passes(o)) continue; // same outletType/program filter as the other KPIs
-          if (o.status !== 'APPROVED') continue; // KYC-approved
-          if (!o.isActive) continue; // active
-          if (!visScope.includes(o.typeCode)) continue; // in visibility scope
-          // program / sub-program narrowing (no-op when the config sets neither)
-          if (!visibilityProgramMatches(visProgramCfg, { program: o.program, subProgram: o.subProgram })) continue;
+          if (!visInScopeIds.has(o.id)) continue; // THE in-scope rule (visibilityUniverseWhere, resolved above)
           den++;
           if (approvedVisOutletIds.has(o.id)) num++; // current-window APPROVED capture
         }

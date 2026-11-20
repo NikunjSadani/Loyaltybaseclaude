@@ -18,6 +18,7 @@ import {
 import { ProgramFilter, TenantWideNote } from '@/components/admin/dashboard/ProgramFilter';
 import { liabilitySplitNote } from '@/lib/wallet-negative';
 import { BillingProgressCard } from '@/components/admin/dashboard/BillingProgressCard';
+import { monthLabel, monthOptions } from '@/lib/visibility-report';
 
 /* ─── KPI card data ──────────────────────────────────────────────────────────── */
 
@@ -56,6 +57,22 @@ interface ApiKpiData {
   activePartners:        number;
   pendingKyc:            number;
   pendingVisibility:     number;
+  /**
+   * PHOTO_APPROVAL tenants with visibility ON (else null / absent). pendingVisibility = EVERY capture still waiting
+   * for review, any month (Gifsy's whole queue). This block: the picked month (default current IST month) and its
+   * share of that queue, the part from earlier months, what waits on reps (open windows only) and the re-takes left
+   * when the window closed ("Not approved — window closed").
+   */
+  visibility?: {
+    month: string;
+    waiting: number;
+    waitingAllMonths?: number;
+    waitingEarlierMonths?: number;
+    needsRetake: number;
+    rejected?: number;
+    waitingOnReps?: number;
+    closedNotApproved?: number;
+  } | null;
   totalRedeemablePoints: number;
   /** Owner D1/D2 (2026-11-19): Σ |negative balances| + how many wallets — reported apart from the liability. */
   totalOwedPoints?:      number;
@@ -79,6 +96,9 @@ export default function DashboardPage() {
   const { program, ready: programReady, setProgram, reconcile } = programState;
   // Last-known program list — kept across a failed refetch so the person can still switch back.
   const [programOptions, setProgramOptions] = useState<string[]>([]);
+  // Pending Visibility Approvals month ('' = the server default, the current IST month → URL unchanged).
+  const [visMonth, setVisMonth] = useState('');
+  const visMonths = useMemo(() => monthOptions(), []);
 
   useEffect(() => {
     if (!programReady) return;
@@ -86,7 +106,9 @@ export default function DashboardPage() {
     let dropped = false; // response discarded because its program isn't usable → a fresh fetch follows
     setKpiLoading(true);
     setKpiError(null);
-    fetch(withProgramParam('/api/admin/dashboard/kpis', program), { headers: { ...authHeader() } })
+    const kpisUrl = withProgramParam('/api/admin/dashboard/kpis', program);
+    const url = visMonth ? `${kpisUrl}${kpisUrl.includes('?') ? '&' : '?'}visibilityMonth=${encodeURIComponent(visMonth)}` : kpisUrl;
+    fetch(url, { headers: { ...authHeader() } })
       .then(async (r) => {
         if (!r.ok) throw new Error(`Request failed (${r.status})`);
         return r.json();
@@ -108,7 +130,7 @@ export default function DashboardPage() {
       })
       .finally(() => { if (!cancelled && !dropped) setKpiLoading(false); });
     return () => { cancelled = true; };
-  }, [program, programReady, reconcile]);
+  }, [program, programReady, reconcile, visMonth]);
 
   const kpiRefetching = kpiLoading && !!liveKpis;
   const tenantWide = (key: string) => isTenantWideMetric(program, liveKpis?.notProgramScoped, key);
@@ -204,6 +226,34 @@ export default function DashboardPage() {
                 <div>
                   <p className="text-2xl font-bold text-gray-900">{card.value}</p>
                   <p className="text-xs text-gray-500 mt-0.5">{card.label}</p>
+                  {card.key === 'pendingVisibility' && liveKpis?.visibility && (
+                    <div className="mt-1 space-y-1" data-testid="kpi-visibility-month">
+                      <p className="text-[11px] text-gray-600" data-testid="kpi-visibility-waiting">
+                        Waiting for review, all months
+                        {(liveKpis.visibility.waitingEarlierMonths ?? 0) > 0
+                          ? ` · ${liveKpis.visibility.waitingEarlierMonths!.toLocaleString('en-IN')} from earlier months`
+                          : ''}
+                        {` · ${liveKpis.visibility.waiting.toLocaleString('en-IN')} from ${monthLabel(liveKpis.visibility.month)}`}
+                      </p>
+                      <p className="text-[11px] text-orange-700" data-testid="kpi-visibility-retake">
+                        Waiting on reps (window still open), {monthLabel(liveKpis.visibility.month)}:{' '}
+                        {(liveKpis.visibility.waitingOnReps ?? liveKpis.visibility.needsRetake).toLocaleString('en-IN')}
+                      </p>
+                      {(liveKpis.visibility.closedNotApproved ?? 0) > 0 && (
+                        <p className="text-[11px] text-red-700" data-testid="kpi-visibility-closed">
+                          Not approved — window closed: {liveKpis.visibility.closedNotApproved!.toLocaleString('en-IN')}
+                        </p>
+                      )}
+                      <select
+                        aria-label="Visibility approvals month"
+                        value={visMonth || liveKpis.visibility.month}
+                        onChange={(e) => setVisMonth(e.target.value)}
+                        className="border border-gray-200 rounded-md px-2 py-0.5 text-[11px] bg-white focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
+                      >
+                        {visMonths.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                      </select>
+                    </div>
+                  )}
                   {tenantWide(card.key) && <TenantWideNote className="mt-1" />}
                   {card.key === 'totalRedeemablePoints' && liveKpis && liabilitySplitNote(liveKpis.totalOwedPoints, liveKpis.owedWallets) && (
                     <p data-testid="kpi-liability-split" className="text-[11px] text-amber-700 mt-1">

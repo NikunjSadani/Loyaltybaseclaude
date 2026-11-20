@@ -178,4 +178,36 @@ describe('Admin Overview — program filter', () => {
     await waitFor(() => expect(urls(fn, '/api/admin/dashboard/kpis')).toContain('/api/admin/dashboard/kpis?program=Gold'));
     expect(((await screen.findByTestId('overview-program-filter')) as HTMLSelectElement).value).toBe('Gold');
   });
+
+  it('OV-VIS: the tile = every capture still waiting (all months) with the month share; waiting on reps apart; picker refetches', async () => {
+    const fn = mockFetch({
+      ...KPIS,
+      pendingVisibility: 10,
+      visibility: {
+        month: '2026-11', waiting: 7, waitingAllMonths: 10, waitingEarlierMonths: 3,
+        needsRetake: 2, rejected: 1, waitingOnReps: 3, closedNotApproved: 4,
+      },
+    });
+    render(<DashboardPage />);
+    expect(await screen.findByTestId('kpi-visibility-retake')).toHaveTextContent('Waiting on reps (window still open), Nov 2026: 3');
+    expect(screen.getByTestId('kpi-visibility-waiting')).toHaveTextContent(
+      'Waiting for review, all months · 3 from earlier months · 7 from Nov 2026',
+    );
+    expect(screen.getByTestId('kpi-visibility-closed')).toHaveTextContent('Not approved — window closed: 4');
+    // Default month → the request is unchanged (no visibilityMonth param).
+    expect(urls(fn, '/api/admin/dashboard/kpis')).toEqual(['/api/admin/dashboard/kpis']);
+    const select = screen.getByLabelText('Visibility approvals month') as HTMLSelectElement;
+    const older = Array.from(select.options).map((o) => o.value).find((v) => v !== '2026-11')!;
+    fireEvent.change(select, { target: { value: older } });
+    await waitFor(() =>
+      expect(urls(fn, '/api/admin/dashboard/kpis')).toContain(`/api/admin/dashboard/kpis?visibilityMonth=${older}`),
+    );
+  });
+
+  it('OV-VIS2: AMOUNT_UPLOAD / visibility off (visibility null) → the tile is exactly as before', async () => {
+    mockFetch({ ...KPIS, visibility: null });
+    render(<DashboardPage />);
+    expect(await screen.findByText('4,321')).toBeInTheDocument();
+    expect(screen.queryByTestId('kpi-visibility-month')).not.toBeInTheDocument();
+  });
 });

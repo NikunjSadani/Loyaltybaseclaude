@@ -1,12 +1,14 @@
 'use client';
 
 /**
- * Tenant read-only Visibility (POSM) coverage report (VISIBILITY-POSM-DESIGN.md D15).
- * CLIENT_ADMIN / MIS_USER cannot configure Visibility or review captures (GIFSY-only),
- * but can view aggregate per-window coverage and download their own tenant's Visibility Excel
- * (owner 2026-11-20; the photo links open via the signed-in /visibility/photo viewer).
+ * Tenant read-only Visibility (POSM) month-wise report (VISIBILITY-POSM-DESIGN.md D15 + §Metrics).
+ * CLIENT_ADMIN only: the backend `report/tenant[/outlets]` routes are @Roles('CLIENT_ADMIN') (a MIS_USER gets
+ * a 403 there today). A client admin cannot configure Visibility or review captures (GIFSY-only), but can view
+ * the month report — tiles, breakdowns and the outlet list behind them — and download their own tenant's
+ * Visibility Excel (one window or the whole month; owner 2026-11-20 — the photo links open via the signed-in
+ * /visibility/photo viewer, the export endpoint pins a client admin to their own clientId).
  *
- * Reads via visibilityApi.getTenantReport (VisibilityReportView variant="tenant").
+ * Reads via visibilityReportApi.getReport('tenant') (VisibilityReportView variant="tenant").
  */
 
 import { BarChart3, FileSpreadsheet } from 'lucide-react';
@@ -22,7 +24,7 @@ export default function VisibilityReportsPage() {
         <h1 className="text-lg font-bold text-gray-900 flex items-center gap-2">
           <BarChart3 className="w-5 h-5 text-[var(--brand-primary)]" /> Visibility Reports
         </h1>
-        <p className="text-xs text-gray-500">Read-only per-window POSM coverage for your tenant.</p>
+        <p className="text-xs text-gray-500">Read-only monthly POSM coverage for your tenant — pick a month, tap any number to see the outlets.</p>
       </div>
 
       {captureMode === 'AMOUNT_UPLOAD' ? (

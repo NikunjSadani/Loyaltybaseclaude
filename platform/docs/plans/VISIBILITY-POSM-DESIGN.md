@@ -73,7 +73,7 @@ the Scheme decision; the dead reward columns in the current module are removed, 
   current window** and opening the capture sheet.
 - **D15 — Reporting:** Gifsy coverage view **per window** (captured / pending / approved / rejected / missed) +
   tenant **read-only** + **Excel export with auth-gated photo links** and a geo-fence-flag column.
-  *(Excel export REDESIGNED 2026-11-20 — monthly, plain-English, per-photo columns: see §17.)*
+  *(Superseded 2026-11-20 by the MONTH-WISE report screen + dashboards and the redesigned monthly Excel export — see §17.)*
 - **D16 — Reference/sample image per photo field is IN v1** (Gifsy uploads an example shot shown to the rep).
 - **D17 — Single visibility configuration per tenant** (one outlet-scope + frequency + levels + form). The owner's
   spec is singular; multiple concurrent named visibility programs are OUT of v1 (the model can extend later).
@@ -221,6 +221,101 @@ Retire the dead scaffolding as part of W0/W2 (no separate wave). Money-path-grad
 only once live).
 
 ---
+
+## 17. Metrics — month-wise report + dashboards (owner-approved PLATFORM-WIDE, 2026-11-20)
+
+One set of definitions behind every Visibility number: the report screen, the admin **Pending Visibility Approvals**
+tile, the Operations **Visibility Program Funnel** and the **Daily Ops Digest**. Code: `api/src/visibility/visibility-metrics.ts`
+(+ `visibility-report.service.ts`); FE mirror of the words: `platform/src/lib/visibility-report.ts`.
+**Only PHOTO_APPROVAL tenants** get the new numbers; **AMOUNT_UPLOAD tenants (no capture flow) are unchanged** on every
+surface (the old queries run, byte-identical).
+
+**Month-wise.** Every surface takes a month `YYYY-MM` (default = the current **IST** month; any past month). A month selects
+every window `YYYY-MM-Pn` of it. Imported old-app records carry `windowKey = <their month>-P1`, so they count in their
+own month (the outlet list labels them *Old app (imported)*).
+
+**Imported months** (`visibility-import.helper.ts` — shared, reuse it; do not re-derive): the portal **go-live month** =
+the first month holding a capture with a submitting rep (`visibilityPortalGoLiveMonth`). A month BEFORE it is an
+imported month; a tenant with no portal capture yet treats any month holding captures as imported
+(`isVisibilityImportedMonth`). The old app kept only APPROVED visits, so an imported month shows the visits it recorded and
+**never** computes coverage / Missed / participation against today's outlets: report `importedMonth: true` +
+`importedMonthNote`, `coveragePct: null`, no outlet-window slots without a capture (so windows 2+ never show Missed),
+funnel `participationPct: null`. A capture is *imported* when a photo path contains `vendor-import/`
+(`isImportedCaptureFormValues`) — not "no submitting rep" (a removed rep nulls that column; shown *Rep (no longer on file)*).
+
+**In scope — THE single rule** (`visibilityUniverseWhere` / `visibilityUniverseBase`, `visibility-scope.helper.ts`):
+not deleted · not deactivated · **`isActive: true` (KYC-approved)** · kycIntent not NOT_INTERESTED / PARKED ·
+outletType.code ∈ `outletScope` · optional programs / sub-programs. Decision (2026-11-20): the report previously used the
+KYC "addressable" universe (no `isActive`) while the rep capture list used `isActive: true` — so a pending-KYC outlet the
+rep could never see was reported as *Missed*. A pending outlet is created `isActive:false` and flips on approval
+(NOT_INTERESTED / PARKED outlets are always `isActive:false`), so "can a rep capture it" = `isActive: true`. The SAME
+rule now drives the rep capture list, the weekly reminder, the admin "outlets in scope" list, the report, both dashboards
+and the digest, the rep **submit / resubmit** path (`loadInScopeOutlet`), the outlet status card (`getOutletStatus` →
+`inScope` + `notInScopeReason`; the sales KYC page shows the reason instead of the Capture button) and the sales team-view
+VISIBILITY figure. An out-of-scope submit is a **400 with a plain reason** (`visibilityOutOfScopeReason` — explains only;
+the DB query decides). (The KYC program-health "addressable" universe keeps NO `isActive` filter — that metric is about
+getting outlets through KYC.)
+
+**Unit = an outlet-window ("visit due").** In scope × windows of the selection (frequency 1 → one per outlet). Each has
+exactly one plain status:
+
+| Plain status | Rule |
+|---|---|
+| Waiting for review | capture `SUBMITTED` |
+| Approved | capture `APPROVED` |
+| Needs re-take | capture `CHANGES_REQUESTED` and the window is still **open** (the rep can re-take) |
+| Rejected | capture `REJECTED` (whole capture) and the window is still **open** (the rep can capture again) |
+| Not approved — window closed | `CHANGES_REQUESTED` / `REJECTED` and the window has **closed** — a resubmit is refused (`resubmitCapture`), so it is final and never "waiting on reps" |
+| Not captured yet | no capture and the window is still open (or not started) |
+| Missed | no capture by the time the window **closed** (IST calendar) — never before; never in an imported month |
+| Not tracked (imported month) | imported months only — no slot is made for a missing visit (the old app kept approved visits only) |
+
+**Report** (`GET /v1/visibility/report[/tenant]?month=&windowKey=`): tiles In scope · the six statuses · Coverage
+(= Approved ÷ In scope); breakdowns by **Programme / Sub-programme**, **Rep** (the outlet's current active assignment to a
+non-deleted rep) and **Manager** (the first ACTIVE manager above that rep, vacant levels skipped — `firstActiveApproverId`);
+`GET …/outlets?status=&group=&groupKey=&page=&pageSize≤200` = the outlets behind any tile or row (status, rep, manager,
+captured by/on, reviewed by/on — reviewer = the last photo decision's reviewer, else the whole-capture reviewer; a capture
+back in *Waiting for review* only shows photo decisions made after its last (re)submission `receivedAt`). Tiles, rows and
+lists come from ONE slot table, so they always add up. **Not counted, shown loudly:** captures in the selection whose
+outlet is no longer in scope, and (all-windows view) captures in a window the current frequency does not have
+(`notCounted`) — the screen states the count; out-of-scope ones are in their window's Excel export (admin screen only),
+while other-window ones cannot be exported from this screen (the banner says exactly that). Definitions are keyboard /
+touch toggletips, the breakdown tabs are ARIA tabs (arrow keys), and the coverage bar has a text alternative + legend. Known limit: "in scope" for a past month
+uses TODAY's outlet state (there is no per-month outlet snapshot). Export stays per window (pick one window when the
+month has several).
+
+**Admin tile** (`GET /v1/admin/dashboard/kpis?visibilityMonth=`): `pendingVisibility` = **every** in-scope capture still
+**Waiting for review, any month** (Gifsy's whole queue — an older capture still waiting is never dropped);
+`visibility.waiting` = the picked month's share, `waitingEarlierMonths` = the rest; `waitingOnReps` = Needs re-take +
+Rejected in an open window; `closedNotApproved` shown apart. The program filter is ANDed onto the in-scope rule. AMOUNT_UPLOAD: unchanged all-time `SUBMITTED` count, `visibility: null`.
+
+**Operations funnel** (`operations?visibilityMonth=`, `operations/visibility?month=`, `operations/visibility/flags?month=`):
+
+| Figure | Definition |
+|---|---|
+| Submitted | this month's captures for in-scope outlets, any status |
+| Approved / Waiting / Needs re-take / Rejected / Not approved — window closed | by current status + whether the window has closed; `waitingAllMonths` / `waitingEarlierMonths` = Gifsy's whole queue |
+| Approval rate | Approved ÷ every decided capture (Approved + Needs re-take + Rejected + Not approved — window closed); *Waiting* excluded; `null` ("—") when nothing is decided |
+| Flagged | captures with a **duplicate photo** (a `VisibilityImageHash` shared with ANOTHER capture of the tenant, any outlet / month) **or** a photo **outside the fence** (stored `geoFenceOk = false`, or any fence-required photo classified `outside` today by the reviewer's per-photo policy: outlet-master tenants = outlet coords + 200 m + accuracy buffer; others = latest APPROVED KYC board-photo geo + configured radius). Counted once per capture; computed whether or not the fence is switched on. *Unverifiable* (no fix / no reference) is NOT outside, so imported photos are never flagged |
+| Fraud flag rate | Flagged ÷ Submitted (`null` when nothing was submitted) |
+| Participation | in-scope outlets with ≥1 capture this month ÷ in-scope outlets; `null` ("Not tracked") for an imported month |
+
+The flags list gives each flagged capture's reason(s): which other captures share the photo (at most 10 listed, the full
+`duplicateCount` kept), which photo is outside. **Gifsy roles only for now** (owner decision pending): client roles get
+the counts on the funnel (`flagDetailsAvailable: false`) and a 403 on `…/flags`. One fraud scan per tenant-month is reused
+for 60 s by the funnel and every flag-list page.
+
+**Daily Ops Digest** (PHOTO_APPROVAL tenants): *reviews done / approved / sent back or rejected* = **one per capture per IST
+day, by that day's final outcome** (each photo's last decision that day; any rejected → sent back), rebuilt from the live +
+every submission version's `photoReviews` — so a rejection then a same-day resubmit still counts; TODO hook for the
+review-events table. *Right now* = Waiting for review across **all months** (earlier-months share called out) and waiting
+on reps (open windows only); "not approved — window closed" listed when non-zero. The section never hides while anything is
+waiting. See DAILY-OPS-DIGEST.md.
+
+**Consolidation notes (parallel tracks):** the plain-status words live locally in `lib/visibility-report.ts` until the
+review-history track's labels in `lib/visibility-types.ts` land; the old `visibilityApi.getReport/getTenantReport` +
+`VisibilityReport` type (per-window shape) are superseded by `visibilityReportApi`.
+
 
 ## 16. AS-BUILT + STATUS (authoritative — 2026-07-27)
 

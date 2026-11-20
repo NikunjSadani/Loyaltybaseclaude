@@ -55,6 +55,86 @@ export function withVisibilityProgramWhere(
   return { AND: [base, appliesToOutletWhere(scope)] };
 }
 
+/**
+ * THE single "in scope for visibility" outlet rule (VISIBILITY-POSM-DESIGN.md §Metrics, decided 2026-11-20).
+ * An outlet is in scope when a rep can actually be asked to capture it:
+ *   - not soft-deleted and not deactivated;
+ *   - `isActive: true` — the outlet is KYC-approved. A pending outlet is created `isActive:false` and only
+ *     flips on approval; the rep's capture list never shows it, so counting it would report a visit nobody
+ *     could make as "Missed". (NOT_INTERESTED and PARKED outlets are always `isActive:false` too.)
+ *   - kycIntent not NOT_INTERESTED / PARKED (belt-and-braces; `notIn` drops NULLs → the {null} branch);
+ *   - outletType.code ∈ visibilityConfig.outletScope (empty = none) AND the optional programs/subPrograms.
+ * Used by the rep capture list, the weekly reminder, the admin "outlets in scope" list, the visibility
+ * report, the admin/operations dashboards and the daily digest — so every number counts the same outlets.
+ * (Contrast the KYC program-health "addressable" universe, which deliberately has NO isActive filter — that
+ * metric is about getting outlets through KYC; this one is about outlets already through it.)
+ */
+export function visibilityUniverseWhere(
+  clientId: string,
+  cfg: VisibilityProgramScopeLike & { outletScope: ReadonlyArray<string> },
+): Prisma.OutletWhereInput {
+  return withVisibilityProgramWhere(visibilityUniverseBase(clientId, cfg.outletScope), cfg);
+}
+
+/**
+ * The FLAT part of {@link visibilityUniverseWhere} (no program narrowing) — for callers that add their own keys
+ * (an id list, a NOT clause) before wrapping with `withVisibilityProgramWhere`. It owns the top-level `OR`
+ * (kycIntent), so a caller that needs another OR must put it under `AND`.
+ */
+export function visibilityUniverseBase(clientId: string, outletScope: ReadonlyArray<string>): Prisma.OutletWhereInput {
+  return {
+    clientId,
+    deletedAt: null,
+    deactivatedAt: null,
+    isActive: true,
+    OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+    outletType: { code: { in: [...outletScope] } },
+  };
+}
+
+/** The outlet fields {@link visibilityOutOfScopeReason} reads (select these to explain a refusal). */
+export const OUT_OF_SCOPE_REASON_SELECT = {
+  deletedAt: true,
+  deactivatedAt: true,
+  isActive: true,
+  kycIntent: true,
+  programName: true,
+  programCategory: true,
+  outletType: { select: { code: true } },
+} as const;
+
+/**
+ * WHY an outlet is not in visibility scope, in plain words — for the 400 a rep gets and the reason shown instead of
+ * the "Capture Visibility" button. This only EXPLAINS a decision: whether an outlet is in scope is always decided by
+ * the database query on {@link visibilityUniverseWhere}. Checks run in the rule's order; null = no rule fails here.
+ */
+export function visibilityOutOfScopeReason(
+  outlet: {
+    deletedAt?: Date | null;
+    deactivatedAt?: Date | null;
+    isActive?: boolean | null;
+    kycIntent?: string | null;
+    programName?: string | null;
+    programCategory?: string | null;
+    outletType?: { code: string } | null;
+  },
+  cfg: VisibilityProgramScopeLike & { outletScope: ReadonlyArray<string> },
+): string | null {
+  if (outlet.deletedAt) return 'This outlet has been removed, so visibility cannot be captured for it.';
+  if (outlet.deactivatedAt) return 'This outlet is deactivated, so visibility cannot be captured for it.';
+  if (outlet.kycIntent === 'NOT_INTERESTED' || outlet.kycIntent === 'PARKED') {
+    return `This outlet is marked ${outlet.kycIntent === 'PARKED' ? 'Parked' : 'Not interested'}, so visibility cannot be captured for it.`;
+  }
+  if (!outlet.isActive) return 'This outlet is not KYC-approved yet — visibility can be captured once its KYC is approved.';
+  if (!outlet.outletType?.code || !cfg.outletScope.includes(outlet.outletType.code)) {
+    return `Outlet type ${outlet.outletType?.code ?? '(none)'} is not part of the visibility programme.`;
+  }
+  if (!visibilityProgramMatches(cfg, { program: outlet.programName ?? null, subProgram: outlet.programCategory ?? null })) {
+    return "This outlet's programme / sub-programme is not part of the visibility programme.";
+  }
+  return null;
+}
+
 // ── Write path: validate + canonicalise + carry over (plan §4, D8) ─────────────────────────────
 
 /** The facet ↔ settings-list ↔ Outlet column mapping for the two program facets. */

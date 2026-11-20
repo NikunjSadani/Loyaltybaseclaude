@@ -953,12 +953,15 @@ function visNeedsCapture(state: CaptureUiState): boolean {
 /**
  * "Visibility — this period" card (VISIBILITY-POSM-DESIGN.md D13): the outlet's windows
  * this month, each with its status, plus a Capture CTA (redirect preselected to this
- * outlet) when a current window is due / missing / rejected. Self-hides when the outlet
- * is not in visibility scope, when the feature/photo-mode is off, or before data loads.
+ * outlet) when a current window is due / missing / rejected. In scope = the backend's single
+ * rule (the one submit enforces), so the button never leads to a refused capture. An outlet
+ * that is NOT in scope shows no button, only the plain reason (e.g. "not KYC-approved yet").
+ * Self-hides when the feature/photo-mode is off, or before data loads.
  */
 function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled: boolean }) {
   const [windows, setWindows] = useState<OutletStatusWindow[] | null>(null);
   const [inScope, setInScope] = useState(false);
+  const [notInScopeReason, setNotInScopeReason] = useState<string | null>(null);
   const [canCapture, setCanCapture] = useState(false);
 
   useEffect(() => {
@@ -969,6 +972,7 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
         if (cancelled) return;
         if (r.success) {
           setInScope(r.data.inScope);
+          setNotInScopeReason(r.data.inScope ? null : r.data.notInScopeReason ?? null);
           setCanCapture(r.data.canCapture);
           setWindows(r.data.windows ?? []);
         } else {
@@ -979,8 +983,26 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
     return () => { cancelled = true; };
   }, [outletId, enabled]);
 
-  // Hide until we have a positive in-scope answer with windows.
-  if (!enabled || !inScope || !windows || windows.length === 0) return null;
+  if (!enabled || !windows) return null;
+  // Not in scope: no capture button — say why in plain words (never a button that leads to a refusal).
+  if (!inScope) {
+    if (!notInScopeReason) return null;
+    return (
+      <Card data-testid="visibility-period-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <Camera className="h-4 w-4 text-gray-400" /> Visibility — this period
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0 pb-3">
+          <p className="text-xs text-gray-600" data-testid="visibility-not-in-scope">
+            {notInScopeReason}
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+  if (windows.length === 0) return null;
 
   // Effective display state: a per-photo CHANGES_REQUESTED capture maps to 'changes_requested'
   // (robust to either backend windowState mapping, via the capture status).

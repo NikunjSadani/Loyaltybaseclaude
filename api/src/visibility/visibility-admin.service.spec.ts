@@ -184,10 +184,22 @@ describe('VisibilityAdminService', () => {
       const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
       expect(where.zone).toBe('West');
       expect(where.state).toBe('MH');
-      expect(where.OR).toEqual([
-        { name: { contains: 'shop', mode: 'insensitive' } },
-        { outletCode: { contains: 'shop', mode: 'insensitive' } },
+      // The text search sits under AND — the top-level OR belongs to the in-scope rule's kycIntent clause.
+      expect(where.AND).toEqual([
+        {
+          OR: [
+            { name: { contains: 'shop', mode: 'insensitive' } },
+            { outletCode: { contains: 'shop', mode: 'insensitive' } },
+          ],
+        },
       ]);
+      expect(where.OR).toEqual([{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }]);
+    });
+
+    it('uses the single in-scope rule: KYC-approved (isActive) outlets only', async () => {
+      mockPrisma.outlet.findMany.mockResolvedValue([]);
+      await service.listOutletsInScope('t1', {});
+      expect(mockPrisma.outlet.findMany.mock.calls[0][0].where.isActive).toBe(true);
     });
   });
 

@@ -77,7 +77,7 @@ describe('VisibilityNotifyService', () => {
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     await service.runWeeklyReminder();
     const where = mockPrisma.outlet.findMany.mock.calls[0][0].where;
-    // Addressable-universe mirror (no isActive; kycIntent OR-wrapped) + scope + NOT approved.
+    // THE single in-scope rule (visibilityUniverseBase: KYC-approved isActive, kycIntent OR-wrapped) + scope + NOT approved.
     expect(where).toMatchObject({
       clientId: 't1',
       deletedAt: null,
@@ -88,7 +88,8 @@ describe('VisibilityNotifyService', () => {
     expect(where.NOT).toEqual({
       visibilityCaptures: { some: { windowKey: expect.any(String), status: 'APPROVED' } },
     });
-    expect(where.isActive).toBeUndefined();
+    // A pending-KYC outlet (isActive:false) is not on the rep's capture list → never nudged about it.
+    expect(where.isActive).toBe(true);
   });
 
   it('notifies the allowed-level assigned rep of a pending (due/rejected) outlet', async () => {

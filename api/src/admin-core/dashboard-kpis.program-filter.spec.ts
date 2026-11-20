@@ -17,7 +17,9 @@ const mockPrisma = {
   payoutTransaction: { groupBy: jest.fn() },
   outlet: { findMany: jest.fn() },
 };
-const mockTenantSettings = { getVisibilityEnabledUncached: jest.fn() };
+const mockTenantSettings = { getVisibilityEnabledUncached: jest.fn(), getEffectiveSettings: jest.fn() };
+// These legacy cases run as an AMOUNT_UPLOAD tenant (Deoleo-style): the pre-month visibility query, unchanged.
+const mockTenant = { resolveClient: jest.fn(), resolveVisibilityCaptureMode: jest.fn().mockResolvedValue('AMOUNT_UPLOAD') };
 const user: JwtPayload = { sub: 'ca', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '', name: '' };
 
 describe('AdminCoreService.dashboardKpis — program filter', () => {
@@ -37,11 +39,12 @@ describe('AdminCoreService.dashboardKpis — program filter', () => {
       { programName: ' Gold' }, { programName: ' ' }, { programName: 'Gold' }, { programName: 'Gold ' }, { programName: 'Silver' },
     ]);
     mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(true);
+    mockTenant.resolveVisibilityCaptureMode.mockResolvedValue('AMOUNT_UPLOAD');
     const mod = await Test.createTestingModule({
       providers: [
         AdminCoreService,
         { provide: PrismaService, useValue: mockPrisma },
-        { provide: TenantService, useValue: { resolveClient: jest.fn() } },
+        { provide: TenantService, useValue: mockTenant },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: SalesNotificationsService, useValue: {} },
       ],
@@ -62,6 +65,7 @@ describe('AdminCoreService.dashboardKpis — program filter', () => {
         program: null,
         availablePrograms: ['Gold', 'Silver'],
         notProgramScoped: [],
+        visibility: null,
       });
       expect(mockPrisma.channelPartner.count).toHaveBeenCalledWith({
         where: { clientId: 'bajaj', isActive: true, deletedAt: null, isParent: false },
@@ -127,7 +131,7 @@ describe('AdminCoreService.dashboardKpis — owner decisions D1/D2 (points owed,
       providers: [
         AdminCoreService,
         { provide: PrismaService, useValue: mockPrisma },
-        { provide: TenantService, useValue: { resolveClient: jest.fn() } },
+        { provide: TenantService, useValue: mockTenant },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: SalesNotificationsService, useValue: {} },
       ],
@@ -144,12 +148,93 @@ describe('AdminCoreService.dashboardKpis — owner decisions D1/D2 (points owed,
       providers: [
         AdminCoreService,
         { provide: PrismaService, useValue: mockPrisma },
-        { provide: TenantService, useValue: { resolveClient: jest.fn() } },
+        { provide: TenantService, useValue: mockTenant },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: SalesNotificationsService, useValue: {} },
       ],
     }).compile();
     const res = await mod.get(AdminCoreService).dashboardKpis(user, undefined);
     expect(res).toMatchObject({ totalRedeemablePoints: 900, totalOwedPoints: 0, owedWallets: 0 });
+  });
+});
+
+describe('AdminCoreService.dashboardKpis — Pending Visibility Approvals (PHOTO_APPROVAL, month-wise)', () => {
+  let svc: AdminCoreService;
+  const groupBy = jest.fn();
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    jest.useFakeTimers({ now: new Date('2026-11-20T06:30:00Z'), doNotFake: ['nextTick', 'setImmediate'] });
+    mockPrisma.channelPartner.count.mockResolvedValue(7);
+    mockPrisma.kycSubmission.count.mockResolvedValue(3);
+    mockPrisma.wallet.aggregate.mockResolvedValue({ _sum: { redeemablePoints: 0 }, _count: { _all: 0 } });
+    mockPrisma.payoutTransaction.groupBy.mockResolvedValue([]);
+    mockPrisma.outlet.findMany.mockResolvedValue([{ programName: 'Gold' }, { programName: 'Silver' }]);
+    // The month groupBy (status × window) vs the all-months waiting queue (by window only).
+    groupBy.mockImplementation((args: any) =>
+      Promise.resolve(
+        args.by.includes('status')
+          ? [
+              { status: 'SUBMITTED', windowKey: '2026-11-P1', _count: { _all: 5 } },
+              { status: 'CHANGES_REQUESTED', windowKey: '2026-11-P1', _count: { _all: 2 } },
+              { status: 'APPROVED', windowKey: '2026-11-P1', _count: { _all: 9 } },
+            ]
+          : [
+              { windowKey: '2026-09-P1', _count: { _all: 4 } },
+              { windowKey: '2026-11-P1', _count: { _all: 5 } },
+            ],
+      ),
+    );
+    mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(true);
+    mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+      visibilityConfig: { outletScope: ['SSS'], frequencyPerMonth: 1, programs: [], subPrograms: [] },
+    });
+    const tenant = { resolveClient: jest.fn(), resolveVisibilityCaptureMode: jest.fn().mockResolvedValue('PHOTO_APPROVAL') };
+    const mod = await Test.createTestingModule({
+      providers: [
+        AdminCoreService,
+        { provide: PrismaService, useValue: { ...mockPrisma, visibilityCapture: { count: mockPrisma.visibilityCapture.count, groupBy } } },
+        { provide: TenantService, useValue: tenant },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
+        { provide: SalesNotificationsService, useValue: {} },
+      ],
+    }).compile();
+    svc = mod.get(AdminCoreService);
+  });
+  afterEach(() => jest.useRealTimers());
+
+  it('the tile counts EVERY capture still waiting (any month), with this month\'s share + earlier months; in scope only', async () => {
+    const res = await svc.dashboardKpis(user, undefined, undefined);
+    // 5 from November + 4 still waiting from September — the September ones are NOT dropped.
+    expect(res.pendingVisibility).toBe(9);
+    expect(res.visibility).toEqual({
+      month: '2026-11', waiting: 5, waitingAllMonths: 9, waitingEarlierMonths: 4,
+      needsRetake: 2, rejected: 0, waitingOnReps: 2, closedNotApproved: 0,
+    });
+    const queueWhere = groupBy.mock.calls[1][0].where;
+    expect(queueWhere).toMatchObject({ clientId: user.clientId, status: 'SUBMITTED' });
+    expect(queueWhere.windowKey).toBeUndefined();
+    const where = groupBy.mock.calls[0][0].where;
+    expect(where.windowKey).toEqual({ startsWith: '2026-11-P' });
+    expect(where.outlet).toMatchObject({ isActive: true, outletType: { code: { in: ['SSS'] } } });
+    // The legacy all-time count is NOT used for a photo tenant.
+    expect(mockPrisma.visibilityCapture.count).not.toHaveBeenCalled();
+  });
+
+  it('a picked month (history incl. imported records) + the program filter ANDed onto the in-scope rule', async () => {
+    const res = await svc.dashboardKpis(user, 'Gold', '2025-06');
+    expect(res.visibility?.month).toBe('2025-06');
+    const where = groupBy.mock.calls[0][0].where;
+    expect(where.windowKey).toEqual({ startsWith: '2025-06-P' });
+    expect(where.outlet.AND[1]).toEqual({ programName: { in: ['Gold'] } });
+    expect(where.outlet.AND[0].isActive).toBe(true);
+  });
+
+  it('a malformed month → 400; visibility OFF → 0 and null', async () => {
+    await expect(svc.dashboardKpis(user, undefined, '2026-13')).rejects.toBeInstanceOf(BadRequestException);
+    mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(false);
+    const res = await svc.dashboardKpis(user, undefined, undefined);
+    expect(res).toMatchObject({ pendingVisibility: 0, visibility: null });
+    expect(groupBy).not.toHaveBeenCalled();
   });
 });

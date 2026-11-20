@@ -6,11 +6,14 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { VisibilityReportQueryDto } from './dto/visibility-capture.dto';
+import { VisibilityMonthReportQueryDto, VisibilityReportOutletsQueryDto } from './dto/visibility-report.dto';
 
 /**
  * Visibility (POSM) REPORT API (D15). Base path `/v1/visibility`.
- *   GET report         — GIFSY coverage report
- *   GET report/tenant  — CLIENT_ADMIN read-only (same shape)
+ *   GET report                 — GIFSY month report (?month=YYYY-MM [&windowKey=])
+ *   GET report/outlets         — GIFSY: the outlets behind a tile / breakdown row (paged)
+ *   GET report/tenant          — CLIENT_ADMIN read-only (same shape)
+ *   GET report/tenant/outlets  — CLIENT_ADMIN read-only outlet list
  *   GET report/export  — xlsx export (GIFSY + CLIENT_ADMIN)
  * Static `report*` paths do not collide with any `:id` param route.
  */
@@ -25,16 +28,30 @@ export class VisibilityReportController {
   @Get('report')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('visibility:read')
-  gifsyReport(@CurrentUser() user: JwtPayload, @Query() query: VisibilityReportQueryDto) {
-    return this.report.gifsyReport(user, query.windowKey);
+  gifsyReport(@CurrentUser() user: JwtPayload, @Query() query: VisibilityMonthReportQueryDto) {
+    return this.report.gifsyReport(user, query);
+  }
+
+  @Get('report/outlets')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('visibility:read')
+  gifsyOutlets(@CurrentUser() user: JwtPayload, @Query() query: VisibilityReportOutletsQueryDto) {
+    return this.report.gifsyOutlets(user, query);
   }
 
   // ── CLIENT_ADMIN read-only report ──────────────────────────────────────────
   @Get('report/tenant')
   @Roles('CLIENT_ADMIN')
   @RequirePermission('visibility:read')
-  tenantReport(@CurrentUser() user: JwtPayload, @Query() query: VisibilityReportQueryDto) {
-    return this.report.tenantReport(user, query.windowKey);
+  tenantReport(@CurrentUser() user: JwtPayload, @Query() query: VisibilityMonthReportQueryDto) {
+    return this.report.tenantReport(user, query);
+  }
+
+  @Get('report/tenant/outlets')
+  @Roles('CLIENT_ADMIN')
+  @RequirePermission('visibility:read')
+  tenantOutlets(@CurrentUser() user: JwtPayload, @Query() query: VisibilityReportOutletsQueryDto) {
+    return this.report.tenantOutlets(user, query);
   }
 
   // ── xlsx export (photo links → the portal's sign-in-gated photo viewer page) ───────────────────────────────────
