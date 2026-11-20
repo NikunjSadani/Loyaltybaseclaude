@@ -126,7 +126,11 @@ function humanize(v: string): string {
 export type RemarksRecipientKind = 'INBOX' | 'ADMIN' | 'CC_ONLY';
 export type RemarksEmailOutcome =
   | { sent: true; recipientKind: RemarksRecipientKind; address: string; to: string[]; cc: string[]; rejected: string[] }
-  | { sent: false; reason: string; recipientKind: RemarksRecipientKind; address: string | null; to: string[]; cc: string[]; rejected: string[] };
+  | {
+      sent: false; reason: string; recipientKind: RemarksRecipientKind; address: string | null; to: string[]; cc: string[]; rejected: string[];
+      /** Every To refused by the relay but CC accepted — not delivered to the intended recipients. */
+      ccOnlyDelivered?: true;
+    };
 
 /** Tenant-wide stat-card counts for the admin list. */
 export interface TicketSummary {
@@ -854,6 +858,7 @@ export class TicketsService {
       emailCc: email.cc,
       ...(email.rejected.length ? { emailRejected: email.rejected } : {}),
       ...(email.sent ? {} : { emailError: email.reason }),
+      ...(!email.sent && email.ccOnlyDelivered ? { emailCcOnlyDelivered: true } : {}),
     };
   }
 
@@ -1142,6 +1147,18 @@ export class TicketsService {
     } catch (e) {
       this.logger.error(`[tickets] remarks email for ${p.ticket.id} failed: ${(e as Error)?.message ?? e}`);
       return notSent('the mail relay refused or timed out');
+    }
+    // Every To address refused but some CC accepted → the request did NOT reach its intended recipients:
+    // reported as NOT sent (distinct status), never as a success with a footnote.
+    const lowerRejected = rejected.map((x) => x.toLowerCase());
+    const toAllRejected = toList.every((x) => lowerRejected.includes(x.toLowerCase()));
+    const ccAccepted = cc.filter((x) => !lowerRejected.includes(x.toLowerCase()));
+    if (toAllRejected && ccAccepted.length) {
+      const reason = `the mail relay REJECTED every To address (${toList.join(', ')}) — NOT delivered to anyone in To; copied to CC only (${ccAccepted.join(', ')})`;
+      await this.recordEmailOutcome(p.ticket.id, p.actorId, `Email ${reason}. ${p.targetName} was notified in-app.`);
+      return {
+        sent: false, reason, recipientKind, address: toText(), to: toList, cc, rejected, ccOnlyDelivered: true,
+      };
     }
     const ccPart = cc.length ? `, cc ${cc.join(', ')}` : '';
     const rejectedPart = rejected.length

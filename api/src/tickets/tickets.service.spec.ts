@@ -1047,6 +1047,16 @@ describe('TicketsService', () => {
       expect(res).toMatchObject({ emailSent: true, emailRejected: ['bad@deoleo.example'] });
     });
 
+    it('relay refuses EVERY To but accepts CC → NOT sent (distinct status), note + response say CC only', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { to: ['a@deoleo.example', 'b@deoleo.example'], cc: ['c@deoleo.example'] } });
+      mockMsg91.sendEmail.mockResolvedValue({ skipped: false, accepted: ['c@deoleo.example'], rejected: ['a@deoleo.example', 'B@deoleo.example'] });
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      const reason = 'the mail relay REJECTED every To address (a@deoleo.example, b@deoleo.example) — NOT delivered to anyone in To; copied to CC only (c@deoleo.example)';
+      expect(gifsyOnlyNotes()[0]).toBe(`Email ${reason}. Deoleo Admin was notified in-app.`);
+      expect(res).toMatchObject({ emailSent: false, emailError: reason, emailCcOnlyDelivered: true, emailRejected: ['a@deoleo.example', 'B@deoleo.example'] });
+    });
+
     it('relay refuses the whole send → NOT sent, note names To + CC', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
       mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { to: ['a@deoleo.example'], cc: ['c@deoleo.example'] } });

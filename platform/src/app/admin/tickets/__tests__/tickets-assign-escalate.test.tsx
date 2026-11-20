@@ -849,6 +849,21 @@ describe('remarks toast names where the email went (follow-up)', () => {
     )).toBeInTheDocument();
   });
 
+  it('every To refused, CC accepted → "NOT delivered to anyone in To … copied to CC only" (no "in-app only")', async () => {
+    routeGet({ list: [baseTicket()] });
+    const reason = 'the mail relay REJECTED every To address (a@deoleo.example) — NOT delivered to anyone in To; copied to CC only (c@deoleo.example)';
+    postMock.mockResolvedValue({ success: true, data: {
+      emailSent: false, emailError: reason, emailCcOnlyDelivered: true, emailRecipientKind: 'INBOX',
+      emailRecipient: 'a@deoleo.example', emailCc: ['c@deoleo.example'], emailRejected: ['a@deoleo.example'],
+    } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    await ask();
+    expect(await screen.findByText(
+      `Remarks requested, but the email was NOT delivered to anyone in To — ${reason}. The client admin was notified in-app.`,
+    )).toBeInTheDocument();
+  });
+
   it('ADMIN + CC → "by email (<admin>, cc <list>)"', async () => {
     routeGet({ list: [baseTicket()] });
     postMock.mockResolvedValue({ success: true, data: { emailSent: true, emailRecipientKind: 'ADMIN', emailRecipient: 'ca@deoleo.example', emailCc: ['ops@deoleo.example'] } });

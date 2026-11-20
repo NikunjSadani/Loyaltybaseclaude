@@ -280,7 +280,7 @@ function EscalatePanel({ ticketId, assignees, assigneesError, onRetryAssignees, 
       const res = await api.post<{
         emailSent?: boolean; emailError?: string; alreadyPending?: boolean; message?: string;
         emailRecipientKind?: 'INBOX' | 'ADMIN' | 'CC_ONLY'; emailRecipient?: string | null;
-        emailCc?: string[]; emailRejected?: string[];
+        emailCc?: string[]; emailRejected?: string[]; emailCcOnlyDelivered?: boolean;
       }>(
         `/api/tickets/${ticketId}/request-client-remarks`, { clientAdminId: target, note: text.trim() },
       );
@@ -303,7 +303,10 @@ function EscalatePanel({ ticketId, assignees, assigneesError, onRetryAssignees, 
         const rejected = res.data?.emailRejected?.length
           ? ` ⚠ The mail relay REJECTED ${res.data.emailRejected.join(', ')} — they did NOT get the email.`
           : '';
-        if (res.data?.emailSent === false) {
+        if (res.data?.emailSent === false && res.data.emailCcOnlyDelivered) {
+          // Distinct from "not sent at all": the CC list got it, the intended To recipients did not.
+          onDone(`Remarks requested, but the email was NOT delivered to anyone in To — ${res.data.emailError ?? 'the mail relay refused them'}. The client admin was notified in-app.`);
+        } else if (res.data?.emailSent === false) {
           onDone(`Remarks requested, but the email to ${where} was NOT sent (${res.data.emailError ?? 'unknown reason'}). The client admin was notified in-app only.`);
         } else if (inbox || ccOnly) {
           onDone(`Remarks requested. The client admin was notified in-app; email sent to ${where}.${rejected}`);
