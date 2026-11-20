@@ -169,4 +169,9 @@ export class VisibilityReportQueryDto {
   @IsOptional()
   @IsString()
   windowKey?: string;
+
+  /** Report export only: the IST month `YYYY-MM` (default = the current month). Validated by the export kind. */
+  @IsOptional()
+  @IsString()
+  month?: string;
 }

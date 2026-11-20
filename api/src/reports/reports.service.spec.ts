@@ -96,7 +96,7 @@ describe('ReportsService', () => {
               'Outlet Name': 'Acme Store',
               City: 'Pune',
               Window: '2026-01',
-              Status: 'APPROVED',
+              Status: 'Approved', // plain words (2026-11-20)
               'Captured By': 'Rep One',
               Latitude: '12.34',
               Longitude: '56.78',

@@ -1,367 +1,502 @@
 /**
- * Visibility captures export kind (`visibility-captures`) — PARITY with the old in-memory builder
- * (VisibilityReportService.exportCaptures, copied below as `oldExportCaptures`), tenant isolation, paging across
- * 2,000-row pages, the per-page duplicate-photo check, cellSafe, the heavy rule and the master-switch 403.
+ * Visibility report export kind (`visibility-captures`) — the 2026-11-20 redesign. Reads the workbook back with SheetJS
+ * and asserts: headers (fixed + per-photo groups from the form LABELS), plain statuses, overall remark composed from
+ * per-photo reasons, reviewer name/time, imported Source, Not-captured sheet (open → "Not captured yet", closed →
+ * "Missed"), About counts = main sheet, absolute photo links on the primary portal host, formula-injection safety,
+ * tenant isolation, paging, params + heavy rule, and the master-switch 403.
  */
-import { ForbiddenException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import * as XLSX from 'xlsx';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
-import { buildXlsx } from '../../../common/xlsx';
-import { istDateTimeCell } from '../../../common/ist-date';
 import { TenantService } from '../../../tenant/tenant.service';
 import { TenantSettingsService } from '../../../tenant/tenant-settings.service';
-import { readMediaValue } from '../../../visibility/visibility-form.helper';
-import { evaluatePhotoFence, haversineMeters } from '../../../visibility/geo-fence.helper';
-import { VISIBILITY_CAPTURES_KIND } from './visibility-captures';
-import { expectSameWorkbook, fakeModuleRef, readBack, runKindToBuffer, seeded } from './parity-testkit-spec';
+import { visibilityAddressableOutletWhere } from '../../../visibility/visibility-report.service';
+import {
+  VISIBILITY_CAPTURES_KIND,
+  VISIBILITY_HISTORY_HEADERS,
+  VISIBILITY_NOT_CAPTURED_HEADERS,
+  VISIBILITY_REPORT_BASE_HEADERS,
+  planPhotoColumns,
+} from './visibility-captures';
+import { fakeModuleRef, readBack, runKindToBuffer } from './parity-testkit-spec';
 
-interface CaptureRec {
-  id: string;
-  clientId: string;
-  outletId: string;
-  outletCode: string;
-  outletName: string;
-  windowKey: string;
-  status: string;
-  geoFenceOk: boolean | null;
-  distanceMeters: number | null;
-  captureAccuracy: number | null;
-  capturedAt: Date | null;
-  receivedAt: Date;
-  rejectionReasonCode: string | null;
-  rejectionReason: string | null;
-  formValues: Prisma.JsonValue;
-  formVersion: number;
-  submittedBy: { employeeCode: string } | null;
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+const T = 'bajaj';
+
+interface Outlet {
+  id: string; clientId: string; outletCode: string; name: string; city: string; state: string;
+  programName: string | null; programCategory: string | null; partnerId: string | null;
+  latitude?: number | null; longitude?: number | null; type: string; inScope: boolean;
+}
+interface Capture {
+  id: string; clientId: string; outletId: string; outletCode: string; outletName: string; windowKey: string;
+  status: string; geoFenceOk: boolean | null; distanceMeters: number | null; captureAccuracy: number | null;
+  capturedAt: Date | null; receivedAt: Date; rejectionReasonCode: string | null; rejectionReason: string | null;
+  formValues: any; formVersion: number; currentVersion: number; photoReviews: any; approvedByUserId: string | null;
+  reviewedAt: Date | null; submittedBySalesUserId: string | null;
+}
+interface Submission {
+  clientId: string; captureId: string; windowKey: string; version: number; formValues: any; photoReviews: any;
+  formVersion: number; createdAt: Date;
 }
 interface Db {
-  captures: CaptureRec[];
+  outlets: Outlet[];
+  captures: Capture[];
+  submissions: Submission[];
   hashes: { clientId: string; captureId: string; hash: string }[];
-  versions: { clientId: string; version: number; formSchema: unknown }[];
-  outlets: { id: string; clientId: string; partnerId: string | null; latitude?: number | null; longitude?: number | null }[];
-  partners: { id: string; clientId: string; geo: { lat: Prisma.Decimal; lng: Prisma.Decimal } | null }[];
-  /** clients.features (absent = no flags — every parity fixture). */
+  versions: { clientId: string; version: number; formSchema: any }[];
+  currentForm: any;
+  users: { id: string; name: string }[];
+  sales: { id: string; clientId: string; reportingToId: string | null; isActive: boolean; deletedAt: Date | null; employeeCode: string; name: string; level: string }[];
+  assignments: { outletId: string; salesUserId: string; unassignedAt: Date | null }[];
+  domains: { clientId: string; domain: string; isPrimary: boolean }[];
   features?: Record<string, unknown>;
 }
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 function fakePrisma(db: Db) {
-  const calls: Record<string, unknown[]> = {};
+  const calls: Record<string, any[]> = {};
   const log = (k: string, a: unknown) => (calls[k] ??= []).push(a);
-  const matchKeyset = (c: CaptureRec, or: Array<Record<string, any>>) =>
-    (c.windowKey > or[0].windowKey.gt) ||
-    (c.windowKey === or[1].windowKey && c.outletCode > or[1].outletCode.gt) ||
-    (c.windowKey === or[2].windowKey && c.outletCode === or[2].outletCode && c.id > or[2].id.gt);
+  const outletRel = (id: string) => {
+    const o = db.outlets.find((x) => x.id === id)!;
+    return {
+      name: o.name, city: o.city, state: o.state, programName: o.programName, programCategory: o.programCategory,
+      partnerId: o.partnerId, latitude: o.latitude ?? null, longitude: o.longitude ?? null, outletType: { name: o.type },
+    };
+  };
+  const matchCapture = (c: Capture, w: any): boolean => {
+    if (w.AND) return w.AND.every((x: any) => matchCapture(c, x));
+    if (w.OR) return w.OR.some((x: any) => matchCapture(c, x));
+    for (const [k, v] of Object.entries<any>(w)) {
+      const val = (c as any)[k];
+      if (v && typeof v === 'object' && 'in' in v) { if (!v.in.includes(val)) return false; }
+      else if (v && typeof v === 'object' && 'gt' in v) { if (!(val > v.gt)) return false; }
+      else if (val !== v) return false;
+    }
+    return true;
+  };
   return {
     calls,
-    client: {
-      findUnique: async (a: unknown) => {
-        log('client.findUnique', a);
-        return db.features ? { features: db.features } : null;
-      },
+    client: { findUnique: async () => (db.features ? { features: db.features } : null) },
+    clientDomain: {
+      findMany: async (a: any) => db.domains.filter((d) => d.clientId === a.where.clientId).map(({ domain, isPrimary }) => ({ domain, isPrimary })),
     },
-    visibilityCapture: {
-      findMany: async (a: { where: Record<string, any>; take?: number }) => {
-        log('visibilityCapture.findMany', a);
-        const base = a.where.AND ? a.where.AND[0] : a.where;
-        const keyset = a.where.AND ? a.where.AND[1].OR : null;
-        let rows = db.captures.filter(
-          (c) => c.clientId === base.clientId && (base.windowKey === undefined || c.windowKey === base.windowKey) && (!keyset || matchKeyset(c, keyset)),
-        );
-        rows = [...rows].sort((x, y) => cmp(x.windowKey, y.windowKey) || cmp(x.outletCode, y.outletCode) || cmp(x.id, y.id));
-        if (a.take) rows = rows.slice(0, a.take);
-        return rows.map(({ clientId: _c, ...r }) => r);
-      },
-    },
-    visibilityImageHash: {
-      findMany: async (a: { where: { clientId: string; captureId?: { in: string[] }; hash?: { in: string[] } } }) => {
-        log('visibilityImageHash.findMany', a);
-        return db.hashes
-          .filter((h) => h.clientId === a.where.clientId)
-          .filter((h) => !a.where.captureId || a.where.captureId.in.includes(h.captureId))
-          .filter((h) => !a.where.hash || a.where.hash.in.includes(h.hash))
-          .map((h) => ({ hash: h.hash, captureId: h.captureId }));
-      },
-    },
+    visibilityForm: { findUnique: async (a: any) => (a.where.clientId === T ? { formSchema: db.currentForm } : null) },
     visibilityFormVersion: {
-      findMany: async (a: { where: { clientId: string; version: { in: number[] } } }) => {
+      findMany: async (a: any) => {
         log('visibilityFormVersion.findMany', a);
         return db.versions.filter((v) => v.clientId === a.where.clientId && a.where.version.in.includes(v.version));
       },
     },
+    visibilityCapture: {
+      findMany: async (a: any) => {
+        log('visibilityCapture.findMany', a);
+        let rows = db.captures.filter((c) => matchCapture(c, a.where));
+        if (a.distinct) return [...new Set(rows.map((r) => r.formVersion))].map((formVersion) => ({ formVersion }));
+        if (a.where.outletId) return rows.map((r) => ({ outletId: r.outletId, windowKey: r.windowKey }));
+        rows = [...rows].sort((x, y) => cmp(x.windowKey, y.windowKey) || cmp(x.outletCode, y.outletCode) || cmp(x.id, y.id));
+        if (a.take) rows = rows.slice(0, a.take);
+        return rows.map(({ clientId: _c, ...r }) => ({ ...r, outlet: outletRel(r.outletId) }));
+      },
+    },
+    visibilityCaptureSubmission: {
+      findMany: async (a: any) => {
+        log('visibilityCaptureSubmission.findMany', a);
+        const base = a.where.AND ? a.where.AND[0] : a.where;
+        const ks = a.where.AND ? a.where.AND[1].OR : null;
+        let rows = db.submissions.filter((s) => s.clientId === base.clientId && base.windowKey.in.includes(s.windowKey));
+        if (ks) {
+          rows = rows.filter((s) =>
+            s.windowKey > ks[0].windowKey.gt ||
+            (s.windowKey === ks[1].windowKey && s.captureId > ks[1].captureId.gt) ||
+            (s.windowKey === ks[2].windowKey && s.captureId === ks[2].captureId && s.version > ks[2].version.gt));
+        }
+        rows = [...rows].sort((x, y) => cmp(x.windowKey, y.windowKey) || cmp(x.captureId, y.captureId) || x.version - y.version);
+        if (a.take) rows = rows.slice(0, a.take);
+        return rows.map((s) => {
+          const c = db.captures.find((x) => x.id === s.captureId)!;
+          return {
+            ...s,
+            capture: {
+              outletCode: c.outletCode, outletName: c.outletName, currentVersion: c.currentVersion, status: c.status,
+              approvedByUserId: c.approvedByUserId, reviewedAt: c.reviewedAt, rejectionReason: c.rejectionReason,
+              rejectionReasonCode: c.rejectionReasonCode,
+            },
+          };
+        });
+      },
+    },
+    visibilityImageHash: {
+      findMany: async (a: any) =>
+        db.hashes
+          .filter((h) => h.clientId === a.where.clientId)
+          .filter((h) => !a.where.captureId || a.where.captureId.in.includes(h.captureId))
+          .filter((h) => !a.where.hash || a.where.hash.in.includes(h.hash))
+          .map((h) => ({ hash: h.hash, captureId: h.captureId })),
+    },
+    channelPartner: { findMany: async () => [] },
     outlet: {
-      findMany: async (a: { where: { id: { in: string[] }; clientId: string } }) => {
+      findMany: async (a: any) => {
         log('outlet.findMany', a);
-        return db.outlets
-          .filter((o) => a.where.id.in.includes(o.id) && o.clientId === a.where.clientId)
-          .map(({ id, partnerId, latitude, longitude }) => ({ id, partnerId, latitude: latitude ?? null, longitude: longitude ?? null }));
+        const ks = a.where.AND ? a.where.AND[1].OR : null;
+        let rows = db.outlets.filter((o) => o.clientId === T && o.inScope);
+        if (ks) rows = rows.filter((o) => o.outletCode > ks[0].outletCode.gt || (o.outletCode === ks[1].outletCode && o.id > ks[1].id.gt));
+        rows = [...rows].sort((x, y) => cmp(x.outletCode, y.outletCode) || cmp(x.id, y.id)).slice(0, a.take);
+        return rows.map((o) => ({ ...o, outletType: { name: o.type } }));
       },
     },
-    channelPartner: {
-      findMany: async (a: { where: { id: { in: string[] }; clientId: string } }) => {
-        log('channelPartner.findMany', a);
-        return db.partners
-          .filter((p) => a.where.id.in.includes(p.id) && p.clientId === a.where.clientId)
-          .map((p) => ({ id: p.id, kycSubmissions: p.geo ? [{ boardPhotoLat: p.geo.lat, boardPhotoLng: p.geo.lng }] : [] }));
+    salesUser: {
+      findMany: async (a: any) =>
+        db.sales.filter((s) => s.clientId === a.where.clientId).map((s) => ({
+          id: s.id, reportingToId: s.reportingToId, isActive: s.isActive, deletedAt: s.deletedAt, employeeCode: s.employeeCode,
+          user: { name: s.name }, hierarchyLevel: { name: s.level },
+        })),
+    },
+    salesUserAssignment: {
+      findMany: async (a: any) => db.assignments.filter((x) => x.unassignedAt === null && a.where.outletId.in.includes(x.outletId)),
+    },
+    user: {
+      findMany: async (a: any) => {
+        log('user.findMany', a);
+        return db.users.filter((u) => a.where.id.in.includes(u.id));
       },
     },
   };
 }
 
-// ─── The OLD builder, verbatim (VisibilityReportService.exportCaptures before 2026-11-13) ───────────────────
+const FORM = {
+  captureGpsOnSubmit: false,
+  fields: [
+    { id: 'w1', type: 'CAMERA', label: 'Window 1', required: true, order: 1, geoFenceRequired: true },
+    { id: 'note', type: 'TEXT', label: 'Note', required: false, order: 2 },
+    { id: 'w2', type: 'CAMERA', label: 'Window 2', required: true, order: 3, visibleWhen: { fieldId: '__subProgram__', op: 'eq', value: 'Privilege' } },
+  ],
+};
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-async function oldExportCaptures(prisma: any, clientId: string, radiusMeters: number, windowKey?: string): Promise<Buffer> {
-  const where: Record<string, unknown> = { clientId };
-  if (windowKey && windowKey.trim()) where.windowKey = windowKey;
-  const captures: any[] = await prisma.visibilityCapture.findMany({ where, orderBy: [{ windowKey: 'asc' }, { outletCode: 'asc' }] });
-  // dup flag (old: every hash row of the tenant)
-  const dup = new Set<string>();
-  if (captures.length) {
-    const hashes: any[] = await prisma.visibilityImageHash.findMany({ where: { clientId } });
-    const byHash = new Map<string, Set<string>>();
-    for (const h of hashes) byHash.set(h.hash, (byHash.get(h.hash) ?? new Set<string>()).add(h.captureId));
-    const inSet = new Set(captures.map((c) => c.id));
-    for (const ids of byHash.values()) if (ids.size > 1) for (const id of ids) if (inSet.has(id)) dup.add(id);
-  }
-  const versions = [...new Set(captures.map((c) => c.formVersion))];
-  const snaps: any[] = versions.length ? await prisma.visibilityFormVersion.findMany({ where: { clientId, version: { in: versions } } }) : [];
-  const schemaByVersion = new Map<number, any>();
-  for (const s of snaps) schemaByVersion.set(s.version, s.formSchema);
-  // reference geo
-  const ref = new Map<string, { lat: number; lng: number }>();
-  const ids = [...new Set(captures.map((c) => c.outletId).filter(Boolean))];
-  if (ids.length) {
-    const outlets: any[] = await prisma.outlet.findMany({ where: { id: { in: ids }, clientId } });
-    const pids = [...new Set(outlets.map((o) => o.partnerId).filter(Boolean))];
-    if (pids.length) {
-      const partners: any[] = await prisma.channelPartner.findMany({ where: { id: { in: pids }, clientId } });
-      const g = new Map<string, { lat: number; lng: number }>();
-      for (const p of partners) {
-        const sub = p.kycSubmissions?.[0];
-        if (sub && sub.boardPhotoLat != null && sub.boardPhotoLng != null) g.set(p.id, { lat: Number(sub.boardPhotoLat), lng: Number(sub.boardPhotoLng) });
-      }
-      for (const o of outlets) {
-        const x = o.partnerId ? g.get(o.partnerId) : undefined;
-        if (x) ref.set(o.id, x);
-      }
-    }
-  }
-  const photosOf = (formValues: any, schema: any, reference: any) => {
-    if (!formValues || typeof formValues !== 'object') return [];
-    if (!schema?.fields) return [];
-    const out: any[] = [];
-    for (const f of schema.fields) {
-      if (f.type !== 'CAMERA') continue;
-      const { key, geo } = readMediaValue(formValues[f.id]);
-      if (!key) continue;
-      const link = `/v1/visibility/captures/media?key=${encodeURIComponent(key)}`;
-      if (geo) {
-        const acc = geo.accuracy != null ? ` (±${Math.round(geo.accuracy)}m)` : '';
-        const status = evaluatePhotoFence(geo, reference, radiusMeters);
-        const distance = reference != null ? String(Math.round(haversineMeters(geo, reference) * 100) / 100) : '';
-        out.push({ link, geo: `${geo.lat}, ${geo.lng}${acc}`, distance, status });
-      } else out.push({ link, geo: '', distance: '', status: '' });
-    }
-    return out;
+const outlet = (n: number, extra: Partial<Outlet> = {}): Outlet => ({
+  id: `o${n}`, clientId: T, outletCode: `A00${n}`, name: `Shop ${n}`, city: 'Pune', state: 'MH', programName: 'RLP',
+  programCategory: 'Elite', partnerId: null, type: 'Retailer', inScope: true, ...extra,
+});
+
+const at = (iso: string) => new Date(iso);
+
+function baseDb(): Db {
+  const rev = (status: string, by: string, iso: string, extra: Record<string, string> = {}) => ({ status, reviewedAt: iso, reviewedByUserId: by, ...extra });
+  return {
+    outlets: [outlet(1), outlet(2, { programCategory: 'Privilege' }), outlet(3), outlet(4, { name: '=HYPERLINK("http://evil")' }), outlet(5), outlet(6, { inScope: false })],
+    captures: [
+      {
+        id: 'c1', clientId: T, outletId: 'o1', outletCode: 'A001', outletName: 'Shop 1', windowKey: '2026-11-P1', status: 'APPROVED',
+        geoFenceOk: true, distanceMeters: 34.4, captureAccuracy: 12, capturedAt: at('2026-11-05T09:30:00Z'), receivedAt: at('2026-11-05T09:31:00Z'),
+        rejectionReasonCode: null, rejectionReason: null, formVersion: 3, currentVersion: 1, submittedBySalesUserId: 'su-rep',
+        formValues: { w1: { key: 'visibility-media/bajaj/a1.jpg', geo: { lat: 18.5, lng: 73.8, accuracy: 9 } }, note: 'ok' },
+        photoReviews: { w1: rev('APPROVED', 'u-admin', '2026-11-06T04:00:00.000Z') }, approvedByUserId: 'u-admin', reviewedAt: at('2026-11-06T04:00:00Z'),
+      },
+      {
+        id: 'c2', clientId: T, outletId: 'o2', outletCode: 'A002', outletName: 'Shop 2', windowKey: '2026-11-P1', status: 'CHANGES_REQUESTED',
+        geoFenceOk: false, distanceMeters: 410, captureAccuracy: 20, capturedAt: at('2026-11-07T10:00:00Z'), receivedAt: at('2026-11-07T10:01:00Z'),
+        rejectionReasonCode: null, rejectionReason: null, formVersion: 3, currentVersion: 2, submittedBySalesUserId: 'su-rep',
+        formValues: { w1: 'visibility-media/bajaj/a2-w1.jpg', w2: 'visibility-media/bajaj/a2-w2.jpg' },
+        photoReviews: {
+          w1: rev('REJECTED', 'u-admin', '2026-11-08T05:00:00.000Z', { reasonCode: 'BLURRY', reason: 'too dark' }),
+          w2: rev('APPROVED', 'u-other', '2026-11-08T06:30:00.000Z'),
+        },
+        approvedByUserId: null, reviewedAt: at('2026-11-08T06:30:00Z'),
+      },
+      {
+        id: 'c3', clientId: T, outletId: 'o3', outletCode: 'A003', outletName: 'Shop 3', windowKey: '2026-11-P1', status: 'APPROVED',
+        geoFenceOk: null, distanceMeters: null, captureAccuracy: null, capturedAt: null, receivedAt: at('2026-11-03T06:00:00Z'),
+        rejectionReasonCode: null, rejectionReason: null, formVersion: 3, currentVersion: 1, submittedBySalesUserId: null,
+        formValues: { w1: 'visibility-media/bajaj/vendor-import/prod/b1/A003/2026-11_v1.jpg' },
+        photoReviews: null, approvedByUserId: 'u-gifsy', reviewedAt: at('2026-11-04T06:00:00Z'),
+      },
+      {
+        id: 'c4', clientId: T, outletId: 'o4', outletCode: 'A004', outletName: '=HYPERLINK("http://evil")', windowKey: '2026-11-P1', status: 'REJECTED',
+        geoFenceOk: true, distanceMeters: 10, captureAccuracy: 5, capturedAt: null, receivedAt: at('2026-11-09T06:00:00Z'),
+        rejectionReasonCode: 'WRONG_OUTLET', rejectionReason: null, formVersion: 3, currentVersion: 1, submittedBySalesUserId: 'su-rep',
+        formValues: { w1: 'visibility-media/bajaj/a4.jpg' },
+        photoReviews: { w1: rev('REJECTED', 'u-admin', '2026-11-10T06:00:00.000Z', { reasonCode: 'WRONG_OUTLET' }) },
+        approvedByUserId: 'u-admin', reviewedAt: at('2026-11-10T06:00:00Z'),
+      },
+      // Another tenant — must never appear.
+      {
+        id: 'x1', clientId: 'other', outletId: 'o1', outletCode: 'A001', outletName: 'OTHER-TENANT', windowKey: '2026-11-P1', status: 'APPROVED',
+        geoFenceOk: null, distanceMeters: null, captureAccuracy: null, capturedAt: null, receivedAt: at('2026-11-03T06:00:00Z'),
+        rejectionReasonCode: null, rejectionReason: null, formVersion: 3, currentVersion: 1, submittedBySalesUserId: null,
+        formValues: { w1: 'k' }, photoReviews: null, approvedByUserId: null, reviewedAt: null,
+      },
+    ],
+    submissions: [
+      { clientId: T, captureId: 'c2', windowKey: '2026-11-P1', version: 1, formValues: { w1: 'visibility-media/bajaj/a2-old.jpg', w2: 'visibility-media/bajaj/a2-w2.jpg' }, photoReviews: null, formVersion: 3, createdAt: at('2026-11-06T10:00:00Z') },
+      { clientId: T, captureId: 'c2', windowKey: '2026-11-P1', version: 2, formValues: { w1: 'visibility-media/bajaj/a2-w1.jpg', w2: 'visibility-media/bajaj/a2-w2.jpg' }, photoReviews: {
+        w1: rev('REJECTED', 'u-admin', '2026-11-08T05:00:00.000Z', { reasonCode: 'BLURRY', reason: 'too dark' }),
+        w2: rev('APPROVED', 'u-other', '2026-11-08T06:30:00.000Z'),
+      }, formVersion: 3, createdAt: at('2026-11-07T10:01:00Z') },
+    ],
+    hashes: [
+      { clientId: T, captureId: 'c1', hash: 'H1' },
+      { clientId: T, captureId: 'c4', hash: 'H1' },
+      { clientId: T, captureId: 'c2', hash: 'H2' },
+    ],
+    versions: [{ clientId: T, version: 3, formSchema: FORM }],
+    currentForm: FORM,
+    users: [{ id: 'u-admin', name: 'Asha Admin' }, { id: 'u-other', name: 'Ravi Reviewer' }, { id: 'u-gifsy', name: 'Gifsy Ops' }],
+    sales: [
+      { id: 'su-rep', clientId: T, reportingToId: 'su-vacant', isActive: true, deletedAt: null, employeeCode: 'E100', name: 'Rahul Rep', level: 'ISR' },
+      { id: 'su-vacant', clientId: T, reportingToId: 'su-so', isActive: false, deletedAt: null, employeeCode: 'E200', name: 'Vacant SO', level: 'SO' },
+      { id: 'su-so', clientId: T, reportingToId: null, isActive: true, deletedAt: null, employeeCode: 'E300', name: 'Sunil Manager', level: 'ASM' },
+    ],
+    assignments: [{ outletId: 'o5', salesUserId: 'su-rep', unassignedAt: null }],
+    domains: [
+      { clientId: T, domain: 'uat-bajaj.gifsy.in', isPrimary: false },
+      { clientId: T, domain: 'rewards.bajaj.example', isPrimary: true },
+    ],
   };
-  const rows = captures.map((c) => {
-    const photos = photosOf(c.formValues, schemaByVersion.get(c.formVersion), ref.get(c.outletId) ?? null);
-    return {
-      'Outlet Code': c.outletCode,
-      'Outlet Name': c.outletName,
-      Window: c.windowKey,
-      Status: c.status,
-      Rep: c.submittedBy?.employeeCode ?? '',
-      'Geo-fence OK': c.geoFenceOk === null ? 'UNVERIFIABLE' : c.geoFenceOk ? 'YES' : 'NO',
-      'Distance (m)': c.distanceMeters != null ? String(c.distanceMeters) : '',
-      'Captured At': c.capturedAt ? istDateTimeCell(c.capturedAt) : '',
-      'Received At': istDateTimeCell(c.receivedAt),
-      'Accuracy (m)': c.captureAccuracy != null ? String(c.captureAccuracy) : '',
-      'Duplicate Photo': dup.has(c.id) ? 'YES' : '',
-      'Reject Reason': c.rejectionReasonCode ?? '',
-      'Reject Detail': c.rejectionReason ?? '',
-      Photos: photos.map((p: any) => p.link).join(' | '),
-      'Photo Geo': photos.map((p: any) => p.geo).join(' | '),
-      'Photo Distance (m)': photos.map((p: any) => p.distance).join(' | '),
-      'Photo Status': photos.map((p: any) => p.status).join(' | '),
-    };
-  });
-  const empty = Object.fromEntries(
-    ['Outlet Code', 'Outlet Name', 'Window', 'Status', 'Rep', 'Geo-fence OK', 'Distance (m)', 'Captured At', 'Received At',
-      'Accuracy (m)', 'Duplicate Photo', 'Reject Reason', 'Reject Detail', 'Photos', 'Photo Geo', 'Photo Distance (m)', 'Photo Status'].map((h) => [h, '']),
-  );
-  return buildXlsx([{ name: 'Captures', rows: rows.length ? rows : [empty] }]);
-}
-/* eslint-enable @typescript-eslint/no-explicit-any */
-
-// ─── Fixtures ──────────────────────────────────────────────────────────────────────────────────────────────
-
-const RADIUS = 50;
-
-function bigDb(clientId: string, n: number): Db {
-  const rnd = seeded(3);
-  const pick = <T,>(xs: readonly T[]) => xs[Math.floor(rnd() * xs.length)];
-  const db: Db = { captures: [], hashes: [], versions: [], outlets: [], partners: [] };
-  db.versions.push({ clientId, version: 1, formSchema: { fields: [{ id: 'photo', type: 'CAMERA' }, { id: 'note', type: 'TEXT' }] } });
-  db.versions.push({ clientId, version: 2, formSchema: { fields: [{ id: 'p1', type: 'CAMERA' }, { id: 'p2', type: 'CAMERA' }] } });
-  db.versions.push({ clientId: 'other', version: 3, formSchema: { fields: [{ id: 'x', type: 'CAMERA' }] } });
-  for (let o = 0; o < 400; o++) {
-    const partnerId = rnd() < 0.8 ? `p${o}` : null;
-    db.outlets.push({ id: `o${o}`, clientId, partnerId });
-    if (partnerId) db.partners.push({ id: partnerId, clientId, geo: rnd() < 0.7 ? { lat: new Prisma.Decimal('19.0760'), lng: new Prisma.Decimal('72.8777') } : null });
-  }
-  const windows = ['2026-08-P1', '2026-09-P1', '2026-09-P2', '2026-10-P1'];
-  for (let i = 0; i < n; i++) {
-    const o = Math.floor(rnd() * 400);
-    const v = pick([1, 2, 3, 9]); // 3 = another tenant's version, 9 = missing snapshot
-    const geoPhoto = () => (rnd() < 0.5 ? `visibility-media/${clientId}/${i}.jpg` : { key: `visibility-media/${clientId}/${i}-g.jpg`, geo: { lat: 19.07 + rnd() / 100, lng: 72.87 + rnd() / 100, accuracy: rnd() < 0.5 ? 12.4 : null } });
-    const id = `cap${String(i).padStart(6, '0')}`;
-    db.captures.push({
-      id, clientId, outletId: `o${o}`, outletCode: i % 101 === 0 ? 'SAME' : `OC${String(o).padStart(4, '0')}`,
-      outletName: i === 3 ? '=cmd()' : `Shop ${o}`, windowKey: pick(windows),
-      status: pick(['APPROVED', 'SUBMITTED', 'REJECTED', 'CHANGES_REQUESTED']),
-      geoFenceOk: pick([true, false, null]), distanceMeters: rnd() < 0.7 ? Math.round(rnd() * 200) : null,
-      captureAccuracy: rnd() < 0.7 ? Math.round(rnd() * 30) : null,
-      capturedAt: rnd() < 0.9 ? new Date(Date.parse('2026-09-01T00:00:00Z') + i * 60_000) : null,
-      receivedAt: new Date(Date.parse('2026-09-01T00:05:00Z') + i * 60_000),
-      rejectionReasonCode: pick([null, 'BLURRY', '-X']), rejectionReason: pick([null, 'photo blurry', '@detail']),
-      formValues: v === 1 ? { photo: geoPhoto(), note: 'n' } : v === 2 ? { p1: geoPhoto(), p2: geoPhoto() } : rnd() < 0.5 ? { x: 'k' } : null,
-      formVersion: v, submittedBy: rnd() < 0.9 ? { employeeCode: `E${o % 30}` } : null,
-    });
-    // ~5% share a photo hash with another capture (some across windows), the rest unique.
-    db.hashes.push({ clientId, captureId: id, hash: rnd() < 0.05 ? `H${Math.floor(rnd() * 40)}` : `U${i}` });
-  }
-  // Another tenant: same hash values must not make OUR captures duplicates; its captures never appear.
-  for (let i = 0; i < 30; i++) {
-    db.captures.push({ ...db.captures[i], id: `other${i}`, clientId: 'other', outletName: `OTHER-TENANT-${i}` });
-    db.hashes.push({ clientId: 'other', captureId: `other${i}`, hash: `U${i}` });
-  }
-  return db;
 }
 
-const user: JwtPayload = { sub: 'a', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '', name: '' };
+const user: JwtPayload = { sub: 'a', role: 'CLIENT_ADMIN', clientId: T, phone: '', name: '' };
+const SCOPE = ['RET'];
 const services = (enabled = true) =>
   fakeModuleRef([
     [TenantService, { resolveVisibilityEnabled: async () => enabled }],
-    [TenantSettingsService, { getEffectiveSettings: async () => ({ visibilityConfig: { geoFence: { radiusMeters: RADIUS } } }) }],
+    [TenantSettingsService, { getEffectiveSettings: async () => ({ visibilityConfig: { geoFence: { radiusMeters: 50 }, frequencyPerMonth: 1, outletScope: SCOPE, programs: [], subPrograms: [] } }) }],
   ]);
 
-async function both(db: Db, windowKey?: string) {
-  const old = await oldExportCaptures(fakePrisma(db), 'bajaj', RADIUS, windowKey);
+const NOW = new Date('2026-11-20T06:00:00Z');
+
+async function run(db: Db, params: Record<string, unknown> = {}, now = NOW) {
   const prisma = fakePrisma(db);
-  const t = performance.now();
-  const res = await runKindToBuffer(VISIBILITY_CAPTURES_KIND, windowKey === undefined ? {} : { windowKey }, { prisma, moduleRef: services(), user });
-  return { old, ...res, prisma, ms: Math.round(performance.now() - t) };
+  const res = await runKindToBuffer(VISIBILITY_CAPTURES_KIND, params, { prisma, moduleRef: services(), user, now });
+  const back = readBack(res.buffer);
+  const sheet = (n: string) => back.rows[n] as unknown[][];
+  const header = sheet('Visibility')[0] as string[];
+  const rowOf = (code: string) => {
+    const r = sheet('Visibility').find((x) => x[0] === code) as unknown[];
+    return (h: string) => {
+      const i = header.indexOf(h);
+      if (i < 0) throw new Error(`no column ${h}`);
+      return r[i];
+    };
+  };
+  return { ...res, back, sheet, header, rowOf, prisma };
 }
 
-// Thousands of rows through two full xlsx builds per test: allow for a loaded CI box.
-jest.setTimeout(120_000);
+const savedEnv = { ...process.env };
+beforeEach(() => {
+  process.env.TENANT_LINK_ENV = 'production';
+  delete process.env.PLATFORM_DOMAIN;
+});
+afterAll(() => {
+  process.env = savedEnv;
+});
 
-describe('visibility-captures export kind', () => {
-  it('PARITY (all windows, 4,300 captures = 3 pages): sheet, headers, every cell equal the old builder', async () => {
-    const db = bigDb('bajaj', 4300);
-    const { old, buffer, rowCount, prisma, ms, heavy, fileName } = await both(db);
-    const got = expectSameWorkbook(buffer, old);
-    expect(rowCount).toBe(4300);
-    expect(got.rows.Captures).toHaveLength(4301);
-    expect(JSON.stringify(got.rows)).not.toContain('OTHER-TENANT');
-    expect(got.rows.Captures.some((r) => r[10] === 'YES')).toBe(true); // some duplicates flagged
-    const pages = prisma.calls['visibilityCapture.findMany'] as Array<{ take: number }>;
-    expect(pages).toHaveLength(3);
-    // Duplicate check reads only the page's hashes (+ the captures sharing them), never the whole tenant's table.
-    for (const c of prisma.calls['visibilityImageHash.findMany'] as Array<{ where: Record<string, unknown> }>) {
-      expect(Object.keys(c.where).sort()).toEqual(expect.arrayContaining(['clientId']));
-      expect(c.where.captureId ?? c.where.hash).toBeDefined();
+describe('visibility report export (visibility-captures)', () => {
+  it('sheets + headers: fixed columns, then one 6-column group per CAMERA field named by its LABEL', async () => {
+    const { back, header, sheet } = await run(baseDb());
+    expect(back.names).toEqual(['Visibility', 'Review history', 'Not captured', 'About']);
+    expect(header).toEqual([
+      ...VISIBILITY_REPORT_BASE_HEADERS,
+      'Window 1 – Photo', 'Window 1 – Decision', 'Window 1 – Reason', 'Window 1 – Reviewed by', 'Window 1 – Reviewed on', 'Window 1 – Location',
+      'Window 2 – Photo', 'Window 2 – Decision', 'Window 2 – Reason', 'Window 2 – Reviewed by', 'Window 2 – Reviewed on', 'Window 2 – Location',
+    ]);
+    expect(sheet('Review history')[0]).toEqual([...VISIBILITY_HISTORY_HEADERS]);
+    expect(sheet('Not captured')[0]).toEqual([...VISIBILITY_NOT_CAPTURED_HEADERS]);
+    expect(JSON.stringify(back.rows)).not.toContain('OTHER-TENANT');
+  });
+
+  it('plain statuses, rep + first ACTIVE manager (vacant level skipped), dates in IST words, duplicate Yes/No', async () => {
+    const { rowOf } = await run(baseDb());
+    const a1 = rowOf('A001');
+    expect(a1('Status')).toBe('Approved');
+    expect(a1('Captured by')).toBe('Rahul Rep');
+    expect(a1('Rep code')).toBe('E100');
+    expect(a1('Rep designation')).toBe('ISR');
+    expect(a1('Manager')).toBe('Sunil Manager (ASM)');
+    expect(a1('Captured on')).toBe('05 Nov 2026, 3:00 pm');
+    expect(a1('Source')).toBe('Portal app');
+    expect(a1('Location check')).toBe('Inside fence (34 m, ±12 m)');
+    expect(a1('Duplicate photo')).toBe('Yes');
+    expect(a1('Re-takes')).toBe(0);
+    expect(a1('Reviewed by')).toBe('Asha Admin');
+    expect(a1('Outlet Type')).toBe('Retailer');
+    expect(a1('Programme')).toBe('RLP');
+    expect(a1('Sub-programme')).toBe('Elite');
+    expect(a1('Window 2 – Decision')).toBe('Not applicable'); // Privilege-only photo at an Elite outlet
+    expect(rowOf('A002')('Status')).toBe('Needs re-take');
+    expect(rowOf('A002')('Duplicate photo')).toBe('No');
+    expect(rowOf('A004')('Status')).toBe('Rejected');
+  });
+
+  it('CHANGES_REQUESTED: per-photo decisions/reasons/reviewers + Overall remark composed from the rejected photos', async () => {
+    const { rowOf } = await run(baseDb());
+    const a2 = rowOf('A002');
+    expect(a2('Window 1 – Decision')).toBe('Rejected');
+    expect(a2('Window 1 – Reason')).toBe('too dark');
+    expect(a2('Window 1 – Reviewed by')).toBe('Asha Admin');
+    expect(a2('Window 1 – Reviewed on')).toBe('08 Nov 2026, 10:30 am');
+    expect(a2('Window 2 – Decision')).toBe('Approved');
+    expect(a2('Window 2 – Reviewed by')).toBe('Ravi Reviewer');
+    expect(a2('Overall remark')).toBe('Re-take needed: Window 1: too dark');
+    // Capture-level reviewer = the LATEST per-photo review.
+    expect(a2('Reviewed by')).toBe('Ravi Reviewer');
+    expect(a2('Reviewed on')).toBe('08 Nov 2026, 12:00 pm');
+    expect(a2('Re-takes')).toBe(1);
+    expect(a2('Location check')).toBe('Outside fence (410 m, ±20 m)');
+  });
+
+  it('whole-capture REJECTED: Overall remark = the reason code label; reason code label fills the photo Reason', async () => {
+    const { rowOf } = await run(baseDb());
+    const a4 = rowOf('A004');
+    expect(a4('Overall remark')).toBe('Wrong outlet');
+    expect(a4('Window 1 – Reason')).toBe('Wrong outlet');
+  });
+
+  it('imported old-app record: Source label, no rep, location "Not recorded", decision from the whole-capture approval', async () => {
+    const { rowOf } = await run(baseDb());
+    const a3 = rowOf('A003');
+    expect(a3('Source')).toBe('Imported (old app)');
+    expect(a3('Captured by')).toBe('');
+    expect(a3('Manager')).toBe('');
+    expect(a3('Location check')).toBe('Not recorded (old app)');
+    expect(a3('Window 1 – Decision')).toBe('Approved');
+    expect(a3('Window 1 – Reviewed by')).toBe('Gifsy Ops');
+    expect(a3('Reviewed by')).toBe('Gifsy Ops');
+    expect(a3('Window 2 – Decision')).toBe('Not applicable');
+  });
+
+  it('photo cells are clickable "Open photo" links on the PRIMARY portal host (never the uat host), key URL-encoded', async () => {
+    const { rowOf, back, header, sheet } = await run(baseDb());
+    expect(rowOf('A001')('Window 1 – Photo')).toBe('Open photo');
+    const col = header.indexOf('Window 1 – Photo');
+    const r = sheet('Visibility').findIndex((x) => x[0] === 'A001');
+    const addr = XLSX.utils.encode_cell({ r, c: col });
+    expect(back.links.Visibility[addr]).toBe(
+      `https://rewards.bajaj.example/visibility/photo?key=${encodeURIComponent('visibility-media/bajaj/a1.jpg')}`,
+    );
+    const all = Object.values(back.links.Visibility);
+    expect(all.length).toBe(5); // a1, a2 w1+w2, a3, a4
+    for (const l of all) expect(l.startsWith('https://rewards.bajaj.example/visibility/photo?key=visibility-media%2Fbajaj%2F')).toBe(true);
+  });
+
+  it('no primary domain → links fall back to <slug>.gifsy.in', async () => {
+    const db = baseDb();
+    db.domains = [{ clientId: T, domain: 'uat-bajaj.gifsy.in', isPrimary: false }];
+    const { back } = await run(db);
+    for (const l of Object.values(back.links.Visibility)) expect(l.startsWith('https://bajaj.gifsy.in/visibility/photo?key=')).toBe(true);
+  });
+
+  it('formula-injection safety: an outlet name starting with "=" is written as text', async () => {
+    const { rowOf } = await run(baseDb());
+    expect(rowOf('A004')('Outlet Name')).toBe('\'=HYPERLINK("http://evil")');
+  });
+
+  it('Review history: one row per version per photo; older version without a snapshot = "Not recorded"', async () => {
+    const { sheet, back } = await run(baseDb());
+    const rows = sheet('Review history').slice(1);
+    expect(rows).toHaveLength(4); // c2 v1 (2 photos) + c2 v2 (2 photos); imported/no-submission captures have none
+    const v1w1 = rows.find((r) => r[3] === 1 && r[5] === 'Window 1')!;
+    expect(v1w1[7]).toBe('Not recorded');
+    const v2w1 = rows.find((r) => r[3] === 2 && r[5] === 'Window 1')!;
+    expect(v2w1.slice(7)).toEqual(['Rejected', 'too dark', 'Asha Admin', '08 Nov 2026, 10:30 am']);
+    expect(v2w1[6]).toBe('Open photo');
+    expect(Object.values(back.links['Review history'])).toContain(
+      `https://rewards.bajaj.example/visibility/photo?key=${encodeURIComponent('visibility-media/bajaj/a2-old.jpg')}`,
+    );
+  });
+
+  it('Not captured: in-scope outlets with no capture; OPEN window → "Not captured yet" with assigned rep + manager', async () => {
+    const { sheet, prisma } = await run(baseDb());
+    const rows = sheet('Not captured').slice(1);
+    expect(rows).toEqual([
+      ['A005', 'Shop 5', 'Retailer', 'RLP', 'Elite', 'Pune', 'MH', 'Rahul Rep', 'E100', 'Sunil Manager (ASM)', '2026-11-P1', 'Not captured yet'],
+    ]);
+    // The SAME in-scope rule as the report tiles.
+    expect(prisma.calls['outlet.findMany'][0].where).toEqual(
+      visibilityAddressableOutletWhere(T, SCOPE, { programs: [], subPrograms: [] }),
+    );
+  });
+
+  it('Not captured: a CLOSED window (past month) → "Missed"; month param scopes captures to that month', async () => {
+    const db = baseDb();
+    const { sheet, rowCount } = await run(db, { month: '2026-10' });
+    expect(sheet('Visibility')).toHaveLength(1); // header only: no October captures
+    const rows = sheet('Not captured').slice(1);
+    expect(rows).toHaveLength(5); // o1..o5 in scope, none captured in October
+    expect(rows.every((r) => r[10] === '2026-10-P1' && r[11] === 'Missed')).toBe(true);
+    expect(rowCount).toBe(5);
+  });
+
+  it('About: status counts equal the Visibility sheet; scope + photo-link note present', async () => {
+    const { sheet } = await run(baseDb());
+    const about = Object.fromEntries(sheet('About').slice(1).map((r) => [String(r[0]).trim(), r[1]]));
+    const main = sheet('Visibility').slice(1);
+    const count = (w: string) => main.filter((r) => r[9] === w).length;
+    expect(about['Visits in the Visibility sheet']).toBe(main.length);
+    const counts = sheet('About').slice(1).filter((r) => String(r[0]).startsWith('  ')).map((r) => [String(r[0]).trim(), r[1]]);
+    expect(Object.fromEntries(counts)).toEqual({
+      Approved: count('Approved'),
+      'Waiting for review': count('Waiting for review'),
+      'Needs re-take': count('Needs re-take'),
+      Rejected: count('Rejected'),
+      'of which imported from the old app': 1,
+    });
+    expect(about['Covers']).toBe('November 2026 — every window of the month');
+    expect(String(about['PHOTO LINKS'])).toContain('rewards.bajaj.example');
+    expect(about['Not captured yet (window still open)']).toBe(1);
+  });
+
+  it('pages over 2,000 captures (keyset) and reads reviewer names once per page, not per row', async () => {
+    const db = baseDb();
+    for (let i = 0; i < 2300; i++) {
+      db.outlets.push(outlet(1000 + i, { outletCode: `B${String(i).padStart(5, '0')}`, inScope: false }));
+      db.captures.push({
+        ...db.captures[0], id: `b${String(i).padStart(5, '0')}`, outletId: `o${1000 + i}`, outletCode: `B${String(i).padStart(5, '0')}`,
+      });
     }
-    // Form versions are read once each across pages.
-    const versionsRead = (prisma.calls['visibilityFormVersion.findMany'] as Array<{ where: { version: { in: number[] } } }>)
-      .flatMap((c) => c.where.version.in);
-    expect(new Set(versionsRead).size).toBe(versionsRead.length);
-    expect(heavy).toBe(true);
-    expect(fileName).toBe('visibility_captures_all_2026-11-13.xlsx');
-    // eslint-disable-next-line no-console
-    console.log(`visibility-captures parity: 4300 rows in ${ms} ms (fake DB)`);
+    const { sheet, prisma } = await run(db);
+    expect(sheet('Visibility')).toHaveLength(1 + 4 + 2300);
+    const pages = prisma.calls['visibilityCapture.findMany'].filter((a: any) => !a.distinct && !a.where.outletId);
+    expect(pages).toHaveLength(2);
+    expect(prisma.calls['user.findMany'].length).toBeLessThanOrEqual(3);
   });
 
-  it('PARITY (one window): light, file name carries the window', async () => {
-    const db = bigDb('bajaj', 2500);
-    const { old, buffer, heavy, fileName } = await both(db, '2026-09-P1');
-    expectSameWorkbook(buffer, old);
-    expect(heavy).toBe(false);
-    expect(fileName).toBe('visibility_captures_2026-09-P1_2026-11-13.xlsx');
+  it('one window → light + window file name; month → heavy (Downloads page)', async () => {
+    const w = await run(baseDb(), { windowKey: '2026-11-P1' });
+    expect(w.heavy).toBe(false);
+    expect(w.fileName).toBe('visibility_report_2026-11-P1_2026-11-20.xlsx');
+    const m = await run(baseDb(), {});
+    expect(m.heavy).toBe(true);
+    expect(m.fileName).toBe('visibility_report_2026-11_2026-11-20.xlsx');
   });
 
-  it('PARITY (no captures): every header + one all-blank row', async () => {
-    const { old, buffer } = await both({ captures: [], hashes: [], versions: [], outlets: [], partners: [] });
-    const got = expectSameWorkbook(buffer, old);
-    expect(got.rows.Captures).toHaveLength(2);
-  });
-
-  it('cellSafe on user text', async () => {
-    const { buffer } = await both(bigDb('bajaj', 10));
-    const rows = readBack(buffer).rows.Captures;
-    expect(rows.some((r) => r[1] === "'=cmd()")).toBe(true);
-  });
-
-  // ── Outlet-master tenants: the capture verdict's own per-photo policy (prod finding 2026-11-19) ──
-  it('outlet-master tenant: Photo Status / Distance use the outlet master + 200 m + buffer; 0,0 unverifiable; non-fence photos no status', async () => {
-    const at = (lat: number, lng: number, accuracy: number) => ({ lat, lng, accuracy });
-    const db: Db = {
-      features: { outletMasterGeo: true },
-      outlets: [{ id: 'o1', clientId: 'bajaj', partnerId: 'p1', latitude: 12.9, longitude: 77.5 }],
-      // A far KYC board geo that must NOT be used on an outlet-master tenant.
-      partners: [{ id: 'p1', clientId: 'bajaj', geo: { lat: new Prisma.Decimal('13.5'), lng: new Prisma.Decimal('78.5') } }],
-      versions: [{
-        clientId: 'bajaj', version: 1,
-        formSchema: { fields: [
-          { id: 'w1', type: 'CAMERA', geoFenceRequired: true },
-          { id: 'w2', type: 'CAMERA', geoFenceRequired: true },
-          { id: 'plain', type: 'CAMERA' },
-        ] },
-      }],
-      hashes: [],
-      captures: [
-        { id: 'c1', clientId: 'bajaj', outletId: 'o1', outletCode: 'A', outletName: 'Elite', windowKey: '2026-11-P1', status: 'SUBMITTED',
-          geoFenceOk: true, distanceMeters: 34, captureAccuracy: 20, capturedAt: null, receivedAt: new Date('2026-11-19T05:00:00Z'),
-          rejectionReasonCode: null, rejectionReason: null, formVersion: 1, submittedBy: null,
-          formValues: { w1: { key: 'k/w1.jpg', geo: at(12.9003, 77.5001, 20) }, plain: { key: 'k/p.jpg', geo: at(12.9003, 77.5001, 5) } } },
-        { id: 'c2', clientId: 'bajaj', outletId: 'o1', outletCode: 'B', outletName: 'Edge', windowKey: '2026-11-P1', status: 'SUBMITTED',
-          geoFenceOk: null, distanceMeters: null, captureAccuracy: null, capturedAt: null, receivedAt: new Date('2026-11-19T05:00:00Z'),
-          rejectionReasonCode: null, rejectionReason: null, formVersion: 1, submittedBy: null,
-          formValues: { w1: { key: 'k/w1b.jpg', geo: at(12.9003, 77.5001, 350) }, w2: { key: 'k/w2b.jpg', geo: at(0, 0, 5) } } },
-      ],
-    };
-    const { buffer } = await runKindToBuffer(VISIBILITY_CAPTURES_KIND, {}, { prisma: fakePrisma(db), moduleRef: services(), user });
-    const rows = readBack(buffer).rows.Captures;
-    const header = rows[0] as string[];
-    const col = (name: string) => header.indexOf(name);
-    const r1 = rows[1] as string[];
-    const r2 = rows[2] as string[];
-    expect(r1[col('Photo Status')]).toBe('inside | ');
-    expect(Number(String(r1[col('Photo Distance (m)')]).split(' | ')[0])).toBeLessThan(40);
-    expect(r2[col('Photo Status')]).toBe('unverifiable | unverifiable'); // ±350 m buffer; 0,0 never "outside"
-    expect(String(r2[col('Photo Distance (m)')]).split(' | ')[1]).toBe('');
-  });
-
-  it('non-gated tenant: the per-photo columns are unchanged (KYC board reference + configured radius)', async () => {
-    const db = bigDb('bajaj', 50);
-    const { old, buffer } = await both(db);
-    expectSameWorkbook(buffer, old);
+  it('parseParams: month / windowKey validated; blank = default; requestOrigin kept for local links', () => {
+    expect(VISIBILITY_CAPTURES_KIND.parseParams({}, user)).toEqual({});
+    expect(VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: '  ' }, user)).toEqual({});
+    expect(VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: '2026-09-P1' }, user)).toEqual({ windowKey: '2026-09-P1' });
+    expect(VISIBILITY_CAPTURES_KIND.parseParams({ month: '2026-09', requestOrigin: 'http://localhost:3000' }, user)).toEqual({
+      month: '2026-09', requestOrigin: 'http://localhost:3000',
+    });
+    expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ month: '2026-13' }, user)).toThrow(BadRequestException);
+    expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: '2026-W45' }, user)).toThrow(BadRequestException);
+    expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ month: '2026-10', windowKey: '2026-11-P1' }, user)).toThrow(BadRequestException);
+    expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: ['a'] }, user)).toThrow('windowKey must be a string');
+    expect(VISIBILITY_CAPTURES_KIND.access).toEqual({ roles: ['GIFSY_ADMIN', 'CLIENT_ADMIN'], permission: 'visibility:read' });
   });
 
   it('403 when the tenant\'s Visibility switch is off (worker re-check)', async () => {
     await expect(
-      runKindToBuffer(VISIBILITY_CAPTURES_KIND, {}, { prisma: fakePrisma(bigDb('bajaj', 1)), moduleRef: services(false), user }),
+      runKindToBuffer(VISIBILITY_CAPTURES_KIND, {}, { prisma: fakePrisma(baseDb()), moduleRef: services(false), user }),
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('parseParams mirrors the old optional windowKey (blank = all) and rejects a non-string', () => {
-    expect(VISIBILITY_CAPTURES_KIND.parseParams({}, user)).toEqual({});
-    expect(VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: '  ' }, user)).toEqual({});
-    expect(VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: '2026-09-P1', requestOrigin: 'x' }, user)).toEqual({ windowKey: '2026-09-P1' });
-    expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: ['a'] }, user)).toThrow('windowKey must be a string');
-    expect(VISIBILITY_CAPTURES_KIND.access).toEqual({ roles: ['GIFSY_ADMIN', 'CLIENT_ADMIN'], permission: 'visibility:read' });
+  it('planPhotoColumns: current-form order, retired fields appended, duplicate labels made unique', () => {
+    const cur = { fields: [{ id: 'b', type: 'CAMERA', label: 'Shelf', order: 2 }, { id: 'a', type: 'CAMERA', label: 'Shelf', order: 1 }] } as any;
+    const old = { fields: [{ id: 'z', type: 'CAMERA', label: 'Old photo', order: 1 }, { id: 'a', type: 'CAMERA', label: 'Ignored old label', order: 1 }] } as any;
+    expect(planPhotoColumns(cur, [cur, old])).toEqual([
+      { fieldId: 'a', label: 'Shelf' }, { fieldId: 'b', label: 'Shelf (2)' }, { fieldId: 'z', label: 'Old photo' },
+    ]);
+    expect(planPhotoColumns(cur, [])).toEqual([{ fieldId: 'a', label: 'Shelf' }, { fieldId: 'b', label: 'Shelf (2)' }]);
   });
 });

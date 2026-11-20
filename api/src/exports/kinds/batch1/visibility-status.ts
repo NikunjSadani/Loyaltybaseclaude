@@ -12,6 +12,7 @@ import { istDateKey, istDayRangeFilter } from '../../../common/ist-date';
 import { platformWide } from '../../../common/tenant-scope';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import { TenantService } from '../../../tenant/tenant.service';
+import { visibilityStatusWords } from '../../../visibility/visibility-report-labels';
 import type { ExportKindDef } from '../../export-kinds';
 import { BATCH1_PAGE_SIZE, describeRange, isBoundedRange, optionalString, rawObject } from './common';
 
@@ -40,7 +41,8 @@ export function visibilityStatusRow(s: VisibilityStatusCapture, serial: number) 
     'Outlet Name': s.outlet?.name ?? s.outletName,
     City: s.outlet?.city ?? '',
     Window: s.windowKey,
-    Status: s.status,
+    // Plain words (2026-11-20, same words as the Visibility report): Waiting for review / Approved / Needs re-take / Rejected.
+    Status: visibilityStatusWords(s.status),
     'Captured By': s.submittedBy?.user?.name ?? '',
     Latitude: s.captureLat?.toString() ?? '',
     Longitude: s.captureLng?.toString() ?? '',

@@ -12,6 +12,34 @@ import { isGifsyOperator } from '../common/tenant-scope';
 import { VisibilityProgramScopeLike, visibilityProgramScope, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 /**
+ * The addressable-universe `where` for visibility coverage — mirrors the program-health
+ * dashboard `addressableWhere` (NOT `isActive:true`; the kycIntent `not` OR-wrapped so
+ * NULL-intent outlets survive) INTERSECTED with the configured outlet-type scope.
+ * Exported so the captures report's "Not captured" sheet uses the SAME in-scope rule as the tiles.
+ */
+export function visibilityAddressableOutletWhere(
+  clientId: string,
+  outletScope: string[],
+  programCfg?: VisibilityProgramScopeLike | null,
+): Prisma.OutletWhereInput {
+  // APPLIES-TO (D9/D12): the optional programs/subPrograms narrowing is merged here, the ONE
+  // builder both the denominator AND the numerator use — so they always move together
+  // (numerator ⊆ denominator invariant). Unscoped config → the exact pre-scope where.
+  return withVisibilityProgramWhere(
+    {
+      clientId,
+      deletedAt: null,
+      deactivatedAt: null,
+      // Exclude NOT_INTERESTED (declined) AND PARKED (admin-removed from pipeline) from the
+      // visibility universe. notIn drops NULLs → the {null} branch keeps normal outlets.
+      OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+      outletType: { code: { in: outletScope } },
+    },
+    programCfg,
+  );
+}
+
+/**
  * VisibilityReportService — Visibility (POSM) coverage reporting + export (Stream B,
  * design D15). Coverage per WINDOW: denominator = addressable in-scope outlets (the
  * program-health `addressableWhere` mirror + outletType.code ∈ scope); numerator =
@@ -38,31 +66,12 @@ export class VisibilityReportService {
     return (await this.tenantSettings.getEffectiveSettings(clientId)).visibilityConfig;
   }
 
-  /**
-   * The addressable-universe `where` for visibility coverage — mirrors the program-health
-   * dashboard `addressableWhere` (NOT `isActive:true`; the kycIntent `not` OR-wrapped so
-   * NULL-intent outlets survive) INTERSECTED with the configured outlet-type scope.
-   */
   private addressableInScopeWhere(
     clientId: string,
     outletScope: string[],
     programCfg?: VisibilityProgramScopeLike | null,
   ): Prisma.OutletWhereInput {
-    // APPLIES-TO (D9/D12): the optional programs/subPrograms narrowing is merged here, the ONE
-    // builder both the denominator AND the numerator use — so they always move together
-    // (numerator ⊆ denominator invariant). Unscoped config → the exact pre-scope where.
-    return withVisibilityProgramWhere(
-      {
-        clientId,
-        deletedAt: null,
-        deactivatedAt: null,
-        // Exclude NOT_INTERESTED (declined) AND PARKED (admin-removed from pipeline) from the
-        // visibility universe. notIn drops NULLs → the {null} branch keeps normal outlets.
-        OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
-        outletType: { code: { in: outletScope } },
-      },
-      programCfg,
-    );
+    return visibilityAddressableOutletWhere(clientId, outletScope, programCfg);
   }
 
   /** Shared coverage computation for a given window (or the current window). */

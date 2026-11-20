@@ -37,9 +37,10 @@ export class VisibilityReportController {
     return this.report.tenantReport(user, query.windowKey);
   }
 
-  // ── xlsx export (auth-gated media links) ───────────────────────────────────
-  // The 'visibility-captures' export kind: one window streams now (200); no window = every capture → queued
-  // (202 → Downloads page). The master switch is checked first so a disabled tenant still gets a plain 403.
+  // ── xlsx export (photo links → the portal's sign-in-gated photo viewer page) ───────────────────────────────────
+  // The 'visibility-captures' export kind (the monthly Visibility report): `?windowKey=` (one window) streams now
+  // (200); `?month=YYYY-MM` or nothing (= the current IST month) is queued (202 → Downloads page). The master switch is
+  // checked first so a disabled tenant still gets a plain 403.
   @Get('report/export')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('visibility:read')
