@@ -136,6 +136,13 @@ refused), Save, saved/error states, "Last changed by X on date" from the audit l
   client's ticket remarks inbox <addr>" or the chosen admin accordingly.
 - Like every `/v1/gifsy/clients/:slug/*` route, a GIFSY_ADMIN may edit any client's address regardless of which
   tenant they are currently assumed into (the slug in the URL decides; this is the console's normal model).
+- **Prod state 2026-11-21:** Bajaj prod ticket remarks inbox is **still unset** (owner decision pending); Deoleo unset.
+
+### Next: per-client To + CC (owner decision 2026-11-21, ⚠️ platform-wide approved — NOT shipped)
+
+Branch `feat/ticket-remarks-cc` (audited; fix round in progress; ships in the next release). Replaces the single
+address with a per-client **To (1–5 addresses) + CC (0–10 addresses)**. **CC-only** (To blank and the chosen admin
+has no email) still emails the CC list. The section above describes what is on prod today until this ships.
 
 ## Raised by / outlet
 

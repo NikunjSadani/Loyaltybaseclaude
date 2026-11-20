@@ -311,7 +311,8 @@ only**; AMOUNT_UPLOAD Excel mode kept as the alternate `visibilityCaptureMode`.
 Three tracks integrated on `feat/visibility-integration` (develop `54a6d63b` + `feat/visibility-review-history` +
 `feat/visibility-report-dashboards`), shipped in **`release/2026-11-21`** — **on staging** (code tip `27581819`; migrate
 execution `gifsy-migrate-staging-7hg7c` applied `20261120140000_visibility_review_events` cleanly 2026-11-20 19:20 UTC),
-real-login verified 2026-11-21 (§17.6); not on prod yet. §17.1 holds the rules every surface shares (written once);
+real-login verified 2026-11-21 (§17.6); **`main` = `develop` = `97332c95`** (release + docs; gates green on push
+2026-11-21) — ready for the owner's prod deploy; not on prod yet (prod `4a48dc0d`). §17.1 holds the rules every surface shares (written once);
 §17.2–17.5 describe each surface; §17.6 = staging results + the photo-GPS note.
 
 ### 17.1 Shared rules — one module, one in-scope rule, one word list
@@ -590,7 +591,14 @@ All checks PASS on `release/2026-11-21`:
 **Capture-form race fix — in prod since `4a48dc0d`:** Submit shows "Getting location…" while a photo's GPS is pending;
 values are re-read after the submit-time wait; a manual location counts as pending; `uploadFile` never stays stuck.
 
+**Location required (2026-11-21):** Bajaj prod `requireLocation` ON (owner) with `outletMasterGeo` ON. Server-side
+staging test on Bajaj (rep SO, outlet 50727096 A.K Department): photo with no location → 400 "Location is required …
+No location on: 'Window 1'"; no GPS at all → 400; photo + visit with location → SUBMITTED. Owner decision: location
+required ON BY DEFAULT for every client incl. Deoleo (`feat/require-location-default`, in build) — Deoleo needs a fix
+but is NOT distance-blocked (visibility blocks only under `outletMasterGeo` or its own `geoFence.enabled` + radius).
+Detail: `LOCATION-GATE.md`.
+
 **Photo-GPS overlap — `fix/gps-photo-overlap` (`0003f706`, LOCAL ONLY, not pushed; owner-approved platform-wide
-2026-11-21; audited + fixed):** concurrent precise-GPS acquires share ONE lookup (no early settle); TIMEOUT /
+2026-11-21; audited + fixed; waiting for the next batch):** concurrent precise-GPS acquires share ONE lookup (no early settle); TIMEOUT /
 POSITION_UNAVAILABLE are transient, PERMISSION_DENIED latches; a reading > 10 s old is never returned; a second photo
 waits only the first lookup's remaining time (≤ 5 s cap) — no added wait.

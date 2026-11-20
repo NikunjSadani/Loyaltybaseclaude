@@ -1,7 +1,20 @@
 # Request volume (edge quota)
 
-**Status:** `feat/request-volume` **in build, LOCAL ONLY** (not pushed). ⚠️ PLATFORM-WIDE — owner-approved 2026-11-21.
-**The owner wants measured request numbers and trade-offs before it ships** (`RESUME.md` §4 item 10).
+**Status:** `feat/request-volume` **in build, LOCAL ONLY** (not pushed); audited, **fix round in progress**.
+⚠️ PLATFORM-WIDE — owner-approved 2026-11-21 **on the condition that screen switching stays smooth**.
+**The owner wants to see the measured request numbers and trade-offs before it ships** (`RESUME.md` §4 item 10).
+
+## Audit findings 2026-11-21 (being fixed)
+
+1. **Cross-tab staleness** — the session cache in one tab is not refreshed when another tab changes the data.
+2. **A failed read is cached as 0** — a transient error was stored as a real zero value.
+3. **Prefetch-once is ineffective without `loading.tsx`** — the once-per-session bottom-nav prefetch does not help
+   the route without a loading boundary.
+
+## Sales banners (owner decision pending — NOT turned on)
+
+Sales banners have **never shown on the sales app for any tenant**: the banners endpoint is partner-only. Whether to
+show them to sales is an open owner decision; the branch does not turn them on.
 
 ## Outage evidence (2026-11-20)
 

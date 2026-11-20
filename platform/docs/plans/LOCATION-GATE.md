@@ -1,10 +1,15 @@
 # Location gate + Location Report — design note
 
-**Status:** ✅ LIVE on prod `1fa2305c` (2026-11-19 night release), DORMANT — flag `features.requireLocation` default OFF;
-owner switches it ON for Bajaj prod (Deoleo OFF). Real-phone check (Android + iPhone) on Bajaj prod after the switch.
-**Scope:** TENANT-SCOPED in effect — the gate, the Location Report (tile + API) and the Daily Ops Digest "Location"
-line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing new). The code paths are shared
-(KYC / visibility services, reports, digest) — owner-approved 2026-11-18.
+**Status:** ✅ LIVE on prod `1fa2305c` (2026-11-19 night release). Flag `features.requireLocation` default OFF in the
+shipped code. **Bajaj prod: ON since 2026-11-21** (owner, Gifsy console → Clients → Bajaj → **Behaviour flags** — not
+"Feature Flags"; verified read-only on `gifsy_prod`, probe job `bajaj-prod-vis-verify` exec `n9vdj`: `requireLocation`
+true, `outletMasterGeo` true). Deoleo prod: key **absent** (OFF). Real-phone check (Android + iPhone) on Bajaj prod is
+still not recorded.
+**Scope:** TENANT-SCOPED in effect today — the gate, the Location Report (tile + API) and the Daily Ops Digest
+"Location" line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing new). The code paths are
+shared (KYC / visibility services, reports, digest) — owner-approved 2026-11-18.
+**⚠️ Changing (owner decision 2026-11-21, platform-wide approved):** ON BY DEFAULT for every client incl. Deoleo and
+new clients — see "Owner decision 2026-11-21" below (branch `feat/require-location-default`, in build, not shipped).
 
 ## Prod fix 2026-11-19 — conditional fence photos (`fix/vis-fence-conditional-fields`, owner-approved)
 
@@ -165,10 +170,34 @@ with the server outlet context, exactly like submit validation): only photos tha
    but flagged).
 4. A Location Report (same access as the Usage Report) and a Daily Ops Digest line.
 
+## Owner decision 2026-11-21 — location required ON BY DEFAULT (⚠️ platform-wide, approved; in build)
+
+- Location required becomes the **default for every client**, incl. **Deoleo** and every new client. The console
+  switch becomes an **emergency OFF**. Branch `feat/require-location-default` (in build, local; not on staging/prod).
+  Supersedes decision 3 above ("OFF for Deoleo") once it ships.
+- **What changes for Deoleo:** reps need a phone location (permission + a real fix) for **KYC and visibility
+  capture**. Deoleo is **NOT distance-blocked**: the 200 m blocking is a separate setting —
+  - KYC blocks outside 200 m only under `outletMasterGeo` (Deoleo: absent);
+  - visibility blocks only under `outletMasterGeo` OR the tenant's own `visibilityConfig.geoFence.enabled` + radius;
+  - `requireLocation` itself only requires a fix, and records `LOCATION_FENCE_BLOCK` audit rows where a fence already
+    blocks.
+- **Recommended:** a heads-up to Deoleo's field team before the release.
+
+## Staging test 2026-11-21 (server side, Bajaj staging)
+
+Rep `SO` (Bajaj staging), outlet **50727096 A.K Department** (the test capture was left on staging):
+- photo with no location → **400** "Location is required … No location on: 'Window 1'";
+- no GPS at all → **400** field required;
+- photo + visit with location → **accepted** (`SUBMITTED`).
+
+Not exercised: the rep UI and real-phone GPS (the capture form is camera-only and the test browser has no camera) —
+covered by the unit tests listed below.
+
 ## The setting — `clients.features.requireLocation`
 
 - A new explicit BEHAVIOUR flag (not a reuse of `outletMasterGeo` — the two are independent: the fence needs outlet
-  coordinates; the gate needs a fix). Absent / `false` = OFF. Only a real boolean `true` turns it on (the console
+  coordinates; the gate needs a fix). Absent / `false` = OFF (shipped code; `feat/require-location-default` will make
+  absent = ON — see the 2026-11-21 decision). Only a real boolean `true` turns it on (the console
   PATCH refuses a non-boolean, like every behaviour flag).
 - Read by: `api/src/common/location-gate.helper.ts` (`isLocationRequiredFor` — ON only for `SALES_*` callers; partner
   self-enrollment and admins are never gated), the KYC create path, the visibility capture path, the report (setting
@@ -283,9 +312,9 @@ platform: `lib/__tests__/location-gate.test.tsx`, `app/sales/kyc/new/__tests__/k
 ## Not verified / open
 
 - Not exercised on real phones (Android Chrome, iPhone Safari, installed apps): permission prompts, the guide steps'
-  exact menu names on the owner's devices, Permissions API `change` events. Bajaj **staging** has the flag ON
-  (2026-11-21); **owner decision 2026-11-21:** Bajaj **prod** is switched ON only after the owner's real-phone test on
-  Bajaj staging (pending owner).
+  exact menu names on the owner's devices, Permissions API `change` events. Bajaj **staging** and **prod** have the
+  flag ON (2026-11-21); the server-side staging test passed the same day (above); a real-phone run is still not
+  recorded.
 - "Not interested" on the KYC page sits behind the gate on the phone (the whole page is gated) but the
   `/kyc/not-interested` API is NOT location-gated (it is not a KYC submission).
 - Refusals for "no location" are not recorded (only fence blocks are) — they never create a row, so the report

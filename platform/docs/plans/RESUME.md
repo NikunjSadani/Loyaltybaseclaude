@@ -10,8 +10,8 @@
 > [`archive/RESUME-ARCHIVE-2026-11-15.md`](archive/RESUME-ARCHIVE-2026-11-15.md) (the full chronology up to 2026-11-15,
 > incl. the CUTOVER LEDGER #14–#52). **Never trust a SHA written here over `git log` + the serving image (§7).**
 >
-> Last updated: **2026-11-21** (prod `4a48dc0d`; staging = `release/2026-11-21` real-login verified; next batch local
-> only; owner's three pending decisions — §1, §3, §4, §8).
+> Last updated: **2026-11-21** (prod `4a48dc0d`; `main` = `develop` = `97332c95` READY for the owner's prod deploy;
+> Bajaj prod `requireLocation` + `wholesalerPayoutInclActivation` ON; owner decisions 2026-11-21 — §1, §3, §4, §8).
 
 Multi-tenant FMCG **trade-loyalty** platform. Operator **Gifsy**; live clients **Deoleo** (since July 2026) and
 **Bajaj Consumer Care** (go-live November 2026). Backend `api/` (NestJS + Prisma 7 — owns the DB and ALL business logic)
@@ -25,7 +25,8 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 | | SHA | Since | Notes |
 |---|---|---|---|
 | **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import` + `gifsy-migrate`) | **`4a48dc0d`** (deployed by the owner 2026-11-20 night IST; verified 2026-11-21 ~00:20 IST: migrate execution `gifsy-migrate-lnsg2` applied **8** migrations on `gifsy_prod` in 14 s — `20261119124400/124500/124600` (WRE debt), `20261120110000/110100/110200` (tickets), `20261120130000/130100` (auth); api + frontend on `4a48dc0d`; 0 errors / 0 5xx after; both tenants load) | 2026-11-20 | `origin/main` = `4a48dc0d`. TODO: record the pre-release backup id here if one was taken |
-| **Staging** (`*-staging`) | **`develop` = `93973135`** (code tip **`27581819`** = `release/2026-11-21`; `93973135` / `6d0783f6` are docs-only on top). Migrate execution `gifsy-migrate-staging-7hg7c` (2026-11-20 19:20 UTC) applied `20261120140000_visibility_review_events` cleanly. **Real-login check 2026-11-21: ALL PASS** (§3) | 2026-11-20/21 | see §3 |
+| **`main` = `develop`** | **`97332c95`** (`release/2026-11-21` code tip `27581819` + docs); full gates green on push 2026-11-21. **READY for the owner's prod deploy** — prod stays `4a48dc0d` until the owner runs "Deploy — Production" (§6) | 2026-11-21 | |
+| **Staging** (`*-staging`) | **`develop`** (code tip **`27581819`** = `release/2026-11-21`; later commits up to `97332c95` are docs-only). Migrate execution `gifsy-migrate-staging-7hg7c` (2026-11-20 19:20 UTC) applied `20261120140000_visibility_review_events` cleanly. **Real-login check 2026-11-21: ALL PASS** (§3) | 2026-11-20/21 | see §3 |
 | Previous prod | `1fa2305c` → `7ba69566` → `71df01f7` → `de2f3700` → `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-19 … 11-15 | rollback targets (⚠️ a rollback below `4a48dc0d` leaves its 8 migrations in place — tickets rollback trap in `SUPPORT-TICKETS.md`; TODO confirm the WRE/auth ones are harmless to older code; a rollback below `1fa2305c` leaves the 45 additive reversal-engine/help columns+tables — harmless to older code) |
 
 **The 2026-11-20 (night) prod release `4a48dc0d`** (owner-deployed; platform-wide items owner-approved in-session):
@@ -58,9 +59,9 @@ visible outlet-detail link on `/sales/kyc` and of the bottom-nav pages), plus a 
 
 **The 2026-11-19 (night) prod release `f61aec24` + `1fa2305c`** (all owner-approved; platform-wide items approved in-session; money paths dual-audited; staging-verified with real Bajaj logins):
 - **Wallet Reversal Engine** shipped DORMANT: schema (45 additive migrations), LEGACY/SHADOW/V2 per-tenant flag (no rows on prod → LEGACY everywhere), backfill + verify jobs. Bajaj **staging** = V2 after the §9.1 wallet backfill (2,321 wallets, 0 blocked). Bajaj **prod** = LEGACY until its own backfill + owner go. → `WALLET-REVERSAL-ENGINE-DESIGN.md`
-- **Location gate + Location Report** (flag `features.requireLocation`, default OFF; owner switches ON for Bajaj prod). → [`LOCATION-GATE.md`](LOCATION-GATE.md)
+- **Location gate + Location Report** (flag `features.requireLocation`, default OFF; **Bajaj prod ON since 2026-11-21**; becoming ON BY DEFAULT for every client — §3). → [`LOCATION-GATE.md`](LOCATION-GATE.md)
 - **Visibility**: fence only the photos that apply to the outlet (fixes "Unverifiable" from a hidden Window 2); centred review dialog with Program/Sub-Program + large photos.
-- **Wholesaler wallet "Incl. Activation"** note under Lifetime Payout (flag `wholesalerPayoutInclActivation`; Bajaj staging ON, prod: owner).
+- **Wholesaler wallet "Incl. Activation"** note under Lifetime Payout (flag `wholesalerPayoutInclActivation`; display-only for WHOLESALER outlets, no payout math change; Bajaj staging ON, **Bajaj prod ON since 2026-11-21**).
 - **Shared outlet wallet view** — the sales outlet page renders the partner's own wallet view (platform-wide, owner-approved).
 - **Bajaj notification reminder** with device-specific (iOS / Android) steps + service-worker reload fix.
 - **Help & videos** per tenant (flag `helpVideos`, default OFF; content loaded per tenant — prod content load pending owner OK).
@@ -142,8 +143,8 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 
 | Work | Branch / worktree | State | Read |
 |---|---|---|---|
-| **Release `release/2026-11-21` — visibility integration + report columns + Redemption report** (⚠️ platform-wide items owner-approved: stricter capture in-scope rule 2026-11-20; area columns + Redemption report for all tenants) | `release/2026-11-21` (worktree `.claude/worktrees/rel-1121`; code tip `27581819`; `develop` = `93973135`) | **Full gates GREEN 2026-11-21** (8,585 api tests, 486 web test files). **On staging; real-login check 2026-11-21 ALL PASS** (review history in `GET /v1/visibility/captures/:id`; report screen = Excel for Gifsy-assumed and CLIENT_ADMIN — Nov-2026 P1 in scope 4,149 = 11 waiting + 2 approved + 4,136 not captured; MIS 403; Operations flag list Gifsy-only; capture rule refuses non-KYC-approved outlets; area columns; Redemption report; Deoleo exports with XSR/RSM/ZNM/NSM — detail in `VISIBILITY-POSM-DESIGN.md` §17.6, `USAGE-REPORT.md`, `REDEMPTION-REPORT.md`). **Waiting on the owner's go for `main`.** Contents: (1) **Visibility integration** — `visibility_review_events` table + migration `20261120140000` (with backfill); report screen with month / window pickers, tiles, breakdowns, outlet list; Operations funnel with real fraud flags + a Gifsy-only flag list; Daily Ops Digest pending counts across months; "Not approved — window closed"; **stricter capture in-scope rule** (no capture for outlets not KYC-approved / deactivated / Not Interested / Parked); per-window scope for closed windows incl. the KYC approval date; go-live cache. (2) **ASM / Zone / State / City columns** in the App installed-users export and the Usage report. (3) **Redemption report** (Gifsy + client admins; never exports voucher code / PIN, PAN, full phone, address or raw notes). | `VISIBILITY-POSM-DESIGN.md` §17, `USAGE-REPORT.md`, [`REDEMPTION-REPORT.md`](REDEMPTION-REPORT.md) |
-| **Next batch (LOCAL ONLY, not pushed)** — all three owner-approved as platform-wide 2026-11-21 | `fix/gps-photo-overlap` (`0003f706`) · `fix/hydration-418` · `feat/request-volume` | **gps-photo-overlap:** concurrent precise-GPS acquires share one lookup (no early settle); TIMEOUT / POSITION_UNAVAILABLE transient, PERMISSION_DENIED latches; never returns a reading > 10 s old; a second photo waits only the first's remaining time (≤ 5 s cap), no added wait — audited + fixed. **hydration-418:** React #418 fixed via `useSyncExternalStore` for `useGifsySettings`, the header date hook, `useAssumedContext`, `useInstallPrompt`; audit round 2 in progress (an assumed GIFSY_STAFF bounced to `/gifsy` on hard refresh — being fixed with a ready flag; brief "Visibility not enabled" flash). **request-volume:** in build (see [`REQUEST-VOLUME.md`](REQUEST-VOLUME.md)); owner wants measured trade-offs before ship. | `VISIBILITY-POSM-DESIGN.md` §17.6, `REQUEST-VOLUME.md` |
+| **Release `release/2026-11-21` — visibility integration + report columns + Redemption report** (⚠️ platform-wide items owner-approved: stricter capture in-scope rule 2026-11-20; area columns + Redemption report for all tenants) | `release/2026-11-21` (worktree `.claude/worktrees/rel-1121`; code tip `27581819`; **`main` = `develop` = `97332c95`**) | **Full gates GREEN 2026-11-21** (8,585 api tests, 486 web test files; green again on the push to `main`/`develop`). **On staging; real-login check 2026-11-21 ALL PASS** (review history in `GET /v1/visibility/captures/:id`; report screen = Excel for Gifsy-assumed and CLIENT_ADMIN — Nov-2026 P1 in scope 4,149 = 11 waiting + 2 approved + 4,136 not captured; MIS 403; Operations flag list Gifsy-only; capture rule refuses non-KYC-approved outlets; area columns; Redemption report; Deoleo exports with XSR/RSM/ZNM/NSM — detail in `VISIBILITY-POSM-DESIGN.md` §17.6, `USAGE-REPORT.md`, `REDEMPTION-REPORT.md`). **On `main` — READY; waiting for the owner to run "Deploy — Production".** Contents: (1) **Visibility integration** — `visibility_review_events` table + migration `20261120140000` (with backfill); report screen with month / window pickers, tiles, breakdowns, outlet list; Operations funnel with real fraud flags + a Gifsy-only flag list; Daily Ops Digest pending counts across months; "Not approved — window closed"; **stricter capture in-scope rule** (no capture for outlets not KYC-approved / deactivated / Not Interested / Parked); per-window scope for closed windows incl. the KYC approval date; go-live cache. (2) **ASM / Zone / State / City columns** in the App installed-users export and the Usage report. (3) **Redemption report** (Gifsy + client admins; never exports voucher code / PIN, PAN, full phone, address or raw notes). | `VISIBILITY-POSM-DESIGN.md` §17, `USAGE-REPORT.md`, [`REDEMPTION-REPORT.md`](REDEMPTION-REPORT.md) |
+| **Next batch (LOCAL ONLY, not pushed)** — all owner-approved as platform-wide 2026-11-21 | `fix/gps-photo-overlap` (`0003f706`) · `fix/hydration-418` (`55155ce0`) · `feat/require-location-default` · `feat/ticket-remarks-cc` · `feat/request-volume` | **gps-photo-overlap — DONE + audited:** concurrent precise-GPS acquires share one lookup (no early settle); TIMEOUT / POSITION_UNAVAILABLE transient, PERMISSION_DENIED latches; never returns a reading > 10 s old; a second photo waits only the first's remaining time (≤ 5 s cap), no added wait. **hydration-418 — DONE + audited:** React #418 fixed via `useSyncExternalStore` for `useGifsySettings`, the header date hook, `useAssumedContext`, `useInstallPrompt` (+ ready flag so an assumed GIFSY_STAFF is not bounced to `/gifsy` on hard refresh). **require-location-default — in build:** location required ON BY DEFAULT for every client incl. Deoleo + new clients; console switch = emergency OFF ([`LOCATION-GATE.md`](LOCATION-GATE.md) "Owner decision 2026-11-21"; Deoleo needs a fix but is NOT distance-blocked; heads-up to Deoleo's field team recommended before release). **ticket-remarks-cc — audited, fix round in progress:** per-client To (1–5) + CC (0–10); CC-only (To blank, chosen admin has no email) still emails the CC list ([`SUPPORT-TICKETS.md`](SUPPORT-TICKETS.md)). **request-volume — audited, fix round in progress** (cross-tab staleness, failed read cached as 0, prefetch-once ineffective without `loading.tsx`); approved on condition screen switching stays smooth; owner sees measured trade-offs before ship ([`REQUEST-VOLUME.md`](REQUEST-VOLUME.md)). | `VISIBILITY-POSM-DESIGN.md` §17.6, `LOCATION-GATE.md`, `SUPPORT-TICKETS.md`, `REQUEST-VOLUME.md` |
 | **MSG91 webhook "Add Condition"** (receive only portal reports) | — | Owner deferred 2026-11-19. ⚠️ Can't simply filter on `crqid`: scheme sends and some untracked paths carry none (their reports would be lost). Needs a design. | this row |
 
 ## 4. What's next / waiting on the owner
@@ -173,10 +174,13 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
    `11636917613043922792`). Recipe kept for reference: `trim` on the `gifsy-migrate` job
    (`--args=node,dist/sales-import/oneoff/sales-history-trim.main.js,trim`), `rebuild-days` on the 2 GiB
    `gifsy-sales-import` job, both with `--update-env-vars=TRIM_TARGET_DB=gifsy_prod`.
-7a. **After the 2026-11-19 night release (`1fa2305c`) — waiting on the owner:** switch ON for Bajaj prod
-   `features.requireLocation` (**owner 2026-11-21: only after a real-phone test on Bajaj staging** — pending owner),
-   `wholesalerPayoutInclActivation`, `helpVideos` (Bajaj **staging** already has all three ON); OK to load the Help & videos content on
-   prod; OK to correct the remaining non-Privilege "Unverifiable" visibility captures in one go (list + SQL + backup
+7a. **After the 2026-11-19 night release (`1fa2305c`).** DONE 2026-11-21 (owner, Gifsy console → Clients → Bajaj;
+   `requireLocation` is under **Behaviour flags**, not "Feature Flags"): Bajaj prod `requireLocation` ON and
+   `wholesalerPayoutInclActivation` ON — verified read-only (probe job `bajaj-prod-vis-verify` exec `n9vdj` on
+   `gifsy_prod`: Bajaj `requireLocation` true, `outletMasterGeo` true, `wholesalerPayoutInclActivation` true,
+   `helpVideos` absent; Deoleo all four absent, no explicit `false`). Server-side location test on Bajaj staging passed
+   the same day (`LOCATION-GATE.md`; real-phone GPS not exercised). **Still waiting on the owner:** `helpVideos` ON
+   after the content load; OK to load the Help & videos content on prod; OK to correct the remaining non-Privilege "Unverifiable" visibility captures in one go (list + SQL + backup
    first — 2 were corrected earlier, backup `1795068290437`); Bajaj prod wallet backfill → reversal engine V2 (backup +
    owner OK; **before any credit reversal on Bajaj prod** — see §3 D3).
 7b. **Month-end sales files (300–350 MB):** test a 200 MB+ real Bajaj file on staging before 30 Nov (owner to send the
@@ -191,17 +195,24 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
    0 blocked, 0 anomalies, 8 debt wallets (−3,549). Next: backfill APPLY (backup + owner OK) → VERIFY → owner flips
    Bajaj to V2 — **before any credit reversal on Bajaj prod**. Deoleo stays LEGACY. **Never run points compute for
    Bajaj imported months (Apr 2025 – Oct 2026).** → `WALLET-REVERSAL-ENGINE-DESIGN.md` §8.7–§8.12
-10. **Request volume (Cloudflare Workers outage 2026-11-20, §1)** — `feat/request-volume` in build (local): no prefetch
+10. **Request volume (Cloudflare Workers outage 2026-11-20, §1)** — `feat/request-volume` (local): no prefetch
     on list links, bottom-nav prefetch once per session, session cache for me / settings / outlet-types / banners,
-    dashboard 2-min reuse, post-submit invalidation. **Owner decision pending: wants measured request numbers +
-    trade-offs before it ships** → [`REQUEST-VOLUME.md`](REQUEST-VOLUME.md). Workers Paid is in place (10M req/mo) —
+    dashboard 2-min reuse, post-submit invalidation. **Owner approved 2026-11-21 on condition screen switching stays
+    smooth**; audit found cross-tab staleness, a failed read cached as 0, and prefetch-once ineffective without
+    `loading.tsx` — fix round in progress; **owner sees the measured trade-offs before it ships** →
+    [`REQUEST-VOLUME.md`](REQUEST-VOLUME.md). **Sales banners** have never shown on the sales app for any tenant (the
+    endpoint is partner-only) — owner decision pending; NOT turned on. Workers Paid is in place (10M req/mo) —
     TODO: confirm the monthly request budget against the ~30k req/h peak.
-11. **`release/2026-11-21`** (§3): staging real-login check DONE 2026-11-21 (all pass). **Owner decision pending: go
-    on `release/2026-11-21` → `main`** (prod deploy per §6).
-12. **The owner's three pending decisions (2026-11-21):** (a) go on `release/2026-11-21` → `main`; (b) the real-phone
-    location test on Bajaj staging (then `requireLocation` ON on Bajaj prod); (c) request-volume numbers before
-    `feat/request-volume` ships. The other local branches (`fix/gps-photo-overlap` audited + fixed; `fix/hydration-418`
-    audit round 2 in progress) are part of the same next batch, not pushed (§3).
+11. **`release/2026-11-21`** (§3): staging real-login check DONE 2026-11-21 (all pass); `main` = `develop` = `97332c95`,
+    gates green on push. **READY — the owner runs "Deploy — Production"** (§6); then verify (§7) and add the release-log
+    row.
+12. **Owner decisions still pending (2026-11-21):** (a) run the prod deploy; (b) remove the prod deploy's second click
+    (§6 step 4); (c) Bajaj prod ticket remarks inbox — still unset (per-client To + CC ships in the next release);
+    (d) sales banners on the sales app; (e) request-volume measured trade-offs. **Decided 2026-11-21 (platform-wide
+    approved), next batch, local (§3):** location required ON BY DEFAULT for every client incl. Deoleo
+    (`feat/require-location-default`, in build — send Deoleo's field team a heads-up before the release); ticket remarks
+    To + CC (`feat/ticket-remarks-cc`, fix round); `fix/gps-photo-overlap` `0003f706` + `fix/hydration-418` `55155ce0`
+    done + audited, waiting for the batch.
 13. Owner may want HO / State-head **City** cells in the area columns shown as "N cities" (they can list hundreds of
     cities today) — not decided. The Usage report Mobile column shows full numbers (pre-existing, not changed).
 
@@ -235,7 +246,10 @@ worker jobs → jobsExecutor grant → API (1 GiB) → frontend. "Pushed" ≠ "d
 3. **Prepare main:** bring `main` to that develop SHA (fast-forward). If a main-only revert is ever pending, it must be
    re-applied explicitly — a merge does not undo a revert.
 4. **Owner dispatches** GitHub Actions → **"Deploy — Production (main)"** → **Run workflow** (branch `main`) → then
-   **Review deployments → Approve** (the run waits at the approval gate). `deploy.yml` is `workflow_dispatch`-only; a
+   **Review deployments → Approve** (the run waits at the approval gate — GitHub Environment `production` with required
+   reviewers). To drop the second click (decision pending, owner): repo **Settings → Environments → production →**
+   untick **Required reviewers → Save protection rules**, or remove the `approve` job from
+   `.github/workflows/deploy.yml`. `deploy.yml` is `workflow_dispatch`-only; a
    push to `main` never deploys. ⚠️ **Never "Re-run" an older run** — it redeploys THAT run's old commit (2026-11-19:
    a re-run put `71df01f7` on prod for ~1 h). Before the deploy: pause `voucher-dispersal-drain-prod` and ask that no
    sales file is applied; resume the scheduler after verification.
@@ -332,6 +346,11 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
   GIFSY_STAFF went to `/gifsy` on hard refresh) — wait for a ready flag.
 - **Photo GPS:** two photos taken close together share ONE precise-GPS lookup; never reuse a reading > 10 s old;
   PERMISSION_DENIED latches, TIMEOUT / POSITION_UNAVAILABLE are transient (`fix/gps-photo-overlap`, local).
+- **Location required ≠ distance blocking.** `requireLocation` only requires a real fix (and records
+  `LOCATION_FENCE_BLOCK` audit rows where a fence already blocks). The 200 m block is separate: KYC blocks only under
+  `outletMasterGeo`; visibility only under `outletMasterGeo` or the tenant's own `visibilityConfig.geoFence.enabled` +
+  radius. The flag lives in the console's **Behaviour flags** section, not "Feature Flags". Once
+  `feat/require-location-default` ships, an ABSENT key means ON (Deoleo included) — the switch is an emergency OFF.
 
 **Visibility (since `release/2026-11-21`)**
 - Capture is refused for outlets not KYC-approved / deactivated / Not Interested / Parked (`visibilityUniverseWhere`):

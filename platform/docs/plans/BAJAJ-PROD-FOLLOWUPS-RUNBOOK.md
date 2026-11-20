@@ -1,6 +1,8 @@
 # Bajaj prod follow-ups — runbook for owner approval (A flags · B Help content · C wallet backfill → V2)
 
-> **Status: PREPARED, NOTHING EXECUTED (2026-11-21).** Every step below writes to **production** or changes a
+> **Status (2026-11-21): part A partly DONE by the owner — `requireLocation` and `wholesalerPayoutInclActivation`
+> are ON for Bajaj prod (verified read-only, see A "Read-back"); `helpVideos` still OFF. Parts B and C: NOTHING
+> EXECUTED.** Every step below writes to **production** or changes a
 > production setting, so each one needs the owner's explicit go. Approving one step does not approve the next one.
 > Claude does not run any of it. Prod = `4a48dc0d` (GO-LIVE-ISSUE-LIST "NOW" 2026-11-21) — confirm the serving SHA first.
 > Sources: `RESUME.md` §4 items 7a + 9, `BAJAJ-CUSTOMIZATIONS.md`, `LOCATION-GATE.md`, `HELP-VIDEOS.md`,
@@ -19,8 +21,9 @@
 - Read-only SQL checks: run through the **read-only probe-job pattern** used for `bajaj-prod-vis-verify` (in-VPC Cloud
   Run job on the api image, prod `DATABASE_URL` secret, first statement `SELECT current_database()` must return
   `gifsy_prod`, SELECTs only). **UNVERIFIED — needs check:** that job's definition (image, command, how it takes a
-  query) is NOT in the repo (only its name, `BAJAJ-PROD-OUTLET-IMPORT.md` line 55). Whoever built it must confirm it
-  can run the SELECTs below, or a small read-only probe script must be added first. For part C, the WRE `verify.main.js`
+  query) is NOT in the repo (only its name, `BAJAJ-PROD-OUTLET-IMPORT.md` line 55). It DID run the part-A flag
+  read-back on 2026-11-21 (execution `n9vdj`); for other SELECTs, confirm it can run them or add a small read-only
+  probe script first. For part C, the WRE `verify.main.js`
   job is itself read-only and covers most checks.
 - Every SQL block starts with the guard: `SELECT current_database();  -- must be gifsy_prod, else STOP`.
 
@@ -40,9 +43,9 @@
    `gcloud run services describe gifsy-api --region asia-south1 $OPS --format='value(spec.template.spec.containers[0].image)'`
    (same for `gifsy-frontend`). Expected tag `4a48dc0d` (or later).
 2. `requireLocation`: `LOCATION-GATE.md` asks for a real-phone check on **staging first** (Android + iPhone: allow / deny /
-   Location off / Test again). **Owner decision 2026-11-21: the owner does the real-phone test on Bajaj staging first;
-   prod is switched only after it (pending owner).** Bajaj staging flag states (2026-11-21): `requireLocation` ON,
-   `helpVideos` ON, `wholesalerPayoutInclActivation` ON.
+   Location off / Test again). 2026-11-21: server-side staging test passed (`LOCATION-GATE.md` "Staging test
+   2026-11-21") and the owner switched Bajaj prod ON the same day. Bajaj staging flag states (2026-11-21):
+   `requireLocation` ON, `helpVideos` ON, `wholesalerPayoutInclActivation` ON.
 3. `helpVideos`: part B done (guides published), else reps see an empty list.
 4. Recommended: tell Bajaj field leads before `requireLocation` goes on (reps with location off are blocked at once,
    on the next page load).
@@ -56,8 +59,14 @@ SELECT id,
        features->'helpVideos'                     AS help_videos
 FROM clients WHERE id IN ('bajaj','deoleo') ORDER BY id;
 ```
-Expected today: all NULL / false for both tenants on prod — TODO: confirm with this read-back (prod state not recorded;
-staging known: Bajaj all three ON).
+**Read-back 2026-11-21** (read-only probe job `bajaj-prod-vis-verify`, execution `n9vdj`, `current_database()` =
+`gifsy_prod`) — AFTER the owner switched the first two on that day:
+- `bajaj`: `requireLocation` **true**, `outletMasterGeo` **true**, `wholesalerPayoutInclActivation` **true**,
+  `helpVideos` **absent** (OFF).
+- `deoleo`: `requireLocation`, `outletMasterGeo`, `wholesalerPayoutInclActivation`, `helpVideos` all **absent** (no
+  explicit `false` stored).
+
+Staging (2026-11-21): Bajaj all three ON.
 
 ### Backup
 Not needed for a flag: each toggle is one audited merge of one key into `clients.features` (every other key kept,
@@ -332,9 +341,11 @@ owed. Deoleo's credits screen: unchanged (no banner). Next Daily Ops Digest: "8 
 ---
 
 ## Decisions the owner must make
-1. A: switch `requireLocation` ON for Bajaj prod — **decided 2026-11-21: only after the owner's real-phone test on
-   Bajaj staging** (test pending owner).
-2. A: switch `wholesalerPayoutInclActivation` ON for Bajaj prod?
+1. ~~A: switch `requireLocation` ON for Bajaj prod~~ — **DONE 2026-11-21** by the owner (Gifsy console → Clients →
+   Bajaj → **Behaviour flags**, not "Feature Flags"); verified read-only on `gifsy_prod`. Server-side staging test the
+   same day passed (see `LOCATION-GATE.md`); the real-phone test was not recorded before the switch.
+2. ~~A: switch `wholesalerPayoutInclActivation` ON for Bajaj prod?~~ — **DONE 2026-11-21** (display-only "Incl.
+   Activation" sub-line under Lifetime Payout for WHOLESALER outlets; no payout math change); verified read-only.
 3. A/B: load which guides (all 14 from `HELP-VIDEOS.md` §3 or a subset), which 3 get the videos, and where the video
    files are; then switch `helpVideos` ON (after the content is published).
 4. B: rehearse the guides on Bajaj staging first, or enter straight on prod?
