@@ -20,7 +20,7 @@ describe('wallet-negative — shared wording (owner decisions 2, D1, D2 — 2026
     expect(liabilitySplitNote(0, 0)).toBeNull();
     expect(liabilitySplitNote(undefined, undefined)).toBeNull();
     expect(liabilitySplitNote(841, 1)).toBe(
-      'Liability counts positive balances only — 841 pts owed by 1 wallet with a negative balance is not included.',
+      'Liability counts positive balances only — 841 pts owed by 1 wallet with a negative balance are not included.',
     );
     expect(liabilitySplitNote(3827, 2)).toBe(
       'Liability counts positive balances only — 3,827 pts owed by 2 wallets with a negative balance are not included.',

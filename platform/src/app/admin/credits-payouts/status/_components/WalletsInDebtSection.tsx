@@ -1,17 +1,19 @@
 'use client';
 
 /**
- * Wallets below zero — audit item 9 + fix rounds 3/4 + owner decisions D1/D2 (2026-11-19, no silent pass-throughs).
+ * Wallets below zero — audit item 9 + fix rounds 3–5 + owner decisions D1/D2 (2026-11-19, no silent pass-throughs).
  *
  * Every wallet of the tenant whose balance is BELOW ZERO (owner D1 — a wallet at or above zero owes nothing): outlet(s),
  * balance, points owed, and — only when true — the reversal(s) behind its CURRENT negative stretch (decided by the
  * wallet's own movement order on the server). A negative with no reversal behind it is labelled as imported / earlier
- * history. Shown for EVERY tenant that has a negative wallet (owner D2 — e.g. imported negatives on a LEGACY tenant),
- * with a programme filter (same options as the admin dashboards) and an Excel download of the same filtered list.
- * Data: GET /api/admin/credits/reversal-engine/wallets-in-debt[?programName=…&limit=…]. Renders nothing when no wallet is
- * below zero (unfiltered); a failed load says so.
+ * history. Shown for EVERY tenant that has a negative wallet (owner D2), with a programme filter (same options as the
+ * admin dashboards) and an Excel download of the same filtered list.
+ * States (round 5): nothing below zero → renders nothing; the first check fails on a tenant with no known negative →
+ * a quiet retry line (never a red error on Deoleo); a later load fails (e.g. a programme change) → header + filter stay,
+ * the error is inline with Retry; a programme change dims the old numbers (aria-busy) until the new ones arrive.
+ * Data: GET /api/admin/credits/reversal-engine/wallets-in-debt[?programName=…&limit=…].
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Download, Wallet } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
@@ -73,8 +75,8 @@ export function sourceText(s: DebtSource): string {
 
 /**
  * The Excel file: sheet "Wallets below zero" = one header row + one row per wallet × source (a wallet with no reversal
- * behind it gets one row with its note) — a clean table (autofilter-safe). When the list is incomplete, a separate
- * "About" sheet says so (never a row above the header).
+ * behind it gets one row with its note) — a clean table (autofilter-safe); "Approved on" is a real date cell (B8). When
+ * the list is filtered or incomplete, a separate "About" sheet says so (never a row above the header).
  */
 export function buildWalletsInDebtXlsx(list: DebtWallet[], opts: { total?: number; program?: string | null } = {}): ArrayBuffer {
   const header = [
@@ -88,7 +90,7 @@ export function buildWalletsInDebtXlsx(list: DebtWallet[], opts: { total?: numbe
     for (const s of w.sources) {
       rows.push([
         ...base, KIND_TEXT[s.kind] ?? s.kind, sourcePoints(s), s.outletCode ?? '', s.creditReversalId,
-        day(s.approvedAt), s.fieldName ?? '', s.period ?? '',
+        s.approvedAt ? new Date(s.approvedAt) : '', s.fieldName ?? '', s.period ?? '',
       ]);
     }
   }
@@ -100,7 +102,7 @@ export function buildWalletsInDebtXlsx(list: DebtWallet[], opts: { total?: numbe
     about.push([`This file has the first ${list.length.toLocaleString('en-IN')} of ${opts.total.toLocaleString('en-IN')} wallets — choose a programme to get the rest.`]);
   }
   if (about.length) XLSX.utils.book_append_sheet(wb, aoaToSheetSafe(about), 'About');
-  const out = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer | Uint8Array;
+  const out = XLSX.write(wb, { type: 'array', bookType: 'xlsx', cellDates: true }) as ArrayBuffer | Uint8Array;
   if (out instanceof ArrayBuffer) return out;
   const ab = new ArrayBuffer(out.byteLength);
   new Uint8Array(ab).set(out);
@@ -121,55 +123,70 @@ export default function WalletsInDebtSection() {
   const [programs, setPrograms] = useState<string[]>([]);
   const [program, setProgram] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
+  // Once ANY load has shown a wallet below zero, a later failure is a real problem (red, inline); before that it may be
+  // a tenant with none at all (Deoleo) — a quiet retry line only.
+  const knownNegatives = useRef(false);
+  const seq = useRef(0);
 
-  const load = useCallback(async (p: string, alive: () => boolean) => {
+  const load = useCallback(async (p: string) => {
+    const mine = ++seq.current;
+    setLoading(true);
+    setError(null);
     try {
       const res = await fetch(urlFor(p));
       const json = await res.json().catch(() => null);
-      if (!alive()) return;
+      if (mine !== seq.current) return;
       if (json?.success && json.data && Array.isArray(json.data.wallets)) {
-        setError(null);
-        setData(json.data as DebtList);
-        if (Array.isArray(json.data.availablePrograms)) setPrograms(json.data.availablePrograms);
+        const d = json.data as DebtList;
+        setData(d);
+        if (d.total > 0) knownNegatives.current = true;
+        if (Array.isArray(d.availablePrograms) && d.availablePrograms.length) setPrograms(d.availablePrograms);
       } else setError(json?.error ?? `Couldn't load the wallets below zero (HTTP ${res.status})`);
     } catch (e) {
-      if (alive()) setError(`Couldn't load the wallets below zero (${String(e)})`);
+      if (mine === seq.current) setError(`Couldn't load the wallets below zero (${String(e)})`);
+    } finally {
+      if (mine === seq.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    let on = true;
-    void load(program, () => on);
-    return () => {
-      on = false;
-    };
+    void load(program);
   }, [program, load]);
 
-  if (error) {
+  // First check failed and no negative wallet is known: a quiet line, never a red error (round 5, B1).
+  if (error && !knownNegatives.current) {
     return (
-      <p role="alert" data-testid="wallets-in-debt-error" className="text-xs text-red-600">
-        {error}
+      <p data-testid="wallets-in-debt-quiet-error" className="text-[11px] text-gray-400">
+        Couldn&apos;t check for wallets below zero.{' '}
+        <button type="button" onClick={() => void load(program)} className="underline hover:text-gray-600">
+          Retry
+        </button>
       </p>
     );
   }
   // Nothing below zero in the whole tenant → nothing to show (every Deoleo screen stays as it was).
-  if (!data || (data.total === 0 && !program)) return null;
+  if (!data || (data.total === 0 && !program && !knownNegatives.current)) return null;
 
   // B4: totals from the API's full aggregate, never from the rows shown.
   const totalOwed = data.totalOwedPoints ?? data.wallets.reduce((s, w) => s + w.owedPoints, 0);
   const cut = data.truncated ?? data.total > data.wallets.length;
+  const scope = program ? ` in ${program}` : '';
 
   async function downloadAll() {
     if (exporting) return;
     setExporting(true);
     setExportMsg(null);
+    setExportStatus('Preparing file…');
     try {
       const res = await fetch(urlFor(program, 5000));
       const json = await res.json().catch(() => null);
       if (!json?.success || !Array.isArray(json.data?.wallets)) {
+        setExportStatus(null);
         setExportMsg(json?.error ?? `Couldn't prepare the file (HTTP ${res.status})`);
         return;
       }
@@ -180,12 +197,14 @@ export default function WalletsInDebtSection() {
         }),
         'wallets-below-zero.xlsx',
       );
+      setExportStatus('Downloaded');
       if (all.total > all.wallets.length) {
         setExportMsg(
           `The file has the first ${all.wallets.length.toLocaleString('en-IN')} of ${all.total.toLocaleString('en-IN')} wallets (see its "About" sheet) — choose a programme to get the rest.`,
         );
       }
     } catch (e) {
+      setExportStatus(null);
       setExportMsg(`Couldn't prepare the file (${String(e)})`);
     } finally {
       setExporting(false);
@@ -193,11 +212,18 @@ export default function WalletsInDebtSection() {
   }
 
   return (
-    <section data-testid="wallets-in-debt" className="bg-orange-50 border border-orange-200 rounded-xl p-4 space-y-3">
+    <section
+      data-testid="wallets-in-debt"
+      aria-busy={loading || undefined}
+      className="bg-orange-50 border border-orange-200 rounded-xl p-4 space-y-3"
+    >
       <div className="flex items-center gap-2 flex-wrap">
         <Wallet className="w-4 h-4 text-orange-600" aria-hidden />
-        <p className="text-sm font-semibold text-orange-900" data-testid="wallets-in-debt-summary">
-          {data.total} wallet{data.total === 1 ? '' : 's'} below zero · {totalOwed.toLocaleString('en-IN')} pts owed
+        <p
+          className={`text-sm font-semibold text-orange-900 transition-opacity ${loading ? 'opacity-50' : ''}`}
+          data-testid="wallets-in-debt-summary"
+        >
+          {data.total} wallet{data.total === 1 ? '' : 's'} below zero{scope} · {totalOwed.toLocaleString('en-IN')} pts owed
           {cut ? ` (first ${data.wallets.length} listed)` : ''}
         </p>
         <span className="text-xs text-orange-800">Repaid from their future earnings; they can&apos;t redeem until back above zero.</span>
@@ -219,11 +245,10 @@ export default function WalletsInDebtSection() {
           <button
             type="button"
             onClick={() => void downloadAll()}
-            disabled={exporting}
-            aria-busy={exporting || undefined}
-            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium border border-orange-300 text-orange-800 rounded-lg hover:bg-orange-100 disabled:opacity-50 disabled:cursor-wait"
+            aria-disabled={exporting || undefined}
+            className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium border border-orange-300 text-orange-800 rounded-lg hover:bg-orange-100 ${exporting ? 'opacity-50 cursor-wait' : ''}`}
           >
-            <Download className="w-3.5 h-3.5" aria-hidden /> {exporting ? 'Preparing…' : 'Excel'}
+            <Download className="w-3.5 h-3.5" aria-hidden /> Excel
           </button>
           <button
             type="button"
@@ -236,13 +261,29 @@ export default function WalletsInDebtSection() {
           </button>
         </div>
       </div>
+      {program && (
+        <p data-testid="wallets-in-debt-program-note" className="text-[11px] text-orange-800">
+          Only wallets with a live outlet in this programme are counted; wallets whose outlets are all inactive appear only
+          under All programmes.
+        </p>
+      )}
+      {/* B4: the export announces itself (screen readers + sighted users) */}
+      <p role="status" data-testid="wallets-in-debt-export-status" className={exportStatus ? 'text-[11px] text-orange-800' : 'sr-only'}>
+        {exportStatus ?? ''}
+      </p>
+      {error && (
+        <p role="alert" data-testid="wallets-in-debt-error" className="text-xs text-red-600">
+          {error}{' '}
+          <button type="button" onClick={() => void load(program)} className="underline font-medium">Retry</button>
+        </p>
+      )}
       {exportMsg && (
         <p role="status" data-testid="wallets-in-debt-export-msg" className="text-xs text-orange-900">{exportMsg}</p>
       )}
       {open && (
-        <div className="overflow-x-auto">
+        <div className={`overflow-x-auto transition-opacity ${loading ? 'opacity-50' : ''}`}>
           {data.wallets.length === 0 ? (
-            <p className="text-xs text-orange-900">No wallet below zero in this programme.</p>
+            <p className="text-xs text-orange-900">No wallet below zero{scope}.</p>
           ) : (
             <table className="w-full text-xs">
               <thead>

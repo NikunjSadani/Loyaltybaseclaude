@@ -21,7 +21,7 @@ export function liabilitySplitNote(owedPoints: number | undefined, owedWallets: 
   const n = owedWallets ?? 0;
   // Fix round 4 (item 6): it counts WALLETS, and this line is often the only place the figure appears — so it says
   // "not included", never "shown separately".
-  return `Liability counts positive balances only — ${formatPoints(owed)} pts owed by ${formatPoints(n)} wallet${n === 1 ? '' : 's'} with a negative balance ${n === 1 ? 'is' : 'are'} not included.`;
+  return `Liability counts positive balances only — ${formatPoints(owed)} pts owed by ${formatPoints(n)} wallet${n === 1 ? '' : 's'} with a negative balance are not included.`; // B6: the subject is the points (plural)
 }
 
 /** Who reads the note: the retailer ("You owe …") or Gifsy / sales / client staff looking at an outlet (B6). */
