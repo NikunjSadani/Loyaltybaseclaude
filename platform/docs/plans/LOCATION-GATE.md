@@ -283,7 +283,9 @@ platform: `lib/__tests__/location-gate.test.tsx`, `app/sales/kyc/new/__tests__/k
 ## Not verified / open
 
 - Not exercised on real phones (Android Chrome, iPhone Safari, installed apps): permission prompts, the guide steps'
-  exact menu names on the owner's devices, Permissions API `change` events.
+  exact menu names on the owner's devices, Permissions API `change` events. Bajaj **staging** has the flag ON
+  (2026-11-21); **owner decision 2026-11-21:** Bajaj **prod** is switched ON only after the owner's real-phone test on
+  Bajaj staging (pending owner).
 - "Not interested" on the KYC page sits behind the gate on the phone (the whole page is gated) but the
   `/kyc/not-interested` API is NOT location-gated (it is not a KYC submission).
 - Refusals for "no location" are not recorded (only fence blocks are) — they never create a row, so the report

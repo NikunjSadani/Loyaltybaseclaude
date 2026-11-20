@@ -309,8 +309,10 @@ only**; AMOUNT_UPLOAD Excel mode kept as the alternate `visibilityCaptureMode`.
 ## 17. Visibility reporting, review history + plain words (2026-11-20, ⚠️ PLATFORM-WIDE, owner-approved in-session)
 
 Three tracks integrated on `feat/visibility-integration` (develop `54a6d63b` + `feat/visibility-review-history` +
-`feat/visibility-report-dashboards`); local only — not pushed / applied anywhere yet. §17.1 holds the rules every
-surface shares (written once); §17.2–17.5 describe each surface.
+`feat/visibility-report-dashboards`), shipped in **`release/2026-11-21`** — **on staging** (code tip `27581819`; migrate
+execution `gifsy-migrate-staging-7hg7c` applied `20261120140000_visibility_review_events` cleanly 2026-11-20 19:20 UTC),
+real-login verified 2026-11-21 (§17.6); not on prod yet. §17.1 holds the rules every surface shares (written once);
+§17.2–17.5 describe each surface; §17.6 = staging results + the photo-GPS note.
 
 ### 17.1 Shared rules — one module, one in-scope rule, one word list
 
@@ -569,3 +571,26 @@ page, month report screen. Codes stay in data.
 - Which tenants are AMOUNT_UPLOAD: mode defaults to PHOTO_APPROVAL and `bulkUpload` refuses other modes; per the docs
   Deoleo launched with visibility OFF and Bajaj is PHOTO_APPROVAL — so most likely NO tenant is AMOUNT_UPLOAD today.
   **Not DB-verified** (needs a read of `clients.features->>'visibilityCaptureMode'` on staging/prod).
+
+### 17.6 Staging verification (2026-11-21, real logins, Bajaj staging) + photo-GPS note
+
+All checks PASS on `release/2026-11-21`:
+- **Review history** comes back inside `GET /v1/visibility/captures/:id` as `reviewHistory`. A new-app capture shows
+  SUBMITTED by the rep (`backfilled: true`); an imported capture shows APPROVED with actor "Imported — old app approval",
+  no admin named, `approvedBy` empty (§17.4).
+- **Report screen = Excel**, identical for a Gifsy operator assumed into Bajaj and for CLIENT_ADMIN — Nov 2026 P1:
+  in scope **4,149** = 11 Waiting for review + 2 Approved + 4,136 Not captured yet. MIS_USER gets a plain 403.
+- **Operations funnel:** Gifsy sees the flag list (13 submitted, 2 duplicate-photo flags); CLIENT_ADMIN gets counts only
+  (`flagDetailsAvailable: false`) and `/flags` answers 403 "available to Gifsy only".
+- **Capture rule:** outlet-status for a not-KYC-approved outlet answers 200 `{inScope: false, canCapture: false, reason:
+  "This outlet is not KYC-approved yet — visibility can be captured once its KYC is approved."}`; submit refuses with a
+  400 (by design; not exercised). A **re-KYC** outlet (approved before, sent back for an address change) stays in scope —
+  intended.
+
+**Capture-form race fix — in prod since `4a48dc0d`:** Submit shows "Getting location…" while a photo's GPS is pending;
+values are re-read after the submit-time wait; a manual location counts as pending; `uploadFile` never stays stuck.
+
+**Photo-GPS overlap — `fix/gps-photo-overlap` (`0003f706`, LOCAL ONLY, not pushed; owner-approved platform-wide
+2026-11-21; audited + fixed):** concurrent precise-GPS acquires share ONE lookup (no early settle); TIMEOUT /
+POSITION_UNAVAILABLE are transient, PERMISSION_DENIED latches; a reading > 10 s old is never returned; a second photo
+waits only the first lookup's remaining time (≤ 5 s cap) — no added wait.

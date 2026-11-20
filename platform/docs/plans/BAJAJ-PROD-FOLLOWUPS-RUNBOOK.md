@@ -40,8 +40,9 @@
    `gcloud run services describe gifsy-api --region asia-south1 $OPS --format='value(spec.template.spec.containers[0].image)'`
    (same for `gifsy-frontend`). Expected tag `4a48dc0d` (or later).
 2. `requireLocation`: `LOCATION-GATE.md` asks for a real-phone check on **staging first** (Android + iPhone: allow / deny /
-   Location off / Test again). Staging is ON (`BAJAJ-CUSTOMIZATIONS.md`). **UNVERIFIED — needs check:** no record in the
-   docs that the real-phone staging check was done.
+   Location off / Test again). **Owner decision 2026-11-21: the owner does the real-phone test on Bajaj staging first;
+   prod is switched only after it (pending owner).** Bajaj staging flag states (2026-11-21): `requireLocation` ON,
+   `helpVideos` ON, `wholesalerPayoutInclActivation` ON.
 3. `helpVideos`: part B done (guides published), else reps see an empty list.
 4. Recommended: tell Bajaj field leads before `requireLocation` goes on (reps with location off are blocked at once,
    on the next page load).
@@ -55,7 +56,8 @@ SELECT id,
        features->'helpVideos'                     AS help_videos
 FROM clients WHERE id IN ('bajaj','deoleo') ORDER BY id;
 ```
-Expected today: all NULL / false for both tenants (GO-LIVE-ISSUE-LIST: "TODO: confirm current state").
+Expected today: all NULL / false for both tenants on prod — TODO: confirm with this read-back (prod state not recorded;
+staging known: Bajaj all three ON).
 
 ### Backup
 Not needed for a flag: each toggle is one audited merge of one key into `clients.features` (every other key kept,
@@ -330,7 +332,8 @@ owed. Deoleo's credits screen: unchanged (no banner). Next Daily Ops Digest: "8 
 ---
 
 ## Decisions the owner must make
-1. A: switch `requireLocation` ON for Bajaj prod now? (staging real-phone check first — not recorded as done.)
+1. A: switch `requireLocation` ON for Bajaj prod — **decided 2026-11-21: only after the owner's real-phone test on
+   Bajaj staging** (test pending owner).
 2. A: switch `wholesalerPayoutInclActivation` ON for Bajaj prod?
 3. A/B: load which guides (all 14 from `HELP-VIDEOS.md` §3 or a subset), which 3 get the videos, and where the video
    files are; then switch `helpVideos` ON (after the content is published).

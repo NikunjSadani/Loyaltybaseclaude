@@ -3,7 +3,8 @@
 **Status:** ✅ LIVE on prod `7ba69566` (2026-11-19 ~00:30 IST; migration `20261118190000_user_activity_usage` applied). Staging-verified 2026-11-18 (phone-app ISR 132 s, browser SO 66 s, background-only traffic added 0; Excel + About sheet). Duration / medium data count from the prod ship date.
 **Scope:** ⚠️ PLATFORM-WIDE — owner-approved 2026-11-18, shipped in the 2026-11-19 prod release (all tenants incl. Deoleo).
 **Next (`release/2026-11-21`, not on prod):** ASM / Zone / State / City columns in the Usage report and the App
-installed-users export (owner-approved for all tenants); full gates green 2026-11-21, staging check pending.
+installed-users export (owner-approved for all tenants); full gates green 2026-11-21; **staging-verified 2026-11-21**
+(see "Area columns — staging check" below).
 
 ## What the owner asked for
 
@@ -141,6 +142,12 @@ server action, not an authenticated `/api` call. Any NEW poll/timer must use `ba
   no own outlet → "Group — N outlets"; sales users → outlets covered by them and their active downline (SalesUser.zone
   wins). Inactive / vacant reps are ignored. Excel writes full lists; the page shows 5 + "+N more" (tooltip + click to
   expand). Admin/MIS/Gifsy → "Not in sales hierarchy". The Region column now also follows parent-group assignments.
+
+**Area columns — staging check (2026-11-21, real logins):** ASM / Zone / State / City filled in both the App
+installed-users export and the Usage report; admin rows read "Not in sales hierarchy"; users above ASM read "Above ASM
+level". HO / State-head **City** cells can list hundreds of cities — the owner may prefer "N cities" (not decided).
+Deoleo: both exports work with its level names XSR / RSM / ZNM / NSM. The Mobile column shows full numbers
+(pre-existing behaviour, unchanged). Bajaj staging has no MIS_USER, so MIS checks used Deoleo's.
 
 ## Runbook — deploy / migration (review A-M2)
 
