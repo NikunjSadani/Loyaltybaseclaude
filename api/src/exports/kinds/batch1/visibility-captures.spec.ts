@@ -15,6 +15,7 @@ import {
   VISIBILITY_CAPTURES_KIND,
   VISIBILITY_HISTORY_HEADERS,
   VISIBILITY_NOT_CAPTURED_HEADERS,
+  VISIBILITY_LINK_LIMIT,
   VISIBILITY_REPORT_BASE_HEADERS,
   planPhotoColumns,
 } from './visibility-captures';
@@ -28,6 +29,7 @@ interface Outlet {
   id: string; clientId: string; outletCode: string; name: string; city: string; state: string;
   programName: string | null; programCategory: string | null; partnerId: string | null;
   latitude?: number | null; longitude?: number | null; type: string; inScope: boolean;
+  createdAt?: Date; deactivatedAt?: Date | null;
 }
 interface Capture {
   id: string; clientId: string; outletId: string; outletCode: string; outletName: string; windowKey: string;
@@ -66,6 +68,7 @@ function fakePrisma(db: Db) {
       partnerId: o.partnerId, latitude: o.latitude ?? null, longitude: o.longitude ?? null, outletType: { name: o.type },
     };
   };
+  const ownCaptures = () => db.captures.filter((c) => c.clientId === T);
   const matchCapture = (c: Capture, w: any): boolean => {
     if (w.AND) return w.AND.every((x: any) => matchCapture(c, x));
     if (w.OR) return w.OR.some((x: any) => matchCapture(c, x));
@@ -91,6 +94,12 @@ function fakePrisma(db: Db) {
       },
     },
     visibilityCapture: {
+      count: async (a: any) => db.captures.filter((c) => matchCapture(c, a.where)).length,
+      findFirst: async (a: any) => {
+        log('visibilityCapture.findFirst', a);
+        const rows = ownCaptures().filter((c) => c.submittedBySalesUserId !== null).sort((x, y) => cmp(x.windowKey, y.windowKey));
+        return rows[0] ? { windowKey: rows[0].windowKey } : null;
+      },
       findMany: async (a: any) => {
         log('visibilityCapture.findMany', a);
         let rows = db.captures.filter((c) => matchCapture(c, a.where));
@@ -120,7 +129,8 @@ function fakePrisma(db: Db) {
           return {
             ...s,
             capture: {
-              outletCode: c.outletCode, outletName: c.outletName, currentVersion: c.currentVersion, status: c.status,
+              outletCode: c.outletCode, outletName: c.outletName, outlet: { name: outletRel(c.outletId).name },
+              currentVersion: c.currentVersion, status: c.status,
               approvedByUserId: c.approvedByUserId, reviewedAt: c.reviewedAt, rejectionReason: c.rejectionReason,
               rejectionReasonCode: c.rejectionReasonCode,
             },
@@ -140,11 +150,11 @@ function fakePrisma(db: Db) {
     outlet: {
       findMany: async (a: any) => {
         log('outlet.findMany', a);
-        const ks = a.where.AND ? a.where.AND[1].OR : null;
+        const ks = a.where.AND?.[1]?.OR?.[0]?.outletCode ? a.where.AND[1].OR : null;
         let rows = db.outlets.filter((o) => o.clientId === T && o.inScope);
         if (ks) rows = rows.filter((o) => o.outletCode > ks[0].outletCode.gt || (o.outletCode === ks[1].outletCode && o.id > ks[1].id.gt));
         rows = [...rows].sort((x, y) => cmp(x.outletCode, y.outletCode) || cmp(x.id, y.id)).slice(0, a.take);
-        return rows.map((o) => ({ ...o, outletType: { name: o.type } }));
+        return rows.map((o) => ({ ...o, createdAt: o.createdAt ?? new Date('2025-01-01T00:00:00Z'), deactivatedAt: o.deactivatedAt ?? null, outletType: { name: o.type } }));
       },
     },
     salesUser: {
@@ -155,7 +165,12 @@ function fakePrisma(db: Db) {
         })),
     },
     salesUserAssignment: {
-      findMany: async (a: any) => db.assignments.filter((x) => x.unassignedAt === null && a.where.outletId.in.includes(x.outletId)),
+      findMany: async (a: any) =>
+        db.assignments.filter((x) => {
+          const su = db.sales.find((s) => s.id === x.salesUserId);
+          const wantActive = a.where.salesUser?.isActive === true;
+          return x.unassignedAt === null && a.where.outletId.in.includes(x.outletId) && !!su && su.deletedAt === null && (!wantActive || su.isActive);
+        }),
     },
     user: {
       findMany: async (a: any) => {
@@ -185,7 +200,7 @@ const at = (iso: string) => new Date(iso);
 function baseDb(): Db {
   const rev = (status: string, by: string, iso: string, extra: Record<string, string> = {}) => ({ status, reviewedAt: iso, reviewedByUserId: by, ...extra });
   return {
-    outlets: [outlet(1), outlet(2, { programCategory: 'Privilege' }), outlet(3), outlet(4, { name: '=HYPERLINK("http://evil")' }), outlet(5), outlet(6, { inScope: false })],
+    outlets: [outlet(1), outlet(2, { programCategory: 'Privilege', name: 'Shop 2 (renamed)' }), outlet(3), outlet(4, { name: '=HYPERLINK("http://evil")' }), outlet(5), outlet(6, { inScope: false })],
     captures: [
       {
         id: 'c1', clientId: T, outletId: 'o1', outletCode: 'A001', outletName: 'Shop 1', windowKey: '2026-11-P1', status: 'APPROVED',
@@ -248,7 +263,10 @@ function baseDb(): Db {
       { id: 'su-vacant', clientId: T, reportingToId: 'su-so', isActive: false, deletedAt: null, employeeCode: 'E200', name: 'Vacant SO', level: 'SO' },
       { id: 'su-so', clientId: T, reportingToId: null, isActive: true, deletedAt: null, employeeCode: 'E300', name: 'Sunil Manager', level: 'ASM' },
     ],
-    assignments: [{ outletId: 'o5', salesUserId: 'su-rep', unassignedAt: null }],
+    assignments: [
+      { outletId: 'o5', salesUserId: 'su-rep', unassignedAt: null },
+      { outletId: 'o5', salesUserId: 'su-vacant', unassignedAt: null }, // inactive rep → never listed
+    ],
     domains: [
       { clientId: T, domain: 'uat-bajaj.gifsy.in', isPrimary: false },
       { clientId: T, domain: 'rewards.bajaj.example', isPrimary: true },
@@ -258,17 +276,17 @@ function baseDb(): Db {
 
 const user: JwtPayload = { sub: 'a', role: 'CLIENT_ADMIN', clientId: T, phone: '', name: '' };
 const SCOPE = ['RET'];
-const services = (enabled = true) =>
+const services = (enabled = true, freq = 1) =>
   fakeModuleRef([
     [TenantService, { resolveVisibilityEnabled: async () => enabled }],
-    [TenantSettingsService, { getEffectiveSettings: async () => ({ visibilityConfig: { geoFence: { radiusMeters: 50 }, frequencyPerMonth: 1, outletScope: SCOPE, programs: [], subPrograms: [] } }) }],
+    [TenantSettingsService, { getEffectiveSettings: async () => ({ visibilityConfig: { geoFence: { radiusMeters: 50 }, frequencyPerMonth: freq, outletScope: SCOPE, programs: [], subPrograms: [] } }) }],
   ]);
 
 const NOW = new Date('2026-11-20T06:00:00Z');
 
-async function run(db: Db, params: Record<string, unknown> = {}, now = NOW) {
+async function run(db: Db, params: Record<string, unknown> = {}, now = NOW, freq = 1) {
   const prisma = fakePrisma(db);
-  const res = await runKindToBuffer(VISIBILITY_CAPTURES_KIND, params, { prisma, moduleRef: services(), user, now });
+  const res = await runKindToBuffer(VISIBILITY_CAPTURES_KIND, params, { prisma, moduleRef: services(true, freq), user, now });
   const back = readBack(res.buffer);
   const sheet = (n: string) => back.rows[n] as unknown[][];
   const header = sheet('Visibility')[0] as string[];
@@ -364,6 +382,7 @@ describe('visibility report export (visibility-captures)', () => {
     expect(a3('Window 1 – Reviewed by')).toBe('Gifsy Ops');
     expect(a3('Reviewed by')).toBe('Gifsy Ops');
     expect(a3('Window 2 – Decision')).toBe('Not applicable');
+    expect(a3('Window 1 – Location')).toBe('Not recorded (old app)');
   });
 
   it('photo cells are clickable "Open photo" links on the PRIMARY portal host (never the uat host), key URL-encoded', async () => {
@@ -401,6 +420,7 @@ describe('visibility report export (visibility-captures)', () => {
     const v2w1 = rows.find((r) => r[3] === 2 && r[5] === 'Window 1')!;
     expect(v2w1.slice(7)).toEqual(['Rejected', 'too dark', 'Asha Admin', '08 Nov 2026, 10:30 am']);
     expect(v2w1[6]).toBe('Open photo');
+    expect(v2w1[1]).toBe('Shop 2 (renamed)'); // current outlet name, same as the main sheet
     expect(Object.values(back.links['Review history'])).toContain(
       `https://rewards.bajaj.example/visibility/photo?key=${encodeURIComponent('visibility-media/bajaj/a2-old.jpg')}`,
     );
@@ -412,20 +432,98 @@ describe('visibility report export (visibility-captures)', () => {
     expect(rows).toEqual([
       ['A005', 'Shop 5', 'Retailer', 'RLP', 'Elite', 'Pune', 'MH', 'Rahul Rep', 'E100', 'Sunil Manager (ASM)', '2026-11-P1', 'Not captured yet'],
     ]);
-    // The SAME in-scope rule as the report tiles.
+    // The SAME in-scope rule as the report tiles, narrowed to outlets alive during the window (IST November).
     expect(prisma.calls['outlet.findMany'][0].where).toEqual(
-      visibilityAddressableOutletWhere(T, SCOPE, { programs: [], subPrograms: [] }),
+      visibilityAddressableOutletWhere(T, SCOPE, { programs: [], subPrograms: [] }, {
+        start: new Date('2026-10-31T18:30:00Z'), end: new Date('2026-11-30T18:30:00Z'),
+      }),
     );
   });
 
-  it('Not captured: a CLOSED window (past month) → "Missed"; month param scopes captures to that month', async () => {
-    const db = baseDb();
+  it('Not captured: a month BEFORE the portal go-live (imported history) → one "Not tracked" row, explained on About', async () => {
+    const db = baseDb(); // first portal capture = 2026-11 → go-live November
     const { sheet, rowCount } = await run(db, { month: '2026-10' });
     expect(sheet('Visibility')).toHaveLength(1); // header only: no October captures
     const rows = sheet('Not captured').slice(1);
-    expect(rows).toHaveLength(5); // o1..o5 in scope, none captured in October
-    expect(rows.every((r) => r[10] === '2026-10-P1' && r[11] === 'Missed')).toBe(true);
-    expect(rowCount).toBe(5);
+    expect(rows).toHaveLength(1);
+    expect(rows[0][0]).toBe("Not tracked for imported months — the old app's records only include approved visits");
+    expect(rows[0][11]).toBe('Not tracked');
+    expect(rowCount).toBe(1);
+    const about = Object.fromEntries(sheet('About').slice(1).map((r) => [String(r[0]).trim(), r[1]]));
+    expect(String(about['NOT CAPTURED'])).toContain('portal went live in November 2026');
+    expect(about['Missed (window closed, no capture)']).toBeUndefined();
+  });
+
+  it('Not captured: a CLOSED portal month → "Missed" only for outlets that existed and were active then', async () => {
+    const db = baseDb();
+    // Portal go-live earlier (September) so October is a tracked portal month.
+    db.captures.push({ ...db.captures[0], id: 'sep1', windowKey: '2026-09-P1', outletCode: 'A001' });
+    db.outlets.find((o) => o.id === 'o5')!.createdAt = new Date('2026-11-05T00:00:00Z'); // created after October
+    db.outlets.find((o) => o.id === 'o3')!.deactivatedAt = new Date('2026-09-15T00:00:00Z'); // gone before October
+    db.outlets.find((o) => o.id === 'o4')!.deactivatedAt = new Date('2026-10-20T00:00:00Z'); // active during October
+    const { sheet, prisma } = await run(db, { month: '2026-10' });
+    const rows = sheet('Not captured').slice(1);
+    expect(rows.map((r) => [r[0], r[10], r[11]])).toEqual([
+      ['A001', '2026-10-P1', 'Missed'],
+      ['A002', '2026-10-P1', 'Missed'],
+      ['A004', '2026-10-P1', 'Missed'],
+    ]);
+    // The outlet query is the tiles' rule narrowed to outlets alive during October (IST).
+    expect(prisma.calls['outlet.findMany'][0].where).toEqual(
+      visibilityAddressableOutletWhere(T, SCOPE, { programs: [], subPrograms: [] }, {
+        start: new Date('2026-09-30T18:30:00Z'), end: new Date('2026-10-31T18:30:00Z'),
+      }),
+    );
+  });
+
+  it('Not captured: a window that has not begun → "Not started" (twice-a-month programme, early in the month)', async () => {
+    const db = baseDb();
+    const { sheet } = await run(db, {}, new Date('2026-11-10T06:00:00Z'), 2);
+    const rows = sheet('Not captured').slice(1).map((r) => [r[0], r[10], r[11]]);
+    expect(rows).toContainEqual(['A005', '2026-11-P1', 'Not captured yet']);
+    expect(rows).toContainEqual(['A005', '2026-11-P2', 'Not started']);
+    expect(rows).toContainEqual(['A001', '2026-11-P2', 'Not started']);
+    expect(rows.some((r) => r[1] === '2026-11-P3')).toBe(false);
+  });
+
+  it('400: a window the programme frequency does not have (P2 on a monthly programme, no captures)', async () => {
+    await expect(run(baseDb(), { windowKey: '2026-11-P2' })).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('carried-forward approvals: "Approved (earlier version)"; a waiting row shows no reviewer older than its submission', async () => {
+    const db = baseDb();
+    db.outlets.push(outlet(7, { programCategory: 'Privilege' }));
+    db.captures.push({
+      ...db.captures[1], id: 'c7', outletId: 'o7', outletCode: 'A007', outletName: 'Shop 7', status: 'SUBMITTED', currentVersion: 2,
+      receivedAt: at('2026-11-12T06:00:00Z'), reviewedAt: null, approvedByUserId: null,
+      formValues: { w1: 'visibility-media/bajaj/a7-w1-new.jpg', w2: 'visibility-media/bajaj/a7-w2.jpg' },
+      photoReviews: { w2: { status: 'APPROVED', reviewedAt: '2026-11-11T06:00:00.000Z', reviewedByUserId: 'u-other' } },
+    });
+    const { rowOf } = await run(db);
+    const a7 = rowOf('A007');
+    expect(a7('Status')).toBe('Waiting for review');
+    expect(a7('Reviewed by')).toBe('');
+    expect(a7('Reviewed on')).toBe('');
+    expect(a7('Window 1 – Decision')).toBe('Pending');
+    expect(a7('Window 2 – Decision')).toBe('Approved (earlier version)');
+    expect(a7('Window 2 – Reviewed by')).toBe('Ravi Reviewer');
+  });
+
+  it('hyperlink limit: beyond the per-sheet cap the URL is written as text and About says so (no silent cap)', async () => {
+    const saved = VISIBILITY_LINK_LIMIT.perSheet;
+    VISIBILITY_LINK_LIMIT.perSheet = 2;
+    try {
+      const { back, sheet, header } = await run(baseDb());
+      expect(Object.keys(back.links.Visibility)).toHaveLength(2);
+      const col = header.indexOf('Window 1 – Photo');
+      const texts = sheet('Visibility').slice(1).map((r) => String(r[col])).filter((v) => v.startsWith('https://'));
+      expect(texts.length).toBeGreaterThan(0);
+      expect(texts[0]).toMatch(/^https:\/\/rewards\.bajaj\.example\/visibility\/photo\?key=/);
+      const about = Object.fromEntries(sheet('About').slice(1).map((r) => [String(r[0]).trim(), r[1]]));
+      expect(String(about['PHOTO LINK LIMIT'])).toContain('show the full photo address as text');
+    } finally {
+      VISIBILITY_LINK_LIMIT.perSheet = saved;
+    }
   });
 
   it('About: status counts equal the Visibility sheet; scope + photo-link note present', async () => {
@@ -479,6 +577,11 @@ describe('visibility report export (visibility-captures)', () => {
       month: '2026-09', requestOrigin: 'http://localhost:3000',
     });
     expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ month: '2026-13' }, user)).toThrow(BadRequestException);
+    const ist = new Date(Date.now() + 330 * 60_000);
+    const next = new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth() + 1, 1));
+    const nextMonth = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}`;
+    expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ month: nextMonth }, user)).toThrow('future month');
+    expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: `${nextMonth}-P1` }, user)).toThrow('future month');
     expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: '2026-W45' }, user)).toThrow(BadRequestException);
     expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ month: '2026-10', windowKey: '2026-11-P1' }, user)).toThrow(BadRequestException);
     expect(() => VISIBILITY_CAPTURES_KIND.parseParams({ windowKey: ['a'] }, user)).toThrow('windowKey must be a string');

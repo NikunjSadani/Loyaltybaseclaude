@@ -47,7 +47,8 @@ import {
   outletMasterFencePolicy,
   type PhotoFenceStatus,
 } from '../../../visibility/geo-fence.helper';
-import { isWindowClosed, windowsForMonth } from '../../../visibility/visibility-window.helper';
+import { windowsForMonth } from '../../../visibility/visibility-window.helper';
+import { visibilityReportScopeError, windowPhase, windowRangeUtc } from '../../../visibility/visibility-report-scope';
 import { visibilityAddressableOutletWhere } from '../../../visibility/visibility-report.service';
 import {
   VISIBILITY_STATUS_ORDER,
@@ -99,6 +100,14 @@ const IMPORTED_KEY_MARKER = '/vendor-import/';
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const WINDOW_RE = /^(\d{4}-(?:0[1-9]|1[0-2]))-P[1-4]$/;
+
+/**
+ * Excel's hyperlink limit is ~65,530 per worksheet; beyond this many a sheet gets the URL as plain text instead (and the
+ * About sheet says so). Mutable object so a spec can lower it.
+ */
+export const VISIBILITY_LINK_LIMIT = { perSheet: 60_000 };
+
+export const NOT_TRACKED_MESSAGE = "Not tracked for imported months — the old app's records only include approved visits";
 
 /** The in-app path of the photo viewer page for a stored object key. */
 export function visibilityPhotoPath(key: string): string {
@@ -285,19 +294,26 @@ function decisionWord(status: 'APPROVED' | 'REJECTED'): string {
  * The scope's month + the capture windows to read + the windows an outlet is expected to cover (Not-captured sheet).
  * A month reads every possible window key P1..P4 (imported months and frequency changes never drop a capture).
  */
-function resolveScope(params: VisibilityCapturesParams, now: Date, freq: number) {
-  if (params.windowKey) {
-    const month = params.windowKey.slice(0, 7);
-    return { month, readWindows: [params.windowKey], expectedWindows: [params.windowKey] };
-  }
+function resolveScope(params: VisibilityCapturesParams, now: Date) {
+  if (params.windowKey) return { month: params.windowKey.slice(0, 7), readWindows: [params.windowKey] };
   const month = params.month ?? istMonthKey(now);
-  let expected: string[];
+  return { month, readWindows: [1, 2, 3, 4].map((n) => `${month}-P${n}`) };
+}
+
+/**
+ * The windows an in-scope outlet was expected to cover in a PORTAL month: the tenant's frequency (today's — the
+ * frequency history is not stored) plus any other window that actually has portal captures that month (an older
+ * frequency). One window asked for -> just that window.
+ */
+function expectedWindowsFor(params: VisibilityCapturesParams, month: string, freq: number, portalWindowsSeen: Set<string>): string[] {
+  if (params.windowKey) return [params.windowKey];
+  let byFreq: string[];
   try {
-    expected = windowsForMonth(month, freq);
+    byFreq = windowsForMonth(month, freq);
   } catch {
-    expected = [`${month}-P1`];
+    byFreq = [`${month}-P1`];
   }
-  return { month, readWindows: [1, 2, 3, 4].map((n) => `${month}-P${n}`), expectedWindows: expected };
+  return [...new Set([...byFreq, ...portalWindowsSeen])].sort();
 }
 
 async function runVisibilityCaptures(
@@ -316,8 +332,22 @@ async function runVisibilityCaptures(
   const freq = cfg.frequencyPerMonth ?? 1;
   const client = await prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
   const outletMasterGeo = ((client?.features ?? {}) as Record<string, unknown>).outletMasterGeo === true;
-  const scope = resolveScope(params, ctx.now, freq);
+  const scope = resolveScope(params, ctx.now);
+  // Same 400s as the endpoint (worker re-check): no future month; no window the frequency doesn't have.
+  const windowHasCaptures = params.windowKey
+    ? (await prisma.visibilityCapture.count({ where: { clientId, windowKey: params.windowKey } })) > 0
+    : false;
+  const scopeErr = visibilityReportScopeError(params, freq, ctx.now, windowHasCaptures);
+  if (scopeErr) throw new BadRequestException(scopeErr);
   const base: Prisma.VisibilityCaptureWhereInput = { clientId, windowKey: { in: scope.readWindows } };
+  // Portal go-live = the first month with any capture taken in this portal (a rep is recorded). Months before it are
+  // imported old-app history, which only holds approved visits -> no "Not captured" list for them.
+  const firstPortal = await prisma.visibilityCapture.findFirst({
+    where: { clientId, submittedBySalesUserId: { not: null } },
+    orderBy: [{ windowKey: 'asc' }],
+    select: { windowKey: true },
+  });
+  const goLiveMonth = firstPortal?.windowKey ? firstPortal.windowKey.slice(0, 7) : null;
 
   // ── Photo links: the tenant's primary portal host ──
   const domainRows = await prisma.clientDomain.findMany({ where: { clientId }, select: { domain: true, isPrimary: true } });
@@ -329,7 +359,27 @@ async function runVisibilityCaptures(
       clientId,
       path: visibilityPhotoPath(key),
     });
-  const photoCell = (key: string): XlsxCell => ({ __hyperlink: true, text: 'Open photo', target: linkFor(key) });
+  /** Per-sheet link writer: real hyperlinks up to the Excel limit, then the URL as text (counted for About). */
+  const linkWriter = () => {
+    let links = 0;
+    let asText = 0;
+    return {
+      cell(key: string): XlsxCell {
+        const target = linkFor(key);
+        if (links < VISIBILITY_LINK_LIMIT.perSheet) {
+          links++;
+          return { __hyperlink: true, text: 'Open photo', target };
+        }
+        asText++;
+        return target;
+      },
+      get asText() {
+        return asText;
+      },
+    };
+  };
+  const mainLinks = linkWriter();
+  const historyLinks = linkWriter();
   const linkHost = (() => {
     try {
       return new URL(linkFor('x')).host;
@@ -372,6 +422,7 @@ async function runVisibilityCaptures(
   const main = await out.addSheet('Visibility', headers);
   const statusCounts = new Map<string, number>();
   let importedCount = 0;
+  const portalWindowsSeen = new Set<string>();
   let after: { windowKey: string; outletCode: string; id: string } | null = null;
 
   for (;;) {
@@ -451,8 +502,17 @@ async function runVisibilityCaptures(
       const reviews = reviewsById.get(c.id) ?? {};
       const imported = isImported(values);
       if (imported) importedCount++;
+      else portalWindowsSeen.add(c.windowKey);
       statusCounts.set(c.status, (statusCounts.get(c.status) ?? 0) + 1);
-      const capturedReviewer = c.status !== 'SUBMITTED';
+      // Review info must belong to the CURRENT version: a review older than this version's submission is a decision
+      // carried forward from an earlier version (re-take flow) — never shown as the visit's reviewer.
+      const submittedAtMs = c.receivedAt.getTime();
+      const isFresh = (iso: string | Date | null | undefined) => {
+        if (imported) return true;
+        const t = iso instanceof Date ? iso.getTime() : iso ? Date.parse(iso) : NaN;
+        return !(Number.isFinite(t) && t < submittedAtMs);
+      };
+      const capturedReviewer = c.status !== 'SUBMITTED' && isFresh(c.reviewedAt);
 
       // Per-photo fence policy for this outlet.
       const policy = outletMasterGeo
@@ -460,6 +520,7 @@ async function runVisibilityCaptures(
         : null;
       const ref = !outletMasterGeo && c.outlet?.partnerId ? refByPartner.get(c.outlet.partnerId) ?? null : null;
       const photoLocation = (f: FormField | undefined, geo: ReturnType<typeof readMediaValue>['geo']): string => {
+        if (imported && !geo) return 'Not recorded (old app)';
         if (policy) {
           if (f?.geoFenceRequired !== true) return '';
           if (!geo) return locationWords('unverifiable');
@@ -490,6 +551,7 @@ async function runVisibilityCaptures(
         let on = '';
         if (r) {
           decision = decisionWord(r.status);
+          if (r.status === 'APPROVED' && !isFresh(r.reviewedAt)) decision = 'Approved (earlier version)';
           if (r.status === 'REJECTED') reason = reasonText(r.reason, r.reasonCode);
           by = users.name(r.reviewedByUserId);
           on = istHumanDateTime(r.reviewedAt);
@@ -501,11 +563,11 @@ async function runVisibilityCaptures(
           on = istHumanDateTime(c.reviewedAt);
         }
         if (decision === 'Rejected') rejectedParts.push(`${col.label}: ${reason || 'no reason given'}`);
-        photoCells.push(photoCell(media.key), decision, reason, by, on, photoLocation(f, media.geo));
+        photoCells.push(mainLinks.cell(media.key), decision, reason, by, on, photoLocation(f, media.geo));
       }
 
-      // Capture-level reviewer = the latest per-photo review, else the whole-capture reviewer.
-      const lr = latestReview(reviews);
+      // Capture-level reviewer = the latest per-photo review OF THIS VERSION, else the whole-capture reviewer.
+      const lr = latestReview(Object.fromEntries(Object.entries(reviews).filter(([, r]) => isFresh(r.reviewedAt))));
       const reviewedBy = lr ? users.name(lr.reviewedByUserId) : capturedReviewer ? users.name(c.approvedByUserId) : '';
       const reviewedOn = lr ? istHumanDateTime(lr.reviewedAt) : capturedReviewer ? istHumanDateTime(c.reviewedAt) : '';
 
@@ -588,6 +650,7 @@ async function runVisibilityCaptures(
           select: {
             outletCode: true,
             outletName: true,
+            outlet: { select: { name: true } },
             currentVersion: true,
             status: true,
             approvedByUserId: true,
@@ -636,12 +699,12 @@ async function runVisibilityCaptures(
         }
         await history.addRow([
           s.capture?.outletCode ?? '',
-          s.capture?.outletName ?? '',
+          s.capture?.outlet?.name ?? s.capture?.outletName ?? '',
           s.windowKey,
           s.version,
           istHumanDateTime(s.createdAt),
           labelByField.get(f.id) ?? f.label ?? f.id,
-          photoCell(media.key),
+          historyLinks.cell(media.key),
           decision,
           reason,
           by,
@@ -655,19 +718,27 @@ async function runVisibilityCaptures(
 
   // ── Sheet 3: Not captured (in-scope outlets × expected windows with no capture) ──
   const notCaptured = await out.addSheet('Not captured', VISIBILITY_NOT_CAPTURED_HEADERS);
-  const closedByWindow = new Map(
-    scope.expectedWindows.map((w) => {
-      try {
-        return [w, isWindowClosed(w, ctx.now, freq)] as const;
-      } catch {
-        return [w, false] as const;
-      }
-    }),
+  // Imported months (before the portal go-live — or, with no portal capture yet, a month holding imported history):
+  // the old app only exported APPROVED visits, so "no capture" there means nothing → one explanatory row, no list.
+  const notTracked = goLiveMonth ? scope.month < goLiveMonth : importedCount > 0;
+  const expectedWindows = notTracked ? [] : expectedWindowsFor(params, scope.month, freq, portalWindowsSeen);
+  const windowInfo = new Map(
+    expectedWindows.map((w) => [w, { ...windowRangeUtc(w, freq), phase: windowPhase(w, freq, ctx.now) }] as const),
   );
   let notYet = 0;
   let missed = 0;
-  if (cfg.outletScope.length > 0) {
-    const inScope = visibilityAddressableOutletWhere(clientId, cfg.outletScope, cfg);
+  let notStarted = 0;
+  if (notTracked) {
+    await notCaptured.addRow([NOT_TRACKED_MESSAGE, '', '', '', '', '', '', '', '', '', params.windowKey ?? '', 'Not tracked']);
+  } else if (cfg.outletScope.length > 0 && expectedWindows.length > 0) {
+    // Outlets that existed during the period: created before its end, not deactivated before it began (today's
+    // outlet type / programme are used — their history is not kept). Checked again per window below.
+    const infos = [...windowInfo.values()];
+    const activeDuring = {
+      start: new Date(Math.min(...infos.map((i) => i.start.getTime()))),
+      end: new Date(Math.max(...infos.map((i) => i.end.getTime()))),
+    };
+    const inScope = visibilityAddressableOutletWhere(clientId, cfg.outletScope, cfg, activeDuring);
     let oAfter: { outletCode: string; id: string } | null = null;
     for (;;) {
       const outlets = await prisma.outlet.findMany({
@@ -687,6 +758,8 @@ async function runVisibilityCaptures(
           state: true,
           programName: true,
           programCategory: true,
+          createdAt: true,
+          deactivatedAt: true,
           outletType: { select: { name: true } },
         },
         orderBy: [{ outletCode: 'asc' }, { id: 'asc' }],
@@ -697,12 +770,13 @@ async function runVisibilityCaptures(
       oAfter = { outletCode: lastO.outletCode, id: lastO.id };
       const ids = outlets.map((o) => o.id);
       const have = await prisma.visibilityCapture.findMany({
-        where: { clientId, outletId: { in: ids }, windowKey: { in: scope.expectedWindows } },
+        where: { clientId, outletId: { in: ids }, windowKey: { in: expectedWindows } },
         select: { outletId: true, windowKey: true },
       });
       const haveSet = new Set(have.map((h) => `${h.outletId}|${h.windowKey}`));
+      // Only ACTIVE, non-deleted reps.
       const assignments = await prisma.salesUserAssignment.findMany({
-        where: { unassignedAt: null, outletId: { in: ids }, salesUser: { clientId, deletedAt: null } },
+        where: { unassignedAt: null, outletId: { in: ids }, salesUser: { clientId, deletedAt: null, isActive: true } },
         select: { outletId: true, salesUserId: true },
         orderBy: [{ assignedAt: 'desc' }, { id: 'asc' }],
       });
@@ -717,11 +791,20 @@ async function runVisibilityCaptures(
         const reps = repsByOutlet.get(o.id) ?? [];
         const repPeople = reps.map((id) => people.person(id));
         const managers = [...new Set(reps.map((id) => people.manager(id)).filter(Boolean))];
-        for (const w of scope.expectedWindows) {
+        for (const w of expectedWindows) {
           if (haveSet.has(`${o.id}|${w}`)) continue;
-          const closed = closedByWindow.get(w) === true;
-          if (closed) missed++;
-          else notYet++;
+          const info = windowInfo.get(w)!;
+          const created = o.createdAt ? new Date(o.createdAt).getTime() : 0;
+          if (created >= info.end.getTime()) continue; // the outlet did not exist yet in that window
+          if (info.phase === 'closed') {
+            if (o.deactivatedAt && new Date(o.deactivatedAt).getTime() <= info.start.getTime()) continue;
+          } else if (o.deactivatedAt) {
+            continue; // an open / future window only expects outlets that are active today
+          }
+          const status = info.phase === 'closed' ? 'Missed' : info.phase === 'open' ? 'Not captured yet' : 'Not started';
+          if (info.phase === 'closed') missed++;
+          else if (info.phase === 'open') notYet++;
+          else notStarted++;
           await notCaptured.addRow([
             o.outletCode,
             o.name,
@@ -734,7 +817,7 @@ async function runVisibilityCaptures(
             repPeople.map((p) => p.code).filter(Boolean).join(', '),
             managers.join(', '),
             w,
-            closed ? 'Missed' : 'Not captured yet',
+            status,
           ]);
         }
       }
@@ -753,15 +836,20 @@ async function runVisibilityCaptures(
     ...VISIBILITY_STATUS_ORDER.map((s): [string, number] => [`  ${VISIBILITY_STATUS_WORDS[s]}`, statusCounts.get(s) ?? 0]),
     ['  of which imported from the old app', importedCount],
     ['Rows in the Review history sheet', historyRows],
-    ['Not captured yet (window still open)', notYet],
-    ['Missed (window closed, no capture)', missed],
+    ...(notTracked
+      ? ([['Not captured', 'Not tracked for this month (imported old-app history — see NOT CAPTURED below)']] as Array<[string, string]>)
+      : ([
+          ['Not captured yet (window still open)', notYet],
+          ['Missed (window closed, no capture)', missed],
+          ['Not started (window has not begun)', notStarted],
+        ] as Array<[string, number]>)),
     ['', ''],
     ['STATUS', ''],
     ['Waiting for review', 'The rep has submitted the photos; nobody has decided on every photo yet.'],
     ['Approved', 'Every required photo was approved. The visit counts as done for that window.'],
     ['Needs re-take', 'At least one photo was rejected. The rep must re-take it; the reason is in "Overall remark" and in the photo\'s own Reason column.'],
     ['Rejected', 'The whole visit was rejected by the reviewer. The rep must capture it again.'],
-    ['Not captured yet / Missed', 'Not captured sheet: an in-scope outlet with no visit for the window — "Not captured yet" while the window is still open (India time), "Missed" once it has closed.'],
+    ['Not captured yet / Missed / Not started', 'Not captured sheet: an in-scope outlet with no visit for the window — "Not captured yet" while the window is open (India time), "Missed" once it has closed, "Not started" when the window has not begun yet.'],
     ['', ''],
     ['COLUMNS', ''],
     ['Source', `"${SOURCE_PORTAL}" = captured in this portal. "${SOURCE_IMPORTED}" = history brought over from the previous app (no rep, location or review history was recorded there).`],
@@ -771,19 +859,30 @@ async function runVisibilityCaptures(
     ['Re-takes', 'How many times the rep re-submitted this visit after a rejection.'],
     ['Location check', 'Whether the phone was inside the outlet\'s geo-fence: Inside fence / Outside fence / Unverifiable (no usable location), with the distance from the outlet and the phone\'s GPS accuracy.'],
     ['Duplicate photo', '"Yes" when the same photo was also used on another visit.'],
-    ['Reviewed by / Reviewed on', 'The person who made the latest review decision on this visit, and when.'],
+    ['Reviewed by / Reviewed on', 'The person who made the latest review decision on the CURRENT version of this visit, and when (blank while the latest submission is still waiting for review).'],
     ['Overall remark', 'The reviewer\'s reason when the whole visit was rejected; otherwise each rejected photo with its reason.'],
     ['<Photo> – Photo', 'A clickable "Open photo" link (see PHOTO LINKS below).'],
-    ['<Photo> – Decision', 'Approved / Rejected / Pending (not reviewed yet) / Not applicable (this photo was not required for the outlet). Blank = no photo was taken.'],
+    ['<Photo> – Decision', 'Approved / Rejected / Pending (not reviewed yet) / Approved (earlier version) (approved before the latest re-take and kept) / Not applicable (this photo was not required for the outlet). Blank = no photo was taken.'],
     ['<Photo> – Reason / Reviewed by / Reviewed on', 'The rejection reason, who decided on this photo and when.'],
     ['<Photo> – Location', 'Where this photo was taken relative to the outlet\'s geo-fence.'],
     ['', ''],
     ['PHOTO LINKS', `Each link opens the photo in the portal${linkHost ? ` (${linkHost})` : ''}. You must be signed in with an account that may view visibility photos; if you are not signed in, the portal asks you to sign in and then opens the photo. The link never works for anyone outside the programme.`],
     ...(picked.note ? ([['Photo link address', picked.note]] as Array<[string, string]>) : []),
-    ['REVIEW HISTORY', 'One row per submitted version per photo, with the decision recorded on that version. "Not recorded" = an older version whose decision was not kept. Full who/when history for whole-visit rejections is recorded from the next release onwards.'],
-    ...(cfg.outletScope.length === 0
-      ? ([['NOT CAPTURED', 'No outlet types are in the Visibility scope yet, so no outlet is listed as not captured.']] as Array<[string, string]>)
+    ...(mainLinks.asText + historyLinks.asText > 0
+      ? ([[
+          'PHOTO LINK LIMIT',
+          `Excel allows about 65,000 links per sheet. The first ${VISIBILITY_LINK_LIMIT.perSheet} photos of a sheet are clickable; the remaining ${mainLinks.asText} (Visibility) and ${historyLinks.asText} (Review history) show the full photo address as text — copy it into the browser. Export one window to get every link clickable.`,
+        ]] as Array<[string, string]>)
       : []),
+    ['REVIEW HISTORY', 'One row per submitted version per photo, with the decision recorded on that version. "Not recorded" = an older version whose decision was not kept. Full who/when history for whole-visit rejections is recorded from the next release onwards.'],
+    [
+      'NOT CAPTURED',
+      notTracked
+        ? `This month is imported old-app history${goLiveMonth ? ` (the portal went live in ${monthLabel(goLiveMonth)})` : ''}. The old app only sent approved visits, so missing visits cannot be told apart from rejected ones — the sheet is not filled for imported months.`
+        : cfg.outletScope.length === 0
+          ? 'No outlet types are in the Visibility scope yet, so no outlet is listed as not captured.'
+          : "Outlets in the Visibility scope (same rule as the report screen) that existed during the window: created before the window ended and not deactivated before it began. Outlet type and programme are today's values. Only active assigned reps are shown.",
+    ],
   ];
   for (const r of aboutRows) await about.addRow(r);
 
@@ -806,6 +905,8 @@ export const VISIBILITY_CAPTURES_KIND: ExportKindDef<VisibilityCapturesParams> =
     const requestOrigin = optionalString(r, 'requestOrigin')?.trim() || undefined;
     if (windowKey && !WINDOW_RE.test(windowKey)) throw new BadRequestException('windowKey must look like 2026-11-P1');
     if (month && !MONTH_RE.test(month)) throw new BadRequestException('month must look like 2026-11');
+    const futureErr = visibilityReportScopeError({ month, windowKey }, 4, new Date(), true); // future-month check only
+    if (futureErr) throw new BadRequestException(futureErr);
     if (windowKey && month && windowKey.slice(0, 7) !== month) {
       throw new BadRequestException('windowKey must be a window of the chosen month');
     }

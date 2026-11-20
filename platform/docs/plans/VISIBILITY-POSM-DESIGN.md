@@ -329,19 +329,33 @@ Export kind `visibility-captures` (`api/src/exports/kinds/batch1/visibility-capt
 - **Sheet "Review history"** — one row per submitted version per photo (`VisibilityCaptureSubmission` + its
   `photoReviews` snapshot). An older version without a snapshot reads "Not recorded". Imported captures have no
   submission rows. Full who/when history for whole-capture rejects is recorded from the next release (noted on About).
-- **Sheet "Not captured"** — in-scope outlets (the SAME `visibilityAddressableOutletWhere` as the coverage tiles) with no
-  capture for an expected window of the scope (`windowsForMonth(month, frequencyPerMonth)`): assigned rep(s) (active
-  SalesUserAssignment) + manager; status **"Not captured yet"** while the window is open (IST), else **"Missed"**.
+- **Sheet "Not captured"** — in-scope outlets (the SAME `visibilityAddressableOutletWhere` as the coverage tiles, with
+  its `activeDuring` option: created before the window ended, not deactivated before it began; type/programme are
+  today's values) with no capture for an expected window: assigned ACTIVE rep(s) + manager; status **"Not captured
+  yet"** (window open, IST), **"Missed"** (closed) or **"Not started"** (not begun). Expected windows = today's
+  frequency (history not stored) ∪ windows that have portal captures that month. **Imported months** (before the
+  portal go-live = the first month with a capture that has a rep; or, with none yet, a month holding imported
+  history) get ONE row "Not tracked for imported months — the old app's records only include approved visits", also
+  explained on About.
+- **400s** (endpoint `assertExportScope`, re-checked in the run): a future month/window; a window the frequency has no
+  period for (P2 on a monthly programme) unless captures exist for that key. The admin month picker stops at the
+  current India month.
+- **Current-version review info:** a per-photo approval older than the current version's submission is shown as
+  "Approved (earlier version)"; the visit-level Reviewed by/on only uses reviews of the current version (blank while
+  waiting for review).
+- **Hyperlink cap:** after 60,000 links in a sheet (Excel's limit is ~65,530) the photo address is written as text and
+  About says how many (`VISIBILITY_LINK_LIMIT`).
 - **Sheet "About"** — scope, generated-at (IST), counts per status (= the Visibility sheet), meanings of every status and
   column, how photo links work (+ the domain-picker note when the link fell back).
 - **Photo links** — ABSOLUTE `https://<tenant primary host>/visibility/photo?key=<encoded key>`; host via
   `pickTenantDomain` + `tenantPortalLink` (`api/src/tickets/ticket-link.ts`, the ticket-email rule: strictly the
   isPrimary domain, never a staging/uat host in prod, fallback `<slug>.gifsy.in`; staging → `uat-` host; local → the
-  request origin). Target = the platform page `app/visibility/photo/page.tsx`: a signed-in PAGE (proxy `ROLE_ROUTES
-  ['/visibility']` + sign-in return-to = GIFSY_ADMIN, GIFSY_STAFF, CLIENT_ADMIN, SALES_*; NOT public) that loads
-  `/api/visibility/captures/media?key=` (role-gated, tenant-pinned), shows it full-width with Download, and says "You
-  don't have access to this photo" (403) / "Photo not found" (404 / no key). A signed-out click → sign-in → back to
-  the photo.
+  request origin). Target = the platform page `app/visibility/photo/page.tsx`: a signed-in PAGE that renders for ANY
+  signed-in role (no proxy ROLE_ROUTES entry; NOT public — no session → sign-in with `next`; sign-in return-to admits
+  GIFSY_ADMIN, GIFSY_STAFF, CLIENT_ADMIN, SALES_*). It loads `/api/visibility/captures/media?key=` (role-gated,
+  tenant-pinned; another tenant's key → **403**, decided from the key alone), shows it full-width with Download, and
+  says "You don't have access to this photo" (403 — incl. MIS / partner / vendor) / "Photo not found" (404 / no key);
+  an image the browser can't render → "can't be displayed in the browser" + Download.
 - **Cells:** text via the streaming writer (`cellSafe` formula-injection guard on every string; hyperlinks as real
   cell links). Dates are IST text "20 Nov 2026, 3:05 pm" — the streaming writer runs without a styles table (memory),
   so real date cells would show as serial numbers.

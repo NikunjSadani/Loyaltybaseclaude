@@ -50,6 +50,7 @@ export class VisibilityReportController {
     @Res({ passthrough: true }) res: Response,
   ) {
     await this.report.assertEnabled(user.clientId);
+    await this.report.assertExportScope(user.clientId, query);
     return this.exports.respond(res, user, 'visibility-captures', query);
   }
 }

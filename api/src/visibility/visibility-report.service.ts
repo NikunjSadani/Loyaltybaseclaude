@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
@@ -9,6 +9,7 @@ import {
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { currentWindowKey, isWindowClosed } from './visibility-window.helper';
 import { isGifsyOperator } from '../common/tenant-scope';
+import { visibilityReportScopeError } from './visibility-report-scope';
 import { VisibilityProgramScopeLike, visibilityProgramScope, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 /**
@@ -21,18 +22,39 @@ export function visibilityAddressableOutletWhere(
   clientId: string,
   outletScope: string[],
   programCfg?: VisibilityProgramScopeLike | null,
+  /**
+   * Report "Not captured" sheet for a PAST period: outlets that existed during [start, end) — created before `end`,
+   * and active then (not deactivated, or deactivated only after `start`). Omitted (the tiles) → today's universe,
+   * byte-identical to before.
+   */
+  activeDuring?: { start: Date; end: Date },
 ): Prisma.OutletWhereInput {
   // APPLIES-TO (D9/D12): the optional programs/subPrograms narrowing is merged here, the ONE
   // builder both the denominator AND the numerator use — so they always move together
   // (numerator ⊆ denominator invariant). Unscoped config → the exact pre-scope where.
+  const intent: Prisma.OutletWhereInput = {
+    // Exclude NOT_INTERESTED (declined) AND PARKED (admin-removed from pipeline) from the
+    // visibility universe. notIn drops NULLs → the {null} branch keeps normal outlets.
+    OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+  };
+  if (activeDuring) {
+    return withVisibilityProgramWhere(
+      {
+        clientId,
+        deletedAt: null,
+        createdAt: { lt: activeDuring.end },
+        outletType: { code: { in: outletScope } },
+        AND: [intent, { OR: [{ deactivatedAt: null }, { deactivatedAt: { gt: activeDuring.start } }] }],
+      },
+      programCfg,
+    );
+  }
   return withVisibilityProgramWhere(
     {
       clientId,
       deletedAt: null,
       deactivatedAt: null,
-      // Exclude NOT_INTERESTED (declined) AND PARKED (admin-removed from pipeline) from the
-      // visibility universe. notIn drops NULLs → the {null} branch keeps normal outlets.
-      OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+      ...intent,
       outletType: { code: { in: outletScope } },
     },
     programCfg,
@@ -60,6 +82,21 @@ export class VisibilityReportService {
     if (!(await this.tenant.resolveVisibilityEnabled(clientId))) {
       throw new ForbiddenException('Visibility is not enabled for this tenant.');
     }
+  }
+
+  /**
+   * 400 before any file for a Visibility report scope that cannot exist: a future month, or a window the programme's
+   * frequency has no such period for (unless captures for that window key exist — an older frequency's window).
+   */
+  async assertExportScope(clientId: string, query: { month?: string; windowKey?: string }, now = new Date()): Promise<void> {
+    const windowKey = query.windowKey?.trim() || undefined;
+    const month = query.month?.trim() || undefined;
+    const freq = (await this.getConfig(clientId)).frequencyPerMonth ?? 1;
+    const hasCaptures = windowKey
+      ? (await this.prisma.visibilityCapture.count({ where: { clientId, windowKey } })) > 0
+      : false;
+    const err = visibilityReportScopeError({ month, windowKey }, freq, now, hasCaptures);
+    if (err) throw new BadRequestException(err);
   }
 
   private async getConfig(clientId: string): Promise<VisibilityConfigSettings> {
