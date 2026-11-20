@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { Spinner } from '@/components/ui/spinner';
 import {
   type Ticket, type TicketCategory, type TicketPriority, type TicketStatus,
-  CATEGORY_LABELS, STATUS_LABELS, PRIORITY_LABELS,
+  CATEGORY_LABELS, STATUS_LABELS,
 } from '@/lib/tickets';
 import { roleLabelFor, getRole, type SalesRole } from '@/lib/sales-role';
 import { useClientConfig } from '@/lib/platform/client-config-context';
@@ -35,6 +35,11 @@ const CAT_FROM_DB: Record<string, TicketCategory> = {
 const STATUS_FROM_DB: Record<string, TicketStatus> = {
   OPEN: 'open', IN_PROGRESS: 'in_progress', WAITING: 'waiting',
   RESOLVED: 'resolved', CLOSED: 'closed',
+  // Support-internal states are masked by the API for field readers; mapped here too so an
+  // escalated ticket can never fall through to the 'open' default.
+  ESCALATED: 'in_progress',
+  // Defense in depth: the API masks WAITING_ON_CLIENT as IN_PROGRESS for sales anyway.
+  WAITING_ON_CLIENT: 'in_progress',
 };
 const PRIO_FROM_DB: Record<string, TicketPriority> = {
   HIGH: 'high', MEDIUM: 'medium', LOW: 'low',
@@ -93,12 +98,6 @@ const SELF_CATEGORIES: { value: TicketCategory; label: string; emoji: string }[]
   { value: 'delivery',   label: 'Field Tool Problem',       emoji: '🔧' },
   { value: 'kyc',        label: 'Training Request',         emoji: '📚' },
   { value: 'other',      label: 'Other',                    emoji: '💬' },
-];
-
-const PRIORITIES: { value: TicketPriority; label: string; color: string }[] = [
-  { value: 'high',   label: 'High',   color: 'text-red-600 bg-red-50 border-red-200' },
-  { value: 'medium', label: 'Medium', color: 'text-amber-600 bg-amber-50 border-amber-200' },
-  { value: 'low',    label: 'Low',    color: 'text-gray-600 bg-gray-50 border-gray-200' },
 ];
 
 function formatTime(iso: string) {
@@ -218,6 +217,7 @@ export default function SalesSupportPage() {
   const [newOpen,    setNewOpen]   = useState(false);
   const [selected,   setSelected]  = useState<Ticket | null>(null);
   const [submitting, setSubmitting]= useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [form, setForm] = useState<NewForm>({
     ticketFor: 'outlet', outletSearch: '', outlet: null, category: '',
     priority: 'medium', title: '', description: '',
@@ -249,6 +249,7 @@ export default function SalesSupportPage() {
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
+    setSubmitError(null);
     const outletPrefix = !isSelf && form.outlet ? `[${form.outlet.name}] ` : '';
     const outletDesc   = !isSelf && form.outlet ? `Outlet: ${form.outlet.name} (${form.outlet.mobile})\n\n` : '';
     try {
@@ -259,6 +260,8 @@ export default function SalesSupportPage() {
           category:    CAT_TO_DB[form.category as TicketCategory],
           subject:     `${outletPrefix}${form.title.trim()}`,
           description: `${outletDesc}${form.description.trim()}`,
+          // Structured outlet link (support console shows its outlet code); omitted for "own issue".
+          ...(!isSelf && form.outlet ? { outletId: form.outlet.id } : {}),
         }),
       });
       const body = await res.json();
@@ -266,8 +269,13 @@ export default function SalesSupportPage() {
         setTickets((prev) => [mapDbTicket(body.data.ticket), ...prev]);
         setForm(BLANK_FORM);
         setNewOpen(false);
+      } else {
+        // Never fail silently — e.g. the outlet is no longer assigned to this rep's team.
+        setSubmitError(body.error ?? 'Could not raise the ticket. Please try again.');
       }
-    } catch {}
+    } catch {
+      setSubmitError('Could not raise the ticket. Please check your connection and try again.');
+    }
     setSubmitting(false);
   };
 
@@ -355,10 +363,6 @@ export default function SalesSupportPage() {
                             <span className="text-[10px] text-gray-400">{t.ticketNumber}</span>
                             <span className="text-[10px] text-gray-300">·</span>
                             <span className="text-[10px] text-gray-400">{CATEGORY_LABELS[t.category]}</span>
-                            <span className="text-[10px] text-gray-300">·</span>
-                            <span className={`text-[10px] font-semibold ${t.priority === 'high' ? 'text-red-500' : t.priority === 'medium' ? 'text-amber-500' : 'text-gray-400'}`}>
-                              {PRIORITY_LABELS[t.priority]}
-                            </span>
                           </div>
                         </div>
                         <ChevronRight className="h-4 w-4 text-gray-300 shrink-0 mt-1" />
@@ -504,19 +508,6 @@ export default function SalesSupportPage() {
                 </div>
               </div>
 
-              {/* ── Priority ── */}
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Priority</label>
-                <div className="flex gap-2">
-                  {PRIORITIES.map((p) => (
-                    <button key={p.value} onClick={() => setForm((f) => ({ ...f, priority: p.value }))}
-                      className={`flex-1 py-2 rounded-xl border text-xs font-semibold transition-all ${form.priority === p.value ? p.color + ' border-current' : 'border-gray-200 text-gray-400 hover:border-gray-300'}`}>
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
               {/* ── Subject ── */}
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Subject</label>
@@ -533,6 +524,9 @@ export default function SalesSupportPage() {
                   className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2.5 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]" />
               </div>
 
+              {submitError && (
+                <p role="alert" className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{submitError}</p>
+              )}
               <Button variant="primary" className="w-full" loading={submitting} onClick={handleSubmit} disabled={!canSubmit}>
                 Submit Ticket
               </Button>

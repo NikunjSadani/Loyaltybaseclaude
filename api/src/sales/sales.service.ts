@@ -49,6 +49,13 @@ export const NOT_PARKED_OUTLET = {
 };
 
 /**
+ * The outlets a rep's lists AND counts show: not admin-PARKED and not soft-deleted. One shared
+ * filter so the dashboard counts, team roll-up, member detail and the outlets list always agree
+ * (2026-11-19: a soft-deleted outlet whose assignment was never closed used to be listed/counted).
+ */
+export const LISTED_OUTLET = { ...NOT_PARKED_OUTLET, deletedAt: null };
+
+/**
  * The member-row shape of the Team / Team-view screens (a direct report OR a report promoted past a
  * REMOVED manager — G3). The promotions are added on top of `_count.subordinates` by
  * `withPromotedReports`, so teamSize = the member's EFFECTIVE team. Two counting bases, each exactly what
@@ -463,7 +470,7 @@ export class SalesService {
         outletId: { not: null },
         // Exclude admin-PARKED outlets so manager "KYC Pending" / "Outlets" counts never
         // include a parked outlet (same null-safe OR-wrap as buildOutlets/getMember).
-        outlet: NOT_PARKED_OUTLET,
+        outlet: LISTED_OUTLET,
       },
       select: {
         salesUserId: true,
@@ -992,7 +999,7 @@ export class SalesService {
         salesUserId: { in: [...rootSubtree] },
         unassignedAt: null,
         outletId: { not: null },
-        outlet: NOT_PARKED_OUTLET,
+        outlet: LISTED_OUTLET,
       },
       select: {
         salesUserId: true,
@@ -1316,7 +1323,7 @@ export class SalesService {
         assignments: {
           // Exclude admin-PARKED outlets from the member-detail counts + list (same null-safe
           // OR-wrap as buildOutlets), so a parked outlet is invisible in the team drill-in too.
-          where: { outletId: { not: null }, unassignedAt: null, outlet: NOT_PARKED_OUTLET },
+          where: { outletId: { not: null }, unassignedAt: null, outlet: LISTED_OUTLET },
           include: {
             outlet: {
               include: {
@@ -2514,8 +2521,9 @@ export class SalesService {
         outletId: { not: null },
         unassignedAt: null,
         // FULLY hide admin-PARKED outlets from the rep (list, counts, dashboard). Null-safe
-        // OR-wrap keeps normal + NOT_INTERESTED outlets; drops only PARKED.
-        outlet: NOT_PARKED_OUTLET,
+        // OR-wrap keeps normal + NOT_INTERESTED outlets; drops only PARKED. Soft-deleted outlets
+        // are hidden too (2026-11-19) — the ticket outlet check (and every pick) refuses them.
+        outlet: LISTED_OUTLET,
       },
       include: {
         // The assigned rep's login-User id — lets the FE KYC-list member filter match

@@ -5,7 +5,9 @@ Single source of truth for every change **exclusive to, or driven by, the Bajaj 
 Keep Deoleo + all other tenants byte-identical. Update this doc in the SAME pass as any
 Bajaj change. Last updated: 2026-11-16.
 
-> **📍 STATE 2026-11-16 (current).** Prod and staging both serve **`2eb8271d`** (release 2026-11-15). Bajaj is live on
+> **📍 STATE 2026-11-19 (current).** Prod and staging serve **`1fa2305c`**. New Bajaj switches in this release (owner flips on prod; staging ON): `features.requireLocation` (location gate), `wholesalerPayoutInclActivation` ("Incl. Activation" under Lifetime Payout), `helpVideos` (Help & videos; content load pending owner OK); notification reminder with iOS/Android steps (Bajaj); reversal engine Bajaj staging = V2, prod = LEGACY until backfill + owner go (switch BEFORE any reversal). KYC fast-track `gifsyRejectFastTrack` ON on prod.
+>
+> **📍 STATE 2026-11-16 (historical).** Prod and staging both serve **`2eb8271d`** (release 2026-11-15). Bajaj is live on
 > prod: branding + logos render on `bajajloyalty.gifsy.in`; Hubble gift cards are LIVE (§1); the v2 partner screens
 > carry the "so far" / targeted-outlets rules (§10); payout-credited messages state the net bank amount (§11); November
 > 2026 sales applied via Sales Import (month OPEN; points rule pending). Bajaj prod data history:
