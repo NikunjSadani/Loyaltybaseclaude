@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { TenantService } from '../tenant/tenant.service';
@@ -113,8 +114,9 @@ export class GroupService {
       // whose groupId trigger has lagged would show in the drill-down rows but be missed by the
       // totals (audit LOW-2). The `parentId` filter is also the guardrail against summing the
       // whole tenant. (Aggregates over Wallet rows, one per partner → no per-outlet double-count.)
-      // Fix round 3 (B-risk): the totals and the negative-balance split come from ONE transaction (one snapshot), so a
-      // movement between two separate reads can never make them disagree.
+      // Fix round 3/4 (B-risk, item 7): the totals and the negative-balance split are read in ONE REPEATABLE READ
+      // transaction — one snapshot for both statements (READ COMMITTED would give each statement its own), so a
+      // movement between the two reads can never make them disagree.
       this.prisma.$transaction([
         this.prisma.wallet.aggregate({
           where: { partner: { outlets: { some: { parentId, clientId, deletedAt: null } } } },
@@ -133,7 +135,7 @@ export class GroupService {
           _sum: { redeemablePoints: true },
           _count: { _all: true },
         }),
-      ]),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }),
       // Per-outlet drill-down over the group's child outlets.
       this.prisma.outlet.findMany({
         where: { parentId, clientId, deletedAt: null },

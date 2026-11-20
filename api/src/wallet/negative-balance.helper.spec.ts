@@ -1,9 +1,9 @@
 import { negativeBalanceSignals } from './negative-balance.helper';
 
-describe('negativeBalanceSignals (owner decision 2 + D1, fix round 3 A8/B1)', () => {
-  const db = (last: Date | null, reversals: number) => ({
+describe('negativeBalanceSignals (owner decision 2 + D1; fix rounds 3–4: A8/B1/item 2)', () => {
+  const db = (last: unknown, reversals: number) => ({
     walletTransaction: {
-      findFirst: jest.fn(async () => (last ? { createdAt: last } : null)),
+      findFirst: jest.fn(async () => last),
       count: jest.fn(async () => reversals),
     },
   });
@@ -11,31 +11,39 @@ describe('negativeBalanceSignals (owner decision 2 + D1, fix round 3 A8/B1)', ()
   it('a wallet at 0 or above gets nothing added and no query (every Deoleo wallet — summary byte-identical)', async () => {
     const d = db(null, 1);
     await expect(negativeBalanceSignals(d as never, { id: 'w', redeemablePoints: 0 })).resolves.toEqual({});
-    await expect(negativeBalanceSignals(d as never, { id: 'w', redeemablePoints: 7014 })).resolves.toEqual({});
+    await expect(negativeBalanceSignals(d as never, { id: 'w', redeemablePoints: 7014, movementSeq: 9 })).resolves.toEqual({});
     await expect(negativeBalanceSignals(d as never, null)).resolves.toEqual({});
     expect(d.walletTransaction.findFirst).not.toHaveBeenCalled();
     expect(d.walletTransaction.count).not.toHaveBeenCalled();
   });
 
-  it('negative: owedPoints = −balance; "from a reversed credit" only when a reversal moved it AFTER it was last ≥ 0', async () => {
-    const t = new Date('2026-11-19T06:00:00Z');
-    const d = db(t, 1);
-    await expect(negativeBalanceSignals(d as never, { id: 'w1', redeemablePoints: -2986 })).resolves.toEqual({
+  it('sequenced wallet: decided by SEQ — a reversal row with a higher seq than the last row that left it ≥ 0', async () => {
+    const d = db({ seq: 7 }, 1);
+    await expect(negativeBalanceSignals(d as never, { id: 'w1', redeemablePoints: -2986, movementSeq: 9 })).resolves.toEqual({
       owedPoints: 2986,
       owedFromReversal: true,
     });
+    expect(d.walletTransaction.findFirst).toHaveBeenCalledWith({
+      where: { walletId: 'w1', balanceAfter: { gte: 0 }, seq: { not: null } },
+      orderBy: { seq: 'desc' },
+      select: { seq: true },
+    });
     expect(d.walletTransaction.count).toHaveBeenCalledWith({
-      where: { walletId: 'w1', referenceType: 'CREDIT_REVERSAL', createdAt: { gt: t } },
+      where: { walletId: 'w1', creditReversalId: { not: null }, seq: { gt: 7 } },
     });
-    // an imported negative (never ≥ 0, no reversal since) → generic wording
-    await expect(negativeBalanceSignals(db(null, 0) as never, { id: 'w2', redeemablePoints: -841 })).resolves.toEqual({
-      owedPoints: 841,
-      owedFromReversal: false,
-    });
-    // an old over-reversal that was since repaid (balance went ≥ 0 after it) no longer counts
-    await expect(negativeBalanceSignals(db(t, 0) as never, { id: 'w3', redeemablePoints: -10 })).resolves.toEqual({
+    // an old over-reversal since repaid (the balance went ≥ 0 after it) no longer counts
+    await expect(negativeBalanceSignals(db({ seq: 12 }, 0) as never, { id: 'w3', redeemablePoints: -10, movementSeq: 13 })).resolves.toEqual({
       owedPoints: 10,
       owedFromReversal: false,
     });
+  });
+
+  it('never-sequenced wallet (imported negative): row times, generic wording when no reversal', async () => {
+    const d = db(null, 0);
+    await expect(negativeBalanceSignals(d as never, { id: 'w2', redeemablePoints: -841, movementSeq: 0 })).resolves.toEqual({
+      owedPoints: 841,
+      owedFromReversal: false,
+    });
+    expect(d.walletTransaction.count).toHaveBeenCalledWith({ where: { walletId: 'w2', referenceType: 'CREDIT_REVERSAL' } });
   });
 });

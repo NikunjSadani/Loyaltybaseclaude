@@ -125,6 +125,8 @@ export interface ReversalPositionRow {
    */
   expired?: number;
   expiredCounted?: number;
+  /** false ⇔ neither the position nor its credit row links the credit's own lot — expiry history unknown (item 1) */
+  expiryKnown?: boolean;
   creditTx: { seq: number | null; createdAt: Date };
 }
 
@@ -1927,7 +1929,17 @@ export class WalletService {
    */
   private async withExpiry(tx: Prisma.TransactionClient, positions: ReversalPositionRow[]): Promise<ReversalPositionRow[]> {
     if (positions.length === 0) return positions;
-    const lotIds = [...new Set(positions.map((p) => p.lotId).filter((x): x is string => !!x))];
+    // Fix round 4 (item 1): a position without `lotId` (backfilled credit) still finds its own lot through its CREDIT
+    // ROW (wallet_transactions.pointsLedgerId — set for every sequenced credit). Only when neither link exists is the
+    // credit's expiry history unknown (`expiryKnown` false) — the caller flags that loudly.
+    const unlinked = positions.filter((p) => !p.lotId).map((p) => p.creditTxId);
+    const viaCredit = unlinked.length
+      ? await tx.walletTransaction.findMany({ where: { id: { in: unlinked } }, select: { id: true, pointsLedgerId: true } })
+      : [];
+    const lotOf = new Map<string, string | null>(
+      positions.map((p) => [p.id, p.lotId ?? (viaCredit ?? []).find((t) => t.id === p.creditTxId)?.pointsLedgerId ?? null]),
+    );
+    const lotIds = [...new Set([...lotOf.values()].filter((x): x is string => !!x))];
     const [expiries, counted] = await Promise.all([
       lotIds.length
         ? tx.walletTransaction.findMany({
@@ -1941,13 +1953,14 @@ export class WalletService {
       }),
     ]);
     return positions.map((p) => {
+      const lot = lotOf.get(p.id) ?? null;
       const expired = (expiries ?? [])
-        .filter((e) => e.referenceId === p.lotId && e.walletId === p.walletId)
+        .filter((e) => !!lot && e.referenceId === lot && e.walletId === p.walletId)
         .reduce((s, e) => s + Math.max(0, e.balanceBefore - e.balanceAfter), 0);
       const expiredCounted = (counted ?? [])
         .filter((a) => a.positionId === p.id)
         .reduce((s, a) => s + (a.alreadyExpired ?? 0), 0);
-      return { ...p, expired, expiredCounted };
+      return { ...p, expired, expiredCounted, expiryKnown: !!lot };
     });
   }
 
@@ -2257,8 +2270,9 @@ export class WalletService {
           shortfall: 0,
         },
       });
-      if (!st.position.lotId && st.owed > 0) {
-        // The credit's expired points can't be counted (no lot link) — part of this debt may be expired points.
+      if (st.position.expiryKnown === false && st.recovered + st.owed > 0) {
+        // Fix round 4 (item 1): the credit's own lot can't be found at all, so points of it that EXPIRED can't be
+        // counted — whatever was taken from the wallet or booked as debt for it may include them. Never silent.
         await tx.auditLog.create({
           data: {
             action: 'UPDATE',
@@ -2273,6 +2287,7 @@ export class WalletService {
               batchId: a.batchId,
               outletCode: a.outletCode,
               owed: st.owed,
+              recovered: st.recovered,
             } as Prisma.InputJsonValue,
           },
         });
@@ -2391,6 +2406,7 @@ export class WalletService {
           recovered: st.recovered,
           owed: st.owed,
           alreadyExpired: st.alreadyExpired,
+          debtExposed: st.debtExposed,
           shortfall: st.shortfall,
           balanceBefore: st.before.B,
           balanceAfter: st.after.B,
@@ -2399,6 +2415,9 @@ export class WalletService {
         // V2 books what the wallet no longer holds as debt (owner 2026-11-19): `removed` is the whole balance change
         owed: plan.reduce((s, st) => s + st.owed, 0),
         alreadyExpired: plan.reduce((s, st) => s + st.alreadyExpired, 0),
+        // fix round 4 (item 8): what V2 would have recorded for the balance (A4 / owner D1)
+        debtExposed: plan.reduce((s, st) => s + st.debtExposed, 0),
+        belowZero: belowZeroBy(plan),
         removed: plan.reduce((s, st) => s + st.debtRestored + st.recovered + st.owed, 0),
       };
     } catch (e) {
@@ -2824,24 +2843,33 @@ export class WalletService {
   async walletsInDebt(clientId: string, opts: { limit?: number; programName?: unknown } = {}) {
     const limit = Math.min(Math.max(opts.limit ?? 1000, 1), 5000);
     const program = normalizeFilterParam(opts.programName, 'program');
-    const variants = program ? (await loadProgramCatalog(this.prisma, clientId)).variantsOf(program) : null;
+    const catalog = await loadProgramCatalog(this.prisma, clientId);
+    const variants = program ? catalog.variantsOf(program) : null;
     const where: Prisma.WalletWhereInput = {
       partner: { clientId, ...partnerProgramScope(variants) },
       redeemablePoints: { lt: 0 },
     };
-    const [total, agg, wallets] = await Promise.all([
-      this.prisma.wallet.count({ where }),
-      this.prisma.wallet.aggregate({ where, _sum: { redeemablePoints: true } }),
-      this.prisma.wallet.findMany({
-        where,
-        select: { id: true, partnerId: true, redeemablePoints: true, debtPoints: true, partner: { select: { businessName: true } } },
-        orderBy: [{ redeemablePoints: 'asc' }, { id: 'asc' }],
-        take: limit,
-      }),
-    ]);
+    // Fix round 4 (item 7): the count, the owed total and the rows come from ONE snapshot (REPEATABLE READ), so the
+    // summary never disagrees with the list under concurrent movements.
+    const [total, agg, wallets] = await this.prisma.$transaction(
+      [
+        this.prisma.wallet.count({ where }),
+        this.prisma.wallet.aggregate({ where, _sum: { redeemablePoints: true } }),
+        this.prisma.wallet.findMany({
+          where,
+          select: {
+            id: true, partnerId: true, redeemablePoints: true, debtPoints: true, movementSeq: true,
+            partner: { select: { businessName: true } },
+          },
+          orderBy: [{ redeemablePoints: 'asc' }, { id: 'asc' }],
+          take: limit,
+        }),
+      ],
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+    );
     const negSum = agg?._sum?.redeemablePoints ?? 0;
     const walletIds = wallets.map((w) => w.id);
-    const [outlets, allocations, lastNonNeg] = walletIds.length
+    const [outlets, allocations, lastNonNeg, reversalRows] = walletIds.length
       ? await Promise.all([
           this.prisma.outlet.findMany({
             where: { clientId, partnerId: { in: wallets.map((w) => w.partnerId) } },
@@ -2854,6 +2882,7 @@ export class WalletService {
               OR: [{ owed: { gt: 0 } }, { debtRestored: { gt: 0 } }, { debtExposed: { gt: 0 } }],
             },
             select: {
+              id: true,
               creditReversalId: true,
               owed: true,
               debtRestored: true,
@@ -2864,28 +2893,51 @@ export class WalletService {
               creditReversal: { select: { approvedAt: true, fieldName: true, period: true } },
             },
           }),
-          // The last moment each wallet was at or above zero — only reversals after it explain the CURRENT debt.
+          // The last row that left each wallet at or above zero — by seq (sequenced) / time (never sequenced).
           this.prisma.walletTransaction.groupBy({
             by: ['walletId'],
             where: { walletId: { in: walletIds }, balanceAfter: { gte: 0 } },
-            _max: { createdAt: true },
+            _max: { seq: true, createdAt: true },
+          }),
+          // Every reversal row on these wallets — "which reversal caused the CURRENT debt" is decided on THESE rows
+          // (fix round 4, item 2: seq, never approvedAt; two positions of one reversal both count).
+          this.prisma.walletTransaction.findMany({
+            where: { walletId: { in: walletIds }, creditReversalId: { not: null } },
+            select: { walletId: true, creditReversalId: true, seq: true, createdAt: true },
           }),
         ])
-      : [[], [], []];
-    const since = new Map((lastNonNeg as Array<{ walletId: string; _max: { createdAt: Date | null } }>).map((g) => [g.walletId, g._max.createdAt]));
+      : [[], [], [], []];
+    const lastBy = new Map(
+      (lastNonNeg as Array<{ walletId: string; _max: { seq: number | null; createdAt: Date | null } }>).map((g) => [g.walletId, g._max]),
+    );
+    const currentReversals = (w: { id: string; movementSeq: number }) => {
+      const last = lastBy.get(w.id);
+      const sequenced = (w.movementSeq ?? 0) > 0;
+      return new Set(
+        (reversalRows as Array<{ walletId: string; creditReversalId: string | null; seq: number | null; createdAt: Date }>)
+          .filter((r) => r.walletId === w.id && r.creditReversalId)
+          .filter((r) =>
+            sequenced
+              ? last?.seq == null || (r.seq != null && r.seq > last.seq)
+              : !last?.createdAt || r.createdAt > last.createdAt,
+          )
+          .map((r) => r.creditReversalId as string),
+      );
+    };
     return {
       clientId,
       program,
+      availablePrograms: catalog.available,
       total,
       totalOwedPoints: Math.max(0, -negSum),
       limit,
       truncated: total > wallets.length,
       wallets: wallets.map((w) => {
-        const from = since.get(w.id) ?? null;
+        const current = currentReversals(w);
         const sources = allocations
-          .filter((a) => a.position.walletId === w.id)
-          .filter((a) => !from || !a.creditReversal?.approvedAt || a.creditReversal.approvedAt > from)
+          .filter((a) => a.position.walletId === w.id && current.has(a.creditReversalId))
           .map((a) => ({
+            allocationId: a.id,
             creditReversalId: a.creditReversalId,
             kind:
               a.engineSource === 'BACKFILL' || (a.engineSource == null && a.owed > 0 && !a.overReversalDebt)
@@ -3151,9 +3203,11 @@ export class WalletService {
           walletId: typeof m.walletId === 'string' ? m.walletId : null,
           outletCode: typeof m.outletCode === 'string' ? m.outletCode : null,
           owed: typeof m.owed === 'number' ? m.owed : null,
+          recovered: typeof m.recovered === 'number' ? m.recovered : null,
           action:
-            "This credit's own points can't be linked to its expiry history, so points of it that EXPIRED may have been " +
-            'booked as debt. Gifsy: check the wallet history; correct the balance by an adjustment if part of it expired.',
+            "This credit's own points can't be linked to its expiry history, so points of it that had EXPIRED may have " +
+            'been taken from the wallet again or booked as debt. Gifsy: check the wallet history; correct the balance by ' +
+            'an adjustment if part of it had expired.',
         };
       }),
       expiryUntrackedTotal: untrackedTotal ?? 0,

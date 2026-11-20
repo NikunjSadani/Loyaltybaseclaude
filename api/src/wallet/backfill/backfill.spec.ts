@@ -477,7 +477,8 @@ class MemStore implements BackfillStore {
     const t = this.tenants.get(clientId)!;
     return {
       clientId,
-      wallets: this.wallets(clientId),
+      // like the Prisma store: a DONE wallet carries its backfill stamp (V6b's cutover point — fix round 4, item 3)
+      wallets: this.wallets(clientId).map((w) => (w.backfillStatus === 'DONE' ? { ...w, backfillCheckedAt: new Date(0).toISOString() } : w)),
       txs: [...t.histories.values()].flatMap((h) => h.txs.map((x) => ({ id: x.id, walletId: x.walletId, seq: x.seq, pointsDelta: x.pointsDelta, balanceBefore: x.balanceBefore, balanceAfter: x.balanceAfter, transactionType: x.transactionType, referenceType: x.referenceType, referenceId: x.referenceId, points: x.points }))),
       positions: this.positions.filter((p) => p.clientId === clientId),
       allocations: this.allocations.filter((a) => a.clientId === clientId),
@@ -1234,6 +1235,15 @@ describe('fix round 3 B1/B2 — V6b checks the CUTOVER balance by wallet id; lat
   it('the legacy list form compares cutover balances too (not the current ones)', () => {
     const res = runVerifyChecks(snap() as never, { neverNegativeTenant: false, expectedNegativeBalances: [-841] });
     expect(res.find((r) => r.check.startsWith('V6b'))!.status).toBe('PASS');
+  });
+
+  it('fix round 4 item 3: a wallet sequenced directly by V2 (no backfill stamp) had 0 at the cutover — never a false V6b FAIL, listed by V6c', () => {
+    const s = snap();
+    s.wallets.push({ ...w('W-PRISTINE', -500, 500), backfillCheckedAt: null as unknown as string });
+    s.txs.push(tx('t4', 'W-PRISTINE', 0, 1000, 'CREDIT_BATCH'), tx('t5', 'W-PRISTINE', 1000, -500, 'CREDIT_REVERSAL'));
+    const res = runVerifyChecks(s as never, { neverNegativeTenant: false, expectedNegativeBalances: { 'W-OLD': -841 } });
+    expect(res.find((r) => r.check.startsWith('V6b'))!.status).toBe('PASS');
+    expect(res.find((r) => r.check.startsWith('V6c'))!.ids).toEqual(['W-NEW', 'W-PRISTINE']);
   });
 
   it('a changed cutover balance, or a wallet negative at the cutover that was not expected, still FAILS', () => {

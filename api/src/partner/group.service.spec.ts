@@ -25,7 +25,7 @@ const mockPrisma = {
   leaderboardSnapshot: { findFirst: jest.fn() },
   leaderboardEntry: { findMany: jest.fn() },
   // fix round 3: the wallet totals + negative split are read in ONE array transaction
-  $transaction: jest.fn(async (ops: Promise<unknown>[]) => Promise.all(ops)),
+  $transaction: jest.fn(async (ops: Promise<unknown>[], _opts?: unknown) => Promise.all(ops)),
 };
 
 const mockTenantSettings = { getConversionRate: jest.fn() };
@@ -311,6 +311,7 @@ describe('GroupService.getWalletRollup', () => {
     if (!result.available) throw new Error('unreachable');
     expect(result.totals).toMatchObject({ redeemablePoints: 5000, owedPoints: 2986, owedWallets: 1 });
     expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.$transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'RepeatableRead' }); // one snapshot (item 7)
     expect(mockPrisma.wallet.aggregate.mock.calls[1][0].where.redeemablePoints).toEqual({ lt: 0 });
   });
 

@@ -534,6 +534,14 @@ export function runVerifyChecks(snap: VerifySnapshot, opts: VerifyOptions): Chec
     const afterRows = new Map<string, VTx[]>();
     for (const w of snap.wallets) {
       const at = w.backfillCheckedAt ? new Date(w.backfillCheckedAt).getTime() : null;
+      if (at === null && w.movementSeq > 0) {
+        // Fix round 4 (item 3): sequenced WITHOUT a backfill stamp = a pristine wallet the V2 engine sequenced from its
+        // first movement — it had nothing at the cutover (balance 0); every row of it is post-cutover movement (V6c).
+        const all = snap.txs.filter((t) => t.walletId === w.id);
+        afterRows.set(w.id, all);
+        cutover.set(w.id, 0);
+        continue;
+      }
       const later = at === null ? [] : snap.txs.filter((t) => t.walletId === w.id && t.createdAt && new Date(t.createdAt).getTime() > at);
       afterRows.set(w.id, later);
       cutover.set(w.id, w.redeemablePoints - later.reduce((n, t) => n + (t.balanceAfter - t.balanceBefore), 0));

@@ -951,11 +951,47 @@ describe('applyCreditReversal (WP3) — R5 / Q4 / Q5', () => {
       expect(sum).toBe(h.wallets[0].redeemablePoints);
     });
 
+    it('fix round 4 item 1: a position WITHOUT lotId still finds its own lot via its credit row — expired points counted, nothing taken twice', async () => {
+      const h = harness({ mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 10000);
+      const pos = h.positions[0];
+      const lot = h.ledger.find((l) => l.id === pos.lotId)!;
+      lot.expiresAt = later(-10);
+      await h.service.expireDuePoints({ now: NOW }); // all 10,000 expired
+      lot.expiresAt = null;
+      await credit(h, 'cp1', 'O2', 5000, 'B2');
+      pos.lotId = null; // a backfilled position without its lot link — the credit row still carries pointsLedgerId
+      const res = await reverse(h, 10000, 'REV');
+      expect(res).toMatchObject({ alreadyExpired: 10000, recovered: 0, owed: 0 });
+      expect(h.wallets[0].redeemablePoints).toBe(5000); // Y's points untouched
+      expect(h.auditLogs).toEqual([]);
+    });
+
+    it('fix round 4 item 1: credit whose own lot cannot be found at all — flagged LOUDLY whenever points are taken or owed (not only owed)', async () => {
+      const h = harness({ mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 1000);
+      await credit(h, 'cp1', 'O2', 5000, 'B2');
+      h.positions[0].lotId = null;
+      h.walletTxns.find((t) => t.id === h.positions[0].creditTxId)!.pointsLedgerId = null; // no link at all
+      await h.models.$transaction((tx: any) =>
+        h.service.applyCreditReversal(tx, {
+          batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: 'RT', points: 1000, clientId: 'bajaj',
+        }),
+      );
+      expect(h.auditLogs).toEqual([
+        expect.objectContaining({
+          entityType: 'REVERSAL_EXPIRY_UNTRACKED', entityId: 'RT',
+          metadata: expect.objectContaining({ clientId: 'bajaj', recovered: 1000, owed: 0 }),
+        }),
+      ]);
+    });
+
     it('fix round 3: debt booked on a credit with NO lot link (expiry history unknown) is never silent — audit row for the banner', async () => {
       const h = harness({ mode: 'V2' });
       await credit(h, 'cp1', 'O1', 1000);
       await h.service.debitRedeem('cp1', 600, {});
       h.positions[0].lotId = null; // a backfilled credit without its lot
+      h.walletTxns.find((t) => t.id === h.positions[0].creditTxId)!.pointsLedgerId = null; // …and no link on its credit row
       await h.models.$transaction((tx: any) =>
         h.service.applyCreditReversal(tx, {
           batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: 'RU', points: 1000, clientId: 'bajaj',

@@ -618,11 +618,19 @@ export class ScheduledReportsService {
     const negativeWallets = await this.prisma.wallet.count({
       where: { redeemablePoints: { lt: 0 }, partner: { clientId } },
     });
+    // Owner D1 (fix round 4, item 8): what those wallets owe — only queried when there is one (Deoleo: unchanged).
+    const owedAgg = negativeWallets > 0
+      ? await this.prisma.wallet.aggregate({
+          where: { redeemablePoints: { lt: 0 }, partner: { clientId } },
+          _sum: { redeemablePoints: true },
+        })
+      : null;
     return {
       credited: sum('EARN'),
       redeemed: Math.abs(sum('REDEEM')),
       expired: Math.abs(sum('EXPIRE')),
       negativeWallets,
+      ...(owedAgg ? { owedPoints: Math.max(0, -(owedAgg._sum.redeemablePoints ?? 0)) } : {}),
     };
   }
 

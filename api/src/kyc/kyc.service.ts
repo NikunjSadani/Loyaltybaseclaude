@@ -4435,6 +4435,8 @@ export class KycService {
             wallets: {
               select: {
                 id: true,
+                // fix round 4 (item 2): orders "which reversal caused the debt" by seq (negativeBalanceSignals)
+                movementSeq: true,
                 earnedPoints: true,
                 lockedPoints: true,
                 redeemablePoints: true,
