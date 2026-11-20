@@ -230,7 +230,21 @@ d(`AuthService.refreshToken × real Postgres [${MODE ?? 'skipped'}]`, () => {
     expect(await prisma.auditLog.count({ where: { entityType: 'AUTH_EVENT', entityId: userId, action: 'REFRESH_HANDOFF' } })).toBe(1);
   });
 
-  it('S-H1a: the old token replayed from a DIFFERENT device → strict kill + SECURITY_EVENT, nothing renewed', async () => {
+  it('H-A (a): the handback reply is lost TOO — same device replays the old token again later → renewed again, still signed in', async () => {
+    const { userId, sessionId, refreshToken } = await seedUserWithSession();
+    await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }); // lost
+    await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 2 * HOUR) } });
+    const first = await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }); // handback reply lost too
+    await prisma.userSession.updateMany({ where: { userId, handedBackAt: { not: null } }, data: { handedBackAt: new Date(Date.now() - 60_000) } });
+
+    const second = await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' });
+
+    expect(second.refreshToken).not.toBe(first.refreshToken);
+    expect(await liveSessions(userId)).toBe(1);
+    expect(await prisma.auditLog.count({ where: { entityType: 'SECURITY_EVENT', entityId: userId } })).toBe(0);
+  });
+
+  it('H-A (c): the old token replayed from a DIFFERENT device → 401, only that lineage ends + SECURITY_EVENT, nothing renewed', async () => {
     const { userId, sessionId, refreshToken } = await seedUserWithSession();
     await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' });
     await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 2 * HOUR) } });

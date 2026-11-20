@@ -25,6 +25,7 @@ function matches(row: Row, where: Row): boolean {
   return Object.entries(where).every(([k, v]) => {
     if (k === 'OR') return (v as Row[]).some((w) => matches(row, w));
     if (v === null) return row[k] === null || row[k] === undefined;
+    if (v && typeof v === 'object' && Array.isArray((v as Row).in)) return ((v as Row).in as unknown[]).includes(row[k]);
     return row[k] === v;
   });
 }
@@ -149,6 +150,10 @@ class FakeDb {
         const row = this.sessions.get(where.id);
         return row ? { ...row } : null;
       },
+      findMany: async ({ where }: { where: Row }) => {
+        await tick();
+        return [...this.sessions.values()].filter((r) => matches(r, where)).map((r) => ({ ...r }));
+      },
       updateMany: ({ where, data }: { where: Row; data: Row }) => this.updateSessions(where, data, owner, pending),
       update: async ({ where, data }: { where: Row; data: Row }) => {
         await this.updateSessions({ id: where.id }, data, owner, pending);
@@ -186,6 +191,7 @@ class FakeDb {
       userSession: {
         findFirst: (a: any) => this.sessionApi(autoOwner(), null).findFirst(a),
         findUnique: (a: any) => this.sessionApi(autoOwner(), null).findUnique(a),
+        findMany: (a: any) => this.sessionApi(autoOwner(), null).findMany(a),
         updateMany: (a: any) => this.sessionApi(autoOwner(), null).updateMany(a),
         create: (a: any) => this.sessionApi(autoOwner(), null).create(a),
       },
@@ -379,7 +385,8 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     const db = new FakeDb();
     seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
     seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0', revokedAt: new Date(Date.now() - 10 * 60_000) });
-    seedSession(db, { id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', rotatedFromId: 's0', revokedAt: new Date(Date.now() - 5 * 60_000) });
+    // s1 was rotated BY ITS HOLDER (a normal refresh) — which marks it used (firstUsedAt) → strict.
+    seedSession(db, { id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', rotatedFromId: 's0', revokedAt: new Date(Date.now() - 5 * 60_000), firstUsedAt: new Date(Date.now() - 5 * 60_000) });
     seedSession(db, { id: 's2', userId: 'u1', clientId: 'deoleo', refreshToken: 'R2', rotatedFromId: 's1' });
     const { svc } = buildService(db);
 
@@ -605,14 +612,17 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     expect(db.audit.filter((a) => a.metadata?.event === 'refresh_token_reuse')).toHaveLength(1);
   });
 
-  it('S-H1a: a thief replaying the stolen old token from ANOTHER device → strict kill, gets nothing', async () => {
+  it('H-A (c): a thief replaying the stolen old token from ANOTHER device class → 401, gets nothing; ONLY that lineage ends; other devices stay signed in', async () => {
     const db = lostResponseSetup(false);
+    seedSession(db, { id: 'laptop', userId: 'u1', clientId: 'deoleo', refreshToken: 'RL', firstUsedAt: new Date() }); // the user's laptop
     const { svc } = buildService(db);
 
     await expect(svc.refreshToken('R0', { fingerprint: 'fp-thief' })).rejects.toBeInstanceOf(UnauthorizedException);
     expect(db.createCount).toBe(0);
-    expect(db.liveSessions('u1')).toHaveLength(0);
-    expect(db.audit.filter((a) => a.metadata?.reason === 'device_mismatch')).toHaveLength(1);
+    expect(db.users.get('u1')!.sessionsInvalidBefore).toBeNull(); // no all-device kill
+    expect(db.liveSessions('u1').map((r) => r.id)).toEqual(['laptop']); // the laptop is untouched
+    expect(db.sessions.get('s1')!.revokedAt).toBeInstanceOf(Date); // this lineage ended
+    expect(db.audit.filter((x) => x.metadata?.event === 'refresh_handback_refused' && x.metadata?.reason === 'device_mismatch')).toHaveLength(1);
   });
 
   it('S-H1: thief ROTATES FIRST from the stolen live token, the user later replays it → not shared (device mismatch) → strict kill', async () => {
@@ -626,21 +636,23 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     db.sessions.get('s0')!.revokedAt = new Date(Date.now() - 60_000); // … the user comes back later
 
     await expect(svc.refreshToken('R0', { fingerprint: 'fp-phone' })).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(db.liveSessions('u1')).toHaveLength(0); // the thief's session is revoked too
+    expect(db.liveSessions('u1')).toHaveLength(0); // the thief's session (same lineage) is revoked too
+    expect(db.users.get('u1')!.sessionsInvalidBefore).toBeNull(); // …without an all-device kill
     expect(db.audit.filter((a) => a.metadata?.reason === 'device_mismatch')).toHaveLength(1);
   });
 
-  it('S-H1b: at most ONE handback — the same old token replayed again later (after grace) → strict kill', async () => {
+  it('H-A (a): the handback REPLY was lost too — same device replays the old token again later → renewed AGAIN (stays signed in)', async () => {
     const db = lostResponseSetup(false);
     const { svc } = buildService(db);
 
-    const first = await svc.refreshToken('R0', { fingerprint: 'fp-phone' }); // renewed forward: s1 → s2
-    expect(first.refreshToken).toBeTruthy();
+    const first = await svc.refreshToken('R0', { fingerprint: 'fp-phone' }); // renewed: s1 → s2 (reply lost)
     for (const r of db.sessions.values()) if (r.handedBackAt) r.handedBackAt = new Date(Date.now() - 60_000);
 
-    await expect(svc.refreshToken('R0', { fingerprint: 'fp-phone' })).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(db.liveSessions('u1')).toHaveLength(0);
-    expect(db.audit.filter((a) => a.metadata?.reason === 'second_handback')).toHaveLength(1);
+    const second = await svc.refreshToken('R0', { fingerprint: 'fp-phone' }); // s2 still unused → s2 → s3
+    expect(second.refreshToken).not.toBe(first.refreshToken);
+    expect(db.createCount).toBe(2);
+    expect(db.liveSessions('u1')).toHaveLength(1);
+    expect(db.audit.filter((x) => x.entityType === 'SECURITY_EVENT')).toHaveLength(0);
   });
 
   it('S-H1b concurrency: two simultaneous post-grace replays of the same old token (one resume) → ONE renewal, both get the SAME pair', async () => {

@@ -78,8 +78,10 @@ export const REFRESH_SERVER_BUDGET_MS = 4_000;
  * the tip's own 30-day sliding session. These bound the lineage walk and the repeat alarm.
  */
 export const MAX_HANDBACK_CHAIN = 50;
-/** S-H1(c): ≥ this many handbacks for ONE user inside the window raise a SECURITY_EVENT. */
-export const HANDBACK_REPEAT_THRESHOLD = 2;
+/** S-H1(c): ≥ this many handbacks for ONE user inside the window raise a SECURITY_EVENT (owner: 5, not 2). */
+export const HANDBACK_REPEAT_THRESHOLD = 5;
+/** H-A (a): at most this many handbacks per LINEAGE per window; beyond → 401 for that device + SECURITY_EVENT. */
+export const HANDBACK_CAP_PER_LINEAGE = 5;
 export const HANDBACK_REPEAT_WINDOW_MS = 24 * 60 * 60_000;
 
 /** Per-request refresh context (receipt time, commit deadline, client device fingerprint). */
@@ -907,6 +909,8 @@ export class AuthService {
       const handback = await this.handbackUnusedSuccessor(session, ctx);
       if (handback.kind === 'tokens') return handback.tokens;
       if (handback.kind === 'kill') await this.killLineage(session, handback.reason);
+      // A refusal ends only THIS device's attempt (re-login); nobody else is logged out.
+      else if (handback.alarm && handback.reason) await this.alarmRefusedHandback(session, handback.reason);
     }
 
     throw new UnauthorizedException('Session expired — please log in again.');
@@ -1041,24 +1045,31 @@ export class AuthService {
   }
 
   /**
-   * H4 + C1 + S-H1 (owner decisions 2026-11-20): a ROTATED token replayed after the grace window.
+   * H4 + C1 + S-H1 + H-A (owner decisions 2026-11-20): a ROTATED token replayed after the grace window.
    *
-   * The common legitimate cause is a client whose refresh RESPONSE was lost (an app switch mid-request):
-   * it still holds the old token, and the session it never received sits unused. The owner's rule:
-   * that must NOT force a login — but a thief replaying a stolen old token must not get in either.
-   *
-   * Walk the lineage forward from the replayed token to its live tip, then:
-   *  - any link USED (firstUsedAt: its access token authenticated a request, or its holder refreshed it)
-   *    → 'kill' (strict reuse, exactly as before);
-   *  - S-H1a device binding: the replaying request's fingerprint must match the one recorded when the
-   *    FIRST successor was created (the lost-response device is the one that asked for it) → else 'kill';
-   *  - S-H1b at most ONE handback per lineage step: if a link was already handed back, only a replay
-   *    within the grace window of that handback converges (concurrent siblings of the same resume);
-   *    anything later → 'kill';
-   *  - tip naturally expired (30-day window lapsed) → 'refuse' (plain 401, no alarm);
-   *  - otherwise C1 RENEW FORWARD: rotate the tip with the normal rules (gates, logout-all check,
-   *    deadline) under a CONDITIONAL claim (still unused + never handed back), so the client gets a FRESH
-   *    pair however long it was away (no 60-min cap) and the lineage stays a single chain.
+   * Owner rule: app switching must NEVER force a login (the device lost the response that carried the newer
+   * session — possibly several times in a row); detection of real theft must stay. Walk the lineage forward
+   * from the replayed token to its live tip, then decide IN THIS ORDER:
+   *  1. M-1 / LOW2 — a handback within the grace window (6 s) of this lineage (the replayed token's own, or a
+   *     later link's): a concurrent sibling of the SAME resume → converge on the live tip's stored pair
+   *     (audited as a repeat). Evaluated BEFORE the "used" check, exactly like the holder in-grace path.
+   *  2. LOW1 — the replayed token was ITSELF handed back earlier (outside its 6 s window): it can't be used to
+   *     take a newer session → refuse (401) + end THIS lineage + SECURITY_EVENT. No all-device kill.
+   *  3. no live tip → strict kill (classic reuse).
+   *  4. any link USED (its access token authenticated a request, or its holder refreshed it) → strict kill of
+   *     every session + SECURITY_EVENT — thief detection: a thief who obtained the tip and used it marked it.
+   *  5. tip naturally expired → plain 401, no alarm.
+   *  6. fingerprint UNKNOWN (no client UA, e.g. an older frontend in a deploy window) → plain 401 for this
+   *     device, no alarm, never a kill (M-2).
+   *  7. fingerprint MISMATCH (H-A c) → 401 + end THIS lineage only + SECURITY_EVENT — NOT the all-device kill
+   *     (a different browser/OS family gets nothing; the user's other devices stay signed in; a thief who
+   *     rotated first and holds this lineage's newest session is cut off with it).
+   *  8. H-A (a) cap — HANDBACK_CAP_PER_LINEAGE handbacks in this lineage within 24 h → 401 + end this lineage
+   *     + SECURITY_EVENT (no all-device kill).
+   *  9. otherwise C1 RENEW FORWARD from the live tip under a CONDITIONAL claim (still unused, never handed
+   *     back): the device gets a FRESH pair, the lineage stays a single chain. H-A (a): this may happen again
+   *     later (lost handback reply) while the newest tip is still unused and the device matches.
+   * All audit writes for a successful handback happen AFTER the response (fire-and-forget; H-A b).
    */
   private async handbackUnusedSuccessor(
     predecessor: UserSession & { user: User },
@@ -1067,7 +1078,7 @@ export class AuthService {
   ): Promise<
     | { kind: 'tokens'; tokens: { accessToken: string; refreshToken: string } }
     | { kind: 'kill'; reason: string }
-    | { kind: 'refuse' }
+    | { kind: 'refuse'; reason?: string; alarm?: boolean }
   > {
     const links: UserSession[] = [];
     let cursor = predecessor.id;
@@ -1082,41 +1093,124 @@ export class AuthService {
       cursor = next.id;
     }
     const tip = links[links.length - 1];
+    const tipLive = !!tip && tip.revokedAt === null && tip.expiresAt.getTime() > ctx.receivedAt;
+    const handedTimes = [predecessor.handedBackAt, ...links.map((l) => l.handedBackAt)]
+      .map((d) => d?.getTime() ?? 0)
+      .filter((t) => t > 0);
+    const newestHandback = handedTimes.length ? Math.max(...handedTimes) : 0;
+
+    // 1. M-1 — concurrent siblings of the same resume converge (before the "used" check).
+    if (tipLive && tip.refreshToken && newestHandback && ctx.receivedAt - newestHandback <= ROTATION_GRACE_MS) {
+      this.background(() => this.auditAuthEvent(predecessor, 'REFRESH_HANDOFF_REPEAT', { handedBackSessionId: tip.id }));
+      return { kind: 'tokens', tokens: { accessToken: tip.token, refreshToken: tip.refreshToken } };
+    }
+    // 2. LOW1 — a token that was itself handed back (outside its window) can't take a newer session.
+    if (predecessor.handedBackAt) return { kind: 'refuse', reason: 'handed_back_token_replayed', alarm: true };
+    // 3–5.
     if (!tip || tip.revokedAt !== null) return { kind: 'kill', reason: 'no_live_successor' };
     if (links.some((l) => l.firstUsedAt !== null)) return { kind: 'kill', reason: 'successor_used' };
+    if (!tipLive) return { kind: 'refuse' };
+    // 6–7. Device binding against the creator of the FIRST successor (the device that asked for it).
     const creatorFingerprint = links[0].createdFingerprint;
-    if (!ctx.fingerprint || !creatorFingerprint || ctx.fingerprint !== creatorFingerprint) {
-      return { kind: 'kill', reason: 'device_mismatch' };
-    }
-    if (tip.expiresAt.getTime() <= ctx.receivedAt) return { kind: 'refuse' };
+    if (!ctx.fingerprint || !creatorFingerprint) return { kind: 'refuse', reason: 'device_unknown' };
+    if (ctx.fingerprint !== creatorFingerprint) return { kind: 'refuse', reason: 'device_mismatch', alarm: true };
+    // 8. H-A (a) cap per lineage per 24 h.
+    const recentHandbacks = handedTimes.filter((t) => ctx.receivedAt - t <= HANDBACK_REPEAT_WINDOW_MS).length;
+    if (recentHandbacks >= HANDBACK_CAP_PER_LINEAGE) return { kind: 'refuse', reason: 'handback_cap_reached', alarm: true };
 
-    const handedBack = links
-      .map((l) => l.handedBackAt?.getTime() ?? 0)
-      .filter((t) => t > 0);
-    if (handedBack.length > 0) {
-      const last = Math.max(...handedBack);
-      // A concurrent sibling of the SAME resume (several requests carried the old token) converges on
-      // the pair the first handback minted. Later → a second handback → strict (S-H1b / S-L1).
-      if (ctx.receivedAt - last <= ROTATION_GRACE_MS && tip.refreshToken) {
-        return { kind: 'tokens', tokens: { accessToken: tip.token, refreshToken: tip.refreshToken } };
-      }
-      return { kind: 'kill', reason: 'second_handback' };
-    }
-
+    // 9. C1 renew forward.
     const outcome = await this.rotateSession({ ...tip, user: predecessor.user }, ctx, 'handback');
     if (outcome.kind === 'swept') return { kind: 'refuse' };
     if (outcome.kind === 'lost') {
-      // The tip changed under us (a concurrent replay handed it back, or its holder used/refreshed it):
+      // The tip changed under us (a concurrent replay handed it back, or its holder used / refreshed it):
       // re-evaluate once against the committed state.
-      if (attempt >= 1) return { kind: 'kill', reason: 'handback_contended' };
+      if (attempt >= 1) return { kind: 'refuse', reason: 'handback_contended' };
       return this.handbackUnusedSuccessor(predecessor, ctx, attempt + 1);
     }
-
-    await this.recordHandback(predecessor, tip, links.length, ctx);
+    // H-A (b) — the rotation is COMMITTED: nothing else may delay or fail the response. Audit + alarm later.
+    this.background(() => this.recordHandback(predecessor, tip, links.length, ctx));
     return { kind: 'tokens', tokens: outcome.tokens };
   }
 
-  /** Audit a handback (info event) and raise a SECURITY_EVENT on repeats (S-H1c). Never blocks. */
+  /** Background work started after a committed handback (never awaited by the request). */
+  private readonly pendingBackground = new Set<Promise<void>>();
+  /** Failed background audit writes since start (also logged + written as an AUTH_EVENT when possible). */
+  handbackAuditFailures = 0;
+
+  private background(work: () => Promise<void>): void {
+    const p: Promise<void> = Promise.resolve()
+      .then(work)
+      .catch((err: unknown) => {
+        this.handbackAuditFailures += 1;
+        this.logger.error(`Session handback audit failed: ${(err as Error)?.message ?? err}`);
+      })
+      .finally(() => {
+        this.pendingBackground.delete(p);
+      });
+    this.pendingBackground.add(p);
+  }
+
+  /** @internal — tests: wait for fire-and-forget handback audits to settle. */
+  async settleBackgroundWork(): Promise<void> {
+    while (this.pendingBackground.size > 0) await Promise.allSettled([...this.pendingBackground]);
+  }
+
+  /** One AUTH_EVENT info row for this user (throws on failure — callers run it in background()). */
+  private async auditAuthEvent(
+    predecessor: UserSession & { user: User },
+    event: string,
+    extra: Record<string, unknown>,
+  ): Promise<void> {
+    const user = predecessor.user;
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'REFRESH_HANDOFF',
+        entityType: 'AUTH_EVENT',
+        entityId: user.id,
+        actorId: user.id,
+        targetUserId: user.id,
+        metadata: { event, clientId: user.clientId, predecessorSessionId: predecessor.id, ...extra } as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  /**
+   * A refused handback that is worth a human look (device mismatch, cap, handed-back token replayed).
+   * Ends THIS LINEAGE only — the replayed token's descendants (the device that presented it must sign in again,
+   * and anyone else holding a session of the same lineage, e.g. a thief who rotated first, is cut off too).
+   * The user's OTHER devices have their own lineages and are untouched: no all-device kill, no stamp.
+   */
+  private async alarmRefusedHandback(predecessor: UserSession & { user: User }, reason: string): Promise<void> {
+    const user = predecessor.user;
+    this.logger.warn(`Session handback refused for user ${user.id} (${reason}) — this lineage ends; its device must sign in again`);
+    try {
+      await this.revokeSessionLineage(user.id, predecessor.id);
+    } catch {
+      /* best-effort — never mask the 401 */
+    }
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'REFRESH_HANDOFF',
+          entityType: 'SECURITY_EVENT',
+          entityId: user.id,
+          actorId: user.id,
+          targetUserId: user.id,
+          metadata: {
+            event: 'refresh_handback_refused',
+            reason,
+            clientId: user.clientId,
+            sessionId: predecessor.id,
+            detectedAt: new Date().toISOString(),
+          },
+        },
+      });
+    } catch {
+      /* best-effort — never mask the 401 */
+    }
+  }
+
+  /** Audit a committed handback (info event) and raise a SECURITY_EVENT on repeats (S-H1c). Background. */
   private async recordHandback(
     predecessor: UserSession & { user: User },
     tip: UserSession,
@@ -1124,57 +1218,38 @@ export class AuthService {
     ctx: RefreshCtx,
   ): Promise<void> {
     const user = predecessor.user;
-    try {
+    await this.auditAuthEvent(predecessor, 'REFRESH_HANDOFF_UNUSED_SUCCESSOR', {
+      handedBackSessionId: tip.id,
+      chainLength,
+      ageMs: predecessor.revokedAt ? ctx.receivedAt - predecessor.revokedAt.getTime() : null,
+    });
+    const since = new Date(ctx.receivedAt - HANDBACK_REPEAT_WINDOW_MS);
+    const recent = await this.prisma.auditLog.count({
+      where: {
+        entityType: 'AUTH_EVENT',
+        entityId: user.id,
+        createdAt: { gte: since },
+        metadata: { path: ['event'], equals: 'REFRESH_HANDOFF_UNUSED_SUCCESSOR' },
+      },
+    });
+    if ((recent ?? 0) >= HANDBACK_REPEAT_THRESHOLD) {
+      // Many handbacks for one user in a day: either a very flaky connection or a shared stolen session.
       await this.prisma.auditLog.create({
         data: {
-          action: 'REFRESH_HANDOFF', // own action — a session continuation, NOT a security event
-          entityType: 'AUTH_EVENT',
+          action: 'REFRESH_HANDOFF',
+          entityType: 'SECURITY_EVENT',
           entityId: user.id,
           actorId: user.id,
           targetUserId: user.id,
           metadata: {
-            event: 'REFRESH_HANDOFF_UNUSED_SUCCESSOR',
+            event: 'repeated_unused_successor_handoff',
             clientId: user.clientId,
-            predecessorSessionId: predecessor.id,
-            handedBackSessionId: tip.id,
-            chainLength,
-            ageMs: predecessor.revokedAt ? ctx.receivedAt - predecessor.revokedAt.getTime() : null,
+            handoffsIn24h: recent,
+            detectedAt: new Date(ctx.receivedAt).toISOString(),
           },
         },
       });
-      const since = new Date(ctx.receivedAt - HANDBACK_REPEAT_WINDOW_MS);
-      const recent = await this.prisma.auditLog.count({
-        where: {
-          entityType: 'AUTH_EVENT',
-          entityId: user.id,
-          createdAt: { gte: since },
-          metadata: { path: ['event'], equals: 'REFRESH_HANDOFF_UNUSED_SUCCESSOR' },
-        },
-      });
-      if ((recent ?? 0) >= HANDBACK_REPEAT_THRESHOLD) {
-        // Repeated handbacks for one user are the signature of a thief sharing the session (S-H1c).
-        await this.prisma.auditLog.create({
-          data: {
-            action: 'REFRESH_HANDOFF',
-            entityType: 'SECURITY_EVENT',
-            entityId: user.id,
-            actorId: user.id,
-            targetUserId: user.id,
-            metadata: {
-              event: 'repeated_unused_successor_handoff',
-              clientId: user.clientId,
-              handoffsIn24h: recent,
-              detectedAt: new Date(ctx.receivedAt).toISOString(),
-            },
-          },
-        });
-        this.logger.warn(`Repeated unused-successor handbacks for user ${user.id}: ${recent} in 24h`);
-      }
-    } catch (auditError) {
-      // Best-effort (never block the handback) — but not silent.
-      this.logger.error(
-        `Could not audit unused-successor handback for user ${user.id}: ${(auditError as Error)?.message ?? auditError}`,
-      );
+      this.logger.warn(`Repeated unused-successor handbacks for user ${user.id}: ${recent} in 24h`);
     }
     this.logger.log(`Refresh: renewed forward never-used session ${tip.id} for a post-grace replay (user ${user.id})`);
   }
