@@ -244,7 +244,9 @@ export function VisibilityCaptureForm({
   // unstored → a tap in that gap reported '"<photo>" is required.' (owner, 2026-11-20). Each
   // CameraField marks itself pending across the whole capture so Submit stays blocked.
   const [capturePending, setCapturePending] = useState<Record<string, boolean>>({});
+  const capturePendingRef = useRef<Record<string, boolean>>({});
   const markCapturePending = useCallback((id: string, pending: boolean) => {
+    capturePendingRef.current = { ...capturePendingRef.current, [id]: pending };
     setCapturePending((p) => ({ ...p, [id]: pending }));
   }, []);
   const [busy, setBusy] = useState(false);
@@ -292,9 +294,17 @@ export function VisibilityCaptureForm({
       opts?: { store?: boolean },
     ): Promise<string | null> => {
       setUploading((u) => ({ ...u, [fieldId]: true }));
-      const optimised = await imageCompression.compress(file);
-      const res = await visibilityApi.uploadSalesMedia(optimised, `${fieldId}.jpg`);
-      setUploading((u) => ({ ...u, [fieldId]: false }));
+      let res: Awaited<ReturnType<typeof visibilityApi.uploadSalesMedia>>;
+      try {
+        const optimised = await imageCompression.compress(file);
+        res = await visibilityApi.uploadSalesMedia(optimised, `${fieldId}.jpg`);
+      } catch {
+        // A throw (compression / network) must not leave Submit stuck on "Uploading photo…".
+        setSubmitError('The photo could not be uploaded — check your connection and retake it.');
+        return null;
+      } finally {
+        setUploading((u) => ({ ...u, [fieldId]: false }));
+      }
       if (res.success) {
         if (opts?.store !== false) setValue(fieldId, res.data.key);
         return res.data.key;
@@ -393,7 +403,19 @@ export function VisibilityCaptureForm({
       ? allGps
       : allGps.filter((f) => (f.captureTrigger ?? 'MANUAL') === 'ON_SUBMIT');
     if (gpsToFill.length > 0) {
-      const fix = await captureGps();
+      // Submit stays disabled ("Submitting…") across the submit-time fix — no double-tap.
+      setBusy(true);
+      let fix: GpsCapture | null;
+      try {
+        fix = await captureGps();
+      } finally {
+        setBusy(false);
+      }
+      // A photo started during that wait is still mid-capture: don't validate a half-stored form.
+      if (Object.values(capturePendingRef.current).some(Boolean)) {
+        setSubmitError('A photo is still being saved — wait for it to finish, then tap Submit again.');
+        return;
+      }
       // Re-read the form AFTER the await: anything stored meanwhile (e.g. a photo whose own
       // fix landed during this wait) must count, not the snapshot taken at the tap.
       working = { ...valuesRef.current };
@@ -988,7 +1010,7 @@ function CarriedForwardPhoto({
 
 // ── GPS field ─────────────────────────────────────────────────────────────────
 
-function GpsField({ field, values, setValue, captureGps, req }: FieldRendererProps & { req: boolean }) {
+function GpsField({ field, values, setValue, captureGps, markCapturePending, req }: FieldRendererProps & { req: boolean }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const v = values[field.id] as GpsCapture | undefined;
@@ -997,8 +1019,15 @@ function GpsField({ field, values, setValue, captureGps, req }: FieldRendererPro
   const capture = async () => {
     setLoading(true);
     setError('');
-    const fix = await captureGps();
-    setLoading(false);
+    // Same Submit block as a photo: a manual location still being fetched is not yet stored.
+    markCapturePending?.(field.id, true);
+    let fix: GpsCapture | null = null;
+    try {
+      fix = await captureGps();
+    } finally {
+      setLoading(false);
+      markCapturePending?.(field.id, false);
+    }
     if (fix) setValue(field.id, fix);
     else setError('Could not get location. Please try again.');
   };
