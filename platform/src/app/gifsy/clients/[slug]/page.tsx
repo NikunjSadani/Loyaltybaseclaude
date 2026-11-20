@@ -14,6 +14,7 @@ import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-s
 import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
 import { useCanManageHelpVideos } from '@/lib/help-videos-access';
+import { useIsGifsyAdmin } from '@/lib/use-is-gifsy-admin';
 import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
 import { TicketRemarksEmailCard } from '@/components/operator/ticket-remarks-email-card';
 
@@ -198,6 +199,8 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
   const [saveError, setSaveError] = useState<string | null>(null);
   // Help & videos authoring is GIFSY_ADMIN-only (API-enforced) — hide the link from GIFSY_STAFF.
   const canManageHelpVideos = useCanManageHelpVideos();
+  // The per-client Ticket remarks email is GIFSY_ADMIN-only (API-enforced) — owner-only card.
+  const isGifsyAdmin = useIsGifsyAdmin();
 
   // The console's OWN host decides whether a tenant link needs the `uat-` staging marker, so a
   // staging console links to the staging site (not prod, which 404s for a staging-only tenant).
@@ -508,7 +511,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
       </Section>
 
       {/* Support tickets — the client's shared "Ticket remarks email" (GIFSY_ADMIN only; API-enforced) */}
-      {canManageHelpVideos && (
+      {isGifsyAdmin && (
         <Section icon={Bell} title="Support tickets" defaultOpen>
           <TicketRemarksEmailCard slug={config.slug} />
         </Section>

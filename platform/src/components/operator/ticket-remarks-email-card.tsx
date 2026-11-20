@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api-client';
@@ -29,6 +29,9 @@ export function TicketRemarksEmailCard({ slug }: { slug: string }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // The "Saved." flash timer — cleared on unmount (and before re-arming) so it never fires late.
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (savedTimer.current) clearTimeout(savedTimer.current); }, []);
 
   const load = useCallback(async () => {
     setLoading(true); setLoadError(null);
@@ -52,7 +55,8 @@ export function TicketRemarksEmailCard({ slug }: { slug: string }) {
     setSaving(false);
     if (res.success) {
       setServer(res.data); setDraft(res.data.email ?? ''); setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
+      if (savedTimer.current) clearTimeout(savedTimer.current);
+      savedTimer.current = setTimeout(() => setSaved(false), 2500);
     } else {
       setSaveError(res.error);
     }

@@ -1058,8 +1058,13 @@ d(
 
     // ═══ expiry sweep vs reversal ═══════════════════════════════════════════════════════════════════════════════
     describe('expiry sweep vs reversal', () => {
+      // Owner decision 1 (2026-11-19): the reversed credit's OWN already-expired points count as already recovered —
+      // never taken twice, never owed. So the order does not change the end state: B −100 / D 100 either way (the 100
+      // of earlier debt the credit had repaid comes back). Expiry first: those 400 pts left as EXPIRY (lifetimeExpired
+      // 400) and the allocation books them as alreadyExpired (q = 400), recovered 0, owed 0. Reversal first: the 400
+      // are recovered from the balance and nothing is left to expire.
       it.each([['expiry first'], ['reversal first']])(
-        'V2 debt wallet, %s → reversal first B −100 / D 100; expiry first the expired 400 owed (B −500 / D 500 — owner 2026-11-19); = oracle',
+        'V2 debt wallet, %s → B −100 / D 100 either way; expiry first the expired 400 are alreadyExpired, never owed (owner decision 1, 2026-11-19); = oracle',
         async (order) => {
           const t = await tenant('V2');
           const w = await newWallet(t, { debt: 100 });
@@ -1078,15 +1083,16 @@ d(
           const expiredFirst = rep.kinds.includes('EXPIRY');
           if (db.concurrent)
             expect(expiredFirst).toBe(order === 'expiry first');
-          expect([row.redeemablePoints, row.debtPoints]).toEqual(expiredFirst ? [-500, 500] : [-100, 100]);
+          expect([row.redeemablePoints, row.debtPoints]).toEqual([-100, 100]);
           expect(row.lifetimeExpired).toBe(expiredFirst ? 400 : 0);
           const [alloc] = await allocations(r.id);
           expect([
             alloc.debtRestored,
+            alloc.alreadyExpired,
             alloc.recovered,
             alloc.owed,
             alloc.shortfall,
-          ]).toEqual(expiredFirst ? [100, 0, 400, 0] : [100, 400, 0, 0]);
+          ]).toEqual(expiredFirst ? [100, 400, 0, 0, 0] : [100, 0, 400, 0, 0]);
           expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(
             -100 - alloc.owed,
           );

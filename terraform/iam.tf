@@ -66,6 +66,40 @@ resource "google_project_iam_member" "deployer_service_usage_admin" {
 
 # ── API Cloud Run service account ────────────────────────────────────────────
 
+# Direct VPC egress (`gcloud run deploy --network/--subnet`) needs compute.subnetworks.use on the deployer.
+# 2026-11-20 least-privilege pass (owner-approved): the deployer had Editor + project-IAM-admin + SA-admin +
+# Secret-Manager-admin + Cloud-SQL/network/Redis/AR admin granted by hand outside terraform — all REMOVED; it now
+# holds exactly the roles in this file. Laptop ops (backups, logs, one-off jobs, probes) use the separate KEYLESS
+# `gifsy-ops` account below, impersonated by the owner's user — never the deployer's key.
+resource "google_project_iam_member" "deployer_network_user" {
+  project = var.project_id
+  role    = "roles/compute.networkUser"
+  member  = "serviceAccount:${google_service_account.deployer.email}"
+}
+
+# gifsy-ops — keyless operations identity (no keys; `--impersonate-service-account` by the owner's user).
+resource "google_service_account" "ops" {
+  account_id   = "gifsy-ops"
+  display_name = "Gifsy ops (laptop operations, keyless — impersonated)"
+}
+
+resource "google_project_iam_member" "ops_roles" {
+  for_each = toset([
+    "roles/logging.viewer",
+    "roles/run.developer",
+    "roles/cloudsql.editor",
+    "roles/monitoring.editor",
+    "roles/iam.securityReviewer",
+    "roles/cloudbuild.builds.viewer",
+  ])
+  project = var.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.ops.email}"
+}
+# Also (resource-scoped, granted by gcloud 2026-11-20): roles/storage.objectAdmin on gs://gifsy-platform-files;
+# roles/secretmanager.secretAccessor on secret MSG91_AUTH_KEY only; roles/iam.serviceAccountTokenCreator on
+# gifsy-ops for user:<owner> (impersonation).
+
 resource "google_service_account" "api_sa" {
   account_id   = "gifsy-api-sa"
   display_name = "Gifsy API (Cloud Run)"

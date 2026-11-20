@@ -1,7 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { getStoredUser } from '@/lib/auth-client';
+import { useIsGifsyAdmin } from '@/lib/use-is-gifsy-admin';
 
 /**
  * Help & videos authoring is GIFSY_ADMIN-only on the API (@Roles('GIFSY_ADMIN') + tenancy:* permissions, and a
@@ -10,9 +9,5 @@ import { getStoredUser } from '@/lib/auth-client';
  * then, i.e. the link appears a frame late rather than flashing for a user who cannot use it.
  */
 export function useCanManageHelpVideos(): boolean {
-  const [can, setCan] = useState(false);
-  useEffect(() => {
-    setCan(getStoredUser()?.role === 'GIFSY_ADMIN');
-  }, []);
-  return can;
+  return useIsGifsyAdmin();
 }

@@ -6,7 +6,7 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
-import ReversalEngineAttentionBanner, { type ReversalAttention } from '../ReversalEngineAttentionBanner';
+import ReversalEngineAttentionBanner, { type ReversalAttention, untrackedWallets } from '../ReversalEngineAttentionBanner';
 
 const ATTENTION = '/api/admin/credits/reversal-engine/attention';
 const PAUSE = '/api/admin/credits/reversal-engine/pause';
@@ -121,6 +121,24 @@ describe('ReversalEngineAttentionBanner', () => {
     expect(screen.getByText(/lot L1 \(wallet w1\) — deadlock detected/)).toBeInTheDocument();
     expect(screen.getByText(/outlet O1 · approval refused — Can't reverse: the original credit for outlet O1/)).toBeInTheDocument();
     expect(screen.getByText(/\(sequenced wallet: no credit position records this credit\)/)).toBeInTheDocument();
+  });
+
+  it('round 6 item 5: an untracked-expiry reversal lists EVERY affected wallet, not only the first', async () => {
+    const at = '2026-11-19T05:00:00.000Z';
+    mockFetch([
+      base({
+        expiryUntracked: [
+          { at, creditReversalId: 'REVU', walletId: 'w2', walletIds: ['w1', 'w2'], outletCode: 'O2', owed: 30, recovered: 10, action: 'check it' },
+        ],
+        expiryUntrackedTotal: 1,
+      }),
+    ]);
+    render(<ReversalEngineAttentionBanner />);
+    fireEvent.click(await screen.findByRole('button', { name: /show details/i }));
+    expect(screen.getByText(/reversal REVU · outlet O2 · 2 wallets: w1, w2 · 10 pts taken · 30 pts booked as debt/)).toBeInTheDocument();
+    // older payloads (no walletIds) still name their one wallet
+    expect(untrackedWallets({ walletId: 'w9' })).toBe(' · wallet w9');
+    expect(untrackedWallets({ walletId: null, walletIds: [] })).toBe('');
   });
 
   it('L6: "Resume approvals" names the program the call-outs are about (never the Gifsy home tenant by default)', async () => {

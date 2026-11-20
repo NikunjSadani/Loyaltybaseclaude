@@ -8,9 +8,11 @@
  * wallet's own movement order on the server). A negative with no reversal behind it is labelled as imported / earlier
  * history. Shown for EVERY tenant that has a negative wallet (owner D2), with a programme filter (same options as the
  * admin dashboards) and an Excel download of the same filtered list.
- * States (round 5): nothing below zero → renders nothing; the first check fails on a tenant with no known negative →
- * a quiet retry line (never a red error on Deoleo); a later load fails (e.g. a programme change) → header + filter stay,
- * the error is inline with Retry; a programme change dims the old numbers (aria-busy) until the new ones arrive.
+ * States (rounds 5–6): the screen is quiet ONLY when the SERVER said no wallet of the tenant is below zero
+ * (`anyNegative: false`, the cheap probe it answers first). Any failed load is loud: before data → a red alert with
+ * Retry; after data (e.g. a programme change) → header + filter stay, the error is inline with Retry. A programme change
+ * dims the old numbers (aria-busy) and the summary keeps the programme of the numbers SHOWN (data.program) until the new
+ * ones arrive.
  * Data: GET /api/admin/credits/reversal-engine/wallets-in-debt[?programName=…&limit=…].
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -49,6 +51,8 @@ interface DebtList {
   limit: number;
   truncated?: boolean;
   program?: string | null;
+  /** round 6: the server's cheap probe — is ANY wallet of the tenant below zero (programme-independent)? */
+  anyNegative?: boolean;
   availablePrograms?: string[];
   wallets: DebtWallet[];
 }
@@ -78,6 +82,9 @@ export function sourceText(s: DebtSource): string {
  * behind it gets one row with its note) — a clean table (autofilter-safe); "Approved on" is a real date cell (B8). When
  * the list is filtered or incomplete, a separate "About" sheet says so (never a row above the header).
  */
+export const EXCEL_DATE_FORMAT = 'dd-mmm-yyyy';
+const APPROVED_COL = 8;
+
 export function buildWalletsInDebtXlsx(list: DebtWallet[], opts: { total?: number; program?: string | null } = {}): ArrayBuffer {
   const header = [
     'Wallet outlet code(s)', 'Outlet / partner', 'Balance (pts)', 'Owed (pts)',
@@ -94,8 +101,14 @@ export function buildWalletsInDebtXlsx(list: DebtWallet[], opts: { total?: numbe
       ]);
     }
   }
+  const sheet = aoaToSheetSafe(rows);
+  // Round 6 (item 6): "Approved on" (column I) shows as dd-mmm-yyyy in every Excel locale, not the machine default.
+  for (let r = 1; r < rows.length; r++) {
+    const cell = sheet[XLSX.utils.encode_cell({ r, c: APPROVED_COL })] as XLSX.CellObject | undefined;
+    if (cell && rows[r][APPROVED_COL] instanceof Date) cell.z = EXCEL_DATE_FORMAT;
+  }
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, aoaToSheetSafe(rows), 'Wallets below zero');
+  XLSX.utils.book_append_sheet(wb, sheet, 'Wallets below zero');
   const about: unknown[][] = [];
   if (opts.program) about.push([`Programme: ${opts.program}`]);
   if (opts.total !== undefined && opts.total > list.length) {
@@ -128,9 +141,6 @@ export default function WalletsInDebtSection() {
   const [exporting, setExporting] = useState(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
-  // Once ANY load has shown a wallet below zero, a later failure is a real problem (red, inline); before that it may be
-  // a tenant with none at all (Deoleo) — a quiet retry line only.
-  const knownNegatives = useRef(false);
   const seq = useRef(0);
 
   const load = useCallback(async (p: string) => {
@@ -144,7 +154,6 @@ export default function WalletsInDebtSection() {
       if (json?.success && json.data && Array.isArray(json.data.wallets)) {
         const d = json.data as DebtList;
         setData(d);
-        if (d.total > 0) knownNegatives.current = true;
         if (Array.isArray(d.availablePrograms) && d.availablePrograms.length) setPrograms(d.availablePrograms);
       } else setError(json?.error ?? `Couldn't load the wallets below zero (HTTP ${res.status})`);
     } catch (e) {
@@ -158,24 +167,28 @@ export default function WalletsInDebtSection() {
     void load(program);
   }, [program, load]);
 
-  // First check failed and no negative wallet is known: a quiet line, never a red error (round 5, B1).
-  if (error && !knownNegatives.current) {
+  // Round 6 (item 2): no answer yet and the load failed → we do NOT know there is none → loud, with Retry.
+  if (error && !data) {
     return (
-      <p data-testid="wallets-in-debt-quiet-error" className="text-[11px] text-gray-400">
-        Couldn&apos;t check for wallets below zero.{' '}
-        <button type="button" onClick={() => void load(program)} className="underline hover:text-gray-600">
+      <p role="alert" data-testid="wallets-in-debt-error" className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-2">
+        Couldn&apos;t check for wallets below zero — {error}{' '}
+        <button type="button" onClick={() => void load(program)} className="underline font-medium">
           Retry
         </button>
       </p>
     );
   }
-  // Nothing below zero in the whole tenant → nothing to show (every Deoleo screen stays as it was).
-  if (!data || (data.total === 0 && !program && !knownNegatives.current)) return null;
+  // Quiet ONLY when the server said no wallet of the tenant is below zero (every Deoleo screen stays as it was).
+  if (!data) return null;
+  const anyNegative = data.anyNegative ?? data.total > 0;
+  if (!anyNegative && !program) return null;
 
   // B4: totals from the API's full aggregate, never from the rows shown.
   const totalOwed = data.totalOwedPoints ?? data.wallets.reduce((s, w) => s + w.owedPoints, 0);
   const cut = data.truncated ?? data.total > data.wallets.length;
-  const scope = program ? ` in ${program}` : '';
+  // Round 6 (item 3): the label belongs to the numbers shown — the LOADED data's programme, not the select's.
+  const shownProgram = data.program ?? '';
+  const scope = shownProgram ? ` in ${shownProgram}` : '';
 
   async function downloadAll() {
     if (exporting) return;
@@ -261,7 +274,7 @@ export default function WalletsInDebtSection() {
           </button>
         </div>
       </div>
-      {program && (
+      {shownProgram && (
         <p data-testid="wallets-in-debt-program-note" className="text-[11px] text-orange-800">
           Only wallets with a live outlet in this programme are counted; wallets whose outlets are all inactive appear only
           under All programmes.

@@ -2154,7 +2154,11 @@ export class WalletService {
     wallets: Map<string, Wallet>;
     unallocatedApproved: number;
   }> {
-    const { positions: unlocked, unallocatedApproved } = await this.v2PointsReversalCap(tx, key, { excludeReversalId });
+    // The pre-lock read only decides WHICH wallets to lock (§5 order). Its unallocatedApproved is NOT used: it was read
+    // before a concurrent sibling reversal of the same credit committed, so it would still count that sibling as "never
+    // attributed" while the positions re-read below (after the locks) already carry its ρ — the sibling counted twice
+    // (WP7 F1, 2026-11-20). Both are re-read under the locks, in one consistent post-lock view.
+    const { positions: unlocked } = await this.v2PointsReversalCap(tx, key, { excludeReversalId });
     const walletIds = [...new Set([...unlocked.map((p) => p.walletId), ...extraWalletIds])].sort();
     const wallets = new Map<string, Wallet>();
     const states = new Map<string, WalletState>();
@@ -2174,6 +2178,10 @@ export class WalletService {
     if (positions.some((p) => !wallets.has(p.walletId))) {
       throw new ConflictException('The credits being reversed changed concurrently — please retry');
     }
+    // Under the position locks: a sibling that applied first has committed its allocation rows AND its ρ together, so
+    // it is counted once (in ρ); a sibling still waiting for these locks has no allocation yet and is counted as
+    // unallocated (conservative — it will consume the credit when it applies).
+    const unallocatedApproved = await this.unallocatedApprovedReversals(tx, key, excludeReversalId);
     return { positions, states, wallets, unallocatedApproved };
   }
 
@@ -2844,6 +2852,20 @@ export class WalletService {
   // ─── Wallets in debt (audit item 9 + fix round 3 + owner decisions D1/D2, 2026-11-19) ─────────────────────────
 
   /**
+   * Round 6 (items 2/4): "is ANY wallet of this tenant below zero?" — the cheap probe wallets-in-debt answers FIRST
+   * and returns as `anyNegative`, so the screen stays quiet ONLY when the server said there is none. Raw SQL with a LITERAL
+   * `< 0` so the planner can use the partial index wallets_negative_balance_idx (a bound parameter can defeat a partial
+   * index under a generic plan).
+   */
+  async anyWalletBelowZero(clientId: string): Promise<boolean> {
+    const rows = await this.prisma.$queryRaw<Array<{ one: number }>>(
+      Prisma.sql`SELECT 1 AS one FROM wallets w JOIN channel_partners cp ON cp.id = w."partnerId"
+                 WHERE cp."clientId" = ${clientId} AND w."redeemablePoints" < 0 LIMIT 1`,
+    );
+    return (rows ?? []).length > 0;
+  }
+
+  /**
    * GET /v1/admin/credits/reversal-engine/wallets-in-debt — every wallet of the tenant whose balance is BELOW ZERO
    * (owner decision D1: "points owed" = how far below zero the balance is; a wallet at +60 owes nothing even with
    * internal debtPoints > 0, so it is not listed). Per wallet: outlet(s), balance, owedPoints, and the reversal(s)
@@ -2854,18 +2876,16 @@ export class WalletService {
    * the rows returned; the list is capped at `limit` (≤ 5,000) and `truncated` says when it is cut.
    * Tenant-scoped by the caller's clientId (CLIENT_ADMIN reads are tenant-wide by design — tenant-scope.ts); the
    * optional `programName` applies the same program scope as the admin dashboards (partnerProgramScope).
+   * Round 6: `anyNegative` = the tenant-wide probe answer, returned SEPARATELY so the screen is quiet ONLY when the
+   * server said no wallet is below zero (a failed load is always loud).
    */
   async walletsInDebt(clientId: string, opts: { limit?: number; programName?: unknown } = {}) {
     const limit = Math.min(Math.max(opts.limit ?? 1000, 1), 5000);
     const program = normalizeFilterParam(opts.programName, 'program');
-    // Round 5 (B1): the cheap gate first — one index-friendly probe (partial index wallets_negative_balance_idx). A tenant
-    // with no negative wallet (every Deoleo request) answers here, without the programme catalogue or any other read.
-    const anyNegative = await this.prisma.wallet.findFirst({
-      where: { partner: { clientId }, redeemablePoints: { lt: 0 } },
-      select: { id: true },
-    });
+    // Round 5 (B1): the cheap gate first — a tenant with no negative wallet (every Deoleo request) answers here.
+    const anyNegative = await this.anyWalletBelowZero(clientId);
     if (!anyNegative && !program) {
-      return { clientId, program, availablePrograms: [] as string[], total: 0, totalOwedPoints: 0, limit, truncated: false, wallets: [] };
+      return { clientId, program, anyNegative, availablePrograms: [] as string[], total: 0, totalOwedPoints: 0, limit, truncated: false, wallets: [] };
     }
     const catalog = await loadProgramCatalog(this.prisma, clientId);
     const variants = program ? catalog.variantsOf(program) : null;
@@ -2873,9 +2893,10 @@ export class WalletService {
       partner: { clientId, ...partnerProgramScope(variants) },
       redeemablePoints: { lt: 0 },
     };
-    // Round 5 (A2): EVERY read below (count, owed total, rows, outlets, allocations, the last row at or above zero and the
-    // reversal rows) runs in ONE read-only REPEATABLE READ transaction: one snapshot, so the list, its totals and
-    // "which reversal caused it" can never disagree under concurrent movements.
+    // Rounds 5–6 (A2 / item 1): every read in ONE read-only REPEATABLE READ transaction (one snapshot), with explicit
+    // timeouts sized for 5,000 wallets (Prisma's defaults — 5 s / 2 s — expire under load), and every heavy read CAPPED
+    // to what the answer needs: only the listed wallets; per wallet only the max seq / time of its last row at or above
+    // zero (an aggregate); reversal rows only AFTER that point; allocations only of those reversals.
     const snap = await this.prisma.$transaction(
       async (tx) => {
         await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
@@ -2899,38 +2920,50 @@ export class WalletService {
           where: { clientId, partnerId: { in: wallets.map((w) => w.partnerId) }, deletedAt: null },
           select: { partnerId: true, outletCode: true },
         });
-        const allocations = await tx.creditReversalAllocation.findMany({
-          where: {
-            position: { walletId: { in: walletIds } },
-            creditReversal: { clientId },
-            OR: [{ owed: { gt: 0 } }, { debtRestored: { gt: 0 } }, { debtExposed: { gt: 0 } }],
-          },
-          select: {
-            id: true,
-            creditReversalId: true,
-            owed: true,
-            debtRestored: true,
-            debtExposed: true,
-            overReversalDebt: true,
-            engineSource: true,
-            position: { select: { walletId: true, outletCode: true } },
-            creditReversal: { select: { approvedAt: true, fieldName: true, period: true } },
-          },
-        });
-        // The last row that left each wallet at or above zero, by seq (sequenced rows) and by time (any row).
+        // The last row that left each listed wallet at or above zero, by seq and by time — one aggregate.
         const lastNonNeg = await tx.walletTransaction.groupBy({
           by: ['walletId'],
           where: { walletId: { in: walletIds }, balanceAfter: { gte: 0 } },
           _max: { seq: true, createdAt: true },
         });
-        // Every reversal row on these wallets: "which reversal caused the CURRENT debt" is decided on THESE rows.
+        const lastBy = new Map(lastNonNeg.map((g) => [g.walletId, g._max]));
+        const seqOf = new Map(wallets.map((w) => [w.id, w.movementSeq ?? 0]));
+        // Reversal rows ONLY after that point (seq on sequenced history, else time; no such row → all).
+        const after: Prisma.WalletTransactionWhereInput[] = walletIds.map((id) => {
+          const last = lastBy.get(id);
+          if (last?.seq != null && (seqOf.get(id) ?? 0) > 0) return { walletId: id, seq: { gt: last.seq } };
+          if (last?.createdAt) return { walletId: id, createdAt: { gt: last.createdAt } };
+          return { walletId: id };
+        });
         const reversalRows = await tx.walletTransaction.findMany({
-          where: { walletId: { in: walletIds }, creditReversalId: { not: null } },
+          where: { creditReversalId: { not: null }, OR: after },
           select: { walletId: true, creditReversalId: true, seq: true, createdAt: true },
         });
+        const reversalIds = [...new Set(reversalRows.map((r) => r.creditReversalId).filter((x): x is string => !!x))];
+        const allocations = reversalIds.length
+          ? await tx.creditReversalAllocation.findMany({
+              where: {
+                creditReversalId: { in: reversalIds },
+                position: { walletId: { in: walletIds } },
+                creditReversal: { clientId },
+                OR: [{ owed: { gt: 0 } }, { debtRestored: { gt: 0 } }, { debtExposed: { gt: 0 } }],
+              },
+              select: {
+                id: true,
+                creditReversalId: true,
+                owed: true,
+                debtRestored: true,
+                debtExposed: true,
+                overReversalDebt: true,
+                engineSource: true,
+                position: { select: { walletId: true, outletCode: true } },
+                creditReversal: { select: { approvedAt: true, fieldName: true, period: true } },
+              },
+            })
+          : [];
         return { total, agg, wallets, outlets, allocations, lastNonNeg, reversalRows };
       },
-      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000, maxWait: 10_000 },
     );
     const { total, agg, wallets } = snap;
     const negSum = agg?._sum?.redeemablePoints ?? 0;
@@ -2943,36 +2976,23 @@ export class WalletService {
     }
     const allocBy = new Map<string, Alloc[]>();
     for (const a of snap.allocations as Alloc[]) allocBy.set(a.position.walletId, [...(allocBy.get(a.position.walletId) ?? []), a]);
-    const rowsBy = new Map<string, RevRow[]>();
-    for (const r of snap.reversalRows as RevRow[]) rowsBy.set(r.walletId, [...(rowsBy.get(r.walletId) ?? []), r]);
-    const lastBy = new Map(
-      (snap.lastNonNeg as Array<{ walletId: string; _max: { seq: number | null; createdAt: Date | null } }>).map((g) => [g.walletId, g._max]),
-    );
-    const currentReversals = (w: { id: string; movementSeq: number }) => {
-      const last = lastBy.get(w.id);
-      return new Set(
-        (rowsBy.get(w.id) ?? [])
-          .filter((r) => !!r.creditReversalId)
-          .filter((r) => {
-            // seq when both sides have one (exact, sequenced history); B7: a last row at or above zero WITHOUT seq
-            // (history from before sequencing) falls back to time; no such row at all: every reversal row counts.
-            if (last?.seq != null && r.seq != null && (w.movementSeq ?? 0) > 0) return r.seq > last.seq;
-            if (last?.createdAt) return r.createdAt > last.createdAt;
-            return true;
-          })
-          .map((r) => r.creditReversalId as string),
-      );
-    };
+    // The reversal rows were already read ONLY after each wallet's last row at or above zero → the current reversals.
+    const currentBy = new Map<string, Set<string>>();
+    for (const r of snap.reversalRows as RevRow[]) {
+      if (!r.creditReversalId) continue;
+      currentBy.set(r.walletId, (currentBy.get(r.walletId) ?? new Set<string>()).add(r.creditReversalId));
+    }
     return {
       clientId,
       program,
+      anyNegative,
       availablePrograms: catalog.available,
       total,
       totalOwedPoints: Math.max(0, -negSum),
       limit,
       truncated: total > wallets.length,
       wallets: wallets.map((w) => {
-        const current = currentReversals(w);
+        const current = currentBy.get(w.id) ?? new Set<string>();
         const sources = (allocBy.get(w.id) ?? [])
           .filter((a) => current.has(a.creditReversalId))
           .map((a) => ({
@@ -3240,6 +3260,15 @@ export class WalletService {
           at: u.createdAt,
           creditReversalId: u.entityId,
           walletId: typeof m.walletId === 'string' ? m.walletId : null,
+          // round 6 (item 5): a reversal can span wallets — every affected wallet, not only the first
+          walletIds: [
+            ...new Set(
+              (Array.isArray(m.positions) ? (m.positions as Array<{ walletId?: unknown }>) : [])
+                .map((x) => (typeof x.walletId === 'string' ? x.walletId : null))
+                .filter((x): x is string => !!x)
+                .concat(typeof m.walletId === 'string' ? [m.walletId] : []),
+            ),
+          ].sort(),
           outletCode: typeof m.outletCode === 'string' ? m.outletCode : null,
           owed: typeof m.owed === 'number' ? m.owed : null,
           recovered: typeof m.recovered === 'number' ? m.recovered : null,
