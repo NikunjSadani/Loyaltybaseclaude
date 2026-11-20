@@ -633,9 +633,10 @@ and wallets-in-debt; correct by an adjustment if it happens.
 - **3** the summary / programme note name the programme of the numbers SHOWN (`data.program`), also while a new
   programme loads and after a failed load.
 - **4** the probe is raw SQL with a LITERAL `< 0` (`WalletService.anyWalletBelowZero`) so the partial index is provable
-  by the planner. Migration `20261119124600` header documents the P3009 recovery if `lock_timeout` trips:
-  `npx prisma migrate resolve --rolled-back 20261119124600_wre_idx_wallets_negative_balance`, then re-deploy (comment-only
-  change to the file).
+  by the planner. If migration `20261119124600`'s `lock_timeout` trips, the migration is recorded failed and later deploys
+  block with P3009 → `npx prisma migrate resolve --rolled-back 20261119124600_wre_idx_wallets_negative_balance`, then
+  re-deploy. (The note lives HERE, not in the migration file: that file is already applied on staging and is kept
+  byte-for-byte — never edit an applied migration.)
 - **5** an untracked-expiry attention item carries `walletIds` = every wallet in the audit row's `positions`; the banner
   lists them all.
 - **6** Excel "Approved on" cells carry an explicit `dd-mmm-yyyy` number format.
