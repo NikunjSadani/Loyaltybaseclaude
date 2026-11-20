@@ -48,7 +48,8 @@ import {
   type PhotoFenceStatus,
 } from '../../../visibility/geo-fence.helper';
 import { windowsForMonth } from '../../../visibility/visibility-window.helper';
-import { visibilityReportScopeError, windowPhase, windowRangeUtc } from '../../../visibility/visibility-report-scope';
+import { isWindowInFrequency, visibilityReportScopeError, windowPhase, windowRangeUtc } from '../../../visibility/visibility-report-scope';
+import { isImportedVisibilityCapture, visibilityPortalGoLive } from '../../../visibility/visibility-portal-go-live';
 import { visibilityAddressableOutletWhere } from '../../../visibility/visibility-report.service';
 import {
   VISIBILITY_STATUS_ORDER,
@@ -95,8 +96,6 @@ export const VISIBILITY_NOT_CAPTURED_HEADERS = [
 export const SOURCE_IMPORTED = 'Imported (old app)';
 export const SOURCE_PORTAL = 'Portal app';
 
-/** Imported old-app photos were re-hosted under this key segment (BAJAJ-PROD-OUTLET-IMPORT §8). */
-const IMPORTED_KEY_MARKER = '/vendor-import/';
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const WINDOW_RE = /^(\d{4}-(?:0[1-9]|1[0-2]))-P[1-4]$/;
@@ -108,6 +107,9 @@ const WINDOW_RE = /^(\d{4}-(?:0[1-9]|1[0-2]))-P[1-4]$/;
 export const VISIBILITY_LINK_LIMIT = { perSheet: 60_000 };
 
 export const NOT_TRACKED_MESSAGE = "Not tracked for imported months — the old app's records only include approved visits";
+
+/** Not-captured status for a closed window that was partly on the old app (it only exported approved visits). */
+export const PART_OLD_APP_STATUS = 'No approved record — part of this window was on the old app (it only sent approved visits)';
 
 /** The in-app path of the photo viewer page for a stored object key. */
 export function visibilityPhotoPath(key: string): string {
@@ -261,14 +263,6 @@ function userNameCache(ctx: ExportRunContext) {
 const asValues = (v: Prisma.JsonValue | null | undefined): Record<string, unknown> =>
   v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 
-function isImported(values: Record<string, unknown>): boolean {
-  for (const v of Object.values(values)) {
-    const { key } = readMediaValue(v);
-    if (key && key.includes(IMPORTED_KEY_MARKER)) return true;
-  }
-  return false;
-}
-
 /** The review with the latest reviewedAt (ties: the later entry), or null. */
 function latestReview(reviews: Record<string, PhotoReview>): PhotoReview | null {
   let best: PhotoReview | null = null;
@@ -301,19 +295,17 @@ function resolveScope(params: VisibilityCapturesParams, now: Date) {
 }
 
 /**
- * The windows an in-scope outlet was expected to cover in a PORTAL month: the tenant's frequency (today's — the
- * frequency history is not stored) plus any other window that actually has portal captures that month (an older
- * frequency). One window asked for -> just that window.
+ * The windows an in-scope outlet was expected to cover: the windows of the tenant's CURRENT frequency only. A window
+ * from an earlier frequency (its captures are still listed) has no known day range — the frequency history is not
+ * stored — so it never produces Missed / Not captured rows (stated on About).
  */
-function expectedWindowsFor(params: VisibilityCapturesParams, month: string, freq: number, portalWindowsSeen: Set<string>): string[] {
-  if (params.windowKey) return [params.windowKey];
-  let byFreq: string[];
+function expectedWindowsFor(params: VisibilityCapturesParams, month: string, freq: number): string[] {
+  if (params.windowKey) return isWindowInFrequency(params.windowKey, freq) ? [params.windowKey] : [];
   try {
-    byFreq = windowsForMonth(month, freq);
+    return windowsForMonth(month, freq);
   } catch {
-    byFreq = [`${month}-P1`];
+    return [];
   }
-  return [...new Set([...byFreq, ...portalWindowsSeen])].sort();
 }
 
 async function runVisibilityCaptures(
@@ -340,14 +332,9 @@ async function runVisibilityCaptures(
   const scopeErr = visibilityReportScopeError(params, freq, ctx.now, windowHasCaptures);
   if (scopeErr) throw new BadRequestException(scopeErr);
   const base: Prisma.VisibilityCaptureWhereInput = { clientId, windowKey: { in: scope.readWindows } };
-  // Portal go-live = the first month with any capture taken in this portal (a rep is recorded). Months before it are
-  // imported old-app history, which only holds approved visits -> no "Not captured" list for them.
-  const firstPortal = await prisma.visibilityCapture.findFirst({
-    where: { clientId, submittedBySalesUserId: { not: null } },
-    orderBy: [{ windowKey: 'asc' }],
-    select: { windowKey: true },
-  });
-  const goLiveMonth = firstPortal?.windowKey ? firstPortal.windowKey.slice(0, 7) : null;
+  // Portal go-live = the earliest capture with no imported (old-app) photo. Windows before it are old-app history,
+  // which only holds approved visits -> no "Missed" for them (shared helper, also used by the dashboards).
+  const goLive = await visibilityPortalGoLive(prisma, clientId);
 
   // ── Photo links: the tenant's primary portal host ──
   const domainRows = await prisma.clientDomain.findMany({ where: { clientId }, select: { domain: true, isPrimary: true } });
@@ -422,7 +409,8 @@ async function runVisibilityCaptures(
   const main = await out.addSheet('Visibility', headers);
   const statusCounts = new Map<string, number>();
   let importedCount = 0;
-  const portalWindowsSeen = new Set<string>();
+  const importedWindowsSeen = new Set<string>();
+  const windowsSeen = new Set<string>();
   let after: { windowKey: string; outletCode: string; id: string } | null = null;
 
   for (;;) {
@@ -500,9 +488,12 @@ async function runVisibilityCaptures(
       const fieldById = new Map(cameraFields(schema).map((f) => [f.id, f]));
       const evalValues = { ...values, ...outletContextValues({ programCategory: c.outlet?.programCategory }) };
       const reviews = reviewsById.get(c.id) ?? {};
-      const imported = isImported(values);
-      if (imported) importedCount++;
-      else portalWindowsSeen.add(c.windowKey);
+      const imported = isImportedVisibilityCapture(values);
+      if (imported) {
+        importedCount++;
+        importedWindowsSeen.add(c.windowKey);
+      }
+      windowsSeen.add(c.windowKey);
       statusCounts.set(c.status, (statusCounts.get(c.status) ?? 0) + 1);
       // Review info must belong to the CURRENT version: a review older than this version's submission is a decision
       // carried forward from an earlier version (re-take flow) — never shown as the visit's reviewer.
@@ -718,19 +709,32 @@ async function runVisibilityCaptures(
 
   // ── Sheet 3: Not captured (in-scope outlets × expected windows with no capture) ──
   const notCaptured = await out.addSheet('Not captured', VISIBILITY_NOT_CAPTURED_HEADERS);
-  // Imported months (before the portal go-live — or, with no portal capture yet, a month holding imported history):
-  // the old app only exported APPROVED visits, so "no capture" there means nothing → one explanatory row, no list.
-  const notTracked = goLiveMonth ? scope.month < goLiveMonth : importedCount > 0;
-  const expectedWindows = notTracked ? [] : expectedWindowsFor(params, scope.month, freq, portalWindowsSeen);
+  // Per expected window: 'old' = entirely before the portal go-live (or, with no portal capture yet, a month holding
+  // imported history) -> one "Not tracked" row; 'part-old' = it holds imported captures or began before go-live ->
+  // outlets are listed, but a CLOSED one reads PART_OLD_APP_STATUS instead of "Missed"; else normal.
+  const expectedAll = expectedWindowsFor(params, scope.month, freq);
   const windowInfo = new Map(
-    expectedWindows.map((w) => [w, { ...windowRangeUtc(w, freq), phase: windowPhase(w, freq, ctx.now) }] as const),
+    expectedAll.map((w) => {
+      const range = windowRangeUtc(w, freq);
+      const old = goLive ? range.end.getTime() <= goLive.getTime() : importedCount > 0;
+      const partOld = !old && (importedWindowsSeen.has(w) || (goLive !== null && range.start.getTime() < goLive.getTime()));
+      return [w, { ...range, phase: windowPhase(w, freq, ctx.now), old, partOld }] as const;
+    }),
   );
+  const oldWindows = expectedAll.filter((w) => windowInfo.get(w)!.old);
+  const expectedWindows = expectedAll.filter((w) => !windowInfo.get(w)!.old);
+  const notTracked = oldWindows.length > 0 && expectedWindows.length === 0;
+  const earlierFreqWindows = [...windowsSeen, ...(params.windowKey ? [params.windowKey] : [])]
+    .filter((w, i, a) => a.indexOf(w) === i && !isWindowInFrequency(w, freq))
+    .sort();
   let notYet = 0;
   let missed = 0;
   let notStarted = 0;
-  if (notTracked) {
-    await notCaptured.addRow([NOT_TRACKED_MESSAGE, '', '', '', '', '', '', '', '', '', params.windowKey ?? '', 'Not tracked']);
-  } else if (cfg.outletScope.length > 0 && expectedWindows.length > 0) {
+  let partOldCount = 0;
+  for (const w of oldWindows) {
+    await notCaptured.addRow([NOT_TRACKED_MESSAGE, '', '', '', '', '', '', '', '', '', w, 'Not tracked']);
+  }
+  if (cfg.outletScope.length > 0 && expectedWindows.length > 0) {
     // Outlets that existed during the period: created before its end, not deactivated before it began (today's
     // outlet type / programme are used — their history is not kept). Checked again per window below.
     const infos = [...windowInfo.values()];
@@ -801,10 +805,20 @@ async function runVisibilityCaptures(
           } else if (o.deactivatedAt) {
             continue; // an open / future window only expects outlets that are active today
           }
-          const status = info.phase === 'closed' ? 'Missed' : info.phase === 'open' ? 'Not captured yet' : 'Not started';
-          if (info.phase === 'closed') missed++;
-          else if (info.phase === 'open') notYet++;
-          else notStarted++;
+          let status: string;
+          if (info.phase === 'closed' && info.partOld) {
+            status = PART_OLD_APP_STATUS;
+            partOldCount++;
+          } else if (info.phase === 'closed') {
+            status = 'Missed';
+            missed++;
+          } else if (info.phase === 'open') {
+            status = 'Not captured yet';
+            notYet++;
+          } else {
+            status = 'Not started';
+            notStarted++;
+          }
           await notCaptured.addRow([
             o.outletCode,
             o.name,
@@ -841,6 +855,7 @@ async function runVisibilityCaptures(
       : ([
           ['Not captured yet (window still open)', notYet],
           ['Missed (window closed, no capture)', missed],
+          ['No approved record (window partly on the old app)', partOldCount],
           ['Not started (window has not begun)', notStarted],
         ] as Array<[string, number]>)),
     ['', ''],
@@ -850,6 +865,7 @@ async function runVisibilityCaptures(
     ['Needs re-take', 'At least one photo was rejected. The rep must re-take it; the reason is in "Overall remark" and in the photo\'s own Reason column.'],
     ['Rejected', 'The whole visit was rejected by the reviewer. The rep must capture it again.'],
     ['Not captured yet / Missed / Not started', 'Not captured sheet: an in-scope outlet with no visit for the window — "Not captured yet" while the window is open (India time), "Missed" once it has closed, "Not started" when the window has not begun yet.'],
+    ['No approved record — part of this window was on the old app', 'Not captured sheet: a closed window that was partly on the old app (it holds imported visits or began before this portal went live). The old app only sent approved visits, so the outlet may have been visited and not approved — it is not counted as Missed.'],
     ['', ''],
     ['COLUMNS', ''],
     ['Source', `"${SOURCE_PORTAL}" = captured in this portal. "${SOURCE_IMPORTED}" = history brought over from the previous app (no rep, location or review history was recorded there).`],
@@ -878,11 +894,17 @@ async function runVisibilityCaptures(
     [
       'NOT CAPTURED',
       notTracked
-        ? `This month is imported old-app history${goLiveMonth ? ` (the portal went live in ${monthLabel(goLiveMonth)})` : ''}. The old app only sent approved visits, so missing visits cannot be told apart from rejected ones — the sheet is not filled for imported months.`
+        ? `This month is imported old-app history${goLive ? ` (the portal went live on ${istHumanDateTime(goLive)})` : ''}. The old app only sent approved visits, so missing visits cannot be told apart from rejected ones — the sheet is not filled for imported months.`
         : cfg.outletScope.length === 0
           ? 'No outlet types are in the Visibility scope yet, so no outlet is listed as not captured.'
-          : "Outlets in the Visibility scope (same rule as the report screen) that existed during the window: created before the window ended and not deactivated before it began. Outlet type and programme are today's values. Only active assigned reps are shown.",
+          : `Outlets in the Visibility scope (same rule as the report screen) that existed during the window: created before the window ended and not deactivated before it began. Outlet type and programme are today's values. Only active assigned reps are shown.${goLive ? ` This portal went live on ${istHumanDateTime(goLive)}; earlier windows are old-app history.` : ''}${oldWindows.length ? ` Not tracked (old app only): ${oldWindows.join(', ')}.` : ''}`,
     ],
+    ...(earlierFreqWindows.length
+      ? ([[
+          'EARLIER FREQUENCY',
+          `${earlierFreqWindows.join(', ')} ${earlierFreqWindows.length === 1 ? 'is a window' : 'are windows'} from an earlier capture frequency (the programme now captures ${freq === 1 ? 'once' : `${freq} times`} a month). Their visits are listed, but their dates and missing-outlet list are not available, so they have no rows on the Not captured sheet.`,
+        ]] as Array<[string, string]>)
+      : []),
   ];
   for (const r of aboutRows) await about.addRow(r);
 

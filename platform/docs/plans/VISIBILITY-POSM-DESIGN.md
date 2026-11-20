@@ -332,13 +332,18 @@ Export kind `visibility-captures` (`api/src/exports/kinds/batch1/visibility-capt
 - **Sheet "Not captured"** — in-scope outlets (the SAME `visibilityAddressableOutletWhere` as the coverage tiles, with
   its `activeDuring` option: created before the window ended, not deactivated before it began; type/programme are
   today's values) with no capture for an expected window: assigned ACTIVE rep(s) + manager; status **"Not captured
-  yet"** (window open, IST), **"Missed"** (closed) or **"Not started"** (not begun). Expected windows = today's
-  frequency (history not stored) ∪ windows that have portal captures that month. **Imported months** (before the
-  portal go-live = the first month with a capture that has a rep; or, with none yet, a month holding imported
-  history) get ONE row "Not tracked for imported months — the old app's records only include approved visits", also
-  explained on About.
-- **400s** (endpoint `assertExportScope`, re-checked in the run): a future month/window; a window the frequency has no
-  period for (P2 on a monthly programme) unless captures exist for that key. The admin month picker stops at the
+  yet"** (window open, IST), **"Missed"** (closed) or **"Not started"** (not begun). Expected windows = the CURRENT
+  frequency's windows only (history not stored). Classified per WINDOW against the portal go-live instant
+  (`visibilityPortalGoLive`, `api/src/visibility/visibility-portal-go-live.ts` = MIN(receivedAt) of captures with no
+  `/vendor-import/` photo — imported is ALWAYS recognised by that photo path, never by "no rep"):
+  window ended before go-live → one row "Not tracked for imported months — the old app's records only include approved
+  visits"; window holding imported captures or begun before go-live ("part old-app") → outlets listed, but a CLOSED one
+  reads **"No approved record — part of this window was on the old app (it only sent approved visits)"** instead of
+  Missed (counted on About); windows fully after go-live as above. A window from an EARLIER frequency (P3 when the
+  programme is now monthly) lists its visits but has no Not-captured rows and no guessed dates (About explains).
+- **400s** (endpoint `assertExportScope`, re-checked in the run): a malformed window ("That window isn't valid."); a
+  future month/window; a window the frequency has no period for (P2 on a monthly programme) unless captures exist for
+  that key. The admin month picker stops at the
   current India month.
 - **Current-version review info:** a per-photo approval older than the current version's submission is shown as
   "Approved (earlier version)"; the visit-level Reviewed by/on only uses reviews of the current version (blank while
@@ -351,8 +356,8 @@ Export kind `visibility-captures` (`api/src/exports/kinds/batch1/visibility-capt
   `pickTenantDomain` + `tenantPortalLink` (`api/src/tickets/ticket-link.ts`, the ticket-email rule: strictly the
   isPrimary domain, never a staging/uat host in prod, fallback `<slug>.gifsy.in`; staging → `uat-` host; local → the
   request origin). Target = the platform page `app/visibility/photo/page.tsx`: a signed-in PAGE that renders for ANY
-  signed-in role (no proxy ROLE_ROUTES entry; NOT public — no session → sign-in with `next`; sign-in return-to admits
-  GIFSY_ADMIN, GIFSY_STAFF, CLIENT_ADMIN, SALES_*). It loads `/api/visibility/captures/media?key=` (role-gated,
+  signed-in role (no proxy ROLE_ROUTES entry; NOT public — no session → sign-in with `next`; after sign-in EVERY role
+  returns to the photo, so a role without access reads the message). It loads `/api/visibility/captures/media?key=` (role-gated,
   tenant-pinned; another tenant's key → **403**, decided from the key alone), shows it full-width with Download, and
   says "You don't have access to this photo" (403 — incl. MIS / partner / vendor) / "Photo not found" (404 / no key);
   an image the browser can't render → "can't be displayed in the browser" + Download.

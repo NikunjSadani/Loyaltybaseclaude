@@ -14,20 +14,19 @@ export function windowPeriod(windowKey: string): number {
 }
 
 /**
- * The frequency to read a window's day bounds with: the tenant's frequency when the window exists under it, else the
- * smallest frequency that has that period (a window captured under an older, higher frequency still has real bounds).
+ * True when the window exists under the tenant's CURRENT frequency. A window outside it comes from an earlier
+ * frequency — the frequency history is not stored, so its day range is unknown and is never guessed.
  */
-function boundsFreq(windowKey: string, freq: number): number {
+export function isWindowInFrequency(windowKey: string, freq: number): boolean {
   const p = windowPeriod(windowKey);
-  if (!Number.isFinite(p)) return freq;
-  return p <= freq ? freq : Math.min(Math.max(p, 1), 4);
+  return Number.isFinite(p) && p >= 1 && p <= freq;
 }
 
-/** The window's [start, end) as UTC instants of its IST calendar days. */
+/** The window's [start, end) as UTC instants of its IST calendar days (current-frequency windows only — throws else). */
 export function windowRangeUtc(windowKey: string, freq: number): { start: Date; end: Date } {
   const m = WINDOW_RE.exec(windowKey);
   if (!m) throw new Error(`Invalid window key "${windowKey}"`);
-  const { startDay, endDay } = windowBoundsForKey(windowKey, boundsFreq(windowKey, freq));
+  const { startDay, endDay } = windowBoundsForKey(windowKey, freq);
   const y = Number(m[1]);
   const mo = Number(m[2]) - 1;
   const off = IST_OFFSET_MIN * 60_000;
@@ -52,6 +51,7 @@ export function visibilityReportScopeError(
   now: Date,
   windowHasCaptures: boolean,
 ): string | null {
+  if (params.windowKey && !Number.isFinite(windowPeriod(params.windowKey))) return "That window isn't valid.";
   const current = istMonthKey(now);
   const month = params.windowKey ? params.windowKey.slice(0, 7) : params.month;
   if (month && month > current) return 'The report cannot be prepared for a future month.';

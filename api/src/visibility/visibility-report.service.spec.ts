@@ -186,6 +186,10 @@ describe('VisibilityReportService', () => {
       mockPrisma.visibilityCapture.count.mockResolvedValue(3);
       await expect(service.assertExportScope('t1', { windowKey: '2026-11-P2' }, now)).resolves.toBeUndefined();
     });
+    it('a malformed window key gives a plain 400 (never PNaN)', async () => {
+      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
+      await expect(service.assertExportScope('t1', { windowKey: '2026-11-X' }, now)).rejects.toThrow("That window isn't valid.");
+    });
     it('a future month / future window → 400; this month and past months are fine', async () => {
       mockPrisma.visibilityCapture.count.mockResolvedValue(0);
       await expect(service.assertExportScope('t1', { month: '2026-12' }, now)).rejects.toBeInstanceOf(BadRequestException);

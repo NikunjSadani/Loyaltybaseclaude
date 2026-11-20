@@ -82,6 +82,12 @@ function fakePrisma(db: Db) {
   };
   return {
     calls,
+    // visibilityPortalGoLive: MIN(receivedAt) over captures with no /vendor-import/ photo.
+    $queryRaw: async () => {
+      const portal = ownCaptures().filter((c) => !JSON.stringify(c.formValues ?? {}).includes('/vendor-import/'));
+      const min = portal.reduce<Date | null>((m, c) => (!m || c.receivedAt < m ? c.receivedAt : m), null);
+      return [{ goLive: min }];
+    },
     client: { findUnique: async () => (db.features ? { features: db.features } : null) },
     clientDomain: {
       findMany: async (a: any) => db.domains.filter((d) => d.clientId === a.where.clientId).map(({ domain, isPrimary }) => ({ domain, isPrimary })),
@@ -95,11 +101,6 @@ function fakePrisma(db: Db) {
     },
     visibilityCapture: {
       count: async (a: any) => db.captures.filter((c) => matchCapture(c, a.where)).length,
-      findFirst: async (a: any) => {
-        log('visibilityCapture.findFirst', a);
-        const rows = ownCaptures().filter((c) => c.submittedBySalesUserId !== null).sort((x, y) => cmp(x.windowKey, y.windowKey));
-        return rows[0] ? { windowKey: rows[0].windowKey } : null;
-      },
       findMany: async (a: any) => {
         log('visibilityCapture.findMany', a);
         let rows = db.captures.filter((c) => matchCapture(c, a.where));
@@ -447,17 +448,18 @@ describe('visibility report export (visibility-captures)', () => {
     const rows = sheet('Not captured').slice(1);
     expect(rows).toHaveLength(1);
     expect(rows[0][0]).toBe("Not tracked for imported months — the old app's records only include approved visits");
+    expect(rows[0][10]).toBe('2026-10-P1');
     expect(rows[0][11]).toBe('Not tracked');
     expect(rowCount).toBe(1);
     const about = Object.fromEntries(sheet('About').slice(1).map((r) => [String(r[0]).trim(), r[1]]));
-    expect(String(about['NOT CAPTURED'])).toContain('portal went live in November 2026');
+    expect(String(about['NOT CAPTURED'])).toContain('portal went live on 05 Nov 2026, 3:01 pm');
     expect(about['Missed (window closed, no capture)']).toBeUndefined();
   });
 
   it('Not captured: a CLOSED portal month → "Missed" only for outlets that existed and were active then', async () => {
     const db = baseDb();
     // Portal go-live earlier (September) so October is a tracked portal month.
-    db.captures.push({ ...db.captures[0], id: 'sep1', windowKey: '2026-09-P1', outletCode: 'A001' });
+    db.captures.push({ ...db.captures[0], id: 'sep1', windowKey: '2026-09-P1', outletCode: 'A001', receivedAt: at('2026-09-05T06:00:00Z') });
     db.outlets.find((o) => o.id === 'o5')!.createdAt = new Date('2026-11-05T00:00:00Z'); // created after October
     db.outlets.find((o) => o.id === 'o3')!.deactivatedAt = new Date('2026-09-15T00:00:00Z'); // gone before October
     db.outlets.find((o) => o.id === 'o4')!.deactivatedAt = new Date('2026-10-20T00:00:00Z'); // active during October
@@ -484,6 +486,51 @@ describe('visibility report export (visibility-captures)', () => {
     expect(rows).toContainEqual(['A005', '2026-11-P2', 'Not started']);
     expect(rows).toContainEqual(['A001', '2026-11-P2', 'Not started']);
     expect(rows.some((r) => r[1] === '2026-11-P3')).toBe(false);
+  });
+
+  it('go-live month, CLOSED window holding imported history → "No approved record — part … old app", never "Missed"', async () => {
+    const db = baseDb(); // November: imported c3 (old app) + portal captures from 05 Nov
+    const { sheet } = await run(db, { month: '2026-11' }, new Date('2026-12-02T06:00:00Z'));
+    const rows = sheet('Not captured').slice(1);
+    expect(rows.map((r) => [r[0], r[10], r[11]])).toEqual([
+      ['A005', '2026-11-P1', 'No approved record — part of this window was on the old app (it only sent approved visits)'],
+    ]);
+    const about = Object.fromEntries(sheet('About').slice(1).map((r) => [String(r[0]).trim(), r[1]]));
+    expect(about['No approved record (window partly on the old app)']).toBe(1);
+    expect(about['Missed (window closed, no capture)']).toBe(0);
+  });
+
+  it('a window that BEGAN before go-live is part old-app even without imported captures in it', async () => {
+    const db = baseDb();
+    db.captures = db.captures.filter((c) => c.id !== 'c3'); // no imported capture in November at all
+    db.captures.push({ ...db.captures[2], id: 'imp-oct', windowKey: '2026-10-P1', outletCode: 'A003', outletId: 'o3',
+      formValues: { w1: 'visibility-media/bajaj/vendor-import/prod/b1/A003/2026-10_v1.jpg' } });
+    const { sheet } = await run(db, { month: '2026-11' }, new Date('2026-12-02T06:00:00Z'));
+    const statuses = sheet('Not captured').slice(1).map((r) => r[11]);
+    expect(statuses.length).toBeGreaterThan(0);
+    expect(statuses.every((st) => String(st).startsWith('No approved record'))).toBe(true); // window began 01 Nov < go-live 05 Nov
+  });
+
+  it('imported = /vendor-import/ photo path, even when the import recorded a rep', async () => {
+    const db = baseDb();
+    db.captures.find((c) => c.id === 'c3')!.submittedBySalesUserId = 'su-rep';
+    const { rowOf } = await run(db);
+    expect(rowOf('A003')('Source')).toBe('Imported (old app)');
+  });
+
+  it('earlier-frequency window: its visits are listed, no Not captured rows for it, About explains', async () => {
+    const db = baseDb();
+    db.captures.push({ ...db.captures[0], id: 'p3', windowKey: '2026-11-P3', outletCode: 'A001' });
+    const { sheet, rowOf } = await run(db, { month: '2026-11' });
+    expect(sheet('Visibility').some((r) => r[0] === 'A001' && r[7] === '2026-11-P3')).toBe(true);
+    expect(rowOf('A001')('Window')).toBeDefined();
+    expect(sheet('Not captured').slice(1).some((r) => r[10] === '2026-11-P3')).toBe(false);
+    const about = Object.fromEntries(sheet('About').slice(1).map((r) => [String(r[0]).trim(), r[1]]));
+    expect(String(about['EARLIER FREQUENCY'])).toContain('2026-11-P3');
+    // Asking for that window directly: listed, still no guessed Missed rows.
+    const one = await run(db, { windowKey: '2026-11-P3' });
+    expect(one.sheet('Visibility')).toHaveLength(2);
+    expect(one.sheet('Not captured')).toHaveLength(1);
   });
 
   it('400: a window the programme frequency does not have (P2 on a monthly programme, no captures)', async () => {
