@@ -71,7 +71,8 @@ describe('AdminCoreService.dashboardKpis — program filter', () => {
         status: { in: expect.any(Array) },
       });
       expect(mockPrisma.visibilityCapture.count).toHaveBeenCalledWith({ where: { clientId: 'bajaj', status: 'SUBMITTED' } });
-      expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where).toEqual({ partner: { clientId: 'bajaj' } });
+      // Audit item 1 (2026-11-19): liability sums POSITIVE balances only (same total when no wallet is negative).
+      expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where).toEqual({ partner: { clientId: 'bajaj' }, redeemablePoints: { gt: 0 } });
       expect(mockPrisma.payoutTransaction.groupBy.mock.calls[0][0].where).toEqual({ partner: { clientId: 'bajaj' } });
     }
   });
@@ -91,7 +92,7 @@ describe('AdminCoreService.dashboardKpis — program filter', () => {
     expect(mockPrisma.visibilityCapture.count.mock.calls[0][0].where).toEqual({
       clientId: 'bajaj', status: 'SUBMITTED', outlet: { programName: variants },
     });
-    expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where).toEqual({ partner: { clientId: 'bajaj', ...some } });
+    expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where).toEqual({ partner: { clientId: 'bajaj', ...some }, redeemablePoints: { gt: 0 } });
     expect(mockPrisma.payoutTransaction.groupBy.mock.calls[0][0].where).toEqual({ partner: { clientId: 'bajaj', ...some } });
     // availablePrograms is the full tenant list, not narrowed by the filter.
     expect(mockPrisma.outlet.findMany.mock.calls[0][0].where).toEqual({ clientId: 'bajaj', deletedAt: null, programName: { not: null } });
@@ -107,5 +108,48 @@ describe('AdminCoreService.dashboardKpis — program filter', () => {
   it('rejects an over-long or repeated program param', async () => {
     await expect(svc.dashboardKpis(user, 'x'.repeat(201))).rejects.toBeInstanceOf(BadRequestException);
     await expect(svc.dashboardKpis(user, ['a', 'b'])).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+describe('AdminCoreService.dashboardKpis — owner decisions D1/D2 (points owed, every tenant)', () => {
+  it('liability = Σ positive balances; points owed = Σ |negative balances| + how many wallets, never netted', async () => {
+    jest.clearAllMocks();
+    mockPrisma.channelPartner.count.mockResolvedValue(7);
+    mockPrisma.kycSubmission.count.mockResolvedValue(3);
+    mockPrisma.visibilityCapture.count.mockResolvedValue(2);
+    mockPrisma.payoutTransaction.groupBy.mockResolvedValue([]);
+    mockPrisma.outlet.findMany.mockResolvedValue([]);
+    mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(true);
+    mockPrisma.wallet.aggregate
+      .mockResolvedValueOnce({ _sum: { redeemablePoints: 900 } })
+      .mockResolvedValueOnce({ _sum: { redeemablePoints: -2986 }, _count: { _all: 2 } });
+    const mod = await Test.createTestingModule({
+      providers: [
+        AdminCoreService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: TenantService, useValue: { resolveClient: jest.fn() } },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
+        { provide: SalesNotificationsService, useValue: {} },
+      ],
+    }).compile();
+    const res = await mod.get(AdminCoreService).dashboardKpis(user, undefined);
+    expect(res).toMatchObject({ totalRedeemablePoints: 900, totalOwedPoints: 2986, owedWallets: 2 });
+    expect(mockPrisma.wallet.aggregate.mock.calls[1][0].where).toEqual({ partner: { clientId: 'bajaj' }, redeemablePoints: { lt: 0 } });
+  });
+
+  it('a tenant with no negative wallet (Deoleo) → owed 0 / 0, liability unchanged', async () => {
+    jest.clearAllMocks();
+    mockPrisma.wallet.aggregate.mockResolvedValueOnce({ _sum: { redeemablePoints: 900 } }).mockResolvedValueOnce({ _sum: { redeemablePoints: null }, _count: { _all: 0 } });
+    const mod = await Test.createTestingModule({
+      providers: [
+        AdminCoreService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: TenantService, useValue: { resolveClient: jest.fn() } },
+        { provide: TenantSettingsService, useValue: mockTenantSettings },
+        { provide: SalesNotificationsService, useValue: {} },
+      ],
+    }).compile();
+    const res = await mod.get(AdminCoreService).dashboardKpis(user, undefined);
+    expect(res).toMatchObject({ totalRedeemablePoints: 900, totalOwedPoints: 0, owedWallets: 0 });
   });
 });

@@ -13,7 +13,7 @@ import {
  * different set of cards than the outlet sees itself (owner-approved, platform-wide, 2026-11-19).
  *
  * Presence-based, never keyed off a single "mode": a partner can hold points AND payouts.
- *   - hasPointsActivity: the partner's Wallet has redeemablePoints > 0 OR lifetimeEarned > 0,
+ *   - hasPointsActivity: the partner's Wallet has redeemablePoints ≠ 0 OR lifetimeEarned > 0,
  *     OR any PointsLedger row exists for that wallet.
  *   - hasPayoutActivity: any CreditPayoutEntry (PENDING/PROCESSING/PAID) for one of the partner's
  *     outlets, OR any non-FAILED/REVERSED PayoutTransaction for the partner — the SAME status set
@@ -88,7 +88,9 @@ export async function resolveOutletWalletActivity(
     select: { id: true, redeemablePoints: true, lifetimeEarned: true },
   });
   let hasPointsActivity =
-    !!wallet && (wallet.redeemablePoints > 0 || wallet.lifetimeEarned > 0);
+    // Fix round 3 (B-risk, 2026-11-19): a NEGATIVE balance is points activity too (owner decision 2 — the outlet sees
+    // it as it is), even with lifetimeEarned 0 and no ledger row (an imported negative opening).
+    !!wallet && (wallet.redeemablePoints !== 0 || wallet.lifetimeEarned > 0);
   if (!hasPointsActivity && wallet) {
     const ledgerRow = await db.pointsLedger.findFirst({
       where: { walletId: wallet.id },

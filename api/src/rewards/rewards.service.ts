@@ -435,6 +435,17 @@ function cappedFulfilmentErrors<T>(errors: T[]): { errors: T[]; errorsTruncated:
   return { errors: e.problemRows, errorsTruncated: e.problemRowsTruncated };
 }
 
+/**
+ * Fix round 3 (B6, 2026-11-19): a NEGATIVE balance is never shown as "Available: −2986" — it is said plainly
+ * (owner decision 2). A balance at or above zero keeps the existing wording exactly.
+ */
+export function insufficientPointsMessage(required: number, balance: number): string {
+  if (balance < 0) {
+    return `Not available while the balance is negative (−${new Intl.NumberFormat('en-IN').format(-balance)} pts) — it's repaid from the next earnings.`;
+  }
+  return `Insufficient points. Required: ${required}, Available: ${balance}`;
+}
+
 @Injectable()
 export class RewardsService {
   private readonly logger = new Logger(RewardsService.name);
@@ -1622,9 +1633,7 @@ export class RewardsService {
     const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: partner.id } });
     if (!wallet) throw new NotFoundException('Wallet not found');
     if (wallet.redeemablePoints < requiredPoints) {
-      throw new BadRequestException(
-        `Insufficient points. Required: ${requiredPoints}, Available: ${wallet.redeemablePoints}`,
-      );
+      throw new BadRequestException(insufficientPointsMessage(requiredPoints, wallet.redeemablePoints));
     }
 
     const addr = dto.deliveryAddress;
@@ -2243,9 +2252,7 @@ export class RewardsService {
     const wallet = await this.prisma.wallet.findFirst({ where: { partnerId: activePartnerId } });
     if (!wallet) throw new NotFoundException('Wallet not found');
     if (wallet.redeemablePoints < requiredPoints) {
-      throw new BadRequestException(
-        `Insufficient points. Required: ${requiredPoints}, Available: ${wallet.redeemablePoints}`,
-      );
+      throw new BadRequestException(insufficientPointsMessage(requiredPoints, wallet.redeemablePoints));
     }
 
     // Owner name for the ship-to fallback (audit HIGH#2) — a vendor must get a real

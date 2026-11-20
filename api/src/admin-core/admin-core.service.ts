@@ -1997,9 +1997,11 @@ export class AdminCoreService {
           },
         }),
 
+        // Audit item 1 (2026-11-19): liability = Σ POSITIVE balances only — a negative wallet (debt) never nets
+        // against what other wallets can redeem. Unchanged for a tenant with no negative wallet (every Deoleo wallet).
         this.prisma.wallet.aggregate({
           _sum: { redeemablePoints: true },
-          where: { partner: { clientId, ...partnerScope } },
+          where: { partner: { clientId, ...partnerScope }, redeemablePoints: { gt: 0 } },
         }),
 
         this.prisma.payoutTransaction.groupBy({
@@ -2022,6 +2024,16 @@ export class AdminCoreService {
     const pendingVisibility = visibilityEnabled ? pendingVisibilityRaw : 0;
 
     const totalRedeemablePoints = walletAggregate._sum.redeemablePoints ?? 0;
+    // Owner decisions D1/D2 (2026-11-19, every tenant): "points owed" = how far below zero balances are — Σ |negative
+    // balances| over the scoped wallets, with how many wallets — shown next to the liability, never netted into it.
+    const owedAggregate = await this.prisma.wallet.aggregate({
+      _sum: { redeemablePoints: true },
+      _count: { _all: true },
+      where: { partner: { clientId, ...partnerScope }, redeemablePoints: { lt: 0 } },
+    });
+    const negSum = owedAggregate?._sum?.redeemablePoints ?? 0;
+    const totalOwedPoints = Math.max(0, -negSum);
+    const owedWallets = totalOwedPoints > 0 ? owedAggregate?._count?._all ?? 0 : 0;
 
     const payoutSummary: Record<string, { count: number; amountPaise: number }> = {};
     for (const g of payoutGroups) {
@@ -2036,6 +2048,8 @@ export class AdminCoreService {
       pendingKyc,
       pendingVisibility,
       totalRedeemablePoints,
+      totalOwedPoints,
+      owedWallets,
       payoutSummary,
       // Additive (program filter): the echo of the applied filter, the dropdown source, and the
       // metrics that could NOT be program-scoped (none — every figure joins to an outlet).

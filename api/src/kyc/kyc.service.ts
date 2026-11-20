@@ -1,4 +1,5 @@
 import type { Readable } from 'node:stream';
+import { negativeBalanceSignals } from '../wallet/negative-balance.helper';
 import {
   BadRequestException,
   ConflictException,
@@ -4434,6 +4435,8 @@ export class KycService {
             wallets: {
               select: {
                 id: true,
+                // fix round 4 (item 2): orders "which reversal caused the debt" by seq (negativeBalanceSignals)
+                movementSeq: true,
                 earnedPoints: true,
                 lockedPoints: true,
                 redeemablePoints: true,
@@ -4542,6 +4545,8 @@ export class KycService {
           expiredPoints: wallet?.expiredPoints ?? 0,
           lifetimeEarned: wallet?.lifetimeEarned ?? 0,
           lifetimeRedeemed: wallet?.lifetimeRedeemed ?? 0,
+          // Owner decision 2 (2026-11-19): a NEGATIVE wallet says what is owed (same helper as GET /v1/wallet).
+          ...(await negativeBalanceSignals(this.prisma, wallet)),
         },
       },
       // The FULL points statement in the SAME shape as GET /v1/wallet/statement (oldest first,

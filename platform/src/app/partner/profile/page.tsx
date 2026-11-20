@@ -10,7 +10,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { Modal } from '@/components/ui/modal';
-import { formatPoints, maskAccountNumber } from '@/lib/utils';
+import { maskAccountNumber } from '@/lib/utils';
+import { formatSignedPoints, negativeBalanceNote } from '@/lib/wallet-negative';
 import { KYCStatus } from '@/types';
 import { usePartnerIdentity } from '@/lib/partner-identity';
 import { api } from '@/lib/api-client';
@@ -28,7 +29,7 @@ interface ProfileData {
     gstNumber: string;
     panNumber: string;
   };
-  wallet: { redeemable: number; locked: number };
+  wallet: { redeemable: number; locked: number; owedFromReversal?: boolean };
   /** Beneficiary on file (from /auth/me). Any field may be null when not captured yet. */
   bank: {
     bankName: string | null;
@@ -139,6 +140,17 @@ export default function ProfilePage() {
             // Default VERIFIED so an older record / Deoleo (no status, or always VERIFIED) shows.
             paymentDetailsStatus: cp?.paymentDetailsStatus ?? 'VERIFIED',
           });
+          // Fix round 4 (item 6): a NEGATIVE balance also reads the wallet page's own "from a reversed credit" signal.
+          if ((w?.redeemablePoints ?? 0) < 0) {
+            api
+              .get<{ owedFromReversal?: boolean }>('/api/wallet')
+              .then((r) => {
+                if (r.success && r.data?.owedFromReversal) {
+                  setProfile((p) => (p ? { ...p, wallet: { ...p.wallet, owedFromReversal: true } } : p));
+                }
+              })
+              .catch(() => {});
+          }
         } else {
           setError('Could not load your profile. Please try again.');
         }
@@ -311,10 +323,19 @@ export default function ProfilePage() {
           <CardContent>
             <div className="flex justify-center">
               <div className="text-center p-3 bg-gray-50 rounded-xl w-full">
-                <p className="text-lg font-bold text-[var(--brand-primary)]">
-                  {formatPoints(profile.wallet.redeemable)}
+                <p
+                  data-testid="profile-redeemable"
+                  className={`text-lg font-bold ${profile.wallet.redeemable < 0 ? 'text-amber-700' : 'text-[var(--brand-primary)]'}`}
+                >
+                  {formatSignedPoints(profile.wallet.redeemable)}
                 </p>
                 <p className="text-xs text-gray-500 mt-0.5">Redeemable</p>
+                {/* Owner decision 2 (2026-11-19): a negative balance is shown as it is, with what it means */}
+                {profile.wallet.redeemable < 0 && (
+                  <p data-testid="profile-negative-note" className="text-xs text-amber-700 mt-1">
+                    {negativeBalanceNote({ redeemable: profile.wallet.redeemable, owedFromReversal: profile.wallet.owedFromReversal })}
+                  </p>
+                )}
               </div>
             </div>
           </CardContent>

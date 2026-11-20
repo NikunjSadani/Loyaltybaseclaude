@@ -206,8 +206,8 @@ export class PartnerService {
    *   - outletType: the PRIMARY outlet's OutletType.code. Primary-outlet selection matches the
    *     codebase pattern — order by isPrimary desc then createdAt asc and take the first (do NOT
    *     filter isPrimary:true, which returns empty for real outlets that never set the flag).
-   *   - hasPointsActivity: the partner's Wallet has redeemablePoints > 0 OR lifetimeEarned > 0,
-   *     OR any PointsLedger row exists for that wallet.
+   *   - hasPointsActivity: the partner's Wallet has redeemablePoints ≠ 0 (a negative balance counts — fix round 3)
+   *     OR lifetimeEarned > 0, OR any PointsLedger row exists for that wallet.
    *   - hasPayoutActivity: any CreditPayoutEntry with status PAID or PENDING for one of the
    *     partner's outlets, OR any PayoutTransaction for the partner.
    */

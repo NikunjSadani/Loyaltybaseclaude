@@ -107,7 +107,7 @@ function makePrisma() {
     kycSubmission: { count: jest.fn().mockResolvedValue(0) },
     kycStatusHistory: { count: jest.fn().mockResolvedValue(0) },
     pointsLedger: { groupBy: jest.fn().mockResolvedValue([]) },
-    wallet: { count: jest.fn().mockResolvedValue(0) },
+    wallet: { aggregate: jest.fn().mockResolvedValue({ _count: { _all: 0 }, _sum: { redeemablePoints: null } }) },
     redemptionOrder: { count: jest.fn().mockResolvedValue(0) },
     redemptionStatusHistory: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
     creditBatch: { aggregate: jest.fn().mockResolvedValue(zeroAgg) },
@@ -691,6 +691,18 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     expect(wheres).toContainEqual({ clientId: 'bajaj', status: 'FAILED', finishedAt: win });
     expect(wheres).toContainEqual({ clientId: 'bajaj', status: 'FAILED', createdAt: { gt: lastReady } });
     expect(wheres.some((w: Record<string, unknown>) => 'updatedAt' in w)).toBe(false);
+  });
+
+  it('points (owner D1, round 5): negative wallets AND the points they owe come from ONE aggregate', async () => {
+    prisma.wallet.aggregate.mockResolvedValue({ _count: { _all: 8 }, _sum: { redeemablePoints: -3549 } });
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    const p = input.tenants[0].points;
+    expect(p.ok && p.data).toMatchObject({ negativeWallets: 8, owedPoints: 3549 });
+    expect(prisma.wallet.aggregate.mock.calls[0][0]).toEqual({
+      where: { redeemablePoints: { lt: 0 }, partner: { clientId: 'bajaj' } },
+      _count: { _all: true },
+      _sum: { redeemablePoints: true },
+    });
   });
 
   it('redemptions: still-open = FAILED orders still holding points', async () => {

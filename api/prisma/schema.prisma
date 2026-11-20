@@ -1446,6 +1446,9 @@ enum AccountType {
 }
 
 model Wallet {
+  // Partial index wallets_negative_balance_idx (redeemablePoints WHERE redeemablePoints < 0) lives in migration
+  // 20261119124600_wre_idx_wallets_negative_balance, not here (Prisma can't express partial indexes). Do NOT drop it:
+  // the wallets-below-zero probe relies on it (WRE fix round 5, B1).
   id                String    @id @default(cuid())
   partnerId         String    @unique
   accountId         String?   @unique // Employee Rewards Phase 1 — unified owner (additive; partnerId kept as the outlet profile)
@@ -3906,6 +3909,9 @@ model WalletCreditPosition {
 
 /// One per (POINTS CreditReversal × position) — §1.2: requested r = debtRestored p + recovered c + owed + shortfall
 /// (SQL CHECK; all ≥ 0, requested > 0). Unique per (reversal, position) → an approval can't double-apply.
+/// V2 engine since owner decisions 2026-11-19: alreadyExpired = q (X's own expired points), owed = r − p − q − c (booked
+/// as debt), shortfall 0. LEGACY on a sequenced wallet: owed 0, alreadyExpired 0, shortfall = r − c (floor 0, written off).
+/// SQL CHECK credit_reversal_allocations_parts_v2_chk: p + c + owed + shortfall + alreadyExpired = requested.
 model CreditReversalAllocation {
   id               String   @id @default(cuid())
   creditReversalId String
@@ -3913,10 +3919,24 @@ model CreditReversalAllocation {
   requested        Int // r
   debtRestored     Int // p = min(r, O_X)
   recovered        Int // c = min(r − p, H) — points actually taken from what the wallet HELD
-  // owed: a HISTORICAL clawback (backfill, Q13/Q4) that debited more than the wallet held — the excess was booked as
-  // debt ("recovered X, owed Y"), never counted as recovered. Always 0 for engine (v2) reversals.
+  // owed: points a reversal took beyond what the wallet held, booked as wallet DEBT (repaid from future earnings) —
+  // never counted as recovered, never written off. Two sources, told apart by `overReversalDebt`:
+  //  - false: a HISTORICAL clawback the WP6 backfill classified (Q13/Q4, "recovered X, owed Y" — attention banner);
+  //  - true:  a live V2 over-reversal (owner decision 2026-11-19: s = r − p − c becomes debt, nothing written off).
   owed             Int      @default(0)
-  shortfall        Int // r − p − c − owed (points already spent — R4)
+  // true ⇔ `owed` was booked by a live V2 over-reversal (owner 2026-11-19). Every row written before that rule has
+  // false — correct, because no engine row had owed > 0 before it.
+  overReversalDebt Boolean  @default(false)
+  // q — V2 (owner decision 2026-11-19, expired points are not recovered twice): the reversed credit's own points that
+  // had already EXPIRED; counted as already recovered — nothing taken, no debt. 0 for LEGACY / historical rows.
+  alreadyExpired   Int      @default(0)
+  // Fix round 3 (2026-11-19): part of `recovered` that was backing EXISTING debt — the reversal took the balance below
+  // zero by this much (B 60 / D 40 → reverse 100 → B −40). Never silent: outcome, passbook, wallets-in-debt.
+  debtExposed      Int      @default(0)
+  // Which path wrote the row: 'V2' | 'LEGACY' (live floor-0 clawback on a sequenced wallet) | 'BACKFILL' (WP6 history).
+  // NULL = written before this column existed (staging only).
+  engineSource     String?
+  shortfall        Int // r − p − c − owed − alreadyExpired (written off: LEGACY floor-0 clawbacks / historical; always 0 for V2)
   createdAt        DateTime @default(now())
 
   creditReversal CreditReversal       @relation(fields: [creditReversalId], references: [id], onDelete: Restrict)

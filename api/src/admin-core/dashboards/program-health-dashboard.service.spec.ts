@@ -175,6 +175,18 @@ describe('ProgramHealthDashboardService', () => {
     expect(empty.participation.activeRatePct).toBe(0);
   });
 
+  it('owner D1/D2: liability = Σ POSITIVE balances only; "points owed" = Σ |negative balances| + wallet count, separate', async () => {
+    mockPrisma.pointsLedger.aggregate.mockResolvedValue(aggSum('points', 0));
+    mockPrisma.wallet.aggregate
+      .mockResolvedValueOnce(aggSum('redeemablePoints', 5000)) // positive wallets only
+      .mockResolvedValueOnce({ _sum: { redeemablePoints: -2986 }, _count: { _all: 2 } }); // negative wallets
+    const res = await service.programHealth(user, PERIOD);
+    expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where.redeemablePoints).toEqual({ gt: 0 });
+    expect(mockPrisma.wallet.aggregate.mock.calls[1][0].where.redeemablePoints).toEqual({ lt: 0 });
+    expect(res.pointsEconomy.outstandingLiabilityPoints).toBe(5000);
+    expect(res.pointsEconomy).toMatchObject({ owedPoints: 2986, owedWallets: 2 });
+  });
+
   it('points-economy breakage = period EXPIRE ÷ EARN, with a /0 guard', async () => {
     // aggregate() is called 5×: EARN, REDEEM, EXPIRE, wallet-liability, expiring-30d.
     mockPrisma.pointsLedger.aggregate
@@ -392,7 +404,7 @@ describe('ProgramHealthDashboardService', () => {
           OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
         });
         expect(mockPrisma.pointsLedger.findMany.mock.calls[0][0].where.wallet).toEqual({ partner: { user: { clientId: 'deoleo' } } });
-        expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where).toEqual({ partner: { user: { clientId: 'deoleo' } } });
+        expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where).toEqual({ partner: { user: { clientId: 'deoleo' } }, redeemablePoints: { gt: 0 } }); // audit item 1: positive balances only
         expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where.partner).toEqual({ user: { clientId: 'deoleo' } });
       }
     });
@@ -409,7 +421,7 @@ describe('ProgramHealthDashboardService', () => {
         expect(call[0].where.wallet).toEqual({ partner: { user: { clientId: 'deoleo' }, ...gold } });
       }
       expect(mockPrisma.pointsLedger.findMany.mock.calls[0][0].where.wallet).toEqual({ partner: { user: { clientId: 'deoleo' }, ...gold } });
-      expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where).toEqual({ partner: { user: { clientId: 'deoleo' }, ...gold } });
+      expect(mockPrisma.wallet.aggregate.mock.calls[0][0].where).toEqual({ partner: { user: { clientId: 'deoleo' }, ...gold }, redeemablePoints: { gt: 0 } });
       expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where.partner).toEqual({ user: { clientId: 'deoleo' }, ...gold });
       expect(mockPrisma.redemptionOrder.groupBy.mock.calls[0][0].where.partner).toEqual({ user: { clientId: 'deoleo' }, ...gold });
     });

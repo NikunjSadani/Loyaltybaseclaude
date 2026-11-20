@@ -640,9 +640,12 @@ d(
 
     // ═══ T-e2 — reversal vs redemption racing ═════════════════════════════════════════════════════════════════════
     describe('T-e2 reversal vs redemption racing', () => {
-      /** T-c: −100, E +500 (B 400, O_E 100), then redeem 400 ∥ reverse E 500. Every order → B −100, D 100 (floor −(D+O_E)). */
+      /**
+       * T-c: −100, E +500 (B 400, O_E 100), then redeem 400 ∥ reverse E 500. Reversal first → B −100, D 100 (the redeem is
+       * refused). Redeem first → the 400 were spent: owner decision 2026-11-19 books them as debt → B −500, D 500.
+       */
       it.each([['redeem first'], ['reversal first']])(
-        'V2 debt wallet (T-c), %s: never below the floor, = oracle',
+        'V2 debt wallet (T-c), %s: = oracle; what was spent first is owed as debt (owner 2026-11-19)',
         async (order) => {
           const t = await tenant('V2');
           const w = await newWallet(t, { debt: 100 });
@@ -657,13 +660,9 @@ d(
           const [redeemOut, approveOut] =
             order === 'redeem first' ? out : [out[1], out[0]];
 
-          expect(approveOut.ok).toBe(true); // the reversal always goes through (shortfall if needed)
+          expect(approveOut.ok).toBe(true); // the reversal always goes through (debt if needed)
           const rep = await expectOracle(w.walletId);
           const row = await walletRow(w.walletId);
-          expect([row.redeemablePoints, row.debtPoints]).toEqual([-100, 100]);
-          expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(
-            -100,
-          ); // floor −(D0 + O_E) = −100
           const [alloc] = await allocations(r.id);
           const redeemedFirst =
             rep.kinds.indexOf('REDEEM') >= 0 &&
@@ -672,28 +671,36 @@ d(
             expect(redeemedFirst).toBe(order === 'redeem first'); // the gate fixed the lock order
           if (redeemedFirst) {
             expect(redeemOut.ok).toBe(true);
+            expect([row.redeemablePoints, row.debtPoints]).toEqual([-500, 500]);
             expect([
               alloc.debtRestored,
               alloc.recovered,
+              alloc.owed,
+              alloc.overReversalDebt,
               alloc.shortfall,
-            ]).toEqual([100, 0, 400]);
+            ]).toEqual([100, 0, 400, true, 0]);
           } else {
             expect(redeemOut.ok).toBe(false); // B −100 < 400 — refused under the lock, never overdrawn
+            expect([row.redeemablePoints, row.debtPoints]).toEqual([-100, 100]);
             expect([
               alloc.debtRestored,
               alloc.recovered,
+              alloc.owed,
+              alloc.overReversalDebt,
               alloc.shortfall,
-            ]).toEqual([100, 400, 0]);
+            ]).toEqual([100, 400, 0, false, 0]);
           }
+          // never below the no-new-debt floor −(D0 + O_E) = −100 except by the part owed
+          expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(-100 - alloc.owed);
           const cr = await prisma.creditReversal.findUniqueOrThrow({
             where: { id: r.id },
           });
-          expect(Number(cr.shortfallPaise)).toBe(alloc.shortfall);
+          expect(Number(cr.shortfallPaise)).toBe(0); // nothing written off
         },
       );
 
       it.each([['redeem first'], ['reversal first']])(
-        'V2 never-negative wallet (R2), %s: B 0, never < 0, D stays 0',
+        'V2 never-negative wallet, %s: reversal first → B 0 (redeem refused); redeem first → the spent 400 owed as debt (owner 2026-11-19)',
         async (order) => {
           const t = await tenant('V2');
           const w = await newWallet(t);
@@ -708,13 +715,17 @@ d(
           expect(out.filter((o) => o.ok).length).toBeGreaterThanOrEqual(1);
           await expectOracle(w.walletId);
           const row = await walletRow(w.walletId);
-          expect([row.redeemablePoints, row.debtPoints]).toEqual([0, 0]);
-          expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(0);
+          const [alloc] = await allocations(r.id);
+          const redeemed = out.filter((o) => o.ok).length === 2;
+          expect([row.redeemablePoints, row.debtPoints]).toEqual(redeemed ? [-400, 400] : [0, 0]);
+          expect([alloc.recovered, alloc.owed, alloc.shortfall]).toEqual(redeemed ? [100, 400, 0] : [500, 0, 0]);
+          if (db.concurrent) expect(redeemed).toBe(order === 'redeem first');
+          expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(-alloc.owed);
         },
       );
 
       itServer(
-        'V2 storm: 8 × redeem 100 ∥ reverse 1000 on a +1000 wallet → never < 0, Σ redeemed + recovered = 1000, = oracle',
+        'V2 storm: 8 × redeem 100 ∥ reverse 1000 on a +1000 wallet → Σ redeemed + recovered = 1000, the redeemed part owed as debt (owner 2026-11-19), = oracle',
         async () => {
           const t = await tenant('V2');
           const w = await newWallet(t);
@@ -731,8 +742,11 @@ d(
           await expectOracle(w.walletId);
           const [alloc] = await allocations(r.id);
           expect(oks(out.slice(0, 8)) * 100 + alloc.recovered).toBe(1000);
-          expect((await walletRow(w.walletId)).redeemablePoints).toBe(0);
-          expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(0);
+          // what was redeemed before the reversal is owed; no redemption gets through after it (B ≤ 0)
+          expect(alloc.owed).toBe(1000 - alloc.recovered);
+          const row = await walletRow(w.walletId);
+          expect([row.redeemablePoints, row.debtPoints]).toEqual([-alloc.owed, alloc.owed]);
+          expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(-alloc.owed);
         },
       );
 
@@ -876,7 +890,7 @@ d(
       // TODO(WP4): un-skip once credits.service approve routes POINTS through reverseCreditBatchPoints (V2 math on debt
       // wallets). Today patchReversal calls the LEGACY assertPointsReversalAllowed + clawbackAward directly, which
       // refuses every debt wallet (DEBT_REVERSAL_PAUSED_MESSAGE) — expected after WP4: exactly one approval, T-c result.
-      it.skip('[pending WP4] credits.service patchReversal, V2 debt wallet (T-c): 3 concurrent approvals → one allocation, B −100', async () => {
+      it.skip('[pending WP4] credits.service patchReversal, V2 debt wallet (T-c): 3 concurrent approvals → one allocation, B −500 (the spent 400 owed — owner 2026-11-19)', async () => {
         const t = await tenant('V2');
         const w = await newWallet(t, { debt: 100 });
         const b = await batch(t, [{ outletCode: w.outletCode, amount: 500 }]);
@@ -897,8 +911,9 @@ d(
         expect([
           allocs[0].debtRestored,
           allocs[0].recovered,
+          allocs[0].owed,
           allocs[0].shortfall,
-        ]).toEqual([100, 0, 400]);
+        ]).toEqual([100, 0, 400, 0]);
         expect(
           Number(
             (
@@ -907,9 +922,9 @@ d(
               })
             ).shortfallPaise,
           ),
-        ).toBe(400);
+        ).toBe(0);
         await expectOracle(w.walletId);
-        expect((await walletRow(w.walletId)).redeemablePoints).toBe(-100);
+        expect((await walletRow(w.walletId)).redeemablePoints).toBe(-500);
       });
     });
 
@@ -1044,7 +1059,7 @@ d(
     // ═══ expiry sweep vs reversal ═══════════════════════════════════════════════════════════════════════════════
     describe('expiry sweep vs reversal', () => {
       it.each([['expiry first'], ['reversal first']])(
-        'V2 debt wallet, %s → B −100, D 100, = oracle',
+        'V2 debt wallet, %s → reversal first B −100 / D 100; expiry first the expired 400 owed (B −500 / D 500 — owner 2026-11-19); = oracle',
         async (order) => {
           const t = await tenant('V2');
           const w = await newWallet(t, { debt: 100 });
@@ -1060,19 +1075,20 @@ d(
           expect(errs(out)).toEqual([]);
           const rep = await expectOracle(w.walletId);
           const row = await walletRow(w.walletId);
-          expect([row.redeemablePoints, row.debtPoints]).toEqual([-100, 100]);
           const expiredFirst = rep.kinds.includes('EXPIRY');
           if (db.concurrent)
             expect(expiredFirst).toBe(order === 'expiry first');
+          expect([row.redeemablePoints, row.debtPoints]).toEqual(expiredFirst ? [-500, 500] : [-100, 100]);
           expect(row.lifetimeExpired).toBe(expiredFirst ? 400 : 0);
           const [alloc] = await allocations(r.id);
           expect([
             alloc.debtRestored,
             alloc.recovered,
+            alloc.owed,
             alloc.shortfall,
-          ]).toEqual(expiredFirst ? [100, 0, 400] : [100, 400, 0]);
+          ]).toEqual(expiredFirst ? [100, 0, 400, 0] : [100, 400, 0, 0]);
           expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(
-            -100,
+            -100 - alloc.owed,
           );
         },
       );

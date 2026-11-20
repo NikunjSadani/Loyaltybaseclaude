@@ -39,7 +39,7 @@ import {
 } from './dto/credits.dto';
 import { HeavyOp } from '../common/heavy-op-limiter';
 import { WalletService } from '../wallet/wallet.service';
-import { ReversalAttentionQueryDto, ReversalEngineModeDto, ReversalPauseDto } from './dto/reversal-engine.dto';
+import { ReversalAttentionQueryDto, ReversalEngineModeDto, ReversalPauseDto, WalletsInDebtQueryDto } from './dto/reversal-engine.dto';
 
 /**
  * Awards & Credits (§12a) — re-homed from
@@ -360,6 +360,15 @@ export class CreditsController {
   @RequirePermission('credits:read')
   reversalAttention(@CurrentUser() user: JwtPayload, @Query() query: ReversalAttentionQueryDto) {
     return this.wallet.reversalAttention(user.clientId, { limit: query.limit });
+  }
+
+  // Audit item 9 (2026-11-19): every wallet of the tenant in debt (negative / recorded debt) with the reversal(s)
+  // behind it — the "Wallets in debt" section of the credits reversal screen (no silent pass-throughs).
+  @Get('reversal-engine/wallets-in-debt')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  walletsInDebt(@CurrentUser() user: JwtPayload, @Query() query: WalletsInDebtQueryDto) {
+    return this.wallet.walletsInDebt(user.clientId, { limit: query.limit, programName: query.programName });
   }
 
   // GIFSY lifts (or sets) the POINTS reversal maintenance pause by hand — e.g. after a crashed backfill run.

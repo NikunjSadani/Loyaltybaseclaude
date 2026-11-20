@@ -239,6 +239,12 @@ describe('resolveOutletWalletActivity', () => {
     ).toBe(true);
   });
 
+  it('fix round 3 (B-risk): a NEGATIVE balance shows the points card even with lifetime 0 and no ledger row', async () => {
+    expect(
+      (await run(fixture({ wallets: [wallet({ redeemablePoints: -841 })] }))).hasPointsActivity,
+    ).toBe(true);
+  });
+
   it('payout transactions: FAILED and REVERSED do NOT count; any other status does', async () => {
     const pt = (status: string) =>
       fixture({ payoutTransactions: [{ id: 't', partnerId: 'p1', status }] });

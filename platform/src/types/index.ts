@@ -289,6 +289,8 @@ export interface WalletTransaction {
   narration?: string;
   reversedById?: string | null;
   reversalReason?: string | null;
+  /** The credit reversal behind a "Credit reversed" passbook row (admin / sales views show it as a reference). */
+  reversalRef?: string | null;
   createdAt: Date;
 }
 
@@ -619,6 +621,10 @@ export interface WalletBalance {
   redeemed: number;
   expired: number;
   available: number;
+  /** Negative wallets only (owner decision 2, 2026-11-19): points owed = −redeemable. */
+  owedPoints?: number;
+  /** Negative wallets only: the debt comes from a reversed credit (V2 over-reversal). */
+  owedFromReversal?: boolean;
 }
 
 // ─── TDS Computation Result ───────────────────────────────────────────────────

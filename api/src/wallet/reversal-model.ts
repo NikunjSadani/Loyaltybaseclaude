@@ -38,6 +38,13 @@ export interface CreditPosition {
   reversed: number;
   /** mirror of the credit's own lot remainingPoints */
   lotRemaining: number;
+  /**
+   * E_X — points of THIS credit that EXPIRED from the balance (its own lot's expiries, e only — the part that
+   * repaid debt went to O_X). Owner decision 2026-11-19: they count as already recovered. Absent = 0.
+   */
+  expired?: number;
+  /** ε_X — how much of E_X earlier reversals of X already counted (never counted twice). Absent = 0. */
+  expiredCounted?: number;
 }
 
 export interface Lot {
@@ -82,8 +89,23 @@ export interface Movement {
   /** position whose O changed (credit itself, expiring lot's owner, reversed credit) */
   offsetPositionId: string | null;
   lotDraws: LotDraw[];
-  /** reversal only: r − p − c (points already spent) */
+  /**
+   * reversal only: points written off. ALWAYS 0 since owner decision 2026-11-19 (over-reversal becomes debt): the
+   * part a wallet no longer holds is `owed` (booked as debt, repaid from future earnings), never written off.
+   */
   shortfall: number;
+  /** reversal only: s = r − p − q − c — the part the wallet no longer held (already spent), booked as debt D (owner 2026-11-19) */
+  owed: number;
+  /**
+   * reversal only: q = min(r − p, E_X − ε_X) — X's own points that already EXPIRED: counted as already recovered,
+   * nothing taken and no debt for them (owner decision 2026-11-19, expired points are not recovered twice).
+   */
+  alreadyExpired: number;
+  /**
+   * reversal only (fix round 3, 2026-11-19): the part of c that was backing EXISTING debt — how much further below zero
+   * the balance went than p + s explain (B 60 / D 40, reverse 100 → c 100, B −40 → 40). Informational: c includes it.
+   */
+  debtExposed: number;
   /** reversal only: p (debt restored) */
   debtRestored: number;
   /** reversal only: c (recovered from holdings) */
@@ -147,6 +169,9 @@ function movement(
     offsetPositionId: null,
     lotDraws: [],
     shortfall: 0,
+    owed: 0,
+    alreadyExpired: 0,
+    debtExposed: 0,
     debtRestored: 0,
     recovered: 0,
   };
@@ -278,6 +303,8 @@ export function expire(m0: WalletModel, lotId: string): Step {
   drawFromLot(m, lot, h, mv.lotDraws);
   if (lot.creditId && m.positions[lot.creditId]) {
     m.positions[lot.creditId].offset += x;
+    // owner 2026-11-19: X's expired points count as already recovered by a later reversal of X
+    m.positions[lot.creditId].expired = (m.positions[lot.creditId].expired ?? 0) + e;
     mv.offsetDelta = x;
     mv.offsetPositionId = lot.creditId;
   }
@@ -301,9 +328,14 @@ export function legacyDebtDebit(m0: WalletModel, d: number): Step {
 }
 
 /**
- * Reversal of X by r ≤ a_X − ρ_X:
- *   p = min(r, O_X); c = min(r − p, H); B −= p + c; D += p; O_X −= p; ρ_X += r; shortfall r − p − c.
- * The recovered part c consumes X's OWN lot first, then FIFO (§4 / Q7).
+ * Reversal of X by r ≤ a_X − ρ_X (owner decisions 2026-11-19 — over-reversal becomes debt; expired points are not
+ * recovered twice):
+ *   p = min(r, O_X)                 debt X had repaid comes back
+ *   q = min(r − p, E_X − ε_X)       X's own points that already EXPIRED — already recovered: nothing taken, no debt
+ *   c = min(r − p − q, H)           taken from what the wallet holds (X's OWN lot first, then FIFO — §4 / Q7)
+ *   s = r − p − q − c               already spent → owed, booked as debt, repaid from future earnings
+ *   B −= r − q; D += p + s; O_X −= p; ε_X += q; ρ_X += r; shortfall 0 (nothing is written off).
+ * p, q and s touch no lot (H drops by exactly c). p and q are private to X, so R3 (order independence) still holds.
  */
 export function reverse(m0: WalletModel, creditId: string, r: number): Step {
   assertPosInt(r, 'reversal amount');
@@ -319,32 +351,42 @@ export function reverse(m0: WalletModel, creditId: string, r: number): Step {
   const pos = m.positions[creditId];
   const H = holdings(m.state);
   const p = Math.min(r, pos.offset);
-  const c = Math.min(r - p, H);
-  const sf = r - p - c;
-  m.state.B -= p + c;
-  m.state.D += p;
+  const q = Math.min(r - p, Math.max(0, (pos.expired ?? 0) - (pos.expiredCounted ?? 0)));
+  const c = Math.min(r - p - q, H);
+  const s = r - p - q - c;
+  const negBefore = Math.max(0, -m.state.B);
+  m.state.B -= r - q;
+  const exposed = Math.max(0, Math.max(0, -m.state.B) - negBefore - p - s);
+  m.state.D += p + s;
   pos.offset -= p;
   pos.reversed += r;
+  if (q > 0) pos.expiredCounted = (pos.expiredCounted ?? 0) + q;
   m.state.seq += 1;
   const mv = movement('REVERSAL', m.state.seq, creditId, r);
-  mv.pointsDelta = neg(p + c);
-  mv.debtDelta = p;
+  mv.pointsDelta = neg(r - q);
+  mv.debtDelta = p + s;
   mv.offsetDelta = neg(p);
   mv.offsetPositionId = creditId;
   mv.debtRestored = p;
+  mv.alreadyExpired = q;
   mv.recovered = c;
-  mv.shortfall = sf;
+  mv.owed = s;
+  mv.debtExposed = exposed;
+  mv.shortfall = 0;
   mv.lotDraws = drawLots(m, c, creditId);
   return { model: m, movement: mv };
 }
 
-/** Floor a reversal of X can push the wallet to: −(D + O_X) (§1.3). */
+/**
+ * Floor a reversal of X can push the wallet to WITHOUT creating new debt: −(D + O_X) (§1.3). Since owner decision
+ * 2026-11-19 a reversal may go below it — the part beyond is the owed debt s (repaid from future earnings).
+ */
 export function reversalFloor(m: WalletModel, creditId: string): number {
   const pos = m.positions[creditId];
   return -(m.state.D + (pos ? pos.offset : 0));
 }
 
-/** Today's (legacy) reversal decrement on a never-negative wallet: min(r, max(0, B)). R2 parity reference. */
+/** The LEGACY reversal decrement (floor 0, remainder written off as shortfall): min(r, max(0, B)). LEGACY path only. */
 export function legacyReversalDecrement(B: number, r: number): number {
   return Math.min(r, Math.max(0, B));
 }

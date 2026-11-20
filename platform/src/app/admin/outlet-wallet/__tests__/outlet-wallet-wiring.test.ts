@@ -62,6 +62,15 @@ describe('Outlet Wallet — page wiring', () => {
     expect(code).toMatch(/Available to redeem/);
   });
 
+  it('owner decision 2 (2026-11-19): a negative balance is shown as it is with the shared note — no ₹ value — and passbook rows carry the reversal reference', () => {
+    const code = src(PAGE);
+    expect(code).toMatch(/@\/lib\/wallet-negative/);
+    expect(code).toMatch(/wallet\.redeemablePoints < 0 \? \(/);
+    expect(code).toMatch(/admin-negative-balance-note/);
+    expect(code).toMatch(/<TransactionItem key=\{tx\.id\} transaction=\{tx\} showReversalRef \/>/);
+    expect(code).toMatch(/reversalRef:\s+t\.referenceType === 'CREDIT_REVERSAL'/);
+  });
+
   it('uses the SearchableSelect outlet picker', () => {
     expect(src(PAGE)).toMatch(/@\/components\/ui\/searchable-select/);
   });

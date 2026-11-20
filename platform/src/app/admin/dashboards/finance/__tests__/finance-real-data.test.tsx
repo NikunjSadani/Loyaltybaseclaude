@@ -71,6 +71,24 @@ describe('Admin Finance Dashboard — real data', () => {
     expect(await screen.findByText('12,000 points')).toBeInTheDocument();
   });
 
+  it('owner D2: liability split — owed by negative wallets is named next to the liability; nothing extra when none (Deoleo)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ...PAYLOAD, liability: { ...PAYLOAD.liability, owedPoints: 2_986, owedWallets: 2 } }),
+    }));
+    render(<FinanceDashboardPage />);
+    expect(
+      await screen.findByText(/Liability counts positive balances only — 2,986 pts owed by 2 wallets with a negative balance are not included\./),
+    ).toBeInTheDocument();
+  });
+
+  it('owner D2: no negative wallets → the liability card reads exactly as before', async () => {
+    mockFetchOk();
+    render(<FinanceDashboardPage />);
+    expect(await screen.findByText('50,000 pts redeemable')).toBeInTheDocument();
+    expect(screen.queryByText(/Liability counts positive balances only/)).toBeNull();
+  });
+
   it('RD2: renders the breakage %', async () => {
     mockFetchOk();
     render(<FinanceDashboardPage />);
