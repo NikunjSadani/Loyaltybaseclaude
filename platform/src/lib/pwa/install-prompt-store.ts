@@ -13,6 +13,7 @@
 // -----------------------------------------------------------------------------
 
 import { useSyncExternalStore } from 'react';
+import { useHydrated } from '@/lib/use-hydrated';
 
 export interface InstallState {
   canInstall: boolean;
@@ -109,13 +110,17 @@ export async function promptInstall(): Promise<'accepted' | 'dismissed' | 'unava
  * state plus the `promptInstall` action. Safe to call from any client component.
  */
 export function useInstallPrompt(): InstallState & {
+  /** false during SSR / hydration (install state = server default) — decide nothing until true. */
+  ready: boolean;
   promptInstall: () => Promise<'accepted' | 'dismissed' | 'unavailable'>;
 } {
   // Hydration-safe: the server + hydration render see SERVER_INSTALL_STATE (no window/matchMedia
   // there → no React #418); after hydration — and on a post-hydration mount, immediately — the live
   // state (incl. a beforeinstallprompt that fired before this component existed) applies.
   const state = useSyncExternalStore(subscribe, getInstallSnapshot, getServerInstallSnapshot);
-  return { ...state, promptInstall };
+  // `ready` = false only during SSR / hydration, where `installed` is the server default (false).
+  const ready = useHydrated();
+  return { ...state, ready, promptInstall };
 }
 
 const SERVER_INSTALL_STATE: InstallState = Object.freeze({ installed: false, canInstall: false });

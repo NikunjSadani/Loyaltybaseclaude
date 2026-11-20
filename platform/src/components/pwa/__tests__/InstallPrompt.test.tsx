@@ -5,8 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // controllable hook (the store's own capture logic is tested separately).
 const promptInstall = vi.fn().mockResolvedValue('accepted');
 let mockState = { canInstall: false, installed: false };
+const mockReady = { current: true };
 vi.mock('@/lib/pwa/install-prompt-store', () => ({
-  useInstallPrompt: () => ({ ...mockState, promptInstall }),
+  useInstallPrompt: () => ({ ...mockState, ready: mockReady.current, promptInstall }),
 }));
 
 import InstallPrompt from '../InstallPrompt';
@@ -24,10 +25,29 @@ describe('InstallPrompt', () => {
     vi.unstubAllEnvs();
     promptInstall.mockClear();
     mockState = { canInstall: false, installed: false };
+    mockReady.current = true;
     setPath('/sales');
   });
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it('decides nothing until the install state is ready (hydration render = server default)', () => {
+    vi.stubEnv('NEXT_PUBLIC_PWA_INSTALL_ENABLED', 'true');
+    mockReady.current = false;
+    mockState = { canInstall: true, installed: false };
+    const { container } = render(<InstallPrompt />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  it('clears an already-shown prompt when installed flips true', () => {
+    vi.stubEnv('NEXT_PUBLIC_PWA_INSTALL_ENABLED', 'true');
+    mockState = { canInstall: true, installed: false };
+    const { container, rerender } = render(<InstallPrompt />);
+    expect(screen.getByRole('button', { name: 'Install' })).toBeInTheDocument();
+    mockState = { canInstall: true, installed: true };
+    rerender(<InstallPrompt />);
+    expect(container.firstChild).toBeNull();
   });
 
   it('renders nothing when the flag is OFF (default)', () => {

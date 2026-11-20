@@ -15,6 +15,7 @@
 
 import { useEffect, useSyncExternalStore } from 'react';
 import { api } from '@/lib/api-client';
+import { useHydrated } from '@/lib/use-hydrated';
 import type { GifsySettings } from '@/types';
 
 const SETTINGS_KEY = 'gifsy_settings_v1';
@@ -306,7 +307,27 @@ export async function saveGifsySettingsDetailed(partial: Partial<GifsySettings>)
 // mounts after hydration (client navigation) gets the cached client value straight away.
 function subscribeGifsySettings(onChange: () => void): () => void {
   listeners.add(onChange);
+  ensureCrossTabSync();
   return () => { listeners.delete(onChange); };
+}
+
+// Cross-tab: another tab's writeCache fires a `storage` event here → re-seed the store from the
+// cache and notify, so a settings change (e.g. Visibility switched off) applies in every open tab.
+let crossTabAttached = false;
+function ensureCrossTabSync(): void {
+  if (crossTabAttached || typeof window === 'undefined') return;
+  crossTabAttached = true;
+  window.addEventListener('storage', (e: StorageEvent) => {
+    if (e.key !== SETTINGS_KEY && e.key !== null) return; // null = storage cleared
+    store = loadCache();
+    listeners.forEach((l) => l());
+  });
+}
+
+/** True once the client cache is applied (false during SSR + the hydration render, where the
+ *  hook returns DEFAULT_SETTINGS). Gate any "feature is OFF" panel / redirect / request on it. */
+export function useGifsySettingsReady(): boolean {
+  return useHydrated();
 }
 /** Client snapshot — the live store (replaced, never mutated, by writeCache → stable identity). */
 export function getGifsySettingsSnapshot(): GifsySettings { return store; }

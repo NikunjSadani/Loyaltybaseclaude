@@ -109,7 +109,7 @@ const primaryBtnStyle: CSSProperties = {
 /* ─── Install section ──────────────────────────────────────────────────────── */
 
 function InstallSection() {
-  const { canInstall, installed, promptInstall } = useInstallPrompt();
+  const { canInstall, installed, ready, promptInstall } = useInstallPrompt();
   const [ios, setIos] = useState(false);
 
   useEffect(() => {
@@ -117,7 +117,10 @@ function InstallSection() {
   }, []);
 
   let body: ReactNode;
-  if (installed) {
+  if (!ready) {
+    // Hydration render: install state is the server default — show a neutral line, not "install".
+    body = <p className="text-sm text-gray-400" aria-busy="true" data-testid="pwa-install-loading">Checking…</p>;
+  } else if (installed) {
     body = <p className="text-sm text-gray-500">App installed ✓</p>;
   } else if (canInstall) {
     body = (

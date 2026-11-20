@@ -248,12 +248,15 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   // (owner nav they can't use, backend-403'd widgets) → bounce them to their /gifsy launchpad.
   // `assumed` is optimistic (localStorage hint) then reconciled to server truth, so an actually-
   // assumed staff is never bounced. Non-staff roles are unaffected.
-  const { assumed } = useAssumedContext();
+  // `ready` gate: during the hydration render `assumed` is the server default (false) — deciding
+  // on it would bounce an ASSUMED staff on every hard refresh. Wait for the client hint.
+  const { assumed, ready: assumedReady } = useAssumedContext();
   useEffect(() => {
+    if (!assumedReady) return;
     if (getStoredUser()?.role === 'GIFSY_STAFF' && !assumed) {
       router.replace('/gifsy');
     }
-  }, [assumed, router]);
+  }, [assumed, assumedReady, router]);
 
   function handleLogout() {
     if (typeof window !== 'undefined') {

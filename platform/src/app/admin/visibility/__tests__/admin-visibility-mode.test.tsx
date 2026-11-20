@@ -15,8 +15,10 @@ let mockSettings: { visibilityEnabled?: boolean; visibilityCaptureMode?: string 
   visibilityEnabled: true,
   visibilityCaptureMode: 'PHOTO_APPROVAL',
 };
+const mockSettingsReady = { current: true };
 vi.mock('@/lib/gifsy-settings', () => ({
   useGifsySettings: () => mockSettings,
+  useGifsySettingsReady: () => mockSettingsReady.current,
 }));
 
 // Stub the heavy child components so the test isolates the page's mode branch.
@@ -39,6 +41,16 @@ vi.mock('@/components/admin/VisibilityAmountUploadPanel', () => ({
 import VisibilityAdminPage from '../page';
 
 describe('AVM — Admin Visibility page mode branch', () => {
+  beforeEach(() => { mockSettingsReady.current = true; });
+
+  it('AVM0: settings not applied yet (hydration) → neutral skeleton, NOT the disabled note', () => {
+    mockSettingsReady.current = false;
+    mockSettings = { visibilityEnabled: false, visibilityCaptureMode: 'PHOTO_APPROVAL' };
+    render(<VisibilityAdminPage />);
+    expect(screen.getByTestId('visibility-settings-loading')).toBeInTheDocument();
+    expect(screen.queryByText(/visibility is disabled for this tenant/i)).not.toBeInTheDocument();
+  });
+
   it('AVM1: visibility disabled → the disabled note, no panels', () => {
     mockSettings = { visibilityEnabled: false, visibilityCaptureMode: 'PHOTO_APPROVAL' };
     render(<VisibilityAdminPage />);

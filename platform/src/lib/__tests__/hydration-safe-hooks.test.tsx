@@ -38,7 +38,7 @@ vi.mock('@/lib/auth-actions', () => ({
 }));
 
 import {
-  useGifsySettings, hydrateGifsySettings,
+  useGifsySettings, useGifsySettingsReady, hydrateGifsySettings,
   getGifsySettingsServerSnapshot, DEFAULT_SETTINGS,
 } from '@/lib/gifsy-settings';
 import { useTodayLabel, getTodayLabelSnapshot } from '@/lib/use-today-label';
@@ -73,7 +73,8 @@ function DateProbe() {
   return <span data-v>{useTodayLabel() ?? 'no-date'}</span>;
 }
 function AssumedProbe() {
-  return <span data-v>{useAssumedContext().brand ?? 'platform'}</span>;
+  const { brand, ready } = useAssumedContext();
+  return <span data-v>{ready ? (brand ?? 'platform') : 'not-ready'}</span>;
 }
 function InstallProbe() {
   return <span data-v>{useInstallPrompt().installed ? 'installed' : 'not-installed'}</span>;
@@ -101,6 +102,33 @@ describe('hydration-safe client stores (React #418)', () => {
     expect(container.textContent).toBe('visibility-on');
   });
 
+  it('useGifsySettingsReady: false in SSR / hydration render, true right after', async () => {
+    function ReadyProbe() {
+      const ready = useGifsySettingsReady();
+      const on = useGifsySettings().visibilityEnabled === true;
+      return <span>{ready ? (on ? 'ready-on' : 'ready-off') : 'not-ready'}</span>;
+    }
+    act(() => {
+      hydrateGifsySettings({ visibilityEnabled: true } as Parameters<typeof hydrateGifsySettings>[0]);
+    });
+    const { serverHtml, container, errors } = await ssrThenHydrate(<ReadyProbe />);
+    expect(serverHtml).toContain('not-ready');
+    expect(errors).toEqual([]);
+    // Never observed "ready" together with the SSR default — ready and the cached value land together.
+    expect(container.textContent).toBe('ready-on');
+  });
+
+  it('useGifsySettings: another tab writing the cache (storage event) applies here', async () => {
+    const { container } = await ssrThenHydrate(<SettingsProbe />);
+    expect(container.textContent).toBe('visibility-on');
+    const next = JSON.stringify({ visibilityEnabled: false });
+    localStorage.setItem('gifsy_settings_v1', next);
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: 'gifsy_settings_v1', newValue: next }));
+    });
+    expect(container.textContent).toBe('visibility-off');
+  });
+
   it('useTodayLabel: no date in SSR (no build-date / ICU mismatch); browser date after hydration', async () => {
     const { serverHtml, container, errors } = await ssrThenHydrate(<DateProbe />);
     expect(serverHtml).toContain('no-date');
@@ -110,7 +138,7 @@ describe('hydration-safe client stores (React #418)', () => {
 
   it('useAssumedContext: localStorage hint is not read during hydration; applies right after', async () => {
     const { serverHtml, container, errors } = await ssrThenHydrate(<AssumedProbe />);
-    expect(serverHtml).toContain('platform');
+    expect(serverHtml).toContain('not-ready');
     expect(errors).toEqual([]);
     expect(container.textContent).toBe('Bajaj');
   });

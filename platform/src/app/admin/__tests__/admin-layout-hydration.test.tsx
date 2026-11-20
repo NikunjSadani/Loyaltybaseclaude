@@ -37,7 +37,7 @@ vi.mock('@/lib/admin-session', () => ({
   useAdminSession: () => ({ role: 'GIFSY_ADMIN', name: 'Test', userId: 'u', canManageSchemes: true }),
   adminRoleLabel: (r: string) => r,
 }));
-vi.mock('@/lib/use-assumed-context', () => ({ useAssumedContext: () => ({ brand: 'Bajaj', assumed: true }) }));
+vi.mock('@/lib/use-assumed-context', () => ({ useAssumedContext: () => ({ brand: 'Bajaj', assumed: true, ready: true }) }));
 vi.mock('@/lib/auth-client', () => ({
   logout: vi.fn(),
   PORTAL_ROLES: { admin: ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'GIFSY_STAFF'] },

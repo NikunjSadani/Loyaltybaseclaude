@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // ── Mock the install-prompt store (controllable hook) ──
 const promptInstall = vi.fn().mockResolvedValue('accepted');
 let installState = { canInstall: false, installed: false };
+const installReady = { current: true };
 vi.mock('@/lib/pwa/install-prompt-store', () => ({
-  useInstallPrompt: () => ({ ...installState, promptInstall }),
+  useInstallPrompt: () => ({ ...installState, ready: installReady.current, promptInstall }),
 }));
 
 // ── Mock the push helpers ──
@@ -50,6 +51,7 @@ describe('PwaAppSettings', () => {
     subscribeToPush.mockClear();
     unsubscribeFromPush.mockClear();
     installState = { canInstall: false, installed: false };
+    installReady.current = true;
     iosSafari = false;
     enablePushSupport();
   });
@@ -72,6 +74,16 @@ describe('PwaAppSettings', () => {
     const btn = screen.getByRole('button', { name: 'Install app' });
     fireEvent.click(btn);
     expect(promptInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a neutral line (no install CTA / not-installed copy) until the install state is ready', () => {
+    vi.stubEnv('NEXT_PUBLIC_PWA_INSTALL_ENABLED', 'true');
+    installReady.current = false;
+    installState = { canInstall: true, installed: false };
+    stubNotification('default');
+    render(<PwaAppSettings />);
+    expect(screen.getByTestId('pwa-install-loading')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Install app' })).toBeNull();
   });
 
   it('shows "App installed ✓" when already installed', () => {

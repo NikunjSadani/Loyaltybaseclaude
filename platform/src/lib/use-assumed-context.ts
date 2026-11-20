@@ -3,6 +3,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { getAssumedBrand, clearAssumedContext } from './auth-client'
 import { getAssumedContext } from './auth-actions'
+import { useHydrated } from './use-hydrated'
 
 /**
  * Shared assumed-tenant signal (mirrors the OperatorBanner AF-6 self-heal).
@@ -27,7 +28,11 @@ import { getAssumedContext } from './auth-actions'
  * @returns `brand` (the assumed brand name, or null at platform level) and the derived
  * `assumed` boolean.
  */
-export function useAssumedContext(): { brand: string | null; assumed: boolean } {
+export function useAssumedContext(): { brand: string | null; assumed: boolean; ready: boolean } {
+  // `ready` = false only during the server / hydration render, where `brand` is the server
+  // default (null) rather than the stored hint. Any decision on `assumed` (redirect, access gate,
+  // request) MUST wait for it — otherwise an assumed operator reads as un-assumed on a hard load.
+  const ready = useHydrated()
   // Optimistic synchronous seed from the localStorage hint — avoids a first-paint flash of the
   // platform-global cards. Read through useSyncExternalStore so it is HYDRATION-SAFE: the server
   // and the hydration render both see `null` (no localStorage on the server → no React #418), and
@@ -67,7 +72,7 @@ export function useAssumedContext(): { brand: string | null; assumed: boolean } 
   }, [])
 
   const brand = reconciled !== undefined ? reconciled : hint
-  return { brand, assumed: !!brand }
+  return { brand, assumed: !!brand, ready }
 }
 
 function subscribeAssumedHint(onChange: () => void): () => void {
