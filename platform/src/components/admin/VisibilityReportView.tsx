@@ -35,6 +35,8 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const exportAction = useDownloadAction();
+  const monthAction = useDownloadAction();
+  const [exportMonth, setExportMonth] = useState<string>('');
 
   const fetcher = variant === 'admin' ? visibilityApi.getReport : visibilityApi.getTenantReport;
 
@@ -45,6 +47,7 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
     if (res.success) {
       setReport(res.data);
       setSelected(res.data.windowKey);
+      setExportMonth((m) => m || monthOfWindowKey(res.data.windowKey) || '');
     } else {
       setError(res.error);
     }
@@ -66,6 +69,16 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
   const handleExport = () => {
     void exportAction.run(async () => {
       const res = await visibilityApi.downloadExport(selected || undefined);
+      if (!res.success) return { kind: 'error', message: res.error };
+      if (res.queued) return { kind: 'queued', ...res.queued };
+      return { kind: 'downloaded', fileName: '' };
+    });
+  };
+
+  // The whole month's Visibility report (always prepared in the background → Downloads page).
+  const handleMonthExport = () => {
+    void monthAction.run(async () => {
+      const res = await visibilityApi.downloadExport(undefined, exportMonth || undefined);
       if (!res.success) return { kind: 'error', message: res.error };
       if (res.queued) return { kind: 'queued', ...res.queued };
       return { kind: 'downloaded', fileName: '' };
@@ -98,6 +111,23 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
               {downloadButtonLabel(exportAction, 'Export Excel')}
             </button>
             <DownloadActionStatus action={exportAction} className="mt-1 max-w-sm" />
+            <div className="mt-2 flex items-center gap-2">
+              <label htmlFor="vis-report-month" className="text-xs text-gray-500">Whole month</label>
+              <input
+                id="vis-report-month"
+                type="month"
+                value={exportMonth}
+                onChange={(e) => setExportMonth(e.target.value)}
+                aria-label="Report month"
+                className="border border-gray-300 rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
+              />
+              <button onClick={handleMonthExport} disabled={monthAction.blocked || !exportMonth}
+                className="flex items-center gap-2 px-3 py-1.5 border border-[var(--brand-primary)] text-[var(--brand-primary)] text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60">
+                {monthAction.busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                {downloadButtonLabel(monthAction, 'Export month')}
+              </button>
+            </div>
+            <DownloadActionStatus action={monthAction} className="mt-1 max-w-sm" />
           </div>
         )}
       </div>

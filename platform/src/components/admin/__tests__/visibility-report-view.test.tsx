@@ -60,6 +60,15 @@ describe('VISRPT — VisibilityReportView', () => {
     await waitFor(() => expect(downloadExport).toHaveBeenCalledWith('2026-07-P2'));
   });
 
+  it('VISRPT2b: Export month calls downloadExport with the chosen month (default = the report month)', async () => {
+    render(<VisibilityReportView variant="admin" />);
+    await screen.findByText('60%');
+    expect((screen.getByLabelText('Report month') as HTMLInputElement).value).toBe('2026-07');
+    fireEvent.change(screen.getByLabelText('Report month'), { target: { value: '2026-05' } });
+    fireEvent.click(screen.getByRole('button', { name: /export month/i }));
+    await waitFor(() => expect(downloadExport).toHaveBeenCalledWith(undefined, '2026-05'));
+  });
+
   it('VISRPT3: tenant variant uses getTenantReport and hides Export', async () => {
     render(<VisibilityReportView variant="tenant" />);
     await screen.findByText('60%');

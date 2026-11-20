@@ -47,6 +47,12 @@ describe('returnPathForRole', () => {
   it('an unsafe next is never honoured', () => {
     expect(returnPathForRole('//evil.example/admin', 'CLIENT_ADMIN')).toBeNull();
   });
+  it('the Visibility photo viewer is a return target for admin + sales roles (not partner / MIS)', () => {
+    const photo = '/visibility/photo?key=visibility-media%2Fbajaj%2Fa.jpg';
+    for (const r of ['CLIENT_ADMIN', 'GIFSY_ADMIN', 'GIFSY_STAFF', 'SALES_ISR', 'SALES_SO']) expect(returnPathForRole(photo, r)).toBe(photo);
+    expect(returnPathForRole(photo, 'WHOLESALER')).toBeNull();
+    expect(returnPathForRole(photo, 'MIS_USER')).toBeNull();
+  });
 });
 
 describe('loginUrlWithNext / readNextParam', () => {

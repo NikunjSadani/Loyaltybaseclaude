@@ -9,6 +9,8 @@
  * admitted to (admin / sales — partner logins always go through the outlet picker first).
  */
 
+import { VISIBILITY_PHOTO_PREFIX, VISIBILITY_PHOTO_ROLES } from './visibility-photo-link';
+
 const NEXT_PARAM = 'next';
 const MAX_LEN = 1024;
 
@@ -16,6 +18,8 @@ const MAX_LEN = 1024;
 const RETURN_TO_PORTALS: Record<string, string[]> = {
   '/admin': ['CLIENT_ADMIN', 'MIS_USER', 'GIFSY_ADMIN', 'GIFSY_STAFF'],
   '/sales': ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'],
+  // The Visibility report's photo links land back on the viewer page after sign-in.
+  [VISIBILITY_PHOTO_PREFIX]: VISIBILITY_PHOTO_ROLES,
 };
 
 /** A safe same-origin relative path (path + query + hash), or null. Pure. */
