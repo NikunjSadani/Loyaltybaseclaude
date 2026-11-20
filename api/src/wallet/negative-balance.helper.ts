@@ -22,20 +22,20 @@ export async function negativeBalanceSignals(
   if (!wallet || wallet.redeemablePoints >= 0) return {};
   const sequenced = (wallet.movementSeq ?? 0) > 0;
   let reversals: number;
-  if (sequenced) {
-    const lastNonNegative = await db.walletTransaction.findFirst({
-      where: { walletId: wallet.id, balanceAfter: { gte: 0 }, seq: { not: null } },
-      orderBy: { seq: 'desc' },
-      select: { seq: true },
-    });
+  const lastSeqRow = sequenced
+    ? await db.walletTransaction.findFirst({
+        where: { walletId: wallet.id, balanceAfter: { gte: 0 }, seq: { not: null } },
+        orderBy: { seq: 'desc' },
+        select: { seq: true },
+      })
+    : null;
+  if (sequenced && lastSeqRow?.seq != null) {
     reversals = await db.walletTransaction.count({
-      where: {
-        walletId: wallet.id,
-        creditReversalId: { not: null },
-        ...(lastNonNegative?.seq != null ? { seq: { gt: lastNonNegative.seq } } : {}),
-      },
+      where: { walletId: wallet.id, creditReversalId: { not: null }, seq: { gt: lastSeqRow.seq } },
     });
   } else {
+    // Never sequenced, or (round 5, B7) the last row at or above zero carries no seq (history from before
+    // sequencing): compare by row time.
     const lastNonNegative = await db.walletTransaction.findFirst({
       where: { walletId: wallet.id, balanceAfter: { gte: 0 } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],

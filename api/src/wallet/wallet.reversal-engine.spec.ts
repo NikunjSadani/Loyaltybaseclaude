@@ -986,6 +986,27 @@ describe('applyCreditReversal (WP3) — R5 / Q4 / Q5', () => {
       ]);
     });
 
+    it('round 5 A1: ONE audit row per reversal even when it touches two unlinked positions; a lot of ANOTHER wallet is not "known"', async () => {
+      const h = harness({ mode: 'V2' });
+      await h.service.creditEarn('cp1', 'bajaj', 300, { referenceType: 'CREDIT_BATCH', referenceId: 'B1', metadata: { fieldId: 'F1', outletCode: 'O1' } });
+      await h.service.creditEarn('cp1', 'bajaj', 200, { referenceType: 'CREDIT_BATCH', referenceId: 'B1', metadata: { fieldId: 'F1', outletCode: 'O1' } });
+      expect(h.positions).toHaveLength(2);
+      for (const p of h.positions) {
+        // the link points at a lot that is not a credit lot of THIS wallet → expiry history unknown
+        const lot = h.ledger.find((l) => l.id === p.lotId)!;
+        lot.walletId = 'some-other-wallet';
+      }
+      await h.models.$transaction((tx: any) =>
+        h.service.applyCreditReversal(tx, {
+          batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: 'R2P', points: 500, clientId: 'bajaj',
+        }),
+      );
+      const rows = h.auditLogs.filter((x) => x.entityType === 'REVERSAL_EXPIRY_UNTRACKED');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ entityId: 'R2P', metadata: expect.objectContaining({ recovered: 500, owed: 0 }) });
+      expect((rows[0].metadata as { positions: unknown[] }).positions).toHaveLength(2);
+    });
+
     it('fix round 3: debt booked on a credit with NO lot link (expiry history unknown) is never silent — audit row for the banner', async () => {
       const h = harness({ mode: 'V2' });
       await credit(h, 'cp1', 'O1', 1000);
@@ -1253,8 +1274,10 @@ describe('reverseCreditBatchPoints — per-tenant flag', () => {
     expect(h.auditLogs[0].metadata).toMatchObject({
       differs: true,
       legacy: expect.objectContaining({ removed: 100, shortfall: 400 }),
-      v2: expect.objectContaining({ removed: 500, owed: 400, shortfall: 0 }),
+      v2: expect.objectContaining({ removed: 500, owed: 400, shortfall: 0, debtExposed: 0, belowZero: 400 }),
     });
+    // round 5 A1: the diff says whether V2 could count the credit's expired points
+    expect((h.auditLogs[0].metadata as { v2: { steps: Array<{ expiryKnown: boolean }> } }).v2.steps[0].expiryKnown).toBe(true);
   });
 
   it('malformed / unreadable flag → the reversal is refused, nothing written', async () => {

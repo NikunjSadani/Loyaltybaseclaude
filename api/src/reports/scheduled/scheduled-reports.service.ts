@@ -615,22 +615,19 @@ export class ScheduledReportsService {
       _sum: { points: true },
     });
     const sum = (t: string) => num(groups.find((g) => g.transactionType === t)?._sum?.points);
-    const negativeWallets = await this.prisma.wallet.count({
+    // Owner D1 (rounds 4-5): how many wallets are below zero AND what they owe, in ONE query (one consistent figure pair).
+    const neg = await this.prisma.wallet.aggregate({
       where: { redeemablePoints: { lt: 0 }, partner: { clientId } },
+      _count: { _all: true },
+      _sum: { redeemablePoints: true },
     });
-    // Owner D1 (fix round 4, item 8): what those wallets owe — only queried when there is one (Deoleo: unchanged).
-    const owedAgg = negativeWallets > 0
-      ? await this.prisma.wallet.aggregate({
-          where: { redeemablePoints: { lt: 0 }, partner: { clientId } },
-          _sum: { redeemablePoints: true },
-        })
-      : null;
+    const negativeWallets = (neg?._count as { _all?: number } | undefined)?._all ?? 0;
     return {
       credited: sum('EARN'),
       redeemed: Math.abs(sum('REDEEM')),
       expired: Math.abs(sum('EXPIRE')),
       negativeWallets,
-      ...(owedAgg ? { owedPoints: Math.max(0, -(owedAgg._sum.redeemablePoints ?? 0)) } : {}),
+      ...(negativeWallets > 0 ? { owedPoints: Math.max(0, -(neg._sum.redeemablePoints ?? 0)) } : {}),
     };
   }
 

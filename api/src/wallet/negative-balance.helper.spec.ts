@@ -46,4 +46,22 @@ describe('negativeBalanceSignals (owner decision 2 + D1; fix rounds 3–4: A8/B1
     });
     expect(d.walletTransaction.count).toHaveBeenCalledWith({ where: { walletId: 'w2', referenceType: 'CREDIT_REVERSAL' } });
   });
+
+  it('round 5 B7: sequenced wallet whose last row at or above zero has NO seq (pre-sequencing history) → time comparison', async () => {
+    const t = new Date('2026-11-01T00:00:00Z');
+    const d = {
+      walletTransaction: {
+        // the seq probe finds nothing; the time probe finds the pre-sequencing row
+        findFirst: jest.fn(async (a: { where: { seq?: unknown } }) => (a.where.seq ? null : { createdAt: t })),
+        count: jest.fn(async () => 1),
+      },
+    };
+    await expect(negativeBalanceSignals(d as never, { id: 'w4', redeemablePoints: -50, movementSeq: 5 })).resolves.toEqual({
+      owedPoints: 50,
+      owedFromReversal: true,
+    });
+    expect(d.walletTransaction.count).toHaveBeenCalledWith({
+      where: { walletId: 'w4', referenceType: 'CREDIT_REVERSAL', createdAt: { gt: t } },
+    });
+  });
 });

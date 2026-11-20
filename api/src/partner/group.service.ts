@@ -103,7 +103,7 @@ export class GroupService {
     // the tenant conversion rate. Every query is tenant-scoped by clientId; the
     // `groupId: parentId` / `parentId` filters inherently exclude parents (no wallet)
     // and every other group.
-    const [parent, [totalsAgg, negAgg], outlets, conversionRate] = await Promise.all([
+    const [parent, [totalsAgg, negAgg, outlets], conversionRate] = await Promise.all([
       this.prisma.channelPartner.findFirst({
         where: { id: parentId, clientId, deletedAt: null },
         select: { businessName: true, ownerName: true },
@@ -135,9 +135,8 @@ export class GroupService {
           _sum: { redeemablePoints: true },
           _count: { _all: true },
         }),
-      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }),
-      // Per-outlet drill-down over the group's child outlets.
-      this.prisma.outlet.findMany({
+        // Round 5 (A2): the per-outlet drill-down in the SAME snapshot, so the rows always add up to the totals.
+        this.prisma.outlet.findMany({
         where: { parentId, clientId, deletedAt: null },
         select: {
           id: true,
@@ -165,6 +164,7 @@ export class GroupService {
         },
         orderBy: [{ outletCode: 'asc' }],
       }),
+      ], { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }),
       this.tenantSettings.getConversionRate(clientId),
     ]);
 

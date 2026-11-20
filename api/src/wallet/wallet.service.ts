@@ -1940,7 +1940,11 @@ export class WalletService {
       positions.map((p) => [p.id, p.lotId ?? (viaCredit ?? []).find((t) => t.id === p.creditTxId)?.pointsLedgerId ?? null]),
     );
     const lotIds = [...new Set([...lotOf.values()].filter((x): x is string => !!x))];
-    const [expiries, counted] = await Promise.all([
+    const [lotRows, expiries, counted] = await Promise.all([
+      // Round 5 (A1): the lot only counts as the credit's own when it is a credit lot (points > 0) of THIS wallet.
+      lotIds.length
+        ? tx.pointsLedger.findMany({ where: { id: { in: lotIds }, points: { gt: 0 } }, select: { id: true, walletId: true } })
+        : Promise.resolve([] as { id: string; walletId: string }[]),
       lotIds.length
         ? tx.walletTransaction.findMany({
             where: { transactionType: 'DEBIT_EXPIRY', referenceType: 'POINTS_LEDGER', referenceId: { in: lotIds } },
@@ -1953,7 +1957,8 @@ export class WalletService {
       }),
     ]);
     return positions.map((p) => {
-      const lot = lotOf.get(p.id) ?? null;
+      const linked = lotOf.get(p.id) ?? null;
+      const lot = linked && (lotRows ?? []).some((l) => l.id === linked && l.walletId === p.walletId) ? linked : null;
       const expired = (expiries ?? [])
         .filter((e) => !!lot && e.referenceId === lot && e.walletId === p.walletId)
         .reduce((s, e) => s + Math.max(0, e.balanceBefore - e.balanceAfter), 0);
@@ -2220,6 +2225,7 @@ export class WalletService {
     this.assertRoomAfterUnallocated(positions, unallocatedApproved, a.points);
     const plan = planV2Reversal(positions, states, a.points);
     const transactionIds: string[] = [];
+    const untracked: PlannedReversalStep[] = [];
     for (const st of plan) {
       const removed = st.debtRestored + st.alreadyExpired + st.recovered + st.owed;
       if (st.shortfall !== 0) throw new Error('applyCreditReversal: WP0 wrote points off (owner 2026-11-19: never)');
@@ -2270,31 +2276,38 @@ export class WalletService {
           shortfall: 0,
         },
       });
-      if (st.position.expiryKnown === false && st.recovered + st.owed > 0) {
-        // Fix round 4 (item 1): the credit's own lot can't be found at all, so points of it that EXPIRED can't be
-        // counted — whatever was taken from the wallet or booked as debt for it may include them. Never silent.
-        await tx.auditLog.create({
-          data: {
-            action: 'UPDATE',
-            entityType: REVERSAL_EXPIRY_UNTRACKED_ENTITY,
-            entityId: a.creditReversalId,
-            actorId: null,
-            metadata: {
-              clientId: a.clientId ?? null,
-              walletId: st.position.walletId,
-              positionId: st.position.id,
-              creditTxId: st.position.creditTxId,
-              batchId: a.batchId,
-              outletCode: a.outletCode,
-              owed: st.owed,
-              recovered: st.recovered,
-            } as Prisma.InputJsonValue,
-          },
-        });
-      }
+      if (st.position.expiryKnown === false && st.recovered + st.owed > 0) untracked.push(st);
       if (removed !== st.requested || st.requested - st.alreadyExpired !== -st.pointsDelta) {
         throw new Error('applyCreditReversal: p + q + c + owed ≠ r, or r − q ≠ −pointsDelta');
       }
+    }
+    if (untracked.length) {
+      // Fix rounds 4–5 (A1): the credit's own lot can't be found (no credit lot of this wallet linked to it), so points
+      // of it that EXPIRED can't be counted — what was taken or booked as debt for it may include them. Never silent:
+      // ONE audit row per reversal (the banner counts reversals), listing every affected position.
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: REVERSAL_EXPIRY_UNTRACKED_ENTITY,
+          entityId: a.creditReversalId,
+          actorId: null,
+          metadata: {
+            clientId: a.clientId ?? null,
+            walletId: untracked[0].position.walletId,
+            batchId: a.batchId,
+            outletCode: a.outletCode,
+            owed: untracked.reduce((n, st) => n + st.owed, 0),
+            recovered: untracked.reduce((n, st) => n + st.recovered, 0),
+            positions: untracked.map((st) => ({
+              positionId: st.position.id,
+              walletId: st.position.walletId,
+              creditTxId: st.position.creditTxId,
+              owed: st.owed,
+              recovered: st.recovered,
+            })),
+          } as Prisma.InputJsonValue,
+        },
+      });
     }
     return {
       shortfall: 0,
@@ -2407,6 +2420,8 @@ export class WalletService {
           owed: st.owed,
           alreadyExpired: st.alreadyExpired,
           debtExposed: st.debtExposed,
+          // round 5 (A1): whether V2 could count this credit's expired points
+          expiryKnown: st.position.expiryKnown !== false,
           shortfall: st.shortfall,
           balanceBefore: st.before.B,
           balanceAfter: st.after.B,
@@ -2843,19 +2858,30 @@ export class WalletService {
   async walletsInDebt(clientId: string, opts: { limit?: number; programName?: unknown } = {}) {
     const limit = Math.min(Math.max(opts.limit ?? 1000, 1), 5000);
     const program = normalizeFilterParam(opts.programName, 'program');
+    // Round 5 (B1): the cheap gate first — one index-friendly probe (partial index wallets_negative_balance_idx). A tenant
+    // with no negative wallet (every Deoleo request) answers here, without the programme catalogue or any other read.
+    const anyNegative = await this.prisma.wallet.findFirst({
+      where: { partner: { clientId }, redeemablePoints: { lt: 0 } },
+      select: { id: true },
+    });
+    if (!anyNegative && !program) {
+      return { clientId, program, availablePrograms: [] as string[], total: 0, totalOwedPoints: 0, limit, truncated: false, wallets: [] };
+    }
     const catalog = await loadProgramCatalog(this.prisma, clientId);
     const variants = program ? catalog.variantsOf(program) : null;
     const where: Prisma.WalletWhereInput = {
       partner: { clientId, ...partnerProgramScope(variants) },
       redeemablePoints: { lt: 0 },
     };
-    // Fix round 4 (item 7): the count, the owed total and the rows come from ONE snapshot (REPEATABLE READ), so the
-    // summary never disagrees with the list under concurrent movements.
-    const [total, agg, wallets] = await this.prisma.$transaction(
-      [
-        this.prisma.wallet.count({ where }),
-        this.prisma.wallet.aggregate({ where, _sum: { redeemablePoints: true } }),
-        this.prisma.wallet.findMany({
+    // Round 5 (A2): EVERY read below (count, owed total, rows, outlets, allocations, the last row at or above zero and the
+    // reversal rows) runs in ONE read-only REPEATABLE READ transaction: one snapshot, so the list, its totals and
+    // "which reversal caused it" can never disagree under concurrent movements.
+    const snap = await this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+        const total = await tx.wallet.count({ where });
+        const agg = await tx.wallet.aggregate({ where, _sum: { redeemablePoints: true } });
+        const wallets = await tx.wallet.findMany({
           where,
           select: {
             id: true, partnerId: true, redeemablePoints: true, debtPoints: true, movementSeq: true,
@@ -2863,64 +2889,77 @@ export class WalletService {
           },
           orderBy: [{ redeemablePoints: 'asc' }, { id: 'asc' }],
           take: limit,
-        }),
-      ],
+        });
+        const walletIds = wallets.map((w) => w.id);
+        if (walletIds.length === 0) {
+          return { total, agg, wallets, outlets: [], allocations: [], lastNonNeg: [], reversalRows: [] };
+        }
+        const outlets = await tx.outlet.findMany({
+          // B8: deleted outlets are not listed
+          where: { clientId, partnerId: { in: wallets.map((w) => w.partnerId) }, deletedAt: null },
+          select: { partnerId: true, outletCode: true },
+        });
+        const allocations = await tx.creditReversalAllocation.findMany({
+          where: {
+            position: { walletId: { in: walletIds } },
+            creditReversal: { clientId },
+            OR: [{ owed: { gt: 0 } }, { debtRestored: { gt: 0 } }, { debtExposed: { gt: 0 } }],
+          },
+          select: {
+            id: true,
+            creditReversalId: true,
+            owed: true,
+            debtRestored: true,
+            debtExposed: true,
+            overReversalDebt: true,
+            engineSource: true,
+            position: { select: { walletId: true, outletCode: true } },
+            creditReversal: { select: { approvedAt: true, fieldName: true, period: true } },
+          },
+        });
+        // The last row that left each wallet at or above zero, by seq (sequenced rows) and by time (any row).
+        const lastNonNeg = await tx.walletTransaction.groupBy({
+          by: ['walletId'],
+          where: { walletId: { in: walletIds }, balanceAfter: { gte: 0 } },
+          _max: { seq: true, createdAt: true },
+        });
+        // Every reversal row on these wallets: "which reversal caused the CURRENT debt" is decided on THESE rows.
+        const reversalRows = await tx.walletTransaction.findMany({
+          where: { walletId: { in: walletIds }, creditReversalId: { not: null } },
+          select: { walletId: true, creditReversalId: true, seq: true, createdAt: true },
+        });
+        return { total, agg, wallets, outlets, allocations, lastNonNeg, reversalRows };
+      },
       { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
     );
+    const { total, agg, wallets } = snap;
     const negSum = agg?._sum?.redeemablePoints ?? 0;
-    const walletIds = wallets.map((w) => w.id);
-    const [outlets, allocations, lastNonNeg, reversalRows] = walletIds.length
-      ? await Promise.all([
-          this.prisma.outlet.findMany({
-            where: { clientId, partnerId: { in: wallets.map((w) => w.partnerId) } },
-            select: { partnerId: true, outletCode: true },
-          }),
-          this.prisma.creditReversalAllocation.findMany({
-            where: {
-              position: { walletId: { in: walletIds } },
-              creditReversal: { clientId },
-              OR: [{ owed: { gt: 0 } }, { debtRestored: { gt: 0 } }, { debtExposed: { gt: 0 } }],
-            },
-            select: {
-              id: true,
-              creditReversalId: true,
-              owed: true,
-              debtRestored: true,
-              debtExposed: true,
-              overReversalDebt: true,
-              engineSource: true,
-              position: { select: { walletId: true, outletCode: true } },
-              creditReversal: { select: { approvedAt: true, fieldName: true, period: true } },
-            },
-          }),
-          // The last row that left each wallet at or above zero — by seq (sequenced) / time (never sequenced).
-          this.prisma.walletTransaction.groupBy({
-            by: ['walletId'],
-            where: { walletId: { in: walletIds }, balanceAfter: { gte: 0 } },
-            _max: { seq: true, createdAt: true },
-          }),
-          // Every reversal row on these wallets — "which reversal caused the CURRENT debt" is decided on THESE rows
-          // (fix round 4, item 2: seq, never approvedAt; two positions of one reversal both count).
-          this.prisma.walletTransaction.findMany({
-            where: { walletId: { in: walletIds }, creditReversalId: { not: null } },
-            select: { walletId: true, creditReversalId: true, seq: true, createdAt: true },
-          }),
-        ])
-      : [[], [], [], []];
+    type Alloc = (typeof snap.allocations)[number];
+    type RevRow = { walletId: string; creditReversalId: string | null; seq: number | null; createdAt: Date };
+    // A2: group every list by wallet ONCE (no wallets x rows loops).
+    const outletsBy = new Map<string, string[]>();
+    for (const o of snap.outlets as Array<{ partnerId: string | null; outletCode: string }>) {
+      if (o.partnerId) outletsBy.set(o.partnerId, [...(outletsBy.get(o.partnerId) ?? []), o.outletCode]);
+    }
+    const allocBy = new Map<string, Alloc[]>();
+    for (const a of snap.allocations as Alloc[]) allocBy.set(a.position.walletId, [...(allocBy.get(a.position.walletId) ?? []), a]);
+    const rowsBy = new Map<string, RevRow[]>();
+    for (const r of snap.reversalRows as RevRow[]) rowsBy.set(r.walletId, [...(rowsBy.get(r.walletId) ?? []), r]);
     const lastBy = new Map(
-      (lastNonNeg as Array<{ walletId: string; _max: { seq: number | null; createdAt: Date | null } }>).map((g) => [g.walletId, g._max]),
+      (snap.lastNonNeg as Array<{ walletId: string; _max: { seq: number | null; createdAt: Date | null } }>).map((g) => [g.walletId, g._max]),
     );
     const currentReversals = (w: { id: string; movementSeq: number }) => {
       const last = lastBy.get(w.id);
-      const sequenced = (w.movementSeq ?? 0) > 0;
       return new Set(
-        (reversalRows as Array<{ walletId: string; creditReversalId: string | null; seq: number | null; createdAt: Date }>)
-          .filter((r) => r.walletId === w.id && r.creditReversalId)
-          .filter((r) =>
-            sequenced
-              ? last?.seq == null || (r.seq != null && r.seq > last.seq)
-              : !last?.createdAt || r.createdAt > last.createdAt,
-          )
+        (rowsBy.get(w.id) ?? [])
+          .filter((r) => !!r.creditReversalId)
+          .filter((r) => {
+            // seq when both sides have one (exact, sequenced history); B7: a last row at or above zero WITHOUT seq
+            // (history from before sequencing) falls back to time; no such row at all: every reversal row counts.
+            if (last?.seq != null && r.seq != null && (w.movementSeq ?? 0) > 0) return r.seq > last.seq;
+            if (last?.createdAt) return r.createdAt > last.createdAt;
+            return true;
+          })
           .map((r) => r.creditReversalId as string),
       );
     };
@@ -2934,8 +2973,8 @@ export class WalletService {
       truncated: total > wallets.length,
       wallets: wallets.map((w) => {
         const current = currentReversals(w);
-        const sources = allocations
-          .filter((a) => a.position.walletId === w.id && current.has(a.creditReversalId))
+        const sources = (allocBy.get(w.id) ?? [])
+          .filter((a) => current.has(a.creditReversalId))
           .map((a) => ({
             allocationId: a.id,
             creditReversalId: a.creditReversalId,
@@ -2960,7 +2999,7 @@ export class WalletService {
           walletId: w.id,
           partnerId: w.partnerId,
           partnerName: w.partner?.businessName ?? null,
-          outletCodes: outlets.filter((o) => o.partnerId === w.partnerId).map((o) => o.outletCode).sort(),
+          outletCodes: [...(outletsBy.get(w.partnerId) ?? [])].sort(),
           balance: w.redeemablePoints,
           debtPoints: w.debtPoints,
           owedPoints: -w.redeemablePoints,
