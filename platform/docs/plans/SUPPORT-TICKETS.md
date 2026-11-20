@@ -110,29 +110,47 @@ column, table layout, inline styles (mobile-friendly, no CSS grid). Subject:
 Privacy: every value HTML-escaped; free text (note, description, messages) has phone numbers and email addresses
 masked ("[phone hidden]" / "[email hidden]"); no internal ids, no bank / KYC document data. All dates IST.
 
-## Ticket remarks email (per client — owner-approved 2026-11-20, TENANT-SCOPED)
+## Ticket remarks email (per client — owner-approved 2026-11-20, TENANT-SCOPED; To + CC lists 2026-11-21, platform-wide approved)
 
 Gifsy console → Clients → <client> → **Support tickets** card (GIFSY_ADMIN only; the card is not rendered for
-GIFSY_STAFF and the API refuses them). Field "Ticket remarks email": one address (trimmed, lowercased; a list is
-refused), Save, saved/error states, "Last changed by X on date" from the audit log.
+GIFSY_STAFF and the API refuses them). "Ticket remarks email" with two chip inputs — **To** (0–5) and **CC** (0–10):
+Enter / comma / space adds a chip (a pasted list is split), × removes one; each address trimmed, lowercased, deduped;
+invalid / over-limit / already-in-the-other-list entries are refused inline under that list; a half-typed address is
+folded in on Save (never dropped). Helper text: blank To = the admin chosen on each ticket. A "Currently: …" summary
+and "Last changed by X on date" (audit log) sit under Save. Phone-width: chips wrap.
 
-- Stored as one `program_settings` row per tenant: key `ticketRemarksEmail`, value `{ email }`. Written ONLY by
-  `PUT /v1/gifsy/clients/:slug/ticket-remarks-email {email | '' | null}` (read: `GET` same path) — `@Roles('GIFSY_ADMIN')`,
-  deliberately no `@RequirePermission` (a staff can never pass), role re-checked in the service. The generic
-  `PUT /v1/admin/settings` refuses the key. Every change writes an `audit_logs` row (`entityType
-  TICKET_REMARKS_EMAIL`, `entityId` = slug, old → new). Clearing deletes the row.
-- **Set** → "Ask client admin for remarks" emails go ONLY to that address (never to the chosen admin's personal
-  email). The email names the admin who was asked; the chosen admin still gets the in-app bell and still replies in
-  the portal. The Gifsy-only outcome note says "Email sent to <address> (client's ticket remarks inbox) — asked: <name>".
-- **Unset** (default — every tenant today incl. Deoleo) → byte-identical to before: the chosen admin's own email,
-  "Hi <name>" greeting, outcome note "Email sent to <name> (<their email>)".
+- Stored as one `program_settings` row per tenant (NO migration): key `ticketRemarksEmail`, value
+  `{ to: string[], cc: string[], email?: to[0] }` — `email` is written only when To is non-empty, so a rolled-back
+  build (which reads only `{ email }`) still mails To[0] and never treats a CC-only config as an inbox. A legacy
+  `{ email }` row reads as To = [email], CC = []. Written ONLY by `PUT /v1/gifsy/clients/:slug/ticket-remarks-email
+  { to: string[], cc: string[] }` (legacy `{ email | '' | null }` still accepted: sets To, keeps CC) — read: `GET`
+  same path → `{ to, cc, email (= To[0]), lastChange }`. `@Roles('GIFSY_ADMIN')`, deliberately no
+  `@RequirePermission` (a staff can never pass), role re-checked in the service. The generic `PUT /v1/admin/settings`
+  refuses the key. Every change writes an `audit_logs` row (`entityType TICKET_REMARKS_EMAIL`, `entityId` = slug,
+  old → new `{ to, cc }`). Both lists empty deletes the row. Server validation: To ≤ 5, CC ≤ 10 (after dedupe), an
+  address in both lists → 400 naming it, invalid entry → 400 naming the list + position ("CC address 2: …").
+- **To set** → ONE email To every To address with a real `Cc:` header for the CC list (MSG91 SMTP relay via
+  nodemailer — multi-recipient + Cc supported). Never to the chosen admin's personal email unless listed. The email
+  names the admin who was asked; the chosen admin still gets the in-app bell and replies in the portal. Outcome note:
+  "Email sent to <to list> (client's ticket remarks inbox)[, cc <list>] — asked: <name>".
+- **To blank, CC set** → To the chosen admin's own email (as before; their address is dropped from CC if listed),
+  Cc the CC list; note "Email sent to <name> (<their email>), cc <list>". If the admin has no email the send is NOT
+  made (as before) and the note says so naming the CC list too.
+- **Both blank** (default — every tenant today incl. Deoleo) → byte-identical to before: the chosen admin's own email,
+  no `cc` key on the send, "Hi <name>" greeting, outcome note "Email sent to <name> (<their email>)".
+- **Partial relay rejection**: `Msg91Service.sendEmail` now takes optional `cc` and returns `{ skipped, accepted,
+  rejected }` (nodemailer resolves when ≥1 recipient is accepted and throws when all are refused). Rejected
+  addresses are appended to the Gifsy-only note ("The mail relay REJECTED x — they did NOT get this email"), returned
+  as `emailRejected`, and shown with ⚠ in the Gifsy toast. Relay acceptance ≠ inbox delivery: a later bounce is not
+  visible (no DLR for SMTP email).
 - Not shown to client admins (optional read-only display deliberately not added); the tenant settings payload
   (`GET /v1/admin/settings`) never includes the key.
 - Validation is strict printable ASCII (letters, digits, `. _ % + ' -` in the local part; dotted labels + a 2+
   letter TLD): spaces, lists (`,` `;`), quotes, backslashes, colons, angle brackets, control characters and
   invisible format characters (e.g. U+200B zero-width space) are refused.
 - Where the email went is reported honestly everywhere: the response carries `emailRecipientKind` (`INBOX` |
-  `ADMIN`) + `emailRecipient`; the Gifsy toast and the Gifsy-only outcome note (sent or NOT sent) name "the
+  `ADMIN`) + `emailRecipient` (To addresses joined ", ") + `emailTo` / `emailCc` lists (+ `emailRejected` when any);
+  the Gifsy toast and the Gifsy-only outcome note (sent or NOT sent) name "the
   client's ticket remarks inbox <addr>" or the chosen admin accordingly.
 - Like every `/v1/gifsy/clients/:slug/*` route, a GIFSY_ADMIN may edit any client's address regardless of which
   tenant they are currently assumed into (the slug in the URL decides; this is the console's normal model).
