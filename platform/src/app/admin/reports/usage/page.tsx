@@ -191,6 +191,7 @@ export default function UsageReportPage() {
               : <>Duration and medium tracking has not recorded any activity for this programme yet; earlier days count as active days only.</>}
           </p>
           <p>{data?.notes.region ?? 'Programme and region come from outlets.'}</p>
+          {(data?.notes.area ?? []).map((line) => <p key={line} data-testid="usage-area-note">{line}</p>)}
         </div>
       </div>
 
@@ -337,7 +338,7 @@ export default function UsageReportPage() {
                   </caption>
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-300 text-gray-700 text-left">
-                      {['User', 'Role', 'Mobile', 'Programme', 'Region'].map((h) => (
+                      {['User', 'Role', data.asmHeader || 'ASM', 'Zone', 'State', 'City', 'Mobile', 'Programme', 'Region'].map((h) => (
                         <th key={h} scope="col" className="px-3 py-2 font-medium whitespace-nowrap">{h}</th>
                       ))}
                       {['Days active', 'Visits', 'Minutes (at least)', 'Avg min / tracked day', 'App days', 'Browser days'].map((h) => (
@@ -353,6 +354,9 @@ export default function UsageReportPage() {
                       <tr key={r.userId} className="border-b border-gray-100 hover:bg-gray-50">
                         <td className="px-3 py-1.5 font-medium whitespace-nowrap max-w-[200px] truncate" title={r.name}>{r.name}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{roleLabel(r.role)}</td>
+                        {[r.asm, r.zone, r.state, r.city].map((v, i) => (
+                          <td key={i} className="px-3 py-1.5 whitespace-nowrap text-gray-600 max-w-[180px] truncate" title={v || undefined}>{v || '—'}</td>
+                        ))}
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-500 font-mono">{r.phone || '—'}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600 max-w-[180px] truncate" title={r.programmes.join(', ')}>{r.programmes.join(', ') || '—'}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600 max-w-[180px] truncate" title={r.regions.join(', ')}>{r.regions.join(', ') || '—'}</td>

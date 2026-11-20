@@ -32,10 +32,15 @@ import {
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import { parseQueryDto } from './kind-support';
 
+/** 'ASM' is the default header — the file uses the tenant's own ASM level name (usageReportHeaders). */
 export const USAGE_REPORT_HEADERS = [
   'Name',
   'Mobile',
   'Role',
+  'ASM',
+  'Zone',
+  'State',
+  'City',
   'Status',
   'Programme',
   'Region',
@@ -49,6 +54,10 @@ export const USAGE_REPORT_HEADERS = [
   'First seen (IST)',
   'Last seen (IST)',
 ] as const;
+
+export function usageReportHeaders(asmHeader: string): string[] {
+  return USAGE_REPORT_HEADERS.map((h) => (h === 'ASM' ? asmHeader : h));
+}
 
 export const USAGE_REPORT_NONE_MESSAGE = '0 users matched these filters.';
 export const USAGE_ABOUT_SHEET = 'About';
@@ -65,6 +74,9 @@ export function usageAboutRows(report: UsageReport, p: UsageParams, now: Date): 
         : 'No tracked activity yet — all days count as active days only (no duration or medium).',
     ],
     ['Programme / region', USAGE_REGION_NOTE],
+    [report.asmHeader, report.notes.area[0] ?? ''],
+    ['Zone / State / City', report.notes.area[1] ?? ''],
+    ['Not set / Not in hierarchy', report.notes.area[2] ?? ''],
     ['Avg minutes per tracked day', 'Minutes ÷ days with tracking (days before tracking started are left out).'],
     ['Phone / computer', 'From the browser identity. Tablets count as phones; an iPad asking for the desktop site counts as a computer.'],
     ['Background activity', 'Automatic refreshes (notification bell, download badge, status polling) are not counted — only real actions.'],
@@ -93,6 +105,10 @@ export function usageReportCells(r: UsageRow): XlsxCell[] {
     r.name,
     normalizePhoneLast10(r.phone) ?? r.phone ?? '',
     r.role.replace(/_/g, ' '),
+    r.asm,
+    r.zone,
+    r.state,
+    r.city,
     STATUS_LABEL[r.status] ?? r.status,
     r.programmes.join(', '),
     r.regions.join(', '),
@@ -141,8 +157,8 @@ async function run(ctx: ExportRunContext, p: UsageParams, out: XlsxStreamWriter)
   });
 
   // 3. Only now write the workbook.
-  const sheet = await out.addSheet('Usage', [...USAGE_REPORT_HEADERS], {
-    widths: [26, 14, 16, 12, 22, 22, 11, 9, 12, 14, 10, 12, 14, 18, 18],
+  const sheet = await out.addSheet('Usage', usageReportHeaders(report.asmHeader), {
+    widths: [26, 14, 16, 24, 16, 18, 18, 12, 22, 22, 11, 9, 12, 14, 10, 12, 14, 18, 18],
   });
   for (const r of report.rows) await sheet.addRow(usageReportCells(r));
 

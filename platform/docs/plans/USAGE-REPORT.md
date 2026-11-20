@@ -128,6 +128,14 @@ server action, not an authenticated `/api` call. Any NEW poll/timer must use `ba
   numbers leave the system — same pattern as the installed-users export.
 - **Page note:** the duration rule, "at least", and "Tracking started on <date>" — the first IST day with tracked
   activity for this tenant (read from the data, so it is the real ship date per environment).
+- **Area columns (owner 2026-11-20):** ASM (header = the tenant's own ASM level name) · Zone · State · City, right
+  after Role — on the page, the Excel and the App-installed-users Excel. One shared resolver
+  `api/src/reports/area/user-area.ts` (4 tenant-wide reads, never per row). ASM = walk SalesUser.reportingTo to the
+  ASM rung (an ASM = self; above ASM = blank; vacant ASM = "Vacant (code)", NOT the next active manager; none =
+  "Not set"). Zone/State/City = the outlet master (the hierarchy upload carries no geography; SalesUser.zone/region
+  are dormant): partners → primary outlet + the assigned rep's ASM; sales users → outlets assigned to them and their
+  downline (SalesUser.zone wins; > 5 values → "+N more"). Admin/MIS/Gifsy → "Not in sales hierarchy". Explained in
+  the About sheet / page note.
 
 ## Runbook — deploy / migration (review A-M2)
 

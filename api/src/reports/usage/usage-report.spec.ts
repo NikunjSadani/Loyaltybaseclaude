@@ -81,20 +81,38 @@ function fixtures() {
     // other tenant — must NEVER appear in a bajaj report
     { id: 'd1', clientId: 'deoleo', name: 'Deoleo Retail', phone: '919800000001', role: 'SSS', status: 'ACTIVE', salesUser: null },
   ];
+  // (The fake ignores `select`, so these rows also carry what the area resolver reads: id / partnerId / zone / city.)
+  const geo = (id: string, partnerId: string | null, zone: string | null, city: string) =>
+    ({ id, partnerId, zone, city, isPrimary: true, createdAt: new Date('2026-01-01T00:00:00Z') });
   const outlets = [
-    { clientId: 'bajaj', programName: ' Gold ', state: 'Maharashtra', partner: { userId: 'r1' }, parent: null },
-    { clientId: 'bajaj', programName: 'Silver', state: 'Gujarat', partner: { userId: 'r2' }, parent: { userId: 'p1' } },
-    { clientId: 'bajaj', programName: 'Gold', state: 'Gujarat', partner: { userId: 'idle' }, parent: null },
-    { clientId: 'bajaj', programName: null, state: 'Goa', partner: null, parent: null },
-    { clientId: 'deoleo', programName: 'Deoleo Club', state: 'Kerala', partner: { userId: 'd1' }, parent: null },
+    { clientId: 'bajaj', programName: ' Gold ', state: 'Maharashtra', partner: { userId: 'r1' }, parent: null, ...geo('o1', 'P-r1', 'West', 'Pune') },
+    { clientId: 'bajaj', programName: 'Silver', state: 'Gujarat', partner: { userId: 'r2' }, parent: { userId: 'p1' }, ...geo('o2', 'P-r2', 'West', 'Surat') },
+    { clientId: 'bajaj', programName: 'Gold', state: 'Gujarat', partner: { userId: 'idle' }, parent: null, ...geo('o3', 'P-idle', null, 'Vadodara') },
+    { clientId: 'bajaj', programName: null, state: 'Goa', partner: null, parent: null, ...geo('o4', null, null, 'Panaji') },
+    { clientId: 'deoleo', programName: 'Deoleo Club', state: 'Kerala', partner: { userId: 'd1' }, parent: null, ...geo('o5', 'P-d1', 'South', 'Kochi') },
+  ];
+  // Sales hierarchy for the area columns: s1 (SO) reports to s2 (ASM "Zara ASM").
+  const levels = [
+    { clientId: 'bajaj', code: 'SO', name: 'SO', level: 2 },
+    { clientId: 'bajaj', code: 'ASM', name: 'ASM', level: 3 },
+  ];
+  const salesUsers = [
+    { clientId: 'bajaj', id: 'su-s1', userId: 's1', reportingToId: 'su-s2', isActive: true, deletedAt: null, employeeCode: 'SO-1', zone: null, hierarchyLevel: { code: 'SO' }, user: { name: 'Sunil SO', status: 'ACTIVE' } },
+    { clientId: 'bajaj', id: 'su-s2', userId: 's2', reportingToId: null, isActive: true, deletedAt: null, employeeCode: 'ASM-1', zone: null, hierarchyLevel: { code: 'ASM' }, user: { name: 'Zara ASM', status: 'ACTIVE' } },
   ];
   const assignments = [
     {
+      salesUserId: 'su-s1',
+      outletId: 'o1',
+      partnerId: null,
       salesUser: { userId: 's1', clientId: 'bajaj' },
       outlet: { programName: 'Gold', state: 'Maharashtra', deletedAt: null, clientId: 'bajaj' },
       partner: null,
     },
     {
+      salesUserId: 'su-s2',
+      outletId: 'o2',
+      partnerId: null,
       salesUser: { userId: 's2', clientId: 'bajaj' },
       outlet: { programName: 'Silver', state: 'Gujarat', deletedAt: null, clientId: 'bajaj' },
       partner: null,
@@ -107,7 +125,7 @@ function fixtures() {
     agg('a1', { daysActive: 3, trackedDays: 0, visits: 0, activeSeconds: 0 }), // legacy-only days (pre-ship)
     agg('d1', { daysActive: 30, trackedDays: 30, visits: 90, activeSeconds: 99_999, appDays: 30 }),
   ];
-  return { users, outlets, assignments, activity, started: '2026-11-18' };
+  return { users, outlets, assignments, levels, salesUsers, activity, started: '2026-11-18' };
 }
 
 function fakePrisma(fx = fixtures()) {
@@ -126,6 +144,12 @@ function fakePrisma(fx = fixtures()) {
       findMany: jest.fn(async ({ where }: any) =>
         fx.assignments.filter((a) => a.salesUser.clientId === where.salesUser.clientId),
       ),
+    },
+    salesHierarchyLevel: {
+      findMany: jest.fn(async ({ where }: any) => fx.levels.filter((l) => l.clientId === where.clientId)),
+    },
+    salesUser: {
+      findMany: jest.fn(async ({ where }: any) => fx.salesUsers.filter((s) => s.clientId === where.clientId)),
     },
     $executeRawUnsafe: jest.fn(async () => 0),
     $transaction: jest.fn(async (fn: any, _opts?: any) => fn(prismaRef)),
@@ -299,6 +323,8 @@ describe('buildUsageReport', () => {
     wrap(prisma.user, 'findMany');
     wrap(prisma.outlet, 'findMany');
     wrap(prisma.salesUserAssignment, 'findMany');
+    wrap(prisma.salesHierarchyLevel, 'findMany');
+    wrap(prisma.salesUser, 'findMany');
     wrap(prisma, '$queryRaw');
     await buildUsageReport(prisma as any, 'bajaj', params(), NOW);
     expect(peak).toBe(1);
@@ -329,6 +355,42 @@ describe('buildUsageReport', () => {
     expect(r.filters.programs).toEqual(['Gold', 'Silver']);
     expect(r.filters.regions).toEqual(['Goa', 'Gujarat', 'Maharashtra', 'West']);
     expect(r.filters.roles).toEqual(['CLIENT_ADMIN', 'SALES_ASM', 'SALES_SO', 'SSS', 'WHOLESALER']);
+  });
+
+  it('area columns (ASM / Zone / State / City): sales chain, partner outlet + rep, admin, header + notes', async () => {
+    const r = await buildUsageReport(fakePrisma() as any, 'bajaj', params({ includeInactive: true }), NOW);
+    const by = new Map(r.rows.map((x) => [x.userId, x]));
+    const area = (id: string) => {
+      const x = by.get(id)!;
+      return [x.asm, x.zone, x.state, x.city];
+    };
+    expect(area('s1')).toEqual(['Zara ASM', 'West', 'Maharashtra', 'Pune']); // SO → its ASM; geo of its assigned outlet
+    expect(area('s2')).toEqual(['Zara ASM', 'West', 'Gujarat, Maharashtra', 'Pune, Surat']); // ASM self; whole downline
+    expect(area('r1')).toEqual(['Zara ASM', 'West', 'Maharashtra', 'Pune']); // outlet geo + assigned rep's ASM
+    expect(area('idle')).toEqual(['Not set', 'Not set', 'Gujarat', 'Vadodara']); // no rep, blank zone → "Not set"
+    expect(area('a1')).toEqual(Array(4).fill('Not in sales hierarchy'));
+    expect(r.asmHeader).toBe('ASM');
+    expect(r.notes.area).toHaveLength(3);
+  });
+
+  it('2,000 users → the same number of DB reads as 10 users (area data is batch-loaded, never per row)', async () => {
+    const reads = async (n: number) => {
+      const fx = fixtures();
+      for (let i = 0; i < n; i++) {
+        fx.users.push({ id: `b${i}`, clientId: 'bajaj', name: `U${i}`, phone: '9', role: i % 2 ? 'SSS' : 'SALES_SO', status: 'ACTIVE', salesUser: null });
+        fx.activity.push(agg(`b${i}`));
+      }
+      const prisma = fakePrisma(fx);
+      const r = await buildUsageReport(prisma as any, 'bajaj', params(), NOW);
+      const calls = [prisma.user, prisma.outlet, prisma.salesUserAssignment, prisma.salesHierarchyLevel, prisma.salesUser]
+        .reduce((s, m) => s + m.findMany.mock.calls.length, prisma.$queryRaw.mock.calls.length);
+      return { calls, rows: r.rows.length };
+    };
+    const small = await reads(10);
+    const big = await reads(2_000);
+    expect(big.rows).toBe(small.rows + 1_990);
+    expect(big.calls).toBe(small.calls);
+    expect(big.calls).toBe(9); // aggregate + start day + users + outlets + assignments + 4 area reads
   });
 
   it('filters: role, programme (case-insensitive), region — totals follow the filter', async () => {
@@ -499,19 +561,25 @@ describe("export kind 'usage-report'", () => {
     expect(w.rows.length).toBeGreaterThan(7);
     expect(order).toEqual(['audit', 'sheet', 'sheet']);
     expect(w.sheets[0].headers).toEqual([...USAGE_REPORT_HEADERS]);
+    // area columns sit right after the user's name / mobile / role
+    expect(w.sheets[0].headers.slice(0, 8)).toEqual(['Name', 'Mobile', 'Role', 'ASM', 'Zone', 'State', 'City', 'Status']);
     // M2: the notes sheet carries the duration rule + tracking start date
     expect(w.sheets[1].name).toBe(USAGE_ABOUT_SHEET);
     const about = w.rows.slice(7).map((r) => r.join(' | ')).join(' // ');
     expect(about).toMatch(/first and last action in each visit/);
     expect(about).toMatch(/Tracking started on \| 2026-11-18/);
     expect(about).toMatch(/not counted/);
+    expect(about).toMatch(/ASM \| ASM: the ASM this user reports to/);
+    expect(about).toMatch(/Zone \/ State \/ City \| .*outlet master/);
+    expect(about).toMatch(/Not in sales hierarchy/);
     const audit = prisma.auditLog.create.mock.calls[0][0].data;
     expect(audit).toMatchObject({ action: 'EXPORT', entityType: 'USAGE_REPORT', entityId: 'bajaj', actorId: 'admin-1' });
     expect(audit.metadata).toMatchObject({ rowCount: 7, filters: { includeInactive: true } });
     const first = w.rows[0];
     expect(first[0]).toBe('Asha Retail');
     expect(first[1]).toBe('9876500001');
-    expect(first[8]).toBe(50); // minutes
+    expect(first.slice(3, 7)).toEqual(['Zara ASM', 'West', 'Maharashtra', 'Pune']); // area
+    expect(first[12]).toBe(50); // minutes
     expect(w.rows.slice(0, 7).map((r) => r[0])).not.toContain('Deoleo Retail');
     expect(w.rows.slice(0, 7).map((r) => r[0])).not.toContain('Off Retail');
   });

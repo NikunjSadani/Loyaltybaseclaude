@@ -12,6 +12,7 @@ import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { EXPORT_KINDS } from '../index';
 import {
   APP_INSTALLED_USERS_KIND,
+  INSTALLED_USERS_ABOUT_SHEET,
   INSTALLED_USERS_HEADERS,
   INSTALLED_USERS_NONE_MESSAGE,
   istDayStart,
@@ -82,6 +83,30 @@ function makePrisma() {
     { userId: 'u-g', clientId: 'gifsy', platform: 'DESKTOP', installedAt: D('2026-11-01T00:00:00Z'), lastSeenAt: D('2026-11-01T00:00:00Z') },
     { userId: 'u-deo', clientId: 'deoleo', platform: 'ANDROID', installedAt: D('2026-11-02T00:00:00Z'), lastSeenAt: D('2026-11-03T00:00:00Z') },
   ];
+  // Area data (reports/area/user-area.ts): bajaj ISR → SO → ASM "Priya"; the retailer's outlet is assigned to the ISR.
+  const levels = [
+    { clientId: 'bajaj', code: 'XSR', name: 'ISR', level: 1 },
+    { clientId: 'bajaj', code: 'SO', name: 'SO', level: 2 },
+    { clientId: 'bajaj', code: 'ASM', name: 'ASM', level: 3 },
+    { clientId: 'deoleo', code: 'ASM', name: 'Area Manager', level: 3 },
+  ];
+  const su = (id: string, clientId: string, userId: string, code: string, reportingToId: string | null, name: string) => ({
+    id, clientId, userId, reportingToId, isActive: true, deletedAt: null, employeeCode: id, zone: null,
+    hierarchyLevel: { code }, user: { name, status: 'ACTIVE' },
+  });
+  const salesUsers = [
+    su('su-isr', 'bajaj', 'u-isr', 'XSR', 'su-so', 'Ravi'),
+    su('su-so', 'bajaj', 'u-so-x', 'SO', 'su-asm', 'Sohan'),
+    su('su-asm', 'bajaj', 'u-asm-x', 'ASM', null, 'Priya'),
+    su('su-deo', 'deoleo', 'u-deo', 'ASM', null, 'Maria'),
+  ];
+  const outlets = [
+    {
+      clientId: 'bajaj', id: 'o-ret', partnerId: 'P-1', isPrimary: true, createdAt: D('2026-01-01T00:00:00Z'),
+      zone: 'West', state: 'Maharashtra', city: 'Pune', partner: { userId: 'u-ret' }, parent: null,
+    },
+  ];
+  const assignments = [{ clientId: 'bajaj', salesUserId: 'su-isr', outletId: 'o-ret', partnerId: null }];
   const byId = new Map(users.map((u) => [u.id, u]));
   const matchInstall = (i: FakeInstall, w: InstallWhere) => {
     if (i.clientId !== w.clientId) return false;
@@ -127,6 +152,14 @@ function makePrisma() {
     outletTypeClientConfig: {
       findMany: jest.fn(async () => [{ displayName: 'Retailer', outletType: { code: 'RT' } }]),
     },
+    salesHierarchyLevel: { findMany: jest.fn(async ({ where }: { where: { clientId: string } }) => levels.filter((l) => l.clientId === where.clientId)) },
+    salesUser: { findMany: jest.fn(async ({ where }: { where: { clientId: string } }) => salesUsers.filter((s) => s.clientId === where.clientId)) },
+    salesUserAssignment: {
+      findMany: jest.fn(async ({ where }: { where: { salesUser: { clientId: string } } }) =>
+        assignments.filter((a) => a.clientId === where.salesUser.clientId),
+      ),
+    },
+    outlet: { findMany: jest.fn(async ({ where }: { where: { clientId: string } }) => outlets.filter((o) => o.clientId === where.clientId)) },
     auditLog: { create: jest.fn(async () => ({})) },
   };
 }
@@ -145,6 +178,9 @@ function allWheres(prisma: ReturnType<typeof makePrisma>): Array<Record<string, 
     ...prisma.user.findMany.mock.calls,
     ...prisma.pushSubscription.groupBy.mock.calls,
     ...prisma.outletTypeClientConfig.findMany.mock.calls,
+    ...prisma.salesHierarchyLevel.findMany.mock.calls,
+    ...prisma.salesUser.findMany.mock.calls,
+    ...prisma.outlet.findMany.mock.calls,
   ] as unknown as Array<[{ where: Record<string, unknown> }]>;
   return calls.map((c) => c[0].where);
 }
@@ -197,7 +233,8 @@ describe('app-installed-users export kind', () => {
   it('row shape: headers, newest first install first, labels, platforms, notifications, status, 10-digit phones', async () => {
     const { aoa, rowCount } = await build(CLIENT);
     expect(rowCount).toBe(4);
-    expect(aoa[0]).toEqual([...INSTALLED_USERS_HEADERS]);
+    expect(aoa[0]).toEqual([...INSTALLED_USERS_HEADERS]); // bajaj's ASM level is named "ASM"
+    expect(aoa[0].slice(0, 9)).toEqual(['Name', 'Phone', 'Role', 'Role Group', 'ASM', 'Zone', 'State', 'City', 'Outlet Code']);
     // u-ret (11-12) → u-isr (11-10) → u-adm (10-01) → u-sus (09-15). NOT u-del (deleted), NOT u-g (Gifsy operator).
     expect(aoa.slice(1).map((r) => r[1])).toEqual(['9000000002', '9000000001', '9000000003', '9000000005']);
     expect(aoa[1]).toEqual([
@@ -205,6 +242,10 @@ describe('app-installed-users export kind', () => {
       '9000000002', // "919000000002" → last 10 digits
       'Retailer', // per-tenant outlet-type display name
       'Partner',
+      'Priya', // the ASM of the ISR assigned to the outlet
+      'West',
+      'Maharashtra',
+      'Pune',
       'BJ-001',
       'Shree Stores',
       'Android',
@@ -215,14 +256,17 @@ describe('app-installed-users export kind', () => {
     ]);
     expect(aoa[2]).toEqual([
       'Ravi', '9000000001' /* "+91 90000 00001" — no apostrophe-prefixed "+91" cell */, 'ISR' /* empty level name → Bajaj label for XSR */,
-      'Sales', null, null, 'Android, iOS', '2026-11-10 10:00', '2026-11-15 15:30', 'Yes', 'Active',
+      'Sales', 'Priya' /* ISR → SO → ASM */, 'West', 'Maharashtra', 'Pune' /* from the ISR's assigned outlet */,
+      null, null, 'Android, iOS', '2026-11-10 10:00', '2026-11-15 15:30', 'Yes', 'Active',
     ]);
     expect(typeof aoa[2][1]).toBe('string'); // phone stays text
     expect(aoa[3].slice(2, 4)).toEqual(['Client admin', 'Admin']);
-    expect(aoa[3][6]).toBe('Desktop');
+    expect(aoa[3].slice(4, 8)).toEqual(Array(4).fill('Not in sales hierarchy'));
+    expect(aoa[3][10]).toBe('Desktop');
     expect(aoa[4][2]).toBe('SO'); // no level → from the role
-    expect(aoa[4][8]).toBeNull(); // no last-seen
-    expect(aoa[4][10]).toBe('Suspended'); // inactive / suspended users are KEPT
+    expect(aoa[4].slice(4, 8)).toEqual(Array(4).fill('Not set')); // a sales login with no employee record
+    expect(aoa[4][12]).toBeNull(); // no last-seen
+    expect(aoa[4][14]).toBe('Suspended'); // inactive / suspended users are KEPT
     expect(aoa.flat()).not.toContain('Old');
     expect(aoa.flat()).not.toContain('9000000004');
     expect(aoa.flat()).not.toContain('Operator');
@@ -231,6 +275,33 @@ describe('app-installed-users export kind', () => {
   it("sales role label = the tenant's own level name (Deoleo), not a Bajaj rung label", async () => {
     const { aoa } = await build(DEOLEO);
     expect(aoa.slice(1).map((r) => [r[0], r[2], r[3]])).toEqual([['Maria', 'Area Manager', 'Sales']]);
+    // the ASM column header is the tenant's own level name; an ASM shows their own name; no outlets → "Not set"
+    expect(aoa[0].slice(4, 8)).toEqual(['Area Manager', 'Zone', 'State', 'City']);
+    expect(aoa[1].slice(4, 8)).toEqual(['Maria', 'Not set', 'Not set', 'Not set']);
+  }, XLSX_TIMEOUT);
+
+  it('an "About" sheet explains the area columns', async () => {
+    const prisma = makePrisma();
+    const { buffer } = await renderKind(APP_INSTALLED_USERS_KIND, ctxFor(CLIENT, prisma), { roleGroup: null, since: null });
+    const about = readBook(buffer).sheets[INSTALLED_USERS_ABOUT_SHEET].aoa;
+    expect(about[0][0]).toBe('About this report');
+    expect(about.slice(1).map((r) => r[0])).toEqual(['ASM', 'Zone / State / City', 'Not set / Not in hierarchy']);
+    expect(String(about[1][1])).toMatch(/ABOVE the ASM level are left blank/);
+    expect(String(about[3][1])).toMatch(/Not in sales hierarchy/);
+  }, XLSX_TIMEOUT);
+
+  it('2,000 installed users → area data read ONCE (4 reads), not per row', async () => {
+    const prisma = makePrisma();
+    const many = Array.from({ length: 2_000 }, (_, i) => ({ userId: `bulk-${i}`, _min: { installedAt: D('2026-11-01T00:00:00Z') }, _max: { lastSeenAt: null } }));
+    prisma.pwaInstall.groupBy.mockResolvedValueOnce(many as never);
+    prisma.user.findMany.mockImplementation((async ({ where }: { where: { id: { in: string[] } } }) =>
+      where.id.in.map((id) => ({ id, name: id, phone: '9000000000', role: 'SALES_ISR', status: 'ACTIVE', salesUser: null, channelPartner: null }))) as never);
+    const { rowCount } = await build(CLIENT, {}, prisma);
+    expect(rowCount).toBe(2_000);
+    for (const m of [prisma.salesHierarchyLevel, prisma.salesUser, prisma.salesUserAssignment, prisma.outlet]) {
+      expect(m.findMany).toHaveBeenCalledTimes(1);
+    }
+    expect(prisma.user.findMany).toHaveBeenCalledTimes(2); // pre-existing 1,000-user batches — 2 reads for 2,000 rows
   }, XLSX_TIMEOUT);
 
   it('soft-deleted users are excluded at BOTH reads (install population + user read)', async () => {
@@ -285,7 +356,7 @@ describe('app-installed-users export kind', () => {
       spyWriter(events),
     );
     expect(res.rowCount).toBe(1);
-    expect(events).toEqual(['audit', 'addSheet', 'row']);
+    expect(events).toEqual(['audit', 'addSheet', 'row', 'addSheet', 'row', 'row', 'row']); // data sheet, then "About"
     expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
     expect(prisma.auditLog.create).toHaveBeenCalledWith({
       data: {

@@ -13,6 +13,12 @@ export interface UsageRow {
   status: string
   programmes: string[]
   regions: string[]
+  /** Area (owner 2026-11-20): ASM name ('' above the ASM level), zone, state, city — "Not set" /
+   *  "Not in sales hierarchy" when missing / not applicable. */
+  asm: string
+  zone: string
+  state: string
+  city: string
   daysActive: number
   trackedDays: number
   visits: number
@@ -50,7 +56,9 @@ export interface UsageReportPage {
   generatedAt: string
   range: { from: string; to: string; days: number }
   trackingStartedOn: string | null
-  notes: { duration: string; region: string }
+  notes: { duration: string; region: string; area?: string[] }
+  /** The ASM column header — the tenant's own name for the ASM level. */
+  asmHeader?: string
   filters: { roles: string[]; programs: string[]; regions: string[] }
   totals: UsageTotals
   page: number

@@ -21,6 +21,9 @@
  *     assigned to them (SalesUserAssignment). Managers without directly-assigned outlets have none;
  *   • admins / Gifsy staff / vendors: none.
  * Filtering by programme or region therefore keeps only users who have one.
+ *
+ * Area columns (ASM · Zone · State · City, owner 2026-11-20) are separate from programme / region and come from the
+ * shared resolver in reports/area/user-area.ts (sales hierarchy + outlet master; 4 tenant-wide reads).
  */
 import { BadRequestException, ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -32,6 +35,7 @@ import {
   type UsageReportQueryDto,
   type UsageSort,
 } from '../dto/usage-report.dto';
+import { loadUserAreaResolver, type AreaPrisma } from '../area/user-area';
 
 export const USAGE_MAX_RANGE_DAYS = 366;
 export const USAGE_DEFAULT_RANGE_DAYS = 30;
@@ -63,6 +67,12 @@ export interface UsageRow {
   status: string;
   programmes: string[];
   regions: string[];
+  /** Area (owner 2026-11-20) — reports/area/user-area.ts: ASM name ('' above ASM), zone, state, city; "Not set" /
+   *  "Not in sales hierarchy" when unresolvable / not applicable. */
+  asm: string;
+  zone: string;
+  state: string;
+  city: string;
   daysActive: number;
   /** Days with duration/medium tracking (visits > 0) — 0 for days before the feature shipped. */
   trackedDays: number;
@@ -109,7 +119,9 @@ export interface UsageReport {
   range: { from: string; to: string; days: number };
   /** First IST day with duration/medium tracking for this tenant (null = no tracked activity yet). */
   trackingStartedOn: string | null;
-  notes: { duration: string; region: string };
+  notes: { duration: string; region: string; area: string[] };
+  /** The ASM column's header — the tenant's own name for the ASM level ("ASM" by default). */
+  asmHeader: string;
   filters: { roles: string[]; programs: string[]; regions: string[] };
   applied: { role: string | null; program: string | null; region: string | null; sort: UsageSort; includeInactive: boolean };
   totals: UsageTotals;
@@ -342,6 +354,8 @@ export async function buildUsageReport(
       },
     },
   });
+  // Area columns: 4 tenant-wide reads, sequential, independent of the row count (reports/area/user-area.ts).
+  const area = await loadUserAreaResolver(prisma as unknown as AreaPrisma, clientId);
 
   // ── programme / region per user + the dropdown catalogues (all tenant outlets) ──
   const links = new Map<string, Link>();
@@ -393,6 +407,7 @@ export async function buildUsageReport(
     const activeSeconds = num(a?.activeSeconds);
     const phoneDays = num(a?.phoneDays);
     const computerDays = num(a?.computerDays);
+    const where = area.resolve({ id: u.id, role: u.role as string });
     inScope.push({
       userId: u.id,
       name: u.name ?? '',
@@ -401,6 +416,10 @@ export async function buildUsageReport(
       status: u.status as string,
       programmes,
       regions,
+      asm: where.asm,
+      zone: where.zone,
+      state: where.state,
+      city: where.city,
       daysActive: num(a?.daysActive),
       trackedDays,
       visits: num(a?.visits),
@@ -452,7 +471,8 @@ export async function buildUsageReport(
     timezone: 'Asia/Kolkata',
     range,
     trackingStartedOn: started?.[0]?.day ?? null,
-    notes: { duration: USAGE_DURATION_NOTE, region: USAGE_REGION_NOTE },
+    notes: { duration: USAGE_DURATION_NOTE, region: USAGE_REGION_NOTE, area: area.notes },
+    asmHeader: area.asmHeader,
     filters: { roles, programs: sortStrings(allPrograms), regions: sortStrings(allRegions) },
     applied: { role: p.role, program: p.program, region: p.region, sort: p.sort, includeInactive: p.includeInactive },
     totals,
