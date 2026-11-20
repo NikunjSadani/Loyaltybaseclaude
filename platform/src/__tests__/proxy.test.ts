@@ -370,12 +370,11 @@ describe('proxy — Step 2: valid token + role gating', () => {
     }
   });
 
-  it('Visibility photo viewer: a partner / MIS role is bounced to sign-in', async () => {
-    for (const role of ['SSS', 'MIS_USER']) {
+  it('Visibility photo viewer: a partner / MIS / vendor role still gets the PAGE (it says "no access"; the API enforces)', async () => {
+    for (const role of ['SSS', 'MIS_USER', 'VENDOR']) {
       mockJwt.mockResolvedValue({ payload: { role, sub: 'u-1' } } as never);
       const res = await run(withToken('/visibility/photo?key=k'));
-      expect(res.status).toBe(307);
-      expect(new URL(res.headers.get('location') as string).pathname).toBe('/auth/login');
+      expect({ role, next: isNext(res) }).toEqual({ role, next: true });
     }
   });
 

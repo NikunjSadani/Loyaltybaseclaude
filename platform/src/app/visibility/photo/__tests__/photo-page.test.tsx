@@ -4,7 +4,7 @@
  * media endpoint, shows the image + Download, and a plain error for 403 / 404 / missing key.
  */
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach, beforeEach } from 'vitest';
 
 let search = new URLSearchParams();
@@ -58,6 +58,16 @@ describe('Visibility photo viewer page', () => {
     stubFetch(404);
     render(<VisibilityPhotoPage />);
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Photo not found'));
+  });
+
+  it('an image the browser cannot render (e.g. HEIC) → "cannot be displayed" with a Download link', async () => {
+    search = new URLSearchParams({ key: KEY });
+    stubFetch(200);
+    render(<VisibilityPhotoPage />);
+    fireEvent.error(await screen.findByAltText('Visibility photo'));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain("This photo can't be displayed in the browser");
+    expect(screen.getAllByRole('link', { name: /download/i }).every((a) => a.getAttribute('href') === 'blob:photo-1')).toBe(true);
   });
 
   it('no key → "Photo not found" without calling the server', async () => {

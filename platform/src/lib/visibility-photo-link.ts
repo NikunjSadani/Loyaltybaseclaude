@@ -3,8 +3,9 @@
  * Visibility Excel report (api exports/kinds/batch1/visibility-captures.ts `visibilityPhotoPath`).
  *
  * It is a normal signed-in PAGE (never public): the edge proxy renews the session or sends the person to sign in
- * with `next`, then brings them back here. Admitted roles = the roles the backend media endpoint
- * (`GET /v1/visibility/captures/media`) serves; the backend still decides per photo (tenant folder pinning).
+ * with `next`. The page renders for ANY signed-in role (no proxy ROLE_ROUTES entry) — the backend media endpoint
+ * (`GET /v1/visibility/captures/media`) decides, and the page shows "You don't have access" on its 403.
+ * VISIBILITY_PHOTO_ROLES = the roles the media endpoint serves = the roles brought BACK to the photo after sign-in.
  */
 export const VISIBILITY_PHOTO_PREFIX = '/visibility';
 export const VISIBILITY_PHOTO_PATH = '/visibility/photo';

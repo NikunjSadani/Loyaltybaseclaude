@@ -19,7 +19,6 @@ import { resolveTenantSync } from '@/lib/platform/tenant-resolution'
 import { ensureWarm, refreshIfStale } from '@/lib/platform/tenant-routing-cache'
 import { resolveTrustedHost } from '@/lib/platform/edge-trust'
 import { loginUrlWithNext, returnToForEdgeRedirect } from '@/lib/return-to'
-import { VISIBILITY_PHOTO_PREFIX, VISIBILITY_PHOTO_ROLES } from '@/lib/visibility-photo-link'
 import {
   REFRESH_MAX_AGE,
   accessCookieMaxAge,
@@ -104,9 +103,9 @@ export const ROLE_ROUTES: Record<string, string[]> = {
   '/admin':   ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'GIFSY_STAFF'],
   '/sales':   ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'], // canonical UserRole enum — must match PORTAL_ROLES.sales (stale legacy codes here 307'd every sales login to /auth/login)
   '/partner': ['SSS', 'WHOLESALER', 'SUB_STOCKIST'],
-  // Visibility photo viewer (the Excel report's "Open photo" links) — signed-in page, every role the backend media
-  // endpoint serves (admin + sales). Never public: a signed-out click goes to sign-in with `next` and comes back.
-  [VISIBILITY_PHOTO_PREFIX]: VISIBILITY_PHOTO_ROLES,
+  // (No entry for /visibility — the photo viewer behind the Excel report's "Open photo" links renders for ANY
+  // signed-in role so a person without access reads "You don't have access to this photo" instead of a silent bounce;
+  // the backend media endpoint enforces roles + tenant. It is still NOT public: no session → sign-in with `next`.)
 }
 
 export async function proxy(request: NextRequest, event: NextFetchEvent) {

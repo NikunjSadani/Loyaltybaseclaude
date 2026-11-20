@@ -23,6 +23,12 @@ import { DownloadActionStatus } from '@/components/exports/download-action-statu
 
 type Variant = 'admin' | 'tenant';
 
+/** The current India month `YYYY-MM` (the latest month the report can be asked for — future months are refused). */
+function currentIstMonth(now = new Date()): string {
+  const s = new Date(now.getTime() + 330 * 60_000);
+  return `${s.getUTCFullYear()}-${String(s.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
 /** Derive `YYYY-MM` from a `YYYY-MM-Pn` window key (for the window selector). */
 function monthOfWindowKey(windowKey: string): string | null {
   const m = /^(\d{4}-\d{2})-P\d+$/.exec(windowKey);
@@ -117,11 +123,12 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
                 id="vis-report-month"
                 type="month"
                 value={exportMonth}
+                max={currentIstMonth()}
                 onChange={(e) => setExportMonth(e.target.value)}
                 aria-label="Report month"
                 className="border border-gray-300 rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
               />
-              <button onClick={handleMonthExport} disabled={monthAction.blocked || !exportMonth}
+              <button onClick={handleMonthExport} disabled={monthAction.blocked || !exportMonth || exportMonth > currentIstMonth()}
                 className="flex items-center gap-2 px-3 py-1.5 border border-[var(--brand-primary)] text-[var(--brand-primary)] text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-60">
                 {monthAction.busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                 {downloadButtonLabel(monthAction, 'Export month')}

@@ -1,5 +1,5 @@
 import type { Readable } from 'node:stream';
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { StorageService } from '../storage/storage.service';
@@ -83,7 +83,12 @@ export class VisibilityMediaService {
     if (!keyClientId) throw deny();
     // Un-assumed GIFSY reads any tenant; every other caller — incl. an ASSUMED
     // operator — is pinned to its (assumed) tenant folder.
-    if (!platformWide(user) && keyClientId !== user.clientId) throw deny();
+    // Another tenant's photo → 403 (not 404) so the report's photo viewer page can say "You don't have access to
+    // this photo" (2026-11-20). Decided from the key alone — storage is never touched, so it reveals nothing about
+    // whether the object exists.
+    if (!platformWide(user) && keyClientId !== user.clientId) {
+      throw new ForbiddenException("You don't have access to this photo.");
+    }
 
     const file = await this.storage.openBoundedObject(key);
     if (!file) throw deny();

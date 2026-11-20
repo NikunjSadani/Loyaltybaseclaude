@@ -10,7 +10,7 @@ import { Readable } from 'node:stream';
  */
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { VisibilityMediaService } from './visibility-media.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -99,10 +99,10 @@ describe('VisibilityMediaService', () => {
       expect(out.contentType).toBe('image/jpeg');
     });
 
-    it('404s a cross-tenant key for a non-admin', async () => {
+    it('403s a cross-tenant key for a non-admin (photo viewer says "no access")', async () => {
       await expect(
         service.viewMedia(t2User, 'visibility-media/t1/2026-07/a.jpg'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toBeInstanceOf(ForbiddenException);
       expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 
@@ -113,10 +113,10 @@ describe('VisibilityMediaService', () => {
       expect(out.contentType).toBe('image/jpeg');
     });
 
-    it('M4: pins a CLIENT_ADMIN to its own tenant — 404s a cross-tenant key', async () => {
+    it('M4: pins a CLIENT_ADMIN to its own tenant — 403s a cross-tenant key', async () => {
       await expect(
         service.viewMedia(t1ClientAdmin, 'visibility-media/t2/2026-07/a.jpg'),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toBeInstanceOf(ForbiddenException);
       expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
     });
 

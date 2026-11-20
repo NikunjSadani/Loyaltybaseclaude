@@ -69,6 +69,18 @@ describe('VISRPT — VisibilityReportView', () => {
     await waitFor(() => expect(downloadExport).toHaveBeenCalledWith(undefined, '2026-05'));
   });
 
+  it('VISRPT2c: future months cannot be chosen (max = the current India month; button disabled beyond it)', async () => {
+    render(<VisibilityReportView variant="admin" />);
+    await screen.findByText('60%');
+    const input = screen.getByLabelText('Report month') as HTMLInputElement;
+    const s = new Date(Date.now() + 330 * 60_000);
+    const current = `${s.getUTCFullYear()}-${String(s.getUTCMonth() + 1).padStart(2, '0')}`;
+    expect(input.max).toBe(current);
+    const next = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + 1, 1));
+    fireEvent.change(input, { target: { value: `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, '0')}` } });
+    expect((screen.getByRole('button', { name: /export month/i }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('VISRPT3: tenant variant uses getTenantReport and hides Export', async () => {
     render(<VisibilityReportView variant="tenant" />);
     await screen.findByText('60%');

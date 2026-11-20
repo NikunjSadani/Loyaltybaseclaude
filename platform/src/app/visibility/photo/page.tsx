@@ -4,8 +4,8 @@
  * Visibility photo viewer — the target of the Visibility Excel report's "Open photo" links
  * (`https://<tenant host>/visibility/photo?key=<object key>`).
  *
- * A signed-in page for every role the media endpoint serves (proxy ROLE_ROUTES['/visibility'], see
- * lib/visibility-photo-link.ts): a signed-out click is sent to sign-in with `next` and lands back here. The image is
+ * A signed-in page that renders for ANY signed-in role (see lib/visibility-photo-link.ts): a signed-out click is sent
+ * to sign-in with `next` and lands back here; a role / tenant without access reads "You don't have access". The image is
  * read from the role-gated `/api/visibility/captures/media?key=` (the backend pins every non-Gifsy caller to its own
  * tenant), shown full-width, with a Download link and a plain error for "no access" / "not found".
  */
@@ -46,6 +46,7 @@ function PhotoViewer() {
   const key = (params.get('key') ?? '').trim();
   const [state, setState] = useState<State>({ kind: 'loading' });
   const [attempt, setAttempt] = useState(0);
+  const [cantDisplay, setCantDisplay] = useState(false);
 
   useEffect(() => {
     if (!key) {
@@ -55,6 +56,7 @@ function PhotoViewer() {
     let cancelled = false;
     let objectUrl: string | null = null;
     setState({ kind: 'loading' });
+    setCantDisplay(false);
     (async () => {
       try {
         const res = await fetch(visibilityPhotoMediaUrl(key), { credentials: 'same-origin', cache: 'no-store' });
@@ -101,10 +103,24 @@ function PhotoViewer() {
           </div>
         )}
 
-        {state.kind === 'ready' && (
+        {state.kind === 'ready' && !cantDisplay && (
           <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
             {/* eslint-disable-next-line @next/next/no-img-element -- a same-origin blob: URL of an auth-gated object */}
-            <img src={state.url} alt="Visibility photo" className="block h-auto w-full" />
+            <img src={state.url} alt="Visibility photo" className="block h-auto w-full" onError={() => setCantDisplay(true)} />
+          </div>
+        )}
+
+        {state.kind === 'ready' && cantDisplay && (
+          <div role="alert" className="rounded-xl border border-gray-200 bg-white px-6 py-16 text-center">
+            <ImageOff className="mx-auto mb-3 h-8 w-8 text-gray-300" aria-hidden="true" />
+            <p className="text-sm font-semibold text-gray-900">This photo can&apos;t be displayed in the browser</p>
+            <p className="mt-1 text-sm text-gray-500">
+              Use{' '}
+              <a href={state.url} download={state.fileName} className="text-[var(--brand-primary)] hover:underline">
+                Download
+              </a>{' '}
+              to open it on your device.
+            </p>
           </div>
         )}
 
