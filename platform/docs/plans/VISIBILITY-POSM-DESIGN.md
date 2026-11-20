@@ -302,3 +302,64 @@ only**; AMOUNT_UPLOAD Excel mode kept as the alternate `visibilityCaptureMode`.
 4. **Prod cutover** — merge develop→main + owner-approved gate; prod pre-check the legacy visibility tables (prod
    dead-scaffolding may have rows — pre-check like scheme). Post-cutover **infra**: Cloud Scheduler for the weekly
    reminder + `VISIBILITY_REMINDER_SECRET`; the `visibility-media/` GCS lifecycle (Standard 4mo → Archive → delete 7y).
+
+---
+
+## 17. Permanent review history + plain status words + Bajaj screen fixes (2026-11-20, owner-approved ⚠️ PLATFORM-WIDE, Track 2a)
+
+Branch `feat/visibility-review-history` (worktree `vis-history`). Not yet pushed / applied anywhere.
+
+### Review history (append-only)
+- **Why:** a resubmit nulls `rejectionReason/Code`, `approvedByUserId`, `reviewedAt` on the live `VisibilityCapture`
+  and resets `photoReviews`; submission versions keep only `SUBMITTED` + a photoReviews copy → "who sent back which
+  photo, when, why" was lost.
+- **Table** `visibility_review_events` (model `VisibilityReviewEvent`, enum `VisibilityReviewAction`), migration
+  **`20261120140000_visibility_review_events`** (additive, `lock_timeout 5s`, IF-NOT-EXISTS / DO-block guards, no FK so
+  history outlives a capture row). Columns: `clientId, captureId, outletId, windowKey, version, action, statusAfter?,
+  fieldId?, fieldLabel?` (snapshot) `, reasonCode?, reason?, actorUserId?, actorName?` (snapshot) `, backfilled, createdAt`.
+  Indexes `(clientId, windowKey)`, `(captureId)`.
+- **Actions:** `SUBMITTED` (v1) · `RESUBMITTED` (v>1) · `PHOTO_APPROVED` · `PHOTO_REJECTED` · `CAPTURE_APPROVED_ALL` ·
+  `CAPTURE_REJECTED_ALL` · `CHANGES_REQUESTED_RESULT` (a per-photo reject moved the capture INTO Needs re-take; written
+  once per transition).
+- **Writers (same transaction as the state change):** `VisibilityReviewService.persistReview` (per-photo, approve-all,
+  reject-all) and `VisibilityCaptureService.persistCapture` (submit / resubmit). Helper: `visibility-review-events.ts`
+  (`appendReviewEvents(tx, …)`). App code never updates/deletes events.
+- **Backfill (in the migration, runs only in the run that creates the table, rows `backfilled = true`):** every
+  submission version → SUBMITTED/RESUBMITTED at its `createdAt` (actor = the rep's user/name); every per-photo review in
+  any version snapshot or the live row → PHOTO_APPROVED/REJECTED at its `reviewedAt` (deduped across carried-forward
+  versions, label from that form version, malformed timestamp → capture `reviewedAt`); current whole-capture REJECTED →
+  CAPTURE_REJECTED_ALL; APPROVED with no per-photo reviews (legacy) → CAPTURE_APPROVED_ALL. Earlier-version whole-capture
+  rejects survive only as their per-photo REJECTED entries. Validated on an embedded Postgres (PGlite) with all prior
+  migrations + seeded captures, incl. an idempotent second run.
+- **API:** `GET /v1/visibility/captures/:id` now also returns `reviewHistory[]` (newest first; actor name = snapshot,
+  else the user's current name, else null → UI "Unknown user") and `lastReview` (latest review of the CURRENT version).
+- **UI (admin capture dialog):** "Review history" timeline (who / what / which photo / reason / IST time; backfilled rows
+  say "from earlier records"); header "Reviewed by <name> on <date time IST>"; an orange **Needs re-take** remarks box
+  listing every sent-back photo + reason (the red banner still covers whole-capture Rejected).
+
+### Plain status words — ONE helper (`platform/src/lib/visibility-types.ts`)
+`VISIBILITY_STATUS_WORDS`: SUBMITTED **Waiting for review** · APPROVED **Approved** · CHANGES_REQUESTED **Needs re-take** ·
+REJECTED **Rejected** · no capture **Not captured yet** · window closed without approval **Missed**. Derived:
+`VISIBILITY_CAPTURE_STATUS_LABELS`, `visibilityStatusLabel(status, {windowClosed})`, `CAPTURE_UI_STATE_LABELS`
+(due/awaiting/approved/rejected/changes_requested/late), `captureUiStateLabel`, `VISIBILITY_SUMMARY_BUCKET_LABELS`,
+`reviewActionLabel`. Used by: admin queue + filter + dialog, admin coverage report tiles, sales visibility list, outlet
+"Visibility — this period" card, sales dashboard summary tiles, sales outlets badges, sales task subtitles, partner group
+page. Codes stay in data. The server-side Excel export (separate track) uses the same words.
+- The dashboard 5-bucket logic is UNCHANGED (owner's earlier design): `partial` = "Partly approved" (Needs re-take with
+  ≥1 photo approved); `rejected` = "Rejected / Needs re-take" (rejected, or Needs re-take with nothing approved).
+
+### Bajaj screen fixes
+- **Partner group page** (`GET /v1/partner/group/visibility`): PHOTO_APPROVAL tenants now read `VisibilityCapture` for
+  the CURRENT window (IST, tenant frequency) — `mode: 'PHOTO_APPROVAL'`, `windowKey`, `window`, counts
+  `{total, approved, waiting, needsRetake, rejected, notCaptured, notInScope}`, rows with `inScope` (out-of-scope group
+  outlets listed as "Not part of visibility", not counted). AMOUNT_UPLOAD tenants: unchanged response (+ `mode`).
+- **`GET /v1/visibility/outlet-statuses?outletCodes=&month=`** (was called by sales outlets/tasks/dashboard but did NOT
+  exist → 404 → silently empty): implemented for AMOUNT_UPLOAD tenants (`admin-programs/visibility.service.ts
+  getOutletStatuses`, controller `VisibilityOutletStatusesController`): visibility ON + mode AMOUNT_UPLOAD (PHOTO_APPROVAL →
+  400), partner logins 403, SALES callers limited to their downline's assigned outlets, ≤2,000 codes, month YYYY-MM.
+  FE `fetchOutletVisibilityStatuses` returns **null on failure** (chunks of 1,000) and every caller shows
+  "Couldn't load visibility status" instead of fake "pending" tasks; the outlets page only calls it for
+  `visibilityEnabled && visibilityCaptureMode === 'AMOUNT_UPLOAD'` (tasks/dashboard already gated by mode).
+- Which tenants are AMOUNT_UPLOAD: mode defaults to PHOTO_APPROVAL and `bulkUpload` refuses other modes; per the docs
+  Deoleo launched with visibility OFF and Bajaj is PHOTO_APPROVAL — so most likely NO tenant is AMOUNT_UPLOAD today.
+  **Not DB-verified** (needs a read of `clients.features->>'visibilityCaptureMode'` on staging/prod).
