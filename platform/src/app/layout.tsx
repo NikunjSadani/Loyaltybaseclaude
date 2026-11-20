@@ -16,6 +16,7 @@ import ClientMediumHeader from '@/components/pwa/ClientMediumHeader';
 import StaleDeploymentGuard from '@/components/StaleDeploymentGuard';
 import PermissionDeniedToast from '@/components/rbac/permission-denied-toast';
 import { pwaAppName, type PwaScope } from '@/lib/pwa/manifest';
+import { appDisplayName } from '@/lib/platform/app-display-name';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -25,6 +26,15 @@ const inter = Inter({
 
 export async function generateMetadata(): Promise<Metadata> {
   const config = await getTenantConfig();
+  // A per-client app name (e.g. "Bajaj Loyalty Club") IS the tab title; the description
+  // keeps the company name. Unset → the legacy displayName-based title, unchanged.
+  const appName = config.branding.appName?.trim();
+  if (appName) {
+    return {
+      title: { default: appName, template: `%s | ${appName}` },
+      description: `${config.branding.displayName} Trade Loyalty Platform — earn points, track targets, and redeem rewards.`,
+    };
+  }
   return {
     title: {
       default: `${config.branding.displayName} Trade Loyalty Platform`,
@@ -118,7 +128,7 @@ export default async function RootLayout({
             steps name what the phone lists. Not hard-coded. */}
         <PushSubscriptionManager
           tenantSlug={config.slug}
-          appName={pwaScope ? pwaAppName(config, pwaScope) : config.branding.displayName}
+          appName={pwaScope ? pwaAppName(config, pwaScope) : appDisplayName(config.branding)}
         />
         {/* PWA install telemetry — Bajaj or NEXT_PUBLIC_PWA_INSTALL_ENABLED; no UI. */}
         <InstallBeacon tenantSlug={config.slug} />

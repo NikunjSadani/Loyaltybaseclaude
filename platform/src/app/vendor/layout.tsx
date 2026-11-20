@@ -29,6 +29,7 @@ import { SiteFooter } from '@/components/layout/site-footer';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout } from '@/lib/auth-client';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { appDisplayName } from '@/lib/platform/app-display-name';
 import { api } from '@/lib/api-client';
 import { VendorMeProvider } from '@/lib/vendor-context';
 import { type VendorMe, approvalPolicyLabel, isBlockedError } from '@/lib/vendor';
@@ -124,7 +125,7 @@ function VendorShell({ children }: { children: React.ReactNode }) {
         onLogout={handleLogout}
         userName={me?.vendor?.name ?? 'Vendor'}
         userRole={me?.clientName ?? me?.clientId ?? ''}
-        logoLabel={clientConfig.branding.displayName}
+        logoLabel={appDisplayName(clientConfig.branding)}
         wordmarkWhiteUrl={clientConfig.branding.wordmarkWhiteUrl}
       />
 

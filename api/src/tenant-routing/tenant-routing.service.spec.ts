@@ -168,6 +168,33 @@ describe('TenantRoutingService', () => {
     expect(res.tenants[0].branding).toEqual({ displayName: '', primaryColor: '' });
   });
 
+  it('exposes a set appName (trimmed) alongside displayName, and never other keys', async () => {
+    const { prisma } = makePrisma(
+      [{ id: 'bajaj', status: 'ACTIVE', branding: {
+        displayName: 'Bajaj Consumer Care Ltd', primaryColor: '#430441',
+        appName: '  Bajaj Loyalty Club ', msg91AuthKey: 'SECRET-KEY', features: { x: true },
+      } }],
+      [],
+    );
+    const res = await new TenantRoutingService(prisma).getRouting();
+    expect(res.tenants[0].branding).toEqual({
+      displayName: 'Bajaj Consumer Care Ltd',
+      primaryColor: '#430441',
+      appName: 'Bajaj Loyalty Club',
+    });
+  });
+
+  it('omits appName when blank / whitespace / non-string', async () => {
+    for (const appName of ['', '   ', 42, null]) {
+      const { prisma } = makePrisma(
+        [{ id: 'acme', status: 'ACTIVE', branding: { displayName: 'Acme', primaryColor: '#456', appName } }],
+        [],
+      );
+      const res = await new TenantRoutingService(prisma).getRouting();
+      expect(res.tenants[0].branding).not.toHaveProperty('appName');
+    }
+  });
+
   it('skips the domain query entirely when there are no eligible tenants', async () => {
     const { prisma, domainFindMany } = makePrisma(
       [{ id: 'ghost', status: 'INACTIVE', branding: {} }],

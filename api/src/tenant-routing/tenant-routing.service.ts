@@ -13,6 +13,12 @@ export type PublicTenantStatus = 'ACTIVE' | 'ONBOARDING';
 export interface PublicBranding {
   displayName: string;
   primaryColor: string;
+  /**
+   * Optional short product/app name (e.g. "Bajaj Loyalty Club") shown under the
+   * installed-app icon, the tab title, sign-in heading and app headers. Absent /
+   * blank → the frontend falls back to displayName (the legal company name).
+   */
+  appName?: string;
   logoUrl?: string;
   wordmarkWhiteUrl?: string;
   wordmarkColorUrl?: string;
@@ -159,6 +165,11 @@ export class TenantRoutingService {
       displayName: asString(b.displayName) ?? '',
       primaryColor: asString(b.primaryColor) ?? '',
     };
+
+    // Only a non-blank appName is exposed (blank = "not set" → key omitted, so a
+    // tenant without one gets a byte-identical snapshot to before).
+    const appName = asString(b.appName)?.trim();
+    if (appName) branding.appName = appName;
 
     const logoUrl = asAssetUrl(b.logoUrl);
     if (logoUrl !== undefined) branding.logoUrl = logoUrl;

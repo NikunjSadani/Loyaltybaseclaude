@@ -128,7 +128,13 @@ export type FeatureKey = keyof Omit<FeatureFlags, 'partnerApp' | 'kycAddressProo
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface BrandingConfig {
-  displayName: string;         // "Deoleo India" — shown in partner app header
+  displayName: string;         // "Deoleo India" — the company/legal name (consent, PDFs, emails, reports)
+  /**
+   * Optional short APP name (e.g. "Bajaj Loyalty Club") shown under the installed-app
+   * icon, on the install prompt, tab title, sign-in heading and app headers. Unset /
+   * blank → those surfaces use displayName. Read it ONLY via `appDisplayName()`.
+   */
+  appName?: string;
   primaryColor: string;        // hex e.g. "#16a34a"
   logoUrl: string;             // absolute or relative path
   /**

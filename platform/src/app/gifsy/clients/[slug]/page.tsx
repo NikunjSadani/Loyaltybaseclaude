@@ -164,10 +164,15 @@ export default function ClientConfigPage({ params }: { params: Promise<{ slug: s
  * The subset of fields the real PATCH /api/gifsy/clients/:slug endpoint accepts.
  * Any subset may be sent; only the edited fields are included in a save.
  */
+/** Max app-name length (mirrors the API's APP_NAME_MAX_LENGTH). */
+const APP_NAME_MAX = 40;
+
 interface ClientPatchBody {
   status?: ClientConfig['status'];
   internalName?: string;
   displayName?: string;
+  /** Installed-app / tab / header name (branding.appName). '' clears it → falls back to displayName. */
+  appName?: string;
   primaryColor?: string;
   supportEmail?: string;
   supportPhone?: string;
@@ -186,6 +191,8 @@ interface ClientPatchResponse {
   internalName: string;
   status: ClientConfig['status'];
   displayName?: string;
+  /** '' when unset/cleared. */
+  appName?: string;
   primaryColor?: string;
   supportEmail?: string;
   supportPhone?: string;
@@ -249,6 +256,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         branding: {
           ...prev.branding,
           displayName:  updated.displayName  ?? patch.displayName  ?? prev.branding.displayName,
+          appName:      updated.appName      ?? patch.appName?.trim() ?? prev.branding.appName,
           primaryColor: updated.primaryColor ?? patch.primaryColor ?? prev.branding.primaryColor,
           supportEmail: updated.supportEmail ?? patch.supportEmail ?? prev.branding.supportEmail,
           supportPhone: updated.supportPhone ?? patch.supportPhone ?? prev.branding.supportPhone,
@@ -629,6 +637,7 @@ function ClientSettingsSection({
     status:        config.status,
     internalName:  config.internalName,
     displayName:   config.branding.displayName,
+    appName:       config.branding.appName ?? '',
     primaryColor:  config.branding.primaryColor,
     supportEmail:  config.branding.supportEmail,
     supportPhone:  config.branding.supportPhone,
@@ -641,6 +650,7 @@ function ClientSettingsSection({
       status:        config.status,
       internalName:  config.internalName,
       displayName:   config.branding.displayName,
+      appName:       config.branding.appName ?? '',
       primaryColor:  config.branding.primaryColor,
       supportEmail:  config.branding.supportEmail,
       supportPhone:  config.branding.supportPhone,
@@ -653,6 +663,7 @@ function ClientSettingsSection({
     if (draft.status        !== config.status)                 patch.status        = draft.status;
     if (draft.internalName  !== config.internalName)           patch.internalName  = draft.internalName;
     if (draft.displayName   !== config.branding.displayName)   patch.displayName   = draft.displayName;
+    if (draft.appName.trim() !== (config.branding.appName ?? '')) patch.appName    = draft.appName.trim();
     if (draft.primaryColor  !== config.branding.primaryColor)  patch.primaryColor  = draft.primaryColor;
     if (draft.supportEmail  !== config.branding.supportEmail)  patch.supportEmail  = draft.supportEmail;
     if (draft.supportPhone  !== config.branding.supportPhone)  patch.supportPhone  = draft.supportPhone;
@@ -704,6 +715,16 @@ function ClientSettingsSection({
           <input data-testid="display-name-input" value={draft.displayName}
             onChange={(e) => setDraft((p) => ({ ...p, displayName: e.target.value }))}
             className={INPUT_CLS} />
+        </Field>
+        <Field label="App name (shown under the app icon)">
+          <input data-testid="app-name-input" value={draft.appName} maxLength={APP_NAME_MAX}
+            placeholder={draft.displayName || 'Defaults to the display name'}
+            onChange={(e) => setDraft((p) => ({ ...p, appName: e.target.value }))}
+            className={INPUT_CLS} />
+          <p className="text-[11px] text-white/40 mt-1">
+            Installed-app label, install prompt, browser tab, sign-in and app headers. Leave blank to use
+            the display name. The display name stays on consent text, PDFs, emails and reports.
+          </p>
         </Field>
         <Field label="Primary colour">
           <div className="flex items-center gap-2">

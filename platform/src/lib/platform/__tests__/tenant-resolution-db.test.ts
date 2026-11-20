@@ -120,6 +120,23 @@ describe('applyDbBranding (pure)', () => {
     expect(cfg!.approvalHierarchy.levels.length).toBeGreaterThan(0);
   });
 
+  it('carries a DB appName into a synthesised (DB-only) config, displayName unchanged', () => {
+    const cfg = applyDbBranding('bajaj', null, {
+      displayName: 'Bajaj Consumer Care Ltd', appName: ' Bajaj Loyalty Club ', primaryColor: '#430441',
+    });
+    expect(cfg!.branding.appName).toBe('Bajaj Loyalty Club');
+    expect(cfg!.branding.displayName).toBe('Bajaj Consumer Care Ltd');
+  });
+
+  it('overlays a DB appName over a registry tenant; blank / absent appName adds no key', () => {
+    expect(applyDbBranding('deoleo', DEOLEO_CONFIG, { appName: 'Deoleo Club' })!.branding.appName).toBe('Deoleo Club');
+    const blank = applyDbBranding('deoleo', DEOLEO_CONFIG, { appName: '   ' });
+    expect(blank).toBe(DEOLEO_CONFIG);
+    expect(blank!.branding).not.toHaveProperty('appName');
+    const synth = applyDbBranding('acme', null, { displayName: 'Acme' });
+    expect(synth!.branding).not.toHaveProperty('appName');
+  });
+
   it('unknown everywhere (no registry, no DB branding) → null (fail-closed)', () => {
     expect(applyDbBranding('ghost', null, undefined)).toBeNull();
     expect(applyDbBranding('ghost', null, {})).toBeNull();
@@ -177,6 +194,15 @@ describe('resolveTenantSync / resolveClientConfig with a primed cache', () => {
     expect(config).not.toBeNull();
     expect(config!.branding.displayName).toBe('Acme Rewards');
     expect(config!.branding.primaryColor).toBe('#654321');
+  });
+
+  it('appName survives the routing-cache whitelist end-to-end (snapshot → config)', async () => {
+    await primeCache([
+      { slug: 'bajaj', status: 'ACTIVE', domains: [], branding: { displayName: 'Bajaj Consumer Care Ltd', appName: 'Bajaj Loyalty Club', primaryColor: '#430441' } },
+    ]);
+    const cfg = resolveClientConfig('bajaj');
+    expect(cfg!.branding.appName).toBe('Bajaj Loyalty Club');
+    expect(cfg!.branding.displayName).toBe('Bajaj Consumer Care Ltd');
   });
 
   it('empty DB branding does not clobber registry values via resolveClientConfig', async () => {

@@ -16,6 +16,7 @@ import type { NavItem } from '@/components/layout/nav-bottom';
 import type { SidebarSection } from '@/components/layout/sidebar';
 import { usePartnerIdentity, announceActivePartnerChanged, rememberActiveOutletDisplay } from '@/lib/partner-identity';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { appDisplayName } from '@/lib/platform/app-display-name';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES } from '@/lib/auth-client';
 
@@ -170,7 +171,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
         onLogout={handleLogout}
         userName={identity.businessName}
         userRole={identity.ownerName}
-        logoLabel={clientConfig.branding.displayName}
+        logoLabel={appDisplayName(clientConfig.branding)}
         wordmarkWhiteUrl={clientConfig.branding.wordmarkWhiteUrl}
       />
 
@@ -190,7 +191,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={clientConfig.branding.wordmarkColorUrl}
-                    alt={clientConfig.branding.displayName}
+                    alt={appDisplayName(clientConfig.branding)}
                     className="h-7 w-auto"
                   />
                 </Link>

@@ -104,6 +104,18 @@ export class UpdateClientDto {
   @IsString()
   displayName?: string;
 
+  /**
+   * Optional short APP name (e.g. "Bajaj Loyalty Club") shown under the installed-app
+   * icon, install prompt, tab title, sign-in heading and app headers. Stored as
+   * `branding.appName` (trimmed). An empty / whitespace string CLEARS it (key removed →
+   * those surfaces fall back to displayName). Max 40 chars after trimming (enforced in
+   * the service, since the raw value may carry padding).
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  appName?: string;
+
   @IsOptional()
   @IsString()
   primaryColor?: string;

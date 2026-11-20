@@ -15,6 +15,7 @@ import {
 import { RequireAuth } from '@/components/auth/require-auth';
 import { PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
 import { useClientConfig } from '@/lib/platform/client-config-context';
+import { appDisplayName } from '@/lib/platform/app-display-name';
 import { NotificationBell } from '@/components/notifications/notification-bell';
 import { SalesFeaturesContext } from '@/lib/sales-features-context';
 import { normalizeFeatures } from '@/lib/tenant-features';
@@ -82,7 +83,7 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={clientConfig.branding.wordmarkWhiteUrl}
-                alt={clientConfig.branding.displayName}
+                alt={appDisplayName(clientConfig.branding)}
                 className="h-7 w-auto shrink-0"
               />
             ) : (
