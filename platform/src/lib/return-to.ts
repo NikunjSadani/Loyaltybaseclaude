@@ -9,6 +9,8 @@
  * admitted to (admin / sales — partner logins always go through the outlet picker first).
  */
 
+import { VISIBILITY_PHOTO_PATH } from './visibility-photo-link';
+
 const NEXT_PARAM = 'next';
 const MAX_LEN = 1024;
 
@@ -17,6 +19,15 @@ const RETURN_TO_PORTALS: Record<string, string[]> = {
   '/admin': ['CLIENT_ADMIN', 'MIS_USER', 'GIFSY_ADMIN', 'GIFSY_STAFF'],
   '/sales': ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'],
 };
+
+/**
+ * The Visibility report's photo viewer (`/visibility/photo?key=…`) is a return target for EVERY signed-in role: the
+ * page itself decides access and tells a role without it "You don't have access to this photo" — losing the link at
+ * sign-in would hide that message.
+ */
+function isVisibilityPhotoPath(path: string): boolean {
+  return path === VISIBILITY_PHOTO_PATH || path.startsWith(`${VISIBILITY_PHOTO_PATH}?`);
+}
 
 /** A safe same-origin relative path (path + query + hash), or null. Pure. */
 export function safeReturnPath(raw: string | null | undefined): string | null {
@@ -41,6 +52,7 @@ export function safeReturnPath(raw: string | null | undefined): string | null {
 export function returnPathForRole(raw: string | null | undefined, role: string | null | undefined): string | null {
   const path = safeReturnPath(raw);
   if (!path || !role) return null;
+  if (isVisibilityPhotoPath(path)) return path;
   const portal = Object.keys(RETURN_TO_PORTALS).find((p) => path === p || path.startsWith(`${p}/`) || path.startsWith(`${p}?`));
   return portal && RETURN_TO_PORTALS[portal].includes(role) ? path : null;
 }

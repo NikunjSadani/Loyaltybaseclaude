@@ -93,6 +93,7 @@ describe('visibilityApi method → URL/verb map', () => {
     ]);
     expect(visibilityApi.exportUrl('2026-07-P1')).toBe('/api/visibility/report/export?windowKey=2026-07-P1');
     expect(visibilityApi.exportUrl()).toBe('/api/visibility/report/export');
+    expect(visibilityApi.exportUrl(undefined, '2026-10')).toBe('/api/visibility/report/export?month=2026-10');
   });
 });
 

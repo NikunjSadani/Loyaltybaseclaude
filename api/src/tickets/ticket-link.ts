@@ -51,8 +51,23 @@ export function ticketEmailLink(params: {
   /** Server env (defaults to process.env); injectable for tests. */
   env?: Env;
 }): string {
+  return tenantPortalLink({ ...params, path: ticketPath(params.ticketId) });
+}
+
+/**
+ * An absolute link to ANY in-app path on the tenant's own portal host (same environment rules as the ticket email
+ * link above). Used by the ticket email and the Visibility report's photo links.
+ */
+export function tenantPortalLink(params: {
+  callerOrigin: string;
+  tenantPrimaryDomain?: string | null;
+  clientId: string;
+  /** In-app path incl. query, starting with "/". */
+  path: string;
+  env?: Env;
+}): string {
   const env = params.env ?? process.env;
-  const path = ticketPath(params.ticketId);
+  const path = params.path;
   const where = linkEnvironment(env);
   const domain = platformDomain(env);
   const primary = (params.tenantPrimaryDomain ?? '').trim().toLowerCase();

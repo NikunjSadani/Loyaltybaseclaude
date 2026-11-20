@@ -362,6 +362,30 @@ describe('proxy — Step 2: valid token + role gating', () => {
     expect(new URL(res.headers.get('location') as string).pathname).toBe('/auth/login');
   });
 
+  it('Visibility photo viewer: every admin + sales role is admitted (report "Open photo" links)', async () => {
+    for (const role of ['GIFSY_ADMIN', 'GIFSY_STAFF', 'CLIENT_ADMIN', 'SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR']) {
+      mockJwt.mockResolvedValue({ payload: { role, sub: 'u-1' } } as never);
+      const res = await run(withToken('/visibility/photo?key=visibility-media%2Fbajaj%2Fa.jpg'));
+      expect({ role, next: isNext(res) }).toEqual({ role, next: true });
+    }
+  });
+
+  it('Visibility photo viewer: a partner / MIS / vendor role still gets the PAGE (it says "no access"; the API enforces)', async () => {
+    for (const role of ['SSS', 'MIS_USER', 'VENDOR']) {
+      mockJwt.mockResolvedValue({ payload: { role, sub: 'u-1' } } as never);
+      const res = await run(withToken('/visibility/photo?key=k'));
+      expect({ role, next: isNext(res) }).toEqual({ role, next: true });
+    }
+  });
+
+  it('Visibility photo viewer is NOT public: signed out → sign-in carrying next back to the photo', async () => {
+    const res = await run(makeReq('/visibility/photo?key=visibility-media%2Fbajaj%2Fa.jpg', { headers: { 'sec-fetch-dest': 'document' } }));
+    expect(res.status).toBe(307);
+    const loc = new URL(res.headers.get('location') as string);
+    expect(loc.pathname).toBe('/auth/login');
+    expect(loc.searchParams.get('next')).toBe('/visibility/photo?key=visibility-media%2Fbajaj%2Fa.jpg');
+  });
+
   it('GIFSY_ADMIN is allowed on /admin/gifsy', async () => {
     mockJwt.mockResolvedValue({ payload: { role: 'GIFSY_ADMIN', sub: 'g-1' } } as never);
     const res = await run(withToken('/admin/gifsy/settings'));

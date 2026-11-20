@@ -9,7 +9,7 @@
  */
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { VisibilityReportService } from './visibility-report.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
@@ -18,7 +18,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
   outlet: { count: jest.fn() },
-  visibilityCapture: { groupBy: jest.fn() },
+  visibilityCapture: { groupBy: jest.fn(), count: jest.fn() },
 };
 
 const mockTenant = { resolveVisibilityEnabled: jest.fn() };
@@ -174,5 +174,28 @@ describe('VisibilityReportService', () => {
     const sub = await service.tenantReport(clientAdmin, '2026-07-P1');
     expect(sub).toMatchObject({ subPrograms: ['Urban'] });
     expect(sub).not.toHaveProperty('programs');
+  });
+
+  describe('assertExportScope (report export 400s before any file)', () => {
+    const now = new Date('2026-11-20T06:00:00Z');
+    it('a window the monthly frequency does not have (P2) with no captures → 400', async () => {
+      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
+      await expect(service.assertExportScope('t1', { windowKey: '2026-11-P2' }, now)).rejects.toBeInstanceOf(BadRequestException);
+    });
+    it('the same window is allowed when captures exist for it (an older frequency)', async () => {
+      mockPrisma.visibilityCapture.count.mockResolvedValue(3);
+      await expect(service.assertExportScope('t1', { windowKey: '2026-11-P2' }, now)).resolves.toBeUndefined();
+    });
+    it('a malformed window key gives a plain 400 (never PNaN)', async () => {
+      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
+      await expect(service.assertExportScope('t1', { windowKey: '2026-11-X' }, now)).rejects.toThrow("That window isn't valid.");
+    });
+    it('a future month / future window → 400; this month and past months are fine', async () => {
+      mockPrisma.visibilityCapture.count.mockResolvedValue(0);
+      await expect(service.assertExportScope('t1', { month: '2026-12' }, now)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.assertExportScope('t1', { windowKey: '2027-01-P1' }, now)).rejects.toBeInstanceOf(BadRequestException);
+      await expect(service.assertExportScope('t1', { month: '2026-11' }, now)).resolves.toBeUndefined();
+      await expect(service.assertExportScope('t1', { windowKey: '2026-10-P1' }, now)).resolves.toBeUndefined();
+    });
   });
 });

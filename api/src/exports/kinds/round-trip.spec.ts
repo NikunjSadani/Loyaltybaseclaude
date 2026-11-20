@@ -35,7 +35,7 @@ const USERS = [OWNER_HOME, OWNER_ASSUMED, CLIENT_ADMIN, MIS];
 /** Realistic raw params per kind, as the screens / query strings send them (strings), incl. each screen's default. */
 const CASES: Record<string, Array<Record<string, unknown>>> = {
   'outlet-master': [{}],
-  'visibility-captures': [{}, { windowKey: '2026-W45' }, { windowKey: '  ' }],
+  'visibility-captures': [{}, { windowKey: '2026-11-P1' }, { windowKey: '  ' }, { month: '2026-10' }],
   'visibility-status': [{}, { dateFrom: '2026-10-01', dateTo: '2026-10-31' }, { dateFrom: '2026-01-01' }],
   'kyc-review-dump': [{}],
   'kyc-rejected': [{}],

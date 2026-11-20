@@ -297,9 +297,12 @@ export const visibilityApi = {
   getTenantReport(windowKey?: string) {
     return api.get<VisibilityReport>(`${BASE}/report/tenant${qs({ windowKey })}`);
   },
-  /** Browser-facing URL of the xlsx export (auth-gated; navigate/anchor to download). */
-  exportUrl(windowKey?: string): string {
-    return `${BASE}/report/export${qs({ windowKey })}`;
+  /**
+   * Browser-facing URL of the xlsx Visibility report (auth-gated). `windowKey` = one window; `month` (`YYYY-MM`) = a
+   * whole month; neither = the current month (server default).
+   */
+  exportUrl(windowKey?: string, month?: string): string {
+    return `${BASE}/report/export${qs({ windowKey, month })}`;
   },
   /**
    * Download the xlsx export: a small one saves straight away; a big one (HTTP 202) is prepared in
@@ -307,12 +310,13 @@ export const visibilityApi = {
    */
   async downloadExport(
     windowKey?: string,
+    month?: string,
   ): Promise<
     | { success: true; queued?: { message: string; exportRequestId: string } }
     | { success: false; error: string }
   > {
-    const out = await downloadOrQueue(this.exportUrl(windowKey), {
-      fallbackFileName: `visibility_captures${windowKey ? `_${windowKey}` : ''}.xlsx`,
+    const out = await downloadOrQueue(this.exportUrl(windowKey, month), {
+      fallbackFileName: `visibility_report${windowKey ? `_${windowKey}` : month ? `_${month}` : ''}.xlsx`,
     });
     if (out.kind === 'queued') return { success: true, queued: { message: out.message, exportRequestId: out.exportRequestId } };
     if (out.kind === 'error') return { success: false, error: out.message };
