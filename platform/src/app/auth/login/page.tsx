@@ -8,6 +8,7 @@ import { useToast } from '@/components/ui/toast';
 import { sendOTP, verifyOTP } from './actions';
 import { cn } from '@/lib/utils';
 import { clearAssumedContext, storedUserFromAuthMe } from '@/lib/auth-client';
+import { clearSessionCache } from '@/lib/session-cache';
 import { isStaleDeploymentError, recoverFromStaleDeployment } from '@/lib/stale-deploy';
 import { api } from '@/lib/api-client';
 import { readNextParam, returnPathForRole } from '@/lib/return-to';
@@ -202,6 +203,7 @@ export default function LoginPage() {
       // left over from a prior session, so a stale "working in <brand>" banner can never
       // outlive its token (the banner/token desync that showed an operator empty tenant data).
       clearAssumedContext();
+      clearSessionCache();
 
       // AF-6: the access token is set ONLY as an httpOnly cookie by the verifyOTP server
       // action — it is NEVER written to localStorage, so a stored-XSS has no bearer token

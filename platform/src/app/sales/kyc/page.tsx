@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, Suspense } from 'react';
-import Link from 'next/link';
+import Link, { LinkPendingHint } from '@/components/navigation/no-prefetch-link';
 import { useSearchParams } from 'next/navigation';
 import { Plus, Search, ChevronRight, ClipboardList, ArrowUpDown } from 'lucide-react';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
@@ -618,9 +618,10 @@ function KYCListContent() {
                   <Link
                     key={entry.id}
                     href={href}
-                    className={`flex items-center gap-3 px-4 py-3.5 hover:bg-gray-50 transition-colors ${borderClass}`}
+                    className={`relative flex items-center gap-3 px-4 py-3.5 hover:bg-gray-50 transition-colors ${borderClass}`}
                   >
                     {rowBody}
+                    <LinkPendingHint />
                   </Link>
                 );
               })}

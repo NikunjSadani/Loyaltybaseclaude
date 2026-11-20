@@ -1,7 +1,7 @@
 ﻿'use client';
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import Link from 'next/link';
+import Link from '@/components/navigation/no-prefetch-link';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft, User, MapPin, CreditCard, Check,

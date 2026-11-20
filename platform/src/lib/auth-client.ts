@@ -15,6 +15,7 @@
 import { assumeTenantAction, exitTenantAction, logoutAction } from './auth-actions';
 import { unsubscribeFromPush } from './pwa/push';
 import { runSessionChangeGuards } from './session-change-guards';
+import { clearSessionCache } from './session-cache';
 
 const USER_KEY = 'user';
 const ASSUMED_BRAND_KEY = 'assumedBrand';
@@ -177,6 +178,7 @@ export async function logout(opts: { force?: boolean } = {}): Promise<void> {
   } catch {
     /* even if the cookie-clear call fails, still clear local state + redirect */
   }
+  clearSessionCache();
   if (typeof window !== 'undefined') {
     localStorage.removeItem(USER_KEY);
     localStorage.removeItem(ASSUMED_BRAND_KEY);
@@ -214,6 +216,7 @@ export async function assumeTenant(clientId: string): Promise<{ brandName: strin
   if (!res.success || !res.brandName) {
     throw new Error(res.error || 'Could not switch brand context');
   }
+  clearSessionCache(); // a different tenant's identity/settings/dashboard must never be served from cache
   if (typeof window !== 'undefined') {
     localStorage.setItem(ASSUMED_BRAND_KEY, res.brandName);
   }
@@ -227,6 +230,7 @@ export async function assumeTenant(clientId: string): Promise<{ brandName: strin
 export async function exitTenant(): Promise<boolean> {
   if (!(await runSessionChangeGuards('switch-brand'))) return false;
   await exitTenantAction();
+  clearSessionCache();
   if (typeof window !== 'undefined') {
     localStorage.removeItem(ASSUMED_BRAND_KEY);
   }

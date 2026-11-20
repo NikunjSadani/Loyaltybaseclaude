@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { getOutletTypes } from '@/lib/cached-reads';
 
 /** One enabled outlet type for the signed-in tenant (GET /api/settings/outlet-types). */
 export interface OutletTypeOption {
@@ -54,8 +55,8 @@ export function useOutletTypeLabels(): OutletTypeLabels {
 
   useEffect(() => {
     let alive = true;
-    fetch('/api/settings/outlet-types', { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : null))
+    // Session-cached (lib/cached-reads.ts): one request per 5 min shared by every screen, not one per screen.
+    getOutletTypes<OutletTypeOption[]>()
       .then((j) => {
         // Envelope: { success: true, data: OutletTypeOption[] } (global TransformInterceptor).
         const data = j?.success && Array.isArray(j.data) ? (j.data as OutletTypeOption[]) : null;

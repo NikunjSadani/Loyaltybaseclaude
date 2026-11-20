@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import Link from 'next/link';
+import Link from '@/components/navigation/no-prefetch-link';
 import {
   User, Phone, Mail, Award, LogOut,
   ChevronRight, Shield, Bell, X, PlayCircle,
@@ -14,6 +14,7 @@ import { api, authHeader } from '@/lib/api-client';
 import { logout } from '@/lib/auth-client';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
 import { useSalesFeatures } from '@/lib/sales-features-context';
+import { getAuthMe } from '@/lib/cached-reads';
 
 interface SalesProfile {
   name: string;
@@ -112,22 +113,23 @@ export default function SalesProfilePage() {
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/auth/me', { headers: { ...authHeader() } }).then(r => r.json()),
+      // Session-cached (lib/cached-reads.ts) — the profile is read-only here; any write clears the cache.
+      getAuthMe<{ user: Parameters<typeof mapUserToProfile>[0] }>(),
       // Real outlet counts for the stat tiles (replaces the hardcoded 0s).
       fetch('/api/sales/outlets', { headers: { ...authHeader() } }).then(r => r.json()).catch(() => null),
     ])
       .then(([meJson, outletJson]: [
-        { success: boolean; data?: { user: Parameters<typeof mapUserToProfile>[0] }; error?: string },
+        { success?: boolean; data?: { user: Parameters<typeof mapUserToProfile>[0] }; error?: string } | null,
         { success: boolean; data?: { outlets: { kycStatus?: string }[] } } | null,
       ]) => {
-        if (meJson.success && meJson.data) {
+        if (meJson?.success && meJson.data) {
           const p = mapUserToProfile(meJson.data.user, slug);
           const outlets = outletJson?.success ? (outletJson.data?.outlets ?? []) : [];
           p.totalOutlets = outlets.length;
           p.kycCompleted = outlets.filter((o) => o.kycStatus === 'APPROVED').length;
           setProfile(p);
         } else {
-          setError(meJson.error ?? 'Failed to load profile');
+          setError(meJson?.error ?? 'Failed to load profile');
         }
       })
       .catch(() => setError('Failed to load profile'))

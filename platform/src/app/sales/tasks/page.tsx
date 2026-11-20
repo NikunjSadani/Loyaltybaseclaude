@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import Link from 'next/link';
+import Link from '@/components/navigation/no-prefetch-link';
 import {
   FileCheck, XCircle, ChevronRight, Clock, Bell, Tag,
   RefreshCw,

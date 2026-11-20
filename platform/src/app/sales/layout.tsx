@@ -19,6 +19,8 @@ import { appDisplayName } from '@/lib/platform/app-display-name';
 import { NotificationBell } from '@/components/notifications/notification-bell';
 import { SalesFeaturesContext } from '@/lib/sales-features-context';
 import { normalizeFeatures } from '@/lib/tenant-features';
+import { getSalesMe } from '@/lib/cached-reads';
+import { usePrefetchOnce } from '@/lib/navigation/prefetch-once';
 import type { FeatureFlags } from '@/lib/platform/client-config';
 
 const BASE_NAV: NavItem[] = [
@@ -30,6 +32,7 @@ const BASE_NAV: NavItem[] = [
 ];
 
 const TEAM_NAV: NavItem = { href: '/sales/team', label: 'Team', icon: Users };
+const SESSION_PREFETCH = ['/sales/profile', '/sales/tasks'] as const;
 
 // Notifications hidden until P7 notification worker (#21)
 
@@ -47,10 +50,11 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     setRoleState(getRole());
-    fetch('/api/sales/me')
-      .then((r) => r.json())
+    // Session-cached (lib/cached-reads.ts): shared with every page's useTenantFeatures('/api/sales/me') — one
+    // request per 5 min instead of one per screen.
+    getSalesMe<{ name?: string; employeeCode?: string; features?: unknown }>()
       .then((res) => {
-        if (res?.success) {
+        if (res?.success && res.data) {
           setUserName(res.data.name ?? getStoredUser()?.name ?? '');
           setEmpId(res.data.employeeCode ?? '');
           setFeatures(normalizeFeatures(res.data.features));
@@ -66,6 +70,10 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
     ? [BASE_NAV[0], BASE_NAV[1], TEAM_NAV, BASE_NAV[3], BASE_NAV[4]]
     : BASE_NAV;
   // BASE_NAV[3] = Leaderboard, BASE_NAV[4] = Support (same for both field & manager roles)
+
+  // Header Profile link + the dashboard's Tasks shortcut: warmed ONCE per session (the bottom-nav tabs are warmed by
+  // NavBottom itself). Replaces <Link>'s per-navigation auto prefetch — see components/navigation/no-prefetch-link.tsx.
+  usePrefetchOnce(SESSION_PREFETCH);
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50">
@@ -103,6 +111,7 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
             <NotificationBell tone="dark" fallbackUrl="/sales/dashboard" />
             <Link
               href="/sales/profile"
+              prefetch={false}
               className="flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-full hover:bg-white/10 transition-colors"
             >
               <div className="w-7 h-7 bg-[var(--brand-primary)] rounded-full flex items-center justify-center">

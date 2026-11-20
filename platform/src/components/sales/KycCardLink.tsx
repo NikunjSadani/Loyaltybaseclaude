@@ -1,5 +1,5 @@
 import React from 'react';
-import Link from 'next/link';
+import Link, { LinkPendingHint } from '@/components/navigation/no-prefetch-link';
 
 /**
  * K2 — an outlet card that links to its KYC when there is one the caller can open, and renders as a plain
@@ -17,8 +17,11 @@ export function KycCardLink({
 }) {
   if (href) {
     return (
-      <Link href={href} className={className}>
+      // Not prefetched (a long list re-prefetched every visible outlet on each navigation); the hint dims the
+      // tapped card at once and app/sales/kyc/[id]/loading.tsx shows the detail skeleton.
+      <Link href={href} className={`relative ${className ?? ''}`}>
         {children}
+        <LinkPendingHint />
       </Link>
     );
   }

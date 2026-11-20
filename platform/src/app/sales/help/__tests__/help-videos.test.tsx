@@ -24,6 +24,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import { SalesFeaturesContext } from '@/lib/sales-features-context';
 import { normalizeFeatures } from '@/lib/tenant-features';
+import { __resetSessionCacheForTests } from '@/lib/session-cache';
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock('next/link', () => ({
@@ -82,6 +83,8 @@ describe('HV-S — sales Profile entry', () => {
 
   it('HV-S2: flag OFF (Deoleo), or features not loaded → no entry and no extra request', async () => {
     for (const value of [normalizeFeatures({}), null]) {
+      // Each iteration is a fresh session: /api/auth/me is session-cached (lib/cached-reads.ts).
+      __resetSessionCacheForTests();
       const fetchMock = stubProfileFetch();
       const { unmount } = render(
         <SalesFeaturesContext.Provider value={value}>
