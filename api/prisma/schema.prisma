@@ -714,6 +714,11 @@ model UserSession {
   // stored tokens instead of a 401 — so parallel tabs converge instead of logging each
   // other out. Nullable (login-minted rows have no predecessor); additive, no backfill.
   rotatedFromId String?
+  // H4 (owner 2026-11-20): first authenticated use of this session (set ONCE by the JWT guard on the
+  // first request carrying its access token). A rotated predecessor replayed after the grace window is
+  // handed this session back only while firstUsedAt IS NULL (and the session is < 60 min old); once it
+  // has been used, reuse detection is strict. Nullable, additive, no backfill.
+  firstUsedAt  DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 

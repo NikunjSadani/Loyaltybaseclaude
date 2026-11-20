@@ -156,7 +156,7 @@ class FakeDb {
       },
       create: async ({ data }: { data: Row }) => {
         await tick();
-        const row: Row = { revokedAt: null, rotatedFromId: null, createdAt: new Date(), ...data };
+        const row: Row = { revokedAt: null, rotatedFromId: null, firstUsedAt: null, createdAt: new Date(), ...data };
         const apply = () => {
           this.sessions.set(row.id, row);
           this.createCount++;
@@ -284,6 +284,7 @@ function seedSession(db: FakeDb, s: Row) {
   db.sessions.set(s.id, {
     token: `old.access.${s.id}`,
     rotatedFromId: null,
+    firstUsedAt: null,
     revokedAt: null,
     createdAt: new Date(Date.now() - 60 * 60_000),
     expiresAt: new Date(Date.now() + 24 * 60 * 60_000),
@@ -424,7 +425,7 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     expect(db.audit.filter((a) => a.metadata?.event === 'refresh_token_reuse')).toHaveLength(1);
   });
 
-  it('B2 trade-off: refresh response LOST, client returns 70 min later with the old token → forced re-login (indistinguishable from theft)', async () => {
+  it('B2/H4 bound: refresh response LOST, client returns 70 min later (successor older than the 60-min window) → forced re-login', async () => {
     const db = new FakeDb();
     seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
     // R0 was rotated to R1 70 minutes ago; the browser never received R1 (lost response).
@@ -509,13 +510,23 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     expect(db.createCount).toBe(1);
   });
 
-  it('F1: a client deadline already passed → 503 before any lock, nothing committed, predecessor LIVE', async () => {
+  it('S2: a caller deadline already in the past is FLOORED (500ms from receipt) → the refresh rotates normally, no free 503 probe', async () => {
     const db = new FakeDb();
     seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
     seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' });
     const { svc } = buildService(db);
 
-    await expect(svc.refreshToken('R0', { clientDeadlineMs: Date.now() - 1 })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(svc.refreshToken('R0', { clientDeadlineMs: Date.now() - 60_000, budgetMs: 1 })).resolves.toMatchObject({ refreshToken: expect.any(String) });
+    expect(db.createCount).toBe(1);
+  });
+
+  it('F1: receipt + budget already spent before the tx (stalled gates) → 503, nothing committed, predecessor LIVE', async () => {
+    const db = new FakeDb();
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' });
+    const { svc } = buildService(db);
+
+    await expect(svc.refreshToken('R0', { receivedAt: Date.now() - 5_000 })).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(db.createCount).toBe(0);
     expect(db.sessions.get('s0')!.revokedAt).toBeNull();
   });
@@ -523,13 +534,13 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
   it('F1: the deadline passing INSIDE the tx (slow lock path) rolls the whole rotation back — never commits late', async () => {
     const db = new FakeDb();
     db.gateLatencyMs = 0;
-    db.shareLockHoldMs = 120; // the tx is slow…
+    db.shareLockHoldMs = 650; // the tx is slow…
     seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
     seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0' });
     const { svc } = buildService(db);
 
-    // …and the client gives up 60ms from now.
-    await expect(svc.refreshToken('R0', { clientDeadlineMs: Date.now() + 60 })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    // …and the caller's budget is the 500ms floor.
+    await expect(svc.refreshToken('R0', { budgetMs: 500 })).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(db.createCount).toBe(0); // the INSERT was rolled back with the claim
     expect(db.sessions.get('s0')!.revokedAt).toBeNull();
   });
@@ -557,5 +568,67 @@ describe('AuthService.refreshToken — concurrent refresh race (real service, ro
     expect(REFRESH_TX_OPTS.timeout).toBeLessThanOrEqual(REFRESH_SERVER_BUDGET_MS);
     // A retry of a committed-but-unanswered rotation (commit ≥ attempt start) lands inside grace.
     expect(CLIENT_TIMEOUT_MS + RETRY_DELAY_MS + 500 /* transit */).toBeLessThanOrEqual(ROTATION_GRACE_MS);
+  });
+
+  // ── H4 (owner decision 2026-11-20): a NEVER-USED successor is handed back after grace ─────────
+  const lostResponseSetup = (successorUsed: boolean) => {
+    const db = new FakeDb();
+    seedUser(db, { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' });
+    // R0 rotated to R1 30s ago; the client never received R1 (lost response) — or did and used it.
+    seedSession(db, { id: 's0', userId: 'u1', clientId: 'deoleo', refreshToken: 'R0', revokedAt: new Date(Date.now() - 30_000) });
+    seedSession(db, {
+      id: 's1', userId: 'u1', clientId: 'deoleo', refreshToken: 'R1', token: 'A1', rotatedFromId: 's0',
+      createdAt: new Date(Date.now() - 30_000), firstUsedAt: successorUsed ? new Date(Date.now() - 20_000) : null,
+    });
+    return db;
+  };
+
+  it('H4: lost response, old token replayed 30s later, successor NEVER used → handed back the stored successor pair (no kill, info audit)', async () => {
+    const db = lostResponseSetup(false);
+    const { svc } = buildService(db);
+
+    await expect(svc.refreshToken('R0')).resolves.toEqual({ accessToken: 'A1', refreshToken: 'R1' });
+
+    expect(db.createCount).toBe(0); // converged — no new rotation, no chain fork
+    expect(db.liveSessions('u1').map((r) => r.id)).toEqual(['s1']);
+    expect(db.users.get('u1')!.sessionsInvalidBefore).toBeNull();
+    expect(db.audit.filter((a) => a.entityType === 'SECURITY_EVENT')).toHaveLength(0);
+    expect(db.audit.filter((a) => a.metadata?.event === 'REFRESH_HANDOFF_UNUSED_SUCCESSOR')).toHaveLength(1);
+  });
+
+  it('H4: successor already USED → strict: the old-token replay kills everything + SECURITY_EVENT', async () => {
+    const db = lostResponseSetup(true);
+    const { svc } = buildService(db);
+
+    await expect(svc.refreshToken('R0')).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(db.liveSessions('u1')).toHaveLength(0);
+    expect(db.audit.filter((a) => a.metadata?.event === 'refresh_token_reuse')).toHaveLength(1);
+  });
+
+  it('H4: ATTACKER replays a stolen old token first and USES the session → the legitimate replay is killed (strict), attacker cut off too', async () => {
+    const db = lostResponseSetup(false);
+    const { svc } = buildService(db);
+
+    const stolen = await svc.refreshToken('R0'); // attacker: handed the never-used successor…
+    expect(stolen.refreshToken).toBe('R1');
+    db.sessions.get('s1')!.firstUsedAt = new Date(); // …and uses it (JWT guard first-use mark)
+
+    await expect(svc.refreshToken('R0')).rejects.toBeInstanceOf(UnauthorizedException); // legit replay
+    expect(db.sessions.get('s1')!.revokedAt).toBeInstanceOf(Date); // attacker's session revoked
+    expect(db.liveSessions('u1')).toHaveLength(0);
+    expect(db.audit.filter((a) => a.metadata?.event === 'refresh_token_reuse')).toHaveLength(1);
+  });
+
+  it('H4 concurrency: two simultaneous post-grace replays of the same old token both converge on the SAME unused successor', async () => {
+    const db = lostResponseSetup(false);
+    const { svc } = buildService(db);
+
+    const [a, b] = await Promise.all([svc.refreshToken('R0'), svc.refreshToken('R0')]);
+
+    expect(a).toEqual({ accessToken: 'A1', refreshToken: 'R1' });
+    expect(b).toEqual(a);
+    expect(db.createCount).toBe(0);
+    expect(db.liveSessions('u1').map((r) => r.id)).toEqual(['s1']);
+    expect(db.audit.filter((x) => x.entityType === 'SECURITY_EVENT')).toHaveLength(0);
   });
 });

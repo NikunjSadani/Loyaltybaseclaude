@@ -51,7 +51,6 @@ beforeEach(() => {
   cookieStore.delete.mockClear();
   cookieStore.get.mockClear();
   requestHeaders.delete('x-session-refreshed');
-  requestHeaders.delete('x-session-refresh-failed');
   requestHeaders.delete('cookie');
 });
 
@@ -86,20 +85,6 @@ describe('refreshSession — B1 no double rotation + B3 transient', () => {
     await expect(refreshSession()).resolves.toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledTimes(1); // did NOT short-circuit on the header alone
     expect(setOf('refresh_token')?.value).toBe('r-next');
-  });
-
-  it.each([
-    ['dead', { ok: false }],
-    ['transient', { ok: false, transient: true }],
-  ])('F3: proxy refresh already failed (%s) → answers from that, NO second backend exchange', async (kind, expected) => {
-    store.set('refresh_token', 'r-x');
-    requestHeaders.set('x-session-refresh-failed', kind);
-    const fetchMock = vi.fn();
-    vi.stubGlobal('fetch', fetchMock);
-
-    await expect(refreshSession()).resolves.toEqual(expected);
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(deleted).toHaveLength(0);
   });
 
   it('without the marker it still rotates normally (one backend call)', async () => {
@@ -138,12 +123,13 @@ describe('refreshSession — multi-tab safety + 7-day TTL', () => {
     store.set('refresh_token', 'r-alive');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: false,
+      status: 409, // a non-401/403 refusal is TRANSIENT (L2) — the session may be alive
       json: () => Promise.resolve({ error: 'contended' }),
     }));
 
     const res = await refreshSession();
 
-    expect(res).toEqual({ ok: false });
+    expect(res).toEqual({ ok: false, transient: true });
     expect(deleted).not.toContain('refresh_token');   // the core fix: cookie left intact
     expect(store.get('refresh_token')).toBe('r-alive'); // still present for the other tabs
   });

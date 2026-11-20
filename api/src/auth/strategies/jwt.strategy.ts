@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
@@ -10,6 +10,8 @@ import { SESSION_TTL_DAYS } from '../auth.constants';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
+  private readonly logger = new Logger(JwtStrategy.name);
+
   constructor(
     private config:   ConfigService,
     private prisma:   PrismaService,
@@ -52,6 +54,24 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
     if (!session) {
       throw new UnauthorizedException('Session expired or revoked — please log in again.');
+    }
+
+    // ── H4: mark the session's FIRST authenticated use (exactly once per session) ──
+    // refreshToken hands a replayed, already-rotated predecessor its successor ONLY while that
+    // successor has never been used; this stamp is what ends that leniency. It is AWAITED (so a
+    // request that used the session can't race ahead of the mark) but costs one write per session
+    // lifetime only — every later request sees firstUsedAt set and skips it. `firstUsedAt: null` in
+    // the WHERE makes it set-once under concurrency. A failed write must not fail the user's request;
+    // it is logged loudly (the residual effect: the lenient window stays open for this session).
+    if (session.firstUsedAt === null) {
+      try {
+        await this.prisma.userSession.updateMany({
+          where: { id: session.id, firstUsedAt: null },
+          data:  { firstUsedAt: new Date() },
+        });
+      } catch (err) {
+        this.logger.warn(`Could not mark first use of session ${session.id}: ${(err as Error)?.message ?? err}`);
+      }
     }
 
     // ── Sliding session: roll expiresAt forward on activity (fire-and-forget) ────

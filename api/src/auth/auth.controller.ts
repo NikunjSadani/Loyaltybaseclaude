@@ -1,5 +1,5 @@
 import {
-  Controller, Post, Body, HttpCode, HttpStatus, Get, UseGuards, Headers,
+  Controller, Post, Body, HttpCode, HttpStatus, Get, UseGuards, Headers, Logger,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
@@ -12,6 +12,8 @@ import type { JwtPayload } from '../common/decorators/current-user.decorator';
 
 @Controller('auth')
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(private readonly authService: AuthService) {}
 
   /**
@@ -52,15 +54,24 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   async refresh(
     @Body() dto: RefreshTokenDto,
-    // F1: the caller's give-up deadline (epoch ms). The service never COMMITS a rotation after
-    // min(this, its own receipt + REFRESH_SERVER_BUDGET_MS) — so a client that timed out can never
-    // be left holding a token the server has already rotated. Absent / malformed → server budget only.
+    // F1/S3: the caller's RELATIVE budget (ms) — how long it will wait for this response. The service
+    // never COMMITS a rotation after receipt + clamp(budget, 500ms, 4s), so a client that timed out is
+    // never left holding a token the server already rotated. Relative → no cross-machine clock skew.
+    // Absent / malformed → the server budget (4s).
+    @Headers('x-refresh-budget-ms') budgetHeader?: string,
+    // Secondary, shorten-only cap (epoch ms) for time lost before receipt (cold start) — see service.
     @Headers('x-refresh-deadline') deadlineHeader?: string,
   ) {
+    const receivedAt = Date.now();
+    const budget = Number(budgetHeader);
+    const budgetMs = Number.isFinite(budget) && budget > 0 ? budget : undefined;
     const deadline = Number(deadlineHeader);
-    return this.authService.refreshToken(dto.refreshToken, {
-      clientDeadlineMs: Number.isFinite(deadline) && deadline > 0 ? deadline : undefined,
-    });
+    const clientDeadlineMs = Number.isFinite(deadline) && deadline > 0 ? deadline : undefined;
+    // L1: lets staging confirm the headers actually arrive through the proxy chain.
+    this.logger.debug(
+      `refresh: x-refresh-budget-ms=${budgetMs ?? 'absent'} x-refresh-deadline=${clientDeadlineMs !== undefined ? 'present' : 'absent'}`,
+    );
+    return this.authService.refreshToken(dto.refreshToken, { budgetMs, receivedAt, clientDeadlineMs });
   }
 
   /** Verify token is valid and return current user info */

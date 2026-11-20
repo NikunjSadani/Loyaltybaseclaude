@@ -66,6 +66,38 @@ describe('JwtStrategy', () => {
       expect(result).toEqual(payload);
     });
 
+    // ── H4: first-use mark (set ONCE per session) ─────────────────────────────────
+    it('FU1: the FIRST request on a never-used session marks firstUsedAt once (set-once WHERE), awaited before returning', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), firstUsedAt: null });
+      let marked = false;
+      mockPrisma.userSession.updateMany.mockImplementationOnce(async () => {
+        marked = true;
+        return { count: 1 };
+      });
+      const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo' };
+
+      await strategy.validate(REQ, payload as any);
+
+      expect(marked).toBe(true); // awaited — the mark lands before the request proceeds
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { id: 'sess_1', firstUsedAt: null },
+        data: { firstUsedAt: expect.any(Date) },
+      });
+    });
+
+    it('FU2: an already-used session makes NO first-use write (no DB write per request)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), firstUsedAt: new Date() });
+      await strategy.validate(REQ, { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo' } as any);
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('FU3: a failed first-use write never fails the request', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), firstUsedAt: null });
+      mockPrisma.userSession.updateMany.mockRejectedValueOnce(new Error('db down'));
+      const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo' };
+      await expect(strategy.validate(REQ, payload as any)).resolves.toEqual(payload);
+    });
+
     it('S5: stamps the user active (fire-and-forget) on a valid session', async () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9876543210', name: 'Test' };

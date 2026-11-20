@@ -731,25 +731,34 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
     expect(fwd(res, 'x-session-refreshed')).toBe('1');
   });
 
+  // S1/M3 (2026-11-20): NO unauthenticated pass-through for server actions any more.
   it.each([
-    ['dead', DEAD],
-    ['transient', TRANSIENT],
-  ])('F3: a SERVER ACTION whose refresh failed (%s) runs UNAUTHENTICATED with the outcome marker — no 401/503, no redirect', async (kind, outcome) => {
+    ['POST', 'dead', DEAD, 401],
+    ['POST', 'transient', TRANSIENT, 503],
+    ['GET', 'dead', DEAD, 401],
+    ['GET', 'transient', TRANSIENT, 503],
+  ])('S1: %s + Next-Action whose refresh failed (%s) → %i, never next() / a rendered page / identity headers', async (method, _k, outcome, status) => {
     mockRefresh.mockResolvedValue(outcome);
-    const res = await run(expiredWithRefresh('/admin/users', { 'next-action': 'refreshSessionId' }));
-    expect(isNext(res)).toBe(true);
-    expect(res.headers.get('location')).toBeNull();
-    expect(fwd(res, 'x-session-refresh-failed')).toBe(kind);
-    // nothing authenticates this request at the edge: no Bearer, no identity headers
+    const req = makeReq('/admin/users', {
+      method: method as string,
+      cookies: { token: 'expired', refresh_token: 'garbage' },
+      headers: { 'next-action': 'x' },
+    });
+    const res = await run(req);
+    expect(res.status).toBe(status);
+    expect(isNext(res)).toBe(false);
     expect(fwd(res, 'authorization')).toBeNull();
     expect(fwd(res, 'x-user-id')).toBeNull();
-    expect(mockRefresh).toHaveBeenCalledTimes(1); // no proxy retry for a non-document request
   });
 
-  it('F3: a CLIENT-sent x-session-refresh-failed is stripped', async () => {
-    mockJwt.mockResolvedValue({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
-    const res = await run(makeReq('/admin/users', { cookies: { token: 'valid' }, headers: { 'x-session-refresh-failed': 'dead' } }));
-    expect(fwd(res, 'x-session-refresh-failed')).toBeNull();
+  it('S1: /auth/session-refresh (the guard endpoint) is a PUBLIC exact path — reaches its handler without an access token', async () => {
+    const res = await run(makeReq('/auth/session-refresh', { method: 'POST', cookies: { refresh_token: 'r' } }));
+    expect(isNext(res)).toBe(true);
+    expect(mockRefresh).not.toHaveBeenCalled(); // the edge does NOT refresh for it; the handler does
+    expect(fwd(res, 'authorization')).toBeNull();
+    // …but only that exact path
+    const sib = await run(makeReq('/auth/session-refresh-x'));
+    expect(sib.status).toBe(307);
   });
 
   it('B1: a CLIENT-sent x-session-refreshed is stripped (cannot fake a proxy rotation)', async () => {

@@ -165,8 +165,9 @@ export async function exitTenantAction(): Promise<{ success: boolean }> {
 
 /**
  * Silently refresh an expired access token using the (single-use, rotating) httpOnly
- * refresh-token cookie. Called by SessionExpiryGuard on a 401 BEFORE bouncing to login,
- * so a normal session-expiry doesn't interrupt the user. On success the new access +
+ * refresh-token cookie. SessionExpiryGuard reaches it through the POST /auth/session-refresh route
+ * handler (app/auth/session-refresh/route.ts), which maps the result to a real HTTP status
+ * (200 / 401 / 503) — so a normal session-expiry doesn't interrupt the user. On success the new access +
  * refresh cookies are set and `{ ok: true }` is returned; the caller retries the request.
  * On failure the cookies are LEFT INTACT: with the backend returning the successor tokens on a
  * contended/just-rotated refresh (multi-tab), deleting the refresh cookie here would strand the
@@ -196,14 +197,6 @@ export async function refreshSession(): Promise<{ ok: boolean; transient?: boole
     return { ok: true };
   }
 
-  // F3 — the proxy already tried this exact token in this request and failed. Answer from that
-  // (a typed 200 the guard can read) instead of replaying the same token: a DEAD token replayed
-  // would only re-trigger reuse handling; a TRANSIENT failure is reported as such (keep session).
-  // Forging this header can only make the caller's OWN refresh report failure — never succeed.
-  const proxyFailure = requestHeaders.get(SESSION_REFRESH_FAILED_HEADER);
-  if (proxyFailure === 'dead') return { ok: false };
-  if (proxyFailure === 'transient') return { ok: false, transient: true };
-
   if (!refreshToken) return { ok: false };
 
   const outcome = await refreshTokensViaBackend(refreshToken);
@@ -218,9 +211,8 @@ export async function refreshSession(): Promise<{ ok: boolean; transient?: boole
   return { ok: true };
 }
 
-/** Mirrors of proxy.ts SESSION_REFRESHED_HEADER / SESSION_REFRESH_FAILED_HEADER. */
+/** Mirror of proxy.ts SESSION_REFRESHED_HEADER (proxy.ts can't be imported into a server action). */
 const SESSION_REFRESHED_HEADER = 'x-session-refreshed';
-const SESSION_REFRESH_FAILED_HEADER = 'x-session-refresh-failed';
 
 /** Value of one cookie in a raw `Cookie:` header (the ORIGINAL request cookies). */
 function readCookie(cookieHeader: string | null, name: string): string | undefined {

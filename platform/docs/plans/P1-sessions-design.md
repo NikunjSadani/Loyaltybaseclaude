@@ -201,7 +201,8 @@ header comment ↔ platform `auth-refresh.ts`, pinned by invariant tests on both
 
 - Cold start / pool wait before the server sees the request only shrink its remaining budget (the deadline
   is client-anchored). Any tx failure → 503 (transient), predecessor stays live, retry works.
-- `SessionExpiryGuard`: a thrown refresh-action call = transient (no login bounce); 3 transients in a row →
+- ⚠️ SUPERSEDED 2026-11-20 (see the dual-audit round below: no unauthenticated server-action path; guard uses
+  `/auth/session-refresh`). Was: `SessionExpiryGuard`: a thrown refresh-action call = transient (no login bounce); 3 transients in a row →
   one full page reload (the proxy then decides page vs login). A server action whose proxy refresh failed
   now runs unauthenticated with `x-session-refresh-failed: dead|transient`, so `refreshSession` returns a
   typed result with HTTP 200 (no data exposure: no page/layout trusts proxy identity, data stays behind
@@ -210,3 +211,49 @@ header comment ↔ platform `auth-refresh.ts`, pinned by invariant tests on both
   browser sent (F5).
 - Not changed: no global pg `connectionTimeoutMillis` (shared pool; would turn queueing in background jobs
   into hard failures); no `FOR SHARE NOWAIT` (user-row writers are ms-short; 1s lock_timeout instead).
+
+#### 2026-11-20 — dual-audit round (security + logout risks) and owner decision H4
+**Security**
+- **S1/M3:** the F3 "server action runs unauthenticated after a failed refresh" path is REMOVED (a `GET` with
+  a `Next-Action` header could render a page tree unauthenticated). A failed refresh on any non-document
+  request (incl. server actions, GET or POST) now answers 401 (dead) / 503 (transient). The guard no longer
+  calls a server action: it POSTs to **`/auth/session-refresh`** (route handler, outside `/api` because
+  `beforeFiles` rewrites all `/api/*` to the backend; public edge path authenticated by the refresh cookie;
+  POST-only, requires `x-session-refresh: 1`, refuses cross-site `Sec-Fetch-Site`) → 200 / 401 / 503.
+- **S2/S3:** the client sends a RELATIVE `x-refresh-budget-ms` (clamped to [500 ms, 4 s] from receipt — no
+  clock comparison) plus the absolute `x-refresh-deadline`, now only a SHORTEN-only cap (never below
+  receipt + 500 ms) that covers time lost before receipt (cold start). A past/garbage deadline can no longer
+  force an instant 503 (no free liveness probe). Headers logged at debug on receipt (L1).
+
+**Logout-risk fixes**
+- **H1:** nothing runs after the rotation commits — the post-mint stamp re-read on the shared pool is gone
+  (redundant: the in-tx `FOR SHARE` check orders every stamper). A committed rotation always reaches the client.
+- **H2:** grace is judged against the request's RECEIPT time, not "now" after a slow DB read.
+- **H3/M1/M2/L3:** `SessionExpiryGuard`: a transient refresh is handled ONCE per refresh outcome (not per
+  waiting caller), never logs out, shows a `role=status` "Reconnecting…" banner with "Retry now", retries in
+  the background with backoff (2/4/8/16/30 s), waits for the `online` event when offline, and after recovery
+  reloads ONCE (≤ 1 per 10 min) — never if the user typed on the page (banner instead). Any successful
+  `/api` response clears it. A background retry that finds the session dead → login.
+- **M4:** refreshes are serialised across tabs (Web Lock `gifsy-session-refresh`); a tab that waited skips
+  its exchange if another tab refreshed < 5 s ago (shared cookie jar).
+- **L2:** only 401/403 from the refresh endpoint are "dead"; any other 4xx (mid-deploy 400/404) is transient.
+- **L4:** nothing cheap to add server-side. **L5 residual:** if the connection drops AFTER commit, the client
+  holds the old token; its retry within 6 s gets the successor (grace), and since H4 a later replay gets it
+  while unused (< 60 min); only a replay after the successor was used is treated as theft.
+
+**H4 — owner decision 2026-11-20 (middle option), implemented**
+- A revoked refresh token replayed OUTSIDE the 6 s grace is handed back its successor's STORED pair (no new
+  rotation, no chain fork) **only while that successor has never been used**: `user_sessions.firstUsedAt IS
+  NULL` (set ONCE, awaited, by the JWT guard on the first request authenticated with the successor's access
+  token — `updateMany … WHERE firstUsedAt IS NULL`, one write per session lifetime), `revokedAt IS NULL`
+  (never refreshed itself), still live, and created < 60 min ago (= access-token lifetime, so the stored
+  access token is still valid). Each such handoff writes an info audit row (`entityType AUTH_EVENT`,
+  `metadata.event REFRESH_HANDOFF_UNUSED_SUCCESSOR`) — not a SECURITY_EVENT. Once used: STRICT (revoke all +
+  stamp + SECURITY_EVENT). Migration `20261120130000_user_session_first_used_at` (additive, nullable, idempotent).
+- **Residual risk (owner-accepted):** a thief holding a stolen, already-rotated token can claim the session
+  in that ≤ 60-min window IF the legitimate client has not used the successor yet (it lost the response or
+  is offline). The theft is then detected on the legitimate client's next replay of the old token (successor
+  now USED → strict kill, attacker's session revoked too). A failed first-use write (logged, request still
+  served) keeps the lenient window open for that session until its 60-min bound. Gates (deactivated partner,
+  suspended vendor, revoked staff grant) are not re-run on a handoff; each of those flows stamps + sweeps the
+  user, which excludes the successor (`revokedAt` / `sessionsInvalidBefore`).

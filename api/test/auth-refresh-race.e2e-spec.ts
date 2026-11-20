@@ -180,21 +180,44 @@ d(`AuthService.refreshToken × real Postgres [${MODE ?? 'skipped'}]`, () => {
     expect(await prisma.userSession.count({ where: { rotatedFromId: sessionId } })).toBe(1);
   });
 
-  it('F1: a client deadline already passed → 503, nothing committed, predecessor LIVE', async () => {
+  it('F1: receipt + budget already spent (stalled before the tx) → 503, nothing committed, predecessor LIVE', async () => {
     const { sessionId, refreshToken } = await seedUserWithSession();
-    await expect(auth.refreshToken(refreshToken, { clientDeadlineMs: Date.now() - 1 })).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(auth.refreshToken(refreshToken, { receivedAt: Date.now() - 5_000 })).rejects.toBeInstanceOf(ServiceUnavailableException);
     const row = await prisma.userSession.findUniqueOrThrow({ where: { id: sessionId } });
     expect(row.revokedAt).toBeNull();
   });
 
-  it('S1: a token rotated hours ago, replayed while its successor is live → reuse kill, nothing handed back', async () => {
+  it('S2: a past absolute deadline / tiny budget is floored → the refresh rotates (no free 503 liveness probe)', async () => {
+    const { sessionId, refreshToken } = await seedUserWithSession();
+    const res = await auth.refreshToken(refreshToken, { clientDeadlineMs: Date.now() - 60_000, budgetMs: 1 });
+    expect(res.refreshToken).toBeTruthy();
+    expect(await prisma.userSession.count({ where: { rotatedFromId: sessionId } })).toBe(1);
+  });
+
+  it('S1/H4: a rotated token replayed past grace while its successor is live AND USED → reuse kill, nothing handed back', async () => {
     const { userId, sessionId, refreshToken } = await seedUserWithSession();
     const first = await auth.refreshToken(refreshToken); // legit rotation R0 → R1
-    // Age the rotation past the grace window.
+    // Age the rotation past the grace window, and mark R1's session used (JWT guard first-use stamp).
     await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 2 * HOUR) } });
+    await prisma.userSession.updateMany({ where: { rotatedFromId: sessionId }, data: { firstUsedAt: new Date() } });
 
     await expect(auth.refreshToken(refreshToken)).rejects.toBeInstanceOf(UnauthorizedException);
     expect(await liveSessions(userId)).toBe(0); // R1's session killed too
     await expect(auth.refreshToken(first.refreshToken)).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(await prisma.auditLog.count({ where: { entityType: 'SECURITY_EVENT', entityId: userId } })).toBe(1);
+  });
+
+  it('H4: lost response — the old token replayed 30s later while the successor was NEVER used → handed back the same pair, info audit, no kill', async () => {
+    const { userId, sessionId, refreshToken } = await seedUserWithSession();
+    const first = await auth.refreshToken(refreshToken); // rotation whose response the client "lost"
+    await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 30_000) } });
+
+    const replay = await auth.refreshToken(refreshToken);
+
+    expect(replay).toEqual(first); // converged on the stored successor pair, no fork
+    expect(await prisma.userSession.count({ where: { rotatedFromId: sessionId } })).toBe(1);
+    expect(await liveSessions(userId)).toBe(1);
+    expect(await prisma.auditLog.count({ where: { entityType: 'SECURITY_EVENT', entityId: userId } })).toBe(0);
+    expect(await prisma.auditLog.count({ where: { entityType: 'AUTH_EVENT', entityId: userId } })).toBe(1);
   });
 });

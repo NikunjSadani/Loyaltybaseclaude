@@ -94,7 +94,12 @@ describe('refreshTokensViaBackend — typed outcome (dead vs transient)', () => 
   afterEach(() => { vi.unstubAllGlobals(); });
   const status = (s: number) => ({ ok: s < 400, status: s, headers: new Headers(), body: { cancel: vi.fn().mockResolvedValue(undefined) }, json: () => Promise.resolve({}) });
 
-  it.each([401, 403, 400, 404])('%i → dead (definite refusal, never retried)', async (s) => {
+  it.each([400, 404, 409, 422])('L2: %i → transient (unexpected), NOT dead — mid-deploy 4xx says nothing about the session', async (s) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(status(s)));
+    await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ kind: 'transient', reason: 'unexpected' });
+  });
+
+  it.each([401, 403])('%i → dead (definite refusal, never retried)', async (s) => {
     const fetchMock = vi.fn().mockResolvedValue(status(s));
     vi.stubGlobal('fetch', fetchMock);
     await expect(refreshTokensViaBackend('r1')).resolves.toEqual({ kind: 'dead', status: s });
@@ -129,11 +134,12 @@ describe('refreshTokensViaBackend — typed outcome (dead vs transient)', () => 
     expect(REFRESH_TIMEOUT_MS + 200 /* proxy retry delay */ + 500 /* transit */).toBeLessThanOrEqual(BACKEND_GRACE_MS);
   });
 
-  it('sends the give-up deadline to the backend as x-refresh-deadline (epoch ms, ~now + 4s)', async () => {
+  it('sends the relative budget (x-refresh-budget-ms) and the shorten-only absolute cap (x-refresh-deadline)', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve({ data: { accessToken: 'a' } }) });
     vi.stubGlobal('fetch', fetchMock);
     const before = Date.now();
     await refreshTokensViaBackend('r1');
+    expect(fetchMock.mock.calls[0][1].headers['x-refresh-budget-ms']).toBe('4000'); // S3: relative budget
     const sent = Number(fetchMock.mock.calls[0][1].headers['x-refresh-deadline']);
     expect(sent).toBeGreaterThanOrEqual(before + 4_000);
     expect(sent).toBeLessThanOrEqual(Date.now() + 4_000);

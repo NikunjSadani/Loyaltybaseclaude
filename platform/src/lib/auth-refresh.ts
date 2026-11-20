@@ -76,9 +76,11 @@ const REFRESH_429_MAX_WAIT_MS = 2_000;
 
 /**
  * Refresh timing budget (F1) — kept in lockstep with api/src/auth/auth.service.ts:
- *  - REFRESH_CLIENT_DEADLINE_MS (4s): sent as `x-refresh-deadline` (epoch ms). The backend NEVER
- *    commits a rotation after it (it rolls back and answers 503 instead), so when we give up we can
- *    be sure the server didn't rotate behind our back after that point.
+ *  - REFRESH_CLIENT_DEADLINE_MS (4s): sent as a RELATIVE budget `x-refresh-budget-ms` (the backend
+ *    clamps it to [500ms, 4s] from receipt — no clock comparison) plus `x-refresh-deadline` (epoch ms,
+ *    a shorten-only cap the backend uses to account for time lost before it received the request,
+ *    e.g. a cold start). The backend NEVER commits a rotation after its resulting deadline (it rolls
+ *    back and answers 503 instead), so when we give up the server hasn't rotated behind our back.
  *  - REFRESH_TIMEOUT_MS (5s): when we give up — ≥ deadline + 1s, so a rotation committed just
  *    before the deadline still has time to reach us.
  *  - the proxy's one document retry follows 200ms later (≤ 5.2s after the first attempt started);
@@ -92,15 +94,16 @@ export const REFRESH_TIMEOUT_MS = 5_000;
 export type RefreshOutcome =
   | { kind: 'ok'; accessToken: string; refreshToken?: string }
   | { kind: 'dead'; status: number }
-  | { kind: 'transient'; reason: 'network' | 'timeout' | 'server' | 'throttled' | 'malformed' };
+  | { kind: 'transient'; reason: 'network' | 'timeout' | 'server' | 'throttled' | 'malformed' | 'unexpected' };
 
 /**
  * Exchange a (single-use, rotating) refresh token for a fresh access + refresh pair via the
  * backend. Returns a TYPED outcome so callers retry only what is retryable:
  *  - `ok`        — the new pair;
- *  - `dead`      — a definite refusal (401/403/400/… any non-429 4xx): the session is gone, never retry;
- *  - `transient` — network error, timeout, 5xx, a 429 that outlived its bounded retries, or a 2xx
- *                  without a token: the session may well be alive, a retry may succeed.
+ *  - `dead`      — a definite refusal (401/403 ONLY): the session is gone, never retry;
+ *  - `transient` — network error, timeout, 5xx, a 429 that outlived its bounded retries, a 2xx
+ *                  without a token, or any OTHER 4xx (a 400/404 mid-deploy says nothing about the
+ *                  session — L2): the session may well be alive, a retry may succeed.
  *
  * A 429 is "retry later", NOT "session dead": the backend's throttler rejects BEFORE the refresh
  * token is looked at, so the same token is still valid — retry it here (bounded backoff, honouring
@@ -117,6 +120,7 @@ export async function refreshTokensViaBackend(refreshToken: string): Promise<Ref
         headers: {
           'Content-Type': 'application/json',
           // The backend must not commit this rotation after we may have given up on it (F1).
+          'x-refresh-budget-ms': String(REFRESH_CLIENT_DEADLINE_MS),
           'x-refresh-deadline': String(Date.now() + REFRESH_CLIENT_DEADLINE_MS),
         },
         body: JSON.stringify({ refreshToken }),
@@ -140,9 +144,15 @@ export async function refreshTokensViaBackend(refreshToken: string): Promise<Ref
         await res.body?.cancel().catch(() => {});
         return { kind: 'transient', reason: 'server' };
       }
-      if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
         await res.body?.cancel().catch(() => {});
         return { kind: 'dead', status: res.status };
+      }
+      if (!res.ok) {
+        // L2 — any other 4xx (400/404/409/… e.g. a route missing mid-deploy) is not proof the
+        // session is gone: transient, so the caller keeps the session and retries.
+        await res.body?.cancel().catch(() => {});
+        return { kind: 'transient', reason: 'unexpected' };
       }
       const body = await res.json().catch(() => null);
       const accessToken: string | undefined = body?.data?.accessToken;

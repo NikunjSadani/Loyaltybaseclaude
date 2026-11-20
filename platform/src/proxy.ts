@@ -64,7 +64,11 @@ const PUBLIC_PATHS = [
 // Range requests that never go through the client's silent-refresh path, so once the ~60 m access cookie lapses
 // mid-video the edge gate would 401 the next range and break playback — it must bypass the gate like the other
 // tokenized viewers. Exact match: nothing else lives under it.
-const PUBLIC_EXACT_PATHS = new Set(['/api/public/branding-assets', '/api/help/media'])
+// `/auth/session-refresh` (SESSION_REFRESH_PATH): SessionExpiryGuard's refresh endpoint (route handler
+// app/auth/session-refresh/route.ts). It is authenticated by the httpOnly REFRESH cookie itself — the very
+// thing it exists to exchange when the access cookie has lapsed — so the edge must not gate it on the
+// access token. It is POST-only and requires a custom header (CSRF), and answers 200 / 401 / 503.
+const PUBLIC_EXACT_PATHS = new Set(['/api/public/branding-assets', '/api/help/media', '/auth/session-refresh'])
 
 /** Headers only the proxy may set on the forwarded request (any client-sent value is dropped). */
 const INTERNAL_REQUEST_HEADERS = [
@@ -77,7 +81,6 @@ const INTERNAL_REQUEST_HEADERS = [
   'x-user-role',
   'x-partner-id',
   'x-session-refreshed', // SESSION_REFRESHED_HEADER — set only by the proxy's silent refresh
-  'x-session-refresh-failed', // SESSION_REFRESH_FAILED_HEADER — set only by the proxy (F3)
 ] as const
 
 export const ROLE_ROUTES: Record<string, string[]> = {
@@ -272,16 +275,9 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
     }
     // The refresh failed. Do NOT delete the cookies either way (a transient failure leaves the
     // session alive; deleting would strand other tabs).
-    if (request.headers.get('next-action')) {
-      // F3 — a SERVER ACTION (notably refreshSession, fired by SessionExpiryGuard): a 401/503 here
-      // reaches the client only as an opaque thrown error, so the guard could not tell a dead
-      // session from a blip. Let the action run UNAUTHENTICATED instead (no Bearer / x-user-*
-      // injected — every server action authenticates to the backend with its own cookies and the
-      // backend validates them) and tell it what happened, so refreshSession returns a typed
-      // { ok:false[, transient] } with HTTP 200. Internal header — stripped from client input.
-      headers.set(SESSION_REFRESH_FAILED_HEADER, outcome.kind)
-      return NextResponse.next({ request: { headers } })
-    }
+    // (S1/M3: there is deliberately NO unauthenticated pass-through here any more — not even for a
+    // server action. SessionExpiryGuard refreshes via the dedicated SESSION_REFRESH_PATH endpoint,
+    // which answers a real HTTP status, so nothing needs to run unauthenticated.)
     if (!isDocument) {
       // NOT a document (RSC payload / prefetch / server action / asset): never redirect to login
       // from here — one such sub-request failing must not bounce the user. A non-OK response lets
@@ -321,11 +317,6 @@ export const DOCUMENT_REFRESH_RETRY_DELAY_MS = 200
  */
 export const SESSION_REFRESHED_HEADER = 'x-session-refreshed'
 
-/**
- * Internal request header carrying a FAILED proxy refresh's outcome ('dead' | 'transient') to a
- * server action (F3). refreshSession uses it to answer without a second backend exchange.
- */
-export const SESSION_REFRESH_FAILED_HEADER = 'x-session-refresh-failed'
 
 /**
  * Static-asset paths (by file extension or a known public asset folder). A request for one is

@@ -52,8 +52,10 @@ export const ROTATION_GRACE_MS = 6_000;
  * the client has given up on it. All values are kept in lockstep with platform/src/lib/auth-refresh.ts.
  *
  *   client starts attempt (t0) ────────────────────────────────────────────────────────────────┐
- *   server commit DEADLINE  = min(t0 + REFRESH_CLIENT_DEADLINE_MS (client header, 4.0s),         │
- *                                 server receipt + REFRESH_SERVER_BUDGET_MS (4.0s))               │
+ *   server commit DEADLINE  = receipt + clamp(x-refresh-budget-ms, 500ms, REFRESH_SERVER_BUDGET_MS │
+ *                             (4.0s)), further SHORTENED (never below receipt + 500ms) by the     │
+ *                             caller's absolute x-refresh-deadline (t0 + 4s) — the relative part  │
+ *                             bounds skew, the absolute part covers pre-receipt cold start        │
  *     · tx connection wait  ≤ REFRESH_TX_OPTS.maxWait   (1.5s)                                   │
  *     · each lock wait      ≤ REFRESH_LOCK_TIMEOUT      (1s: FOR SHARE on user, claim on session)│
  *     · whole tx            ≤ REFRESH_TX_OPTS.timeout   (4s)                                     │
@@ -70,6 +72,14 @@ export const ROTATION_GRACE_MS = 6_000;
  *                             commit past the client's give-up.
  */
 export const REFRESH_SERVER_BUDGET_MS = 4_000;
+/**
+ * H4 (owner 2026-11-20): a post-grace replay is handed a NEVER-USED successor only while that
+ * successor is younger than this — the access-token lifetime (ACCESS_TTL = 60m), so the stored
+ * access token handed back is still valid and the lenient window is bounded.
+ */
+export const UNUSED_SUCCESSOR_HANDOFF_MS = 60 * 60_000;
+/** Floor for a caller-supplied budget (S2): no caller can force an instant 503 probe. */
+export const REFRESH_MIN_BUDGET_MS = 500;
 export const REFRESH_LOCK_TIMEOUT = '1s';
 export const REFRESH_TX_OPTS = { maxWait: 1_500, timeout: 4_000 } as const;
 
@@ -788,11 +798,26 @@ export class AuthService {
 
   async refreshToken(
     refreshToken: string,
-    opts: { clientDeadlineMs?: number } = {},
+    opts: { budgetMs?: number; receivedAt?: number; clientDeadlineMs?: number } = {},
   ): Promise<{ accessToken: string; refreshToken: string }> {
-    // F1 — commit deadline: the earlier of the caller's give-up time and our own budget. Past it
-    // we must not COMMIT a rotation (the caller may already have given up on this response).
-    const deadline = Math.min(opts.clientDeadlineMs ?? Infinity, Date.now() + REFRESH_SERVER_BUDGET_MS);
+    // H2 — the instant this request was received; grace is judged against it.
+    const receivedAt = opts.receivedAt ?? Date.now();
+    // F1/S3 — commit deadline = receipt + the caller's RELATIVE budget (x-refresh-budget-ms; no
+    // cross-machine clock comparison), clamped to [MIN, MAX]. The floor (S2) stops a caller from
+    // forcing an immediate 503 that would let a stolen token be probed with no rotation and no
+    // alarm; the cap is our own budget. Past the deadline we must not COMMIT a rotation.
+    const budget = Math.min(
+      Math.max(opts.budgetMs ?? REFRESH_SERVER_BUDGET_MS, REFRESH_MIN_BUDGET_MS),
+      REFRESH_SERVER_BUDGET_MS,
+    );
+    let deadline = receivedAt + budget;
+    // Secondary cap: the caller's ABSOLUTE give-up time (x-refresh-deadline) covers what a relative
+    // budget can't see — time spent BEFORE we received the request (cold start, network). It may only
+    // SHORTEN the window, and never below the floor, so clock skew can neither extend the deadline
+    // (S3) nor force an instant 503 (S2).
+    if (opts.clientDeadlineMs !== undefined && Number.isFinite(opts.clientDeadlineMs)) {
+      deadline = Math.max(receivedAt + REFRESH_MIN_BUDGET_MS, Math.min(deadline, opts.clientDeadlineMs));
+    }
     const assertBeforeDeadline = () => {
       if (Date.now() >= deadline) {
         throw new ServiceUnavailableException('Session refresh timed out — please retry.');
@@ -972,25 +997,14 @@ export class AuthService {
       }
 
       if (outcome.kind === 'won') {
-        const tokens = outcome.tokens;
-        // ── logout-all authority (1b), post-mint re-read — belt-and-braces ─────────────────
-        // The in-transaction share lock above already orders us against every stamper. This
-        // committed re-read stays as a second, independent check: if a stamp that post-dates
-        // the refreshed lineage's start is visible, the successor is illegitimate → revoke it
-        // and 401. (DB-anchored predecessor.createdAt compare — robust to app-clock skew.)
-        const fresh = await this.prisma.user.findUnique({
-          where:  { id: session.user.id },
-          select: { sessionsInvalidBefore: true },
-        });
-        if (fresh?.sessionsInvalidBefore && session.createdAt < fresh.sessionsInvalidBefore) {
-          await this.prisma.userSession.updateMany({
-            where: { refreshToken: tokens.refreshToken, revokedAt: null },
-            data:  { revokedAt: new Date() },
-          });
-          throw new UnauthorizedException('Session expired — please log in again.');
-        }
-
-        return tokens;
+        // H1 — NOTHING after the commit: a committed rotation MUST reach the client (its old token
+        // is now consumed; losing the new pair here would force a re-login, or worse, turn the
+        // client's retry into "reuse"). The former post-mint stamp re-read on the shared pool was
+        // unbounded post-commit work; it is redundant because the logout-all check now runs INSIDE
+        // the transaction under FOR SHARE on the user row, which orders us against every stamper
+        // (all stamps are UPDATEs of that row): a stamp committed first is seen and refused; a
+        // stamp arriving later waits for our commit, so its sweep revokes our successor.
+        return outcome.tokens;
       }
 
       // claim LOST: our read saw the row LIVE at the start of THIS request and the claim found
@@ -1003,10 +1017,12 @@ export class AuthService {
       lostConcurrentClaim = true;
     }
 
+    // H2 — judge the age at RECEIPT, not "now": a slow pool / DB read between receipt and here
+    // must not turn a legitimate in-grace retry into "reuse".
     const withinGrace =
       lostConcurrentClaim ||
       (predecessorRevokedAt !== null &&
-        Date.now() - predecessorRevokedAt.getTime() <= ROTATION_GRACE_MS);
+        receivedAt - predecessorRevokedAt.getTime() <= ROTATION_GRACE_MS);
 
     // ── Converge on the LIVE successor — ONLY inside the grace window (S1) ─────────────────
     // A predecessor revoked within the last ROTATION_GRACE_MS is a concurrent sibling of the
@@ -1032,12 +1048,62 @@ export class AuthService {
     // regardless of grace" path let a stolen, already-rotated token obtain the live session
     // with no time limit). STAMP sessionsInvalidBefore FIRST, then revoke every live session
     // (stamp-before-revoke, same authority logout-all uses), and write the security event.
-    // Trade-off (owner-approved 2026-11-19): a client whose refresh RESPONSE was lost keeps
-    // the old token; its next refresh after the grace window is indistinguishable from theft
-    // and logs that user out everywhere (re-login required).
+    // A client whose refresh RESPONSE was lost keeps the old token; since H4 (owner 2026-11-20)
+    // it is handed back its successor while that successor is still UNUSED and < 60 min old (see
+    // the block below). Only once the successor has been used is a replay treated as theft.
     // A merely EXPIRED-but-never-revoked session (revokedAt === null) is NOT reuse → just 401.
     // Best-effort: a failed lineage-kill must never mask the 401 below.
     if (predecessorRevokedAt !== null) {
+      // ── H4 (owner decision 2026-11-20): hand back a NEVER-USED successor ────────────────────
+      // A rotated token replayed after the grace window is usually a client whose refresh RESPONSE
+      // was lost (e.g. the phone→Next leg dropped the Set-Cookie): it still holds the old token and
+      // the successor it never received is sitting unused. Hand that successor's STORED pair back
+      // (exactly like the in-grace handoff — no new rotation, the lineage converges) instead of
+      // killing every session — but ONLY while the successor has NEVER been used:
+      //   · firstUsedAt IS NULL — no request was ever authenticated with its access token (the JWT
+      //     guard stamps the first one), and revokedAt IS NULL — it was never refreshed itself;
+      //   · it is still live (expiresAt in the future) and younger than the access-token lifetime
+      //     (60 min), so its stored access token is still valid and the window is bounded.
+      // As soon as the successor has been used even once, STRICT applies (fall through to the kill).
+      // Residual risk (owner-accepted): a thief holding a stolen old token can claim the session in
+      // that window if the legitimate client has not used it yet; the legitimate client's next use of
+      // the old token then finds a USED successor → strict kill (attacker's session revoked too).
+      const unused = await this.prisma.userSession.findFirst({
+        where: { rotatedFromId: session.id, revokedAt: null },
+      });
+      if (
+        unused &&
+        unused.refreshToken &&
+        unused.firstUsedAt === null &&
+        unused.expiresAt.getTime() > receivedAt &&
+        receivedAt - unused.createdAt.getTime() <= UNUSED_SUCCESSOR_HANDOFF_MS
+      ) {
+        try {
+          await this.prisma.auditLog.create({
+            data: {
+              action: 'LOGIN', // valid AuditAction; a session continuation, NOT a security event
+              entityType: 'AUTH_EVENT',
+              entityId: session.user.id,
+              actorId: session.user.id,
+              targetUserId: session.user.id,
+              metadata: {
+                event: 'REFRESH_HANDOFF_UNUSED_SUCCESSOR',
+                clientId: session.user.clientId,
+                predecessorSessionId: session.id,
+                successorSessionId: unused.id,
+                predecessorRevokedAt: predecessorRevokedAt.toISOString(),
+                ageMs: receivedAt - predecessorRevokedAt.getTime(),
+              },
+            },
+          });
+        } catch (auditError) {
+          // Best-effort (never block the handoff) — but not silent.
+          this.logger.warn(`Could not audit unused-successor handoff for user ${session.user.id}: ${(auditError as Error)?.message ?? auditError}`);
+        }
+        this.logger.log(`Refresh: handed back never-used successor ${unused.id} to a post-grace replay (user ${session.user.id})`);
+        return { accessToken: unused.token, refreshToken: unused.refreshToken };
+      }
+
       const now = new Date();
       try {
         await this.prisma.user.update({
