@@ -2,8 +2,9 @@
 
 /**
  * Tenant read-only Visibility (POSM) month-wise report (VISIBILITY-POSM-DESIGN.md D15 + §Metrics).
- * CLIENT_ADMIN / MIS_USER cannot configure Visibility or review captures (GIFSY-only),
- * but can view aggregate per-window coverage. Mirrors /admin/scheme-reports: no raw
+ * CLIENT_ADMIN only: the backend `report/tenant[/outlets]` routes are @Roles('CLIENT_ADMIN') (a MIS_USER gets
+ * a 403 there today). A client admin cannot configure Visibility or review captures (GIFSY-only), but can view
+ * the month report — tiles, breakdowns and the outlet list behind them. Mirrors /admin/scheme-reports: no raw
  * media, no export — that surface lives on the GIFSY Report tab.
  *
  * Reads via visibilityReportApi.getReport('tenant') (VisibilityReportView variant="tenant").

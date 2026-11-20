@@ -16,10 +16,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Banknote, CheckCircle, XCircle, Clock, AlertCircle,
-  Ticket as TicketIcon, Timer, ShieldCheck, Loader2, Eye, Info, X,
+  Ticket as TicketIcon, Timer, ShieldCheck, Loader2, Eye, X,
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
+import { Toggletip } from '@/components/ui/toggletip';
 import { PLAIN_STATUS_LABEL, PlainStatus, monthLabel, monthOptions, windowShortLabel } from '@/lib/visibility-report';
 
 const DARK_NAVY = '#1A1A2E';
@@ -78,18 +79,30 @@ interface PhotoVisibilityBlock {
   submitted: number;
   approved: number;
   waiting: number;
+  /** Gifsy's whole review queue (any month) and the part of it from months before `month`. */
+  waitingAllMonths?: number;
+  waitingEarlierMonths?: number;
+  /** Open window only (the rep can still redo it). */
   needsRetake: number;
   rejected: number;
-  /** approved ÷ (approved + needs re-take + rejected); null when nothing has been decided yet. */
+  /** Re-take / rejection left when the window closed — final. */
+  closedNotApproved?: number;
+  /** approved ÷ every decided capture; null when nothing has been decided yet. */
   approvalRatePct: number | null;
   flagged: number;
   duplicate: number;
   outsideFence: number;
   /** flagged ÷ submitted; null when nothing was submitted. */
   fraudFlagPct: number | null;
+  /** true = this caller may open the flagged-capture list (Gifsy roles only for now). */
+  flagDetailsAvailable?: boolean;
+  /** A month before the portal went live — participation is not tracked. */
+  importedMonth?: boolean;
+  importedMonthNote?: string;
   participatingOutlets: number;
   inScopeOutlets: number;
-  participationPct: number;
+  /** null for an imported month (not tracked). */
+  participationPct: number | null;
 }
 
 type VisibilityBlock = LegacyVisibilityBlock | PhotoVisibilityBlock;
@@ -101,7 +114,9 @@ interface FlagRow {
   windowKey: string;
   status: PlainStatus;
   reasons: Array<'DUPLICATE_PHOTO' | 'OUTSIDE_FENCE'>;
+  /** At most 10 listed; duplicateCount is the full figure. */
   duplicateOf: Array<{ outletCode: string; windowKey: string }>;
+  duplicateCount?: number;
   outsidePhotos: string[];
 }
 
@@ -149,7 +164,7 @@ interface StatCardProps {
   label: string;
   value: string;
   sub?: string;
-  /** A plain-words definition, shown as a tooltip on the info icon (and to screen readers). */
+  /** A plain-words definition, shown by a keyboard / touch reachable toggletip beside the label. */
   hint?: string;
   icon: React.ElementType;
   iconBg: string;
@@ -165,11 +180,7 @@ function StatCard({ label, value, sub, hint, icon: Icon, iconBg, iconColor, valC
           <div className="min-w-0">
             <p className="text-sm text-gray-500 flex items-center gap-1">
               {label}
-              {hint && (
-                <span title={hint} aria-label={hint} role="img" className="text-gray-400 cursor-help">
-                  <Info className="w-3.5 h-3.5" />
-                </span>
-              )}
+              {hint && <Toggletip label={label} text={hint} />}
             </p>
             <p className={`text-3xl font-bold mt-1 ${valColor}`}>{value}</p>
             {sub && <p className="text-[11px] text-gray-400 mt-1">{sub}</p>}
@@ -490,7 +501,7 @@ export default function AdminOperationsDashboardPage() {
 /* ─── Visibility (PHOTO_APPROVAL) — month-wise funnel + real fraud flags ───────── */
 
 const APPROVAL_RATE_HINT =
-  'Approved ÷ (Approved + Needs re-take + Rejected) for this month’s captures. Captures still waiting for review are not counted until a reviewer decides.';
+  'Approved ÷ every capture a reviewer has decided this month (Approved + Needs re-take + Rejected + Not approved — window closed). Captures still waiting for review are not counted until a reviewer decides.';
 const FRAUD_RATE_HINT =
   'Flagged ÷ Submitted. A capture is flagged when one of its photos is also used in another capture (duplicate photo), or a photo was taken outside the outlet’s fence.';
 const PARTICIPATION_HINT =
@@ -570,7 +581,7 @@ function PhotoVisibilityCard({ initial }: { initial: PhotoVisibilityBlock }) {
           <StatCard
             label="Approval Rate"
             value={fmtPctOrDash(v.approvalRatePct)}
-            sub={`${fmtInt(v.approved)} approved of ${fmtInt(v.approved + v.needsRetake + v.rejected)} reviewed`}
+            sub={`${fmtInt(v.approved)} approved of ${fmtInt(v.approved + v.needsRetake + v.rejected + (v.closedNotApproved ?? 0))} reviewed`}
             hint={APPROVAL_RATE_HINT}
             icon={CheckCircle} iconBg="bg-green-100" iconColor="text-green-700" valColor="text-green-700"
           />
@@ -583,9 +594,13 @@ function PhotoVisibilityCard({ initial }: { initial: PhotoVisibilityBlock }) {
           />
           <StatCard
             label="Participation"
-            value={fmtPct(v.participationPct)}
-            sub={`${fmtInt(v.participatingOutlets)} of ${fmtInt(v.inScopeOutlets)} in-scope outlets`}
-            hint={PARTICIPATION_HINT}
+            value={v.participationPct === null ? 'Not tracked' : fmtPct(v.participationPct)}
+            sub={
+              v.participationPct === null
+                ? 'imported month'
+                : `${fmtInt(v.participatingOutlets)} of ${fmtInt(v.inScopeOutlets)} in-scope outlets`
+            }
+            hint={v.participationPct === null ? v.importedMonthNote ?? 'Not tracked for imported months.' : PARTICIPATION_HINT}
             icon={Eye} iconBg="bg-purple-100" iconColor="text-purple-600" valColor="text-purple-700"
           />
           <StatCard
@@ -602,21 +617,43 @@ function PhotoVisibilityCard({ initial }: { initial: PhotoVisibilityBlock }) {
             { label: PLAIN_STATUS_LABEL.WAITING, value: v.waiting },
             { label: PLAIN_STATUS_LABEL.NEEDS_RETAKE, value: v.needsRetake },
             { label: PLAIN_STATUS_LABEL.REJECTED, value: v.rejected },
+            { label: PLAIN_STATUS_LABEL.CLOSED_NOT_APPROVED, value: v.closedNotApproved ?? 0 },
             { label: 'Flagged', value: v.flagged },
           ]}
           color="#8b5cf6"
         />
+        {(v.waitingAllMonths ?? 0) > v.waiting && (
+          <p className="mt-3 text-xs text-amber-700" data-testid="operations-visibility-waiting-all">
+            {fmtInt(v.waitingAllMonths ?? 0)} captures are waiting for review across all months
+            {(v.waitingEarlierMonths ?? 0) > 0 ? ` — ${fmtInt(v.waitingEarlierMonths ?? 0)} from months before ${monthLabel(v.month)}` : ''}.
+          </p>
+        )}
+        {v.importedMonth && (
+          <p className="mt-3 text-xs text-blue-800" role="note" data-testid="operations-visibility-imported">
+            {monthLabel(v.month)} is an imported month. {v.importedMonthNote ?? 'Not tracked for imported months.'}
+          </p>
+        )}
         <div className="mt-4">
-          <button
-            type="button"
-            onClick={() => setShowFlags((x) => !x)}
-            disabled={v.flagged === 0}
-            className="text-xs font-medium text-[var(--brand-primary)] hover:underline disabled:text-gray-400 disabled:no-underline"
-          >
-            {v.flagged === 0 ? 'No flagged captures this month' : showFlags ? 'Hide flagged captures' : `See the ${fmtInt(v.flagged)} flagged capture${v.flagged === 1 ? '' : 's'}`}
-          </button>
+          {v.flagDetailsAvailable === false ? (
+            // Owner decision pending: outlet-level fraud detail (outlet codes) stays with Gifsy for now.
+            <p className="text-xs text-gray-500" data-testid="operations-visibility-flags-gifsy-only">
+              {v.flagged === 0
+                ? 'No flagged captures this month.'
+                : `${fmtInt(v.flagged)} flagged capture${v.flagged === 1 ? '' : 's'} this month. The outlet-level list is available to Gifsy only.`}
+            </p>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setShowFlags((x) => !x)}
+              disabled={v.flagged === 0}
+              aria-expanded={showFlags}
+              className="text-xs font-medium text-[var(--brand-primary)] hover:underline disabled:text-gray-400 disabled:no-underline"
+            >
+              {v.flagged === 0 ? 'No flagged captures this month' : showFlags ? 'Hide flagged captures' : `See the ${fmtInt(v.flagged)} flagged capture${v.flagged === 1 ? '' : 's'}`}
+            </button>
+          )}
         </div>
-        {showFlags && <FlagList month={v.month} onClose={() => setShowFlags(false)} />}
+        {showFlags && v.flagDetailsAvailable !== false && <FlagList month={v.month} onClose={() => setShowFlags(false)} />}
       </CardContent>
     </Card>
   );
@@ -682,7 +719,7 @@ function FlagList({ month, onClose }: { month: string; onClose: () => void }) {
                         <li key={reason}>
                           <span className="font-medium">{REASON_LABEL[reason]}</span>
                           {reason === 'DUPLICATE_PHOTO' && r.duplicateOf.length > 0 && (
-                            <span className="text-gray-500"> — same photo as {r.duplicateOf.slice(0, 3).map((d) => `${d.outletCode} (${monthLabel(d.windowKey.slice(0, 7))})`).join(', ')}{r.duplicateOf.length > 3 ? ` +${r.duplicateOf.length - 3} more` : ''}</span>
+                            <span className="text-gray-500"> — same photo as {r.duplicateOf.slice(0, 3).map((d) => `${d.outletCode} (${monthLabel(d.windowKey.slice(0, 7))})`).join(', ')}{(r.duplicateCount ?? r.duplicateOf.length) > 3 ? ` +${(r.duplicateCount ?? r.duplicateOf.length) - 3} more` : ''}</span>
                           )}
                           {reason === 'OUTSIDE_FENCE' && (
                             <span className="text-gray-500"> — {r.outsidePhotos.length ? r.outsidePhotos.join(', ') : 'recorded outside at capture'}</span>

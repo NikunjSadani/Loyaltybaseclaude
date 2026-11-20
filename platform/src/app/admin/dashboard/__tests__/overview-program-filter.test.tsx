@@ -179,11 +179,21 @@ describe('Admin Overview — program filter', () => {
     expect(((await screen.findByTestId('overview-program-filter')) as HTMLSelectElement).value).toBe('Gold');
   });
 
-  it('OV-VIS: Pending Visibility Approvals is month-wise — Waiting for review + Needs re-take, month picker refetches', async () => {
-    const fn = mockFetch({ ...KPIS, visibility: { month: '2026-11', waiting: 7, needsRetake: 3 } });
+  it('OV-VIS: the tile = every capture still waiting (all months) with the month share; waiting on reps apart; picker refetches', async () => {
+    const fn = mockFetch({
+      ...KPIS,
+      pendingVisibility: 10,
+      visibility: {
+        month: '2026-11', waiting: 7, waitingAllMonths: 10, waitingEarlierMonths: 3,
+        needsRetake: 2, rejected: 1, waitingOnReps: 3, closedNotApproved: 4,
+      },
+    });
     render(<DashboardPage />);
-    expect(await screen.findByTestId('kpi-visibility-retake')).toHaveTextContent('Needs re-take (waiting on reps): 3');
-    expect(screen.getByTestId('kpi-visibility-month')).toHaveTextContent('Waiting for review · Nov 2026');
+    expect(await screen.findByTestId('kpi-visibility-retake')).toHaveTextContent('Waiting on reps (window still open), Nov 2026: 3');
+    expect(screen.getByTestId('kpi-visibility-waiting')).toHaveTextContent(
+      'Waiting for review, all months · 3 from earlier months · 7 from Nov 2026',
+    );
+    expect(screen.getByTestId('kpi-visibility-closed')).toHaveTextContent('Not approved — window closed: 4');
     // Default month → the request is unchanged (no visibilityMonth param).
     expect(urls(fn, '/api/admin/dashboard/kpis')).toEqual(['/api/admin/dashboard/kpis']);
     const select = screen.getByLabelText('Visibility approvals month') as HTMLSelectElement;

@@ -58,10 +58,21 @@ interface ApiKpiData {
   pendingKyc:            number;
   pendingVisibility:     number;
   /**
-   * PHOTO_APPROVAL tenants with visibility ON (else null / absent): the month the tile counts (default current IST
-   * month) and its two queues — Waiting for review (= pendingVisibility, Gifsy's queue) and Needs re-take (reps).
+   * PHOTO_APPROVAL tenants with visibility ON (else null / absent). pendingVisibility = EVERY capture still waiting
+   * for review, any month (Gifsy's whole queue). This block: the picked month (default current IST month) and its
+   * share of that queue, the part from earlier months, what waits on reps (open windows only) and the re-takes left
+   * when the window closed ("Not approved — window closed").
    */
-  visibility?:           { month: string; waiting: number; needsRetake: number } | null;
+  visibility?: {
+    month: string;
+    waiting: number;
+    waitingAllMonths?: number;
+    waitingEarlierMonths?: number;
+    needsRetake: number;
+    rejected?: number;
+    waitingOnReps?: number;
+    closedNotApproved?: number;
+  } | null;
   totalRedeemablePoints: number;
   /** Owner D1/D2 (2026-11-19): Σ |negative balances| + how many wallets — reported apart from the liability. */
   totalOwedPoints?:      number;
@@ -217,12 +228,22 @@ export default function DashboardPage() {
                   <p className="text-xs text-gray-500 mt-0.5">{card.label}</p>
                   {card.key === 'pendingVisibility' && liveKpis?.visibility && (
                     <div className="mt-1 space-y-1" data-testid="kpi-visibility-month">
-                      <p className="text-[11px] text-gray-600">
-                        Waiting for review · {monthLabel(liveKpis.visibility.month)}
+                      <p className="text-[11px] text-gray-600" data-testid="kpi-visibility-waiting">
+                        Waiting for review, all months
+                        {(liveKpis.visibility.waitingEarlierMonths ?? 0) > 0
+                          ? ` · ${liveKpis.visibility.waitingEarlierMonths!.toLocaleString('en-IN')} from earlier months`
+                          : ''}
+                        {` · ${liveKpis.visibility.waiting.toLocaleString('en-IN')} from ${monthLabel(liveKpis.visibility.month)}`}
                       </p>
                       <p className="text-[11px] text-orange-700" data-testid="kpi-visibility-retake">
-                        Needs re-take (waiting on reps): {liveKpis.visibility.needsRetake.toLocaleString('en-IN')}
+                        Waiting on reps (window still open), {monthLabel(liveKpis.visibility.month)}:{' '}
+                        {(liveKpis.visibility.waitingOnReps ?? liveKpis.visibility.needsRetake).toLocaleString('en-IN')}
                       </p>
+                      {(liveKpis.visibility.closedNotApproved ?? 0) > 0 && (
+                        <p className="text-[11px] text-red-700" data-testid="kpi-visibility-closed">
+                          Not approved — window closed: {liveKpis.visibility.closedNotApproved!.toLocaleString('en-IN')}
+                        </p>
+                      )}
                       <select
                         aria-label="Visibility approvals month"
                         value={visMonth || liveKpis.visibility.month}

@@ -501,7 +501,10 @@ export interface OutletStatusResponse {
     outletName: string;
     outletType: { code: string; name: string } | null;
   };
+  /** In visibility scope by THE single rule (backend visibilityUniverseWhere — the one submit enforces). */
   inScope: boolean;
+  /** Plain words why the outlet is not in scope (null / absent when it is). Shown instead of the capture button. */
+  notInScopeReason?: string | null;
   canCapture: boolean;
   windows: OutletStatusWindow[];
 }

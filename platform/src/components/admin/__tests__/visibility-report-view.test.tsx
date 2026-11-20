@@ -9,6 +9,10 @@
  * VISRPT6: picking another month refetches that month; freq 2 shows a window picker; export needs one window.
  * VISRPT7: tapping a tile opens the outlet list for that status; a breakdown row filters by that row.
  * VISRPT8: captures not counted are called out loudly.
+ * VISRPT9: imported month — the old app's visits only; coverage / Missed "Not tracked" with the reason.
+ * VISRPT10: a re-take left when the window closed shows as "Not approved — window closed".
+ * VISRPT11: the not-counted banner only claims an export the screen can make.
+ * VISRPT12: accessibility — toggletip definitions (keyboard), arrow-key tabs + tabpanel, coverage bar text.
  */
 
 import React from 'react';
@@ -43,7 +47,10 @@ vi.mock('@/lib/visibility-report', async (orig) => {
 
 import { VisibilityReportView } from '../VisibilityReportView';
 
-const tally = { inScope: 10, approved: 6, waiting: 1, needsRetake: 1, rejected: 1, notCaptured: 1, missed: 0, coveragePct: 60 };
+const tally = {
+  inScope: 10, approved: 6, waiting: 1, needsRetake: 1, rejected: 1, closedNotApproved: 0, notCaptured: 1, missed: 0, notTracked: 0,
+  coveragePct: 60 as number | null,
+};
 const REPORT = {
   month: '2026-11',
   windowKey: null,
@@ -166,6 +173,84 @@ describe('VISRPT — VisibilityReportView', () => {
     const note = await screen.findByTestId('report-not-counted');
     expect(note.textContent).toContain('3 captures in Nov 2026 are not counted');
     expect(note.textContent).toContain('no longer in scope');
+  });
+
+  it('VISRPT9: imported month — visits the old app recorded; coverage / Missed not tracked, with the reason', async () => {
+    const note = 'Not tracked for imported months — the old app only kept approved visits, so coverage and Missed cannot be worked out.';
+    const imp = { ...tally, inScope: 4, approved: 4, waiting: 0, needsRetake: 0, rejected: 0, notCaptured: 0, coveragePct: null };
+    getReport.mockResolvedValue({
+      success: true,
+      data: {
+        ...REPORT, month: '2026-10', windows: [{ key: '2026-10-P1', closed: true }], importedMonth: true, importedMonthNote: note,
+        summary: imp, breakdowns: { programme: [{ key: 'p', label: 'Unnati / Elite', ...imp }], rep: [], manager: [] },
+      },
+    });
+    render(<VisibilityReportView variant="tenant" />);
+    const banner = await screen.findByTestId('report-imported-month');
+    expect(banner.textContent).toContain('Oct 2026 is an imported month.');
+    expect(banner.textContent).toContain('the old app only kept approved visits');
+    expect(screen.getByText('Visits recorded (old app)')).toBeInTheDocument();
+    expect(screen.getAllByText('Not tracked').length).toBeGreaterThan(0);
+    // No "Missed" / "Not captured yet" tiles for an imported month, and no coverage bar against today's outlets.
+    expect(screen.queryByRole('button', { name: /^missed:/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^not captured yet:/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('report-coverage-bar')).not.toBeInTheDocument();
+    expect(screen.getByTestId('report-coverage-not-tracked')).toHaveTextContent(note);
+  });
+
+  it('VISRPT10: a re-take left when the window closed is "Not approved — window closed" (its own tile + column)', async () => {
+    getReport.mockResolvedValue({
+      success: true,
+      data: { ...REPORT, summary: { ...tally, needsRetake: 0, rejected: 0, closedNotApproved: 2 } },
+    });
+    render(<VisibilityReportView variant="admin" />);
+    await screen.findByText(/^Coverage — /);
+    fireEvent.click(screen.getByRole('button', { name: /not approved — window closed: 2\. show outlets/i }));
+    await waitFor(() =>
+      expect(getOutlets).toHaveBeenCalledWith('admin', expect.objectContaining({ status: 'CLOSED_NOT_APPROVED' })),
+    );
+    expect(screen.getByRole('columnheader', { name: 'Not approved — window closed' })).toBeInTheDocument();
+  });
+
+  it('VISRPT11: the not-counted banner never claims an export the screen cannot make', async () => {
+    getReport.mockResolvedValue({ success: true, data: { ...REPORT, notCounted: { outOfScope: 2, otherWindow: 1 } } });
+    const { unmount } = render(<VisibilityReportView variant="admin" />);
+    let note = await screen.findByTestId('report-not-counted');
+    expect(note.textContent).toContain('still in the Excel export of their window');
+    expect(note.textContent).toContain('cannot be exported from this screen');
+    expect(note.textContent).not.toContain('They still appear in the Excel export');
+    unmount();
+    // The tenant screen has no export at all → no export claim.
+    render(<VisibilityReportView variant="tenant" />);
+    note = await screen.findByTestId('report-not-counted');
+    expect(note.textContent).not.toContain('Excel export of their window');
+  });
+
+  it('VISRPT12: definitions are keyboard toggletips; tabs move with arrow keys; the coverage bar has a text alternative', async () => {
+    render(<VisibilityReportView variant="admin" />);
+    await screen.findByText(/^Coverage — /);
+    const tip = screen.getByRole('button', { name: 'About Missed' });
+    expect(tip).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(tip);
+    expect(tip).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('No capture by the time the window closed.')).toBeInTheDocument();
+    fireEvent.keyDown(tip, { key: 'Escape' });
+    expect(tip).toHaveAttribute('aria-expanded', 'false');
+
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs[0]).toHaveAttribute('aria-selected', 'true');
+    expect(tabs[0]).toHaveAttribute('tabindex', '0');
+    expect(tabs[1]).toHaveAttribute('tabindex', '-1');
+    fireEvent.keyDown(tabs[0], { key: 'ArrowRight' });
+    expect(screen.getByRole('tab', { name: /by rep/i })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', 'vis-breakdown-tab-rep');
+    fireEvent.keyDown(screen.getByRole('tab', { name: /by rep/i }), { key: 'ArrowLeft' });
+    expect(screen.getByRole('tab', { name: /by programme/i })).toHaveAttribute('aria-selected', 'true');
+
+    const bar = screen.getByTestId('report-coverage-bar');
+    expect(bar).toHaveAttribute('role', 'img');
+    expect(bar.getAttribute('aria-label')).toContain('Coverage 60% of 10 visits due');
+    expect(bar.getAttribute('aria-label')).toContain('Approved 6');
   });
 
   it('shows the error with a retry when the report fails', async () => {

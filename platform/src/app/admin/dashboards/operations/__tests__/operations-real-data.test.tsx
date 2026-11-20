@@ -136,9 +136,11 @@ describe('Admin Operations Dashboard — real data', () => {
   describe('RD6: PHOTO_APPROVAL month-wise funnel', () => {
     const PHOTO = {
       enabled: true, mode: 'PHOTO_APPROVAL', month: '2026-10',
-      submitted: 40, approved: 20, waiting: 10, needsRetake: 6, rejected: 4,
-      approvalRatePct: 66.7, flagged: 3, duplicate: 2, outsideFence: 1, fraudFlagPct: 7.5,
-      participatingOutlets: 40, inScopeOutlets: 50, participationPct: 80,
+      submitted: 40, approved: 20, waiting: 10, waitingAllMonths: 13, waitingEarlierMonths: 3,
+      needsRetake: 6, rejected: 4, closedNotApproved: 0,
+      approvalRatePct: 66.7, flagged: 3, duplicate: 2, outsideFence: 1, fraudFlagPct: 7.5, flagDetailsAvailable: true,
+      importedMonth: false,
+      participatingOutlets: 40, inScopeOutlets: 50, participationPct: 80 as number | null,
     };
     const FLAGS = {
       month: '2026-10', flagged: 3,
@@ -171,7 +173,13 @@ describe('Admin Operations Dashboard — real data', () => {
       expect(within(card).getByText('Needs re-take')).toBeInTheDocument();
       expect(within(card).getByText('66.7%')).toBeInTheDocument();
       expect(within(card).getByText('20 approved of 30 reviewed')).toBeInTheDocument();
-      expect(within(card).getByRole('img', { name: /Approved ÷ \(Approved \+ Needs re-take \+ Rejected\)/ })).toBeInTheDocument();
+      // The definition is a keyboard / touch toggletip (not a hover-only title).
+      fireEvent.click(within(card).getByRole('button', { name: 'About Approval Rate' }));
+      expect(within(card).getByText(/Approved ÷ every capture a reviewer has decided this month/)).toBeInTheDocument();
+      // Gifsy's whole queue, not only this month.
+      expect(within(card).getByTestId('operations-visibility-waiting-all')).toHaveTextContent(
+        '13 captures are waiting for review across all months — 3 from months before Oct 2026.',
+      );
       expect(within(card).getByText('3 flagged · 2 duplicate · 1 outside fence')).toBeInTheDocument();
       expect(within(card).getByText('40 of 50 in-scope outlets')).toBeInTheDocument();
     });
@@ -186,6 +194,31 @@ describe('Admin Operations Dashboard — real data', () => {
       expect(within(list).getByText(/same photo as Z9 \(Aug 2026\)/)).toBeInTheDocument();
       expect(within(list).getByText('Photo outside the outlet fence')).toBeInTheDocument();
       expect(within(list).getByText(/— Window 1/)).toBeInTheDocument();
+    });
+
+    it('client roles (flagDetailsAvailable false): counts only, no outlet list button, no flags request', async () => {
+      const fn = vi.fn(async () => ({ ok: true, json: async () => ({ ...BASE_PAYLOAD, visibility: { ...PHOTO, flagDetailsAvailable: false } }) }));
+      vi.stubGlobal('fetch', fn);
+      render(<OperationsDashboardPage />);
+      const card = await screen.findByTestId('operations-visibility-card');
+      expect(within(card).getByTestId('operations-visibility-flags-gifsy-only')).toHaveTextContent(
+        '3 flagged captures this month. The outlet-level list is available to Gifsy only.',
+      );
+      expect(within(card).queryByRole('button', { name: /see the 3 flagged captures/i })).not.toBeInTheDocument();
+      expect(fn.mock.calls.map((c) => String((c as unknown[])[0])).some((u) => u.includes('/flags'))).toBe(false);
+    });
+
+    it('imported month: participation is "Not tracked" with the reason (never divided by the current outlets)', async () => {
+      const note = 'Not tracked for imported months — the old app only kept approved visits, so coverage and Missed cannot be worked out.';
+      const fn = vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ ...BASE_PAYLOAD, visibility: { ...PHOTO, importedMonth: true, importedMonthNote: note, participationPct: null } }),
+      }));
+      vi.stubGlobal('fetch', fn);
+      render(<OperationsDashboardPage />);
+      const card = await screen.findByTestId('operations-visibility-card');
+      expect(within(card).getByText('Not tracked')).toBeInTheDocument();
+      expect(within(card).getByTestId('operations-visibility-imported')).toHaveTextContent(note);
     });
 
     it('picking a month refetches only the visibility block for that month', async () => {

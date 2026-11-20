@@ -7,16 +7,22 @@
  *
  *   - Pick any month (default = the current IST month; imported old-app records count in their own month) and,
  *     for a tenant capturing more than once a month, one window of it (default = every window).
- *   - Tiles: In scope · Approved · Waiting for review · Needs re-take · Rejected · Not captured yet · Missed ·
- *     Coverage. "Missed" only ever counts windows that have closed.
+ *   - Tiles: In scope · Approved · Waiting for review · Needs re-take · Rejected · Not approved — window closed ·
+ *     Not captured yet · Missed · Coverage. "Missed" only ever counts windows that have closed with no capture;
+ *     a re-take / rejection left when the window closed is "Not approved — window closed" (can't be resubmitted).
+ *   - Imported months (before the portal went live — the API decides): only the visits the old app recorded;
+ *     coverage / Not captured / Missed show "Not tracked" with the one-line reason.
+ *   - Definitions are toggletips (keyboard + touch), the breakdown tabs are real tabs (arrow keys), and the
+ *     coverage bar has a text alternative + visible legend.
  *   - Breakdowns by Programme / Sub-programme, Rep and Manager (first active manager above the rep).
  *   - Tap a tile or a breakdown row → the outlets behind it (paged) with status, rep, captured on, reviewed by/on.
  *   - Captures the report does NOT count (outlet no longer in scope / a window the current frequency does not
  *     have) are called out above the tiles — never dropped silently.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, BarChart3, ChevronLeft, ChevronRight, Download, Loader2, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { AlertTriangle, BarChart3, ChevronLeft, ChevronRight, Download, Info, Loader2, X } from 'lucide-react';
+import { Toggletip } from '@/components/ui/toggletip';
 import { visibilityApi } from '@/lib/visibility';
 import {
   BreakdownRow,
@@ -58,8 +64,10 @@ const STATUS_TONE: Record<PlainStatus, string> = {
   WAITING: 'text-amber-600',
   NEEDS_RETAKE: 'text-orange-600',
   REJECTED: 'text-red-600',
+  CLOSED_NOT_APPROVED: 'text-red-800',
   NOT_CAPTURED: 'text-gray-600',
   MISSED: 'text-red-700',
+  NOT_TRACKED: 'text-gray-500',
 };
 
 const BADGE_TONE: Record<PlainStatus, string> = {
@@ -67,20 +75,29 @@ const BADGE_TONE: Record<PlainStatus, string> = {
   WAITING: 'bg-amber-50 text-amber-700 border-amber-200',
   NEEDS_RETAKE: 'bg-orange-50 text-orange-700 border-orange-200',
   REJECTED: 'bg-red-50 text-red-700 border-red-200',
+  CLOSED_NOT_APPROVED: 'bg-red-50 text-red-800 border-red-300',
   NOT_CAPTURED: 'bg-gray-50 text-gray-600 border-gray-200',
   MISSED: 'bg-red-50 text-red-800 border-red-300',
+  NOT_TRACKED: 'bg-gray-50 text-gray-500 border-gray-200',
 };
 
-const TILE_ORDER: Array<{ status: PlainStatus; field: keyof MonthReport['summary'] }> = [
+type CountField = 'approved' | 'waiting' | 'needsRetake' | 'rejected' | 'closedNotApproved' | 'notCaptured' | 'missed';
+
+/** Tiles in order. `trackedOnly` = hidden for an imported month (no denominator → never "Missed"). */
+const TILE_ORDER: Array<{ status: PlainStatus; field: CountField; trackedOnly?: boolean }> = [
   { status: 'APPROVED', field: 'approved' },
   { status: 'WAITING', field: 'waiting' },
   { status: 'NEEDS_RETAKE', field: 'needsRetake' },
   { status: 'REJECTED', field: 'rejected' },
-  { status: 'NOT_CAPTURED', field: 'notCaptured' },
-  { status: 'MISSED', field: 'missed' },
+  { status: 'CLOSED_NOT_APPROVED', field: 'closedNotApproved' },
+  { status: 'NOT_CAPTURED', field: 'notCaptured', trackedOnly: true },
+  { status: 'MISSED', field: 'missed', trackedOnly: true },
 ];
 
-const fmtInt = (n: number) => n.toLocaleString('en-IN');
+const NOT_TRACKED_TEXT = 'Not tracked for imported months';
+const fmtCoverage = (pct: number | null) => (pct === null ? 'Not tracked' : `${pct}%`);
+
+const fmtInt = (n: number | null | undefined) => (n ?? 0).toLocaleString('en-IN');
 
 function fmtDate(iso: string | null): string {
   if (!iso) return '—';
@@ -142,6 +159,22 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
   const multiWindow = (report?.windows.length ?? 0) > 1;
   const showWindowCol = multiWindow && !windowKey;
   const notCountedTotal = report ? report.notCounted.outOfScope + report.notCounted.otherWindow : 0;
+  const imported = report?.importedMonth === true;
+  const tiles = TILE_ORDER.filter((t) => !(imported && t.trackedOnly));
+  const groups = Object.keys(GROUP_LABEL) as ReportGroup[];
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // WAI-ARIA tabs: Left/Right (and Home/End) move between the breakdown tabs and select them.
+  const onTabKey = (e: KeyboardEvent<HTMLButtonElement>, i: number) => {
+    let next = -1;
+    if (e.key === 'ArrowRight') next = (i + 1) % groups.length;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + groups.length) % groups.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = groups.length - 1;
+    if (next < 0) return;
+    e.preventDefault();
+    setGroup(groups[next]);
+    tabRefs.current[next]?.focus();
+  };
 
   return (
     <div className="space-y-5">
@@ -214,48 +247,98 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
                 {fmtInt(notCountedTotal)} capture{notCountedTotal === 1 ? '' : 's'} in {monthLabel(report.month)} {notCountedTotal === 1 ? 'is' : 'are'} not counted below
                 {report.notCounted.outOfScope > 0 && ` — ${fmtInt(report.notCounted.outOfScope)} for outlets no longer in scope (deactivated, not KYC-approved, or outside the visibility scope)`}
                 {report.notCounted.otherWindow > 0 && ` — ${fmtInt(report.notCounted.otherWindow)} in a window this month no longer has (the capture frequency changed)`}.
-                They still appear in the Excel export.
+                {/* Only claim an export this screen can actually make: the admin export is per window of the
+                    CURRENT frequency, so out-of-scope captures are in their window's file, but captures in a
+                    window the month no longer has cannot be exported from here. */}
+                {variant === 'admin' && report.notCounted.outOfScope > 0 && ' Captures for outlets no longer in scope are still in the Excel export of their window.'}
+                {report.notCounted.otherWindow > 0 && ' Captures in a window the month no longer has cannot be exported from this screen.'}
+              </span>
+            </div>
+          )}
+
+          {imported && (
+            <div role="note" data-testid="report-imported-month" className="flex items-start gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+              <Info className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+              <span>
+                <strong>{monthLabel(report.month)} is an imported month.</strong>{' '}
+                {report.importedMonthNote ?? `${NOT_TRACKED_TEXT} — the old app only kept approved visits.`}{' '}
+                The numbers below are the visits the old app recorded.
               </span>
             </div>
           )}
 
           {/* Tiles */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
             <Tile
-              label="In scope"
+              label={imported ? 'Visits recorded (old app)' : 'In scope'}
               value={fmtInt(s.inScope)}
-              sub={multiWindow && !windowKey ? `${fmtInt(report.outletsInScope)} outlets × ${report.windows.length} windows` : 'outlets'}
-              hint="KYC-approved, active outlets in the visibility scope — every visit due this period."
-              onClick={() => setList({ title: 'All outlets in scope' })}
+              sub={
+                imported
+                  ? 'approved visits the old app kept'
+                  : multiWindow && !windowKey ? `${fmtInt(report.outletsInScope)} outlets × ${report.windows.length} windows` : 'outlets'
+              }
+              hint={
+                imported
+                  ? 'The visits the old app recorded for this month (it kept only approved visits).'
+                  : 'KYC-approved, active outlets in the visibility scope — every visit due this period.'
+              }
+              onClick={() => setList({ title: imported ? 'Visits recorded (old app)' : 'All outlets in scope' })}
             />
-            {TILE_ORDER.map((t) => (
+            {tiles.map((t) => (
               <Tile
                 key={t.status}
                 label={PLAIN_STATUS_LABEL[t.status]}
-                value={fmtInt(s[t.field] as number)}
+                value={fmtInt(s[t.field])}
                 tone={STATUS_TONE[t.status]}
                 hint={PLAIN_STATUS_HINT[t.status]}
                 onClick={() => setList({ status: t.status, title: PLAIN_STATUS_LABEL[t.status] })}
               />
             ))}
-            <Tile label="Coverage" value={`${s.coveragePct}%`} tone="text-blue-600" hint="Approved ÷ in scope." />
+            {imported && (
+              <Tile
+                label="Not captured / Missed"
+                value="Not tracked"
+                tone="text-gray-500"
+                hint={report.importedMonthNote ?? NOT_TRACKED_TEXT}
+              />
+            )}
+            <Tile
+              label="Coverage"
+              value={fmtCoverage(s.coveragePct)}
+              tone={s.coveragePct === null ? 'text-gray-500' : 'text-blue-600'}
+              hint={s.coveragePct === null ? report.importedMonthNote ?? NOT_TRACKED_TEXT : 'Approved ÷ in scope.'}
+            />
           </div>
 
-          {/* Coverage bar */}
+          {/* Coverage bar (hidden for an imported month — there is no "in scope" denominator to fill) */}
           <div className="bg-white border border-gray-200 rounded-xl p-4">
             <div className="flex items-center gap-2 mb-3">
-              <BarChart3 className="w-4 h-4 text-[var(--brand-primary)]" />
+              <BarChart3 className="w-4 h-4 text-[var(--brand-primary)]" aria-hidden="true" />
               <p className="text-xs font-semibold text-gray-700">
                 Coverage — {monthLabel(report.month)}{windowKey ? ` · ${windowShortLabel(windowKey)}` : ''}
               </p>
             </div>
-            <div className="h-3 bg-gray-100 rounded-full overflow-hidden flex">
-              <div className="h-full bg-green-500" style={{ width: `${pct(s.approved, s.inScope)}%` }} title={`Approved ${s.approved}`} />
-              <div className="h-full bg-amber-400" style={{ width: `${pct(s.waiting, s.inScope)}%` }} title={`Waiting for review ${s.waiting}`} />
-              <div className="h-full bg-orange-400" style={{ width: `${pct(s.needsRetake, s.inScope)}%` }} title={`Needs re-take ${s.needsRetake}`} />
-              <div className="h-full bg-red-400" style={{ width: `${pct(s.rejected, s.inScope)}%` }} title={`Rejected ${s.rejected}`} />
-              <div className="h-full bg-red-700" style={{ width: `${pct(s.missed, s.inScope)}%` }} title={`Missed ${s.missed}`} />
-            </div>
+            {imported ? (
+              <p className="text-xs text-gray-600" data-testid="report-coverage-not-tracked">{report.importedMonthNote ?? NOT_TRACKED_TEXT}</p>
+            ) : (
+              <>
+                <div
+                  className="h-3 bg-gray-100 rounded-full overflow-hidden flex"
+                  role="img"
+                  aria-label={coverageBarText(s)}
+                  data-testid="report-coverage-bar"
+                >
+                  <div className="h-full bg-green-500" style={{ width: `${pct(s.approved, s.inScope)}%` }} />
+                  <div className="h-full bg-amber-400" style={{ width: `${pct(s.waiting, s.inScope)}%` }} />
+                  <div className="h-full bg-orange-400" style={{ width: `${pct(s.needsRetake, s.inScope)}%` }} />
+                  <div className="h-full bg-red-400" style={{ width: `${pct(s.rejected, s.inScope)}%` }} />
+                  <div className="h-full bg-red-800" style={{ width: `${pct(s.closedNotApproved, s.inScope)}%` }} />
+                  <div className="h-full bg-red-700" style={{ width: `${pct(s.missed, s.inScope)}%` }} />
+                </div>
+                {/* The same figures in words (visible legend = the bar's text alternative). */}
+                <p className="text-[11px] text-gray-600 mt-2" aria-hidden="true">{coverageBarText(s)}</p>
+              </>
+            )}
             <p className="text-[11px] text-gray-500 mt-2">
               Scope: {report.outletScope.length ? report.outletScope.join(', ') : '—'}
               {report.programs?.length ? ` · Programs: ${report.programs.join(', ')}` : ''}
@@ -267,23 +350,32 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
           {/* Breakdowns */}
           <div className="bg-white border border-gray-200 rounded-xl">
             <div className="flex items-center gap-1 border-b border-gray-100 px-3 pt-3 overflow-x-auto" role="tablist" aria-label="Breakdown">
-              {(Object.keys(GROUP_LABEL) as ReportGroup[]).map((g) => (
+              {groups.map((g, i) => (
                 <button
                   key={g}
+                  ref={(el) => { tabRefs.current[i] = el; }}
+                  type="button"
                   role="tab"
+                  id={`vis-breakdown-tab-${g}`}
                   aria-selected={group === g}
+                  aria-controls="vis-breakdown-panel"
+                  tabIndex={group === g ? 0 : -1}
                   onClick={() => setGroup(g)}
-                  className={`px-3 py-2 text-xs font-medium whitespace-nowrap border-b-2 -mb-px ${group === g ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                  onKeyDown={(e) => onTabKey(e, i)}
+                  className={`px-3 py-2 text-xs font-medium whitespace-nowrap border-b-2 -mb-px focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] ${group === g ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
                 >
                   By {GROUP_LABEL[g]}
                 </button>
               ))}
             </div>
-            <BreakdownTable
-              rows={report.breakdowns[group]}
-              firstCol={GROUP_LABEL[group]}
-              onPick={(r) => setList({ group, groupKey: r.key, title: r.label })}
-            />
+            <div role="tabpanel" id="vis-breakdown-panel" aria-labelledby={`vis-breakdown-tab-${group}`} tabIndex={0} className="focus:outline-none">
+              <BreakdownTable
+                rows={report.breakdowns[group]}
+                firstCol={GROUP_LABEL[group]}
+                imported={imported}
+                onPick={(r) => setList({ group, groupKey: r.key, title: r.label })}
+              />
+            </div>
           </div>
 
           {list && (
@@ -304,52 +396,83 @@ export function VisibilityReportView({ variant }: { variant: Variant }) {
   );
 }
 
-function pct(n: number, d: number): number {
-  if (!d || d <= 0) return 0;
+function pct(n: number | undefined, d: number): number {
+  if (!d || d <= 0 || !n) return 0;
   return Math.min(100, Math.round((n / d) * 100));
 }
 
+/** The coverage bar in words — its text alternative and visible legend. */
+function coverageBarText(s: MonthReport['summary']): string {
+  const parts: Array<[string, number]> = [
+    [PLAIN_STATUS_LABEL.APPROVED, s.approved],
+    [PLAIN_STATUS_LABEL.WAITING, s.waiting],
+    [PLAIN_STATUS_LABEL.NEEDS_RETAKE, s.needsRetake],
+    [PLAIN_STATUS_LABEL.REJECTED, s.rejected],
+    [PLAIN_STATUS_LABEL.CLOSED_NOT_APPROVED, s.closedNotApproved],
+    [PLAIN_STATUS_LABEL.NOT_CAPTURED, s.notCaptured],
+    [PLAIN_STATUS_LABEL.MISSED, s.missed],
+  ];
+  return `Coverage ${fmtCoverage(s.coveragePct)} of ${fmtInt(s.inScope)} visits due: ${parts.map(([l, n]) => `${l} ${fmtInt(n)}`).join(', ')}.`;
+}
+
+/**
+ * A stat tile. The definition (`hint`) is a keyboard / touch reachable toggletip beside the number — never only a
+ * mouse-hover `title`. A tile with `onClick` opens the outlets behind it; the toggletip is a SIBLING button (never
+ * nested inside the tile button).
+ */
 function Tile({ label, value, sub, tone, hint, onClick }: {
   label: string; value: string; sub?: string; tone?: string; hint?: string; onClick?: () => void;
 }) {
   const body = (
     <>
       <p className={`text-2xl font-bold ${tone ?? 'text-gray-900'}`}>{value}</p>
-      <p className="text-xs text-gray-600 mt-0.5">{label}</p>
+      <p className="text-xs text-gray-600 mt-0.5 pr-5">{label}</p>
       {sub && <p className="text-[11px] text-gray-500">{sub}</p>}
     </>
   );
+  const tip = hint ? <Toggletip label={label} text={hint} className="absolute top-2 right-2" /> : null;
   if (!onClick) {
-    return <div className="bg-white rounded-xl border border-gray-200 p-3" title={hint}>{body}</div>;
+    return <div className="relative bg-white rounded-xl border border-gray-200 p-3">{body}{tip}</div>;
   }
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={hint}
-      aria-label={`${label}: ${value}. Show outlets`}
-      className="text-left bg-white rounded-xl border border-gray-200 p-3 hover:border-[var(--brand-primary)] hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] transition"
-    >
-      {body}
-    </button>
+    <div className="relative">
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={`${label}: ${value}. Show outlets`}
+        className="w-full h-full text-left bg-white rounded-xl border border-gray-200 p-3 hover:border-[var(--brand-primary)] hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)] transition"
+      >
+        {body}
+      </button>
+      {tip}
+    </div>
   );
 }
 
-function BreakdownTable({ rows, firstCol, onPick }: { rows: BreakdownRow[]; firstCol: string; onPick: (r: BreakdownRow) => void }) {
-  if (rows.length === 0) return <p className="px-4 py-6 text-xs text-gray-500">No outlets in scope for this period.</p>;
+function BreakdownTable({ rows, firstCol, imported, onPick }: {
+  rows: BreakdownRow[]; firstCol: string; imported: boolean; onPick: (r: BreakdownRow) => void;
+}) {
+  if (rows.length === 0) {
+    return (
+      <p className="px-4 py-6 text-xs text-gray-500">
+        {imported ? 'The old app recorded no visits for this period.' : 'No outlets in scope for this period.'}
+      </p>
+    );
+  }
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead>
           <tr className="text-left text-gray-500">
             <th className="px-3 py-2 font-medium">{firstCol}</th>
-            <th className="px-3 py-2 font-medium text-right">In scope</th>
+            <th className="px-3 py-2 font-medium text-right">{imported ? 'Visits recorded' : 'In scope'}</th>
             <th className="px-3 py-2 font-medium text-right">{PLAIN_STATUS_LABEL.APPROVED}</th>
             <th className="px-3 py-2 font-medium text-right">{PLAIN_STATUS_LABEL.WAITING}</th>
             <th className="px-3 py-2 font-medium text-right">{PLAIN_STATUS_LABEL.NEEDS_RETAKE}</th>
             <th className="px-3 py-2 font-medium text-right">{PLAIN_STATUS_LABEL.REJECTED}</th>
-            <th className="px-3 py-2 font-medium text-right">{PLAIN_STATUS_LABEL.NOT_CAPTURED}</th>
-            <th className="px-3 py-2 font-medium text-right">{PLAIN_STATUS_LABEL.MISSED}</th>
+            <th className="px-3 py-2 font-medium text-right">{PLAIN_STATUS_LABEL.CLOSED_NOT_APPROVED}</th>
+            {!imported && <th className="px-3 py-2 font-medium text-right">{PLAIN_STATUS_LABEL.NOT_CAPTURED}</th>}
+            {!imported && <th className="px-3 py-2 font-medium text-right">{PLAIN_STATUS_LABEL.MISSED}</th>}
             <th className="px-3 py-2 font-medium text-right">Coverage</th>
           </tr>
         </thead>
@@ -366,9 +489,10 @@ function BreakdownTable({ rows, firstCol, onPick }: { rows: BreakdownRow[]; firs
               <td className="px-3 py-2 text-right">{fmtInt(r.waiting)}</td>
               <td className="px-3 py-2 text-right">{fmtInt(r.needsRetake)}</td>
               <td className="px-3 py-2 text-right">{fmtInt(r.rejected)}</td>
-              <td className="px-3 py-2 text-right">{fmtInt(r.notCaptured)}</td>
-              <td className="px-3 py-2 text-right">{fmtInt(r.missed)}</td>
-              <td className="px-3 py-2 text-right font-medium">{r.coveragePct}%</td>
+              <td className="px-3 py-2 text-right">{fmtInt(r.closedNotApproved ?? 0)}</td>
+              {!imported && <td className="px-3 py-2 text-right">{fmtInt(r.notCaptured)}</td>}
+              {!imported && <td className="px-3 py-2 text-right">{fmtInt(r.missed)}</td>}
+              <td className="px-3 py-2 text-right font-medium">{fmtCoverage(r.coveragePct)}</td>
             </tr>
           ))}
         </tbody>
