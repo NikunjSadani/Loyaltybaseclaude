@@ -583,6 +583,26 @@ and wallets-in-debt; correct by an adjustment if it happens.
   `REVERSAL_EXPIRY_UNTRACKED` audit row, listed on the attention banner.
 - Migration `20261119124400` (unpushed, edited in place) also adds `debtExposed`, `engineSource` and their CHECK terms.
 
+### 8.9 Fix round 4 (re-audit of fix round 3, 2026-11-19/20) — branch `fix/wre-overreversal-debt`
+1. A position without `lotId` finds the credit's own lot through its credit row (`wallet_transactions.pointsLedgerId`),
+   so its expired points are counted (never taken twice). Only when neither link exists is the expiry history unknown —
+   then EVERY reversal that takes or owes points for it (recovered + owed > 0) writes a `REVERSAL_EXPIRY_UNTRACKED`
+   audit row, listed on the attention banner.
+2. "Which reversal caused the current debt" (wallets-in-debt sources, `owedFromReversal`) is decided by the per-wallet
+   movement `seq` on sequenced wallets — reversal rows after the last row that left the balance ≥ 0 — never by
+   approvedAt / clock ties; one reversal touching two positions lists both (one line per allocation, React key per
+   allocation). Never-sequenced wallets fall back to row times.
+3. V6b: a wallet sequenced by V2 without a backfill stamp had 0 at the cutover (not compared); V6c lists it.
+4. Wallets below zero: programme filter (dashboard catalogue), busy Excel button, the Excel is a clean table (per-source
+   points + source outlet code) and a cut / filtered file says so on an "About" sheet.
+5. Owner D2: the wallets-below-zero list is shown on EVERY tenant with a negative wallet (LEGACY included), neutral
+   wording; nothing renders when none (Deoleo unchanged).
+6. Partner hero and profile read the wallet page's own `owedFromReversal`; liability note: "… N pts owed by M wallets with
+   a negative balance are not included" (it counts wallets; often the only place the figure appears).
+7. Group totals + negative split, and wallets-in-debt count / total / rows, are read in ONE REPEATABLE READ snapshot.
+8. SHADOW diff records `debtExposed` and `belowZero`; the Daily Ops Digest names the points owed next to the negative
+   wallets ("8 negative wallets (3,549 pts owed)"); stale activity comment fixed.
+
 ## 9. One-off backfill (WP6, NOT built) + rollout
 **Backfill** (per wallet, own tx, advisory lock + wallet FOR UPDATE, resumable: skip wallets with movementSeq > 0):
 1. Order rows by **chain-following** exact `balanceAfter` from 0 (δ = points for credits/guarded debits/vendor rows;
