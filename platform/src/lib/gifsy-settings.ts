@@ -13,7 +13,7 @@
 
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { api } from '@/lib/api-client';
 import type { GifsySettings } from '@/types';
 
@@ -298,14 +298,30 @@ export async function saveGifsySettingsDetailed(partial: Partial<GifsySettings>)
   return allOk ? { ok: true } : { ok: false, ...(firstError ? { error: firstError } : {}) };
 }
 
+// ── useSyncExternalStore plumbing (hydration-safe) ────────────────────────────
+// The store is seeded from localStorage on the client but is DEFAULT_SETTINGS on the server, so
+// reading it during the HYDRATION render would make the first client render differ from the SSR
+// HTML (React error #418 — e.g. the admin nav's Visibility item). useSyncExternalStore renders the
+// SERVER snapshot during hydration and then re-renders with the client value; a component that
+// mounts after hydration (client navigation) gets the cached client value straight away.
+function subscribeGifsySettings(onChange: () => void): () => void {
+  listeners.add(onChange);
+  return () => { listeners.delete(onChange); };
+}
+/** Client snapshot — the live store (replaced, never mutated, by writeCache → stable identity). */
+export function getGifsySettingsSnapshot(): GifsySettings { return store; }
+/** Server / hydration snapshot — exactly what the server renders (no localStorage there). */
+export function getGifsySettingsServerSnapshot(): GifsySettings { return DEFAULT_SETTINGS; }
+
 /** Reactive hook — re-renders on hydrate/save and refreshes from the server on mount. */
 export function useGifsySettings(): GifsySettings {
-  const [snapshot, setSnapshot] = useState<GifsySettings>(store);
+  const snapshot = useSyncExternalStore(
+    subscribeGifsySettings,
+    getGifsySettingsSnapshot,
+    getGifsySettingsServerSnapshot,
+  );
   useEffect(() => {
-    const sync = () => setSnapshot(store);
-    listeners.add(sync);
     void refreshGifsySettings();
-    return () => { listeners.delete(sync); };
   }, []);
   return snapshot;
 }

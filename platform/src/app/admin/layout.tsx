@@ -44,6 +44,7 @@ import { useClientConfig } from '@/lib/platform/client-config-context';
 import { appDisplayName } from '@/lib/platform/app-display-name';
 import { useTenantFeatures } from '@/lib/tenant-features';
 import { useGifsySettings } from '@/lib/gifsy-settings';
+import { useTodayLabel } from '@/lib/use-today-label';
 import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
@@ -236,7 +237,11 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const adminSession = useAdminSession();
   // Master Visibility switch (per-tenant, default OFF). Lives in GifsySettings, NOT ClientConfig
   // features — so it is gated here directly rather than via the featureFlag map below.
+  // useGifsySettings is hydration-safe (useSyncExternalStore): SSR + the hydration render both use
+  // DEFAULT_SETTINGS (Visibility OFF); the cached/server value applies in the re-render right after
+  // hydration — the same post-mount tick in which the role-gated items (adminSession) appear.
   const visibilityEnabled = useGifsySettings().visibilityEnabled === true;
+  const todayLabel = useTodayLabel();
 
   // RBAC Option-X (P5 UI/UX audit M2): a GIFSY_STAFF reaches the admin shell ONLY while assumed
   // into a granted brand. An un-assumed staff who lands on /admin/* has no coherent state here
@@ -296,9 +301,13 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     [features, adminSession.canManageSchemes, adminSession.role, visibilityEnabled],
   );
 
-  // Auto-expand the parent whose child matches the current path
+  // Auto-expand the parent whose child matches the current path. Scans ALL_NAV_ITEMS (not the
+  // filtered navItems): the filter depends on client-only state (role, Visibility switch) that is
+  // still the SSR default when this initial state is computed during hydration, so a role- or
+  // Visibility-gated group (e.g. Visibility Invoices, Redemption Payouts) would otherwise never
+  // auto-expand. Expanding a group that ends up hidden is harmless.
   const getInitialExpanded = (): string | null => {
-    for (const item of navItems) {
+    for (const item of ALL_NAV_ITEMS) {
       if (item.children) {
         if (item.children.some((c) => pathname === c.href || pathname.startsWith(c.href + '/'))) {
           return item.href;
@@ -474,14 +483,10 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                 return 'Admin Portal';
               })()}
             </h1>
-            <p className="text-xs text-gray-500">
-              {new Date().toLocaleDateString('en-IN', {
-                timeZone: 'Asia/Kolkata',
-                weekday: 'long',
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric',
-              })}
+            {/* Client-only date (hydration-safe): a non-breaking space holds the line's height
+                during SSR/hydration so the header never shifts when the date fills in. */}
+            <p className="text-xs text-gray-500" data-testid="admin-header-date">
+              {todayLabel ?? ' '}
             </p>
           </div>
 

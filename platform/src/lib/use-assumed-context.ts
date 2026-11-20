@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { getAssumedBrand, clearAssumedContext } from './auth-client'
 import { getAssumedContext } from './auth-actions'
 
@@ -28,9 +28,14 @@ import { getAssumedContext } from './auth-actions'
  * `assumed` boolean.
  */
 export function useAssumedContext(): { brand: string | null; assumed: boolean } {
-  // Optimistic synchronous seed from the localStorage hint (null on the server / at
-  // platform level) — avoids a first-paint flash of the platform-global cards.
-  const [brand, setBrand] = useState<string | null>(() => getAssumedBrand())
+  // Optimistic synchronous seed from the localStorage hint — avoids a first-paint flash of the
+  // platform-global cards. Read through useSyncExternalStore so it is HYDRATION-SAFE: the server
+  // and the hydration render both see `null` (no localStorage on the server → no React #418), and
+  // a component mounted after hydration reads the hint synchronously on its first render.
+  const hint = useSyncExternalStore(subscribeAssumedHint, getAssumedBrand, getNullServerSnapshot)
+  // Server truth (or a newer hint after a cross-tab change) overrides the optimistic hint.
+  // `undefined` = not reconciled yet → fall back to the hint.
+  const [reconciled, setReconciled] = useState<string | null | undefined>(undefined)
 
   useEffect(() => {
     let alive = true
@@ -39,7 +44,7 @@ export function useAssumedContext(): { brand: string | null; assumed: boolean } 
         .then((ctx) => {
           if (!alive) return
           const b = ctx?.brandName ?? null
-          setBrand(b)
+          setReconciled(b)
           // Server truth says un-assumed → scrub the stale localStorage hint too, so a
           // later cross-tab 'storage' event can't re-read a stale hint and transiently flip
           // an editable card back to the placeholder. Makes the hook self-consistent instead
@@ -48,11 +53,10 @@ export function useAssumedContext(): { brand: string | null; assumed: boolean } 
         })
         .catch(() => { /* non-fatal — keep the optimistic value */ })
     }
-    // Re-seed optimistically on mount, then reconcile against server truth.
-    setBrand(getAssumedBrand())
     reconcile()
-    // Cross-tab assume/exit → re-read the hint; tab focus → full server reconcile.
-    const onStorage = () => setBrand(getAssumedBrand())
+    // Cross-tab assume/exit → the hint (re-read by useSyncExternalStore) wins again until the
+    // next reconcile; tab focus → full server reconcile.
+    const onStorage = () => setReconciled(undefined)
     window.addEventListener('storage', onStorage)
     window.addEventListener('focus', reconcile)
     return () => {
@@ -62,5 +66,15 @@ export function useAssumedContext(): { brand: string | null; assumed: boolean } 
     }
   }, [])
 
+  const brand = reconciled !== undefined ? reconciled : hint
   return { brand, assumed: !!brand }
+}
+
+function subscribeAssumedHint(onChange: () => void): () => void {
+  window.addEventListener('storage', onChange)
+  return () => window.removeEventListener('storage', onChange)
+}
+
+function getNullServerSnapshot(): null {
+  return null
 }
