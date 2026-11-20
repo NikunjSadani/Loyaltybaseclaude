@@ -4,7 +4,7 @@ import { KycModule } from '../kyc/kyc.module';
 import { TargetsModule } from '../targets/targets.module';
 
 import { ChannelPartnersController } from './channel-partners.controller';
-import { VisibilityController } from './visibility.controller';
+import { VisibilityController, VisibilityOutletStatusesController } from './visibility.controller';
 import { ReportsController } from './reports.controller';
 import { BannersController } from './banners.controller';
 import { BannerConfigController } from './banner-config.controller';
@@ -30,6 +30,7 @@ import { BannerConfigService } from './banner-config.service';
   controllers: [
     ChannelPartnersController,
     VisibilityController,
+    VisibilityOutletStatusesController,
     ReportsController,
     BannersController,
     BannerConfigController,

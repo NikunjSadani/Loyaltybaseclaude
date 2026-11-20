@@ -9,6 +9,8 @@ import { kpiCodeKeys, NAMES_KEY } from '../targets/targets.helpers';
 import { ListPartnerTargetsQueryDto } from './dto/partner.dto';
 import { GroupVisibilityQueryDto } from './dto/group.dto';
 import { istMonthKey, istDateKey } from '../common/ist-date';
+import { currentWindowKey, windowBoundsForKey } from '../visibility/visibility-window.helper';
+import { visibilityProgramMatches } from '../visibility/visibility-scope.helper';
 import { AppliesToOutletFacets } from '../common/applies-to/applies-to';
 import { kpiAppliesToOutlet, outletPrimaryFallback } from '../sales/outlet-kpi-scope.helper';
 
@@ -447,6 +449,15 @@ export class GroupService {
       return { available: true as const, visibilityEnabled: false as const, parent: parentInfo };
     }
 
+    // PHOTO_APPROVAL tenants (Bajaj) record visibility as VisibilityCapture rows (photo capture +
+    // review), NOT OutletVisibilityRecord (that table is the AMOUNT_UPLOAD Excel path, empty for a
+    // photo tenant) — so reading the old table showed every outlet as "No record". AMOUNT_UPLOAD
+    // tenants keep the exact response below.
+    const mode = await this.tenant.resolveVisibilityCaptureMode(clientId);
+    if (mode === 'PHOTO_APPROVAL') {
+      return this.photoVisibilityRollup(clientId, parentId, parentInfo);
+    }
+
     const month = q?.month ?? istMonthKey(new Date());
     const outletCodes = outlets.map((o) => o.outletCode);
     const nameByCode = new Map(outlets.map((o) => [o.outletCode, o.name]));
@@ -484,10 +495,88 @@ export class GroupService {
     return {
       available: true as const,
       visibilityEnabled: true as const,
+      mode: 'AMOUNT_UPLOAD' as const,
       parent: parentInfo,
       month,
       counts,
       outlets: outletRows,
+    };
+  }
+
+  /**
+   * PHOTO_APPROVAL roll-up for a group: each group outlet's VisibilityCapture status for the
+   * CURRENT window (IST, the tenant's capture frequency). Outlets outside the tenant's visibility
+   * scope (outlet type / program / sub-program — the SAME predicate the capture + coverage use)
+   * are listed with inScope:false and are NOT counted, so the parent sees why a shop has no
+   * status instead of a silent gap. Status codes stay codes; the FE shows the plain words.
+   */
+  private async photoVisibilityRollup(
+    clientId: string,
+    parentId: string,
+    parentInfo: { businessName: string | null; ownerName: string | null },
+  ) {
+    const config = (await this.tenantSettings.getEffectiveSettings(clientId)).visibilityConfig;
+    const freq = config.frequencyPerMonth;
+    const now = new Date();
+    const windowKey = currentWindowKey(now, freq);
+    const { startDay, endDay } = windowBoundsForKey(windowKey, freq);
+
+    const outlets = await this.prisma.outlet.findMany({
+      where: { parentId, clientId, deletedAt: null, deactivatedAt: null },
+      select: {
+        id: true,
+        outletCode: true,
+        name: true,
+        programName: true,
+        programCategory: true,
+        outletType: { select: { code: true } },
+      },
+    });
+    const inScope = (o: (typeof outlets)[number]) =>
+      config.outletScope.includes(o.outletType?.code ?? '') &&
+      visibilityProgramMatches(config, { program: o.programName, subProgram: o.programCategory });
+    const scopedIds = outlets.filter(inScope).map((o) => o.id);
+
+    const captures = scopedIds.length
+      ? await this.prisma.visibilityCapture.findMany({
+          where: { clientId, windowKey, outletId: { in: scopedIds } },
+          select: { outletId: true, status: true, receivedAt: true, reviewedAt: true, currentVersion: true },
+        })
+      : [];
+    const capByOutlet = new Map(captures.map((c) => [c.outletId, c]));
+
+    const counts = { total: scopedIds.length, approved: 0, waiting: 0, needsRetake: 0, rejected: 0, notCaptured: 0, notInScope: 0 };
+    const rows = [...outlets]
+      .sort((a, b) => a.outletCode.localeCompare(b.outletCode))
+      .map((o) => {
+        const scoped = inScope(o);
+        const cap = scoped ? capByOutlet.get(o.id) : undefined;
+        if (!scoped) counts.notInScope++;
+        else if (!cap) counts.notCaptured++;
+        else if (cap.status === 'APPROVED') counts.approved++;
+        else if (cap.status === 'SUBMITTED') counts.waiting++;
+        else if (cap.status === 'CHANGES_REQUESTED') counts.needsRetake++;
+        else counts.rejected++;
+        return {
+          outletCode: o.outletCode,
+          outletName: o.name,
+          inScope: scoped,
+          status: cap?.status ?? null,
+          capturedAt: cap?.receivedAt ? istDateKey(cap.receivedAt) : null,
+          reviewedAt: cap?.reviewedAt ? istDateKey(cap.reviewedAt) : null,
+          version: cap?.currentVersion ?? null,
+        };
+      });
+
+    return {
+      available: true as const,
+      visibilityEnabled: true as const,
+      mode: 'PHOTO_APPROVAL' as const,
+      parent: parentInfo,
+      windowKey,
+      window: { startDay, endDay },
+      counts,
+      outlets: rows,
     };
   }
 

@@ -21,12 +21,12 @@ import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/tas
 import { fetchBanners, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
 import { schemeApi } from '@/lib/schemes';
 import type { EligibleScheme } from '@/lib/scheme-types';
-import { fetchOutletVisibilityStatuses, VISIBILITY_ELIGIBLE_OUTLET_TYPES } from '@/lib/visibility-upload';
+import { fetchOutletVisibilityStatuses, VISIBILITY_ELIGIBLE_OUTLET_TYPES, VISIBILITY_STATUS_LOAD_ERROR } from '@/lib/visibility-upload';
 import {
   buildKycSubRows, buildVisibilityTaskItems, buildPhotoCaptureTaskItems, type KycSubRow,
 } from '@/lib/sales-tasks';
 import { visibilityApi } from '@/lib/visibility';
-import { summarizeVisibilityCaptures, type VisibilitySummaryCounts } from '@/lib/visibility-types';
+import { summarizeVisibilityCaptures, VISIBILITY_SUMMARY_BUCKET_LABELS, type VisibilitySummaryCounts } from '@/lib/visibility-types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { fetchTargetTrend, type TargetTrendResult } from '@/lib/sales-trend';
 import { TargetTrendChart } from '@/components/target-trend-chart';
@@ -210,11 +210,12 @@ const VIS_SUMMARY_TILES: {
   valueCls: string;
   bg: string;
 }[] = [
-  { key: 'approved',  label: 'Approved',  title: 'Approved',                      valueCls: 'text-emerald-600', bg: 'bg-emerald-50' },
-  { key: 'partial',   label: 'Partial',   title: 'Partially approved',            valueCls: 'text-amber-600',   bg: 'bg-amber-50'   },
-  { key: 'in_review', label: 'In review', title: 'Submitted — awaiting review',   valueCls: 'text-blue-600',    bg: 'bg-blue-50'    },
-  { key: 'pending',   label: 'Pending',   title: 'Not captured yet',             valueCls: 'text-gray-500',    bg: 'bg-gray-50'    },
-  { key: 'rejected',  label: 'Rejected',  title: 'Rejected — re-capture needed',  valueCls: 'text-red-600',     bg: 'bg-red-50'     },
+  // Labels = the shared plain status words (VISIBILITY_SUMMARY_BUCKET_LABELS).
+  { key: 'approved',  label: VISIBILITY_SUMMARY_BUCKET_LABELS.approved,  title: 'Approved',                                       valueCls: 'text-emerald-600', bg: 'bg-emerald-50' },
+  { key: 'partial',   label: VISIBILITY_SUMMARY_BUCKET_LABELS.partial,   title: 'Some photos approved — the rest need a re-take', valueCls: 'text-amber-600',   bg: 'bg-amber-50'   },
+  { key: 'in_review', label: VISIBILITY_SUMMARY_BUCKET_LABELS.in_review, title: 'Photos sent — waiting for review',               valueCls: 'text-blue-600',    bg: 'bg-blue-50'    },
+  { key: 'pending',   label: VISIBILITY_SUMMARY_BUCKET_LABELS.pending,   title: 'No photos sent yet for this period',             valueCls: 'text-gray-500',    bg: 'bg-gray-50'    },
+  { key: 'rejected',  label: VISIBILITY_SUMMARY_BUCKET_LABELS.rejected,  title: 'Rejected, or every photo needs a re-take',       valueCls: 'text-red-600',     bg: 'bg-red-50'     },
 ];
 
 /**
@@ -279,6 +280,7 @@ export default function SalesDashboard() {
   const [kycSubs,      setKycSubs]      = useState<KycSubRow[]>([]);
   const [visibilityItems, setVisibilityItems] = useState<TaskItem[]>([]);
   const [visibilityMode, setVisibilityMode] = useState<'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD'>('PHOTO_APPROVAL');
+  const [visibilityLoadError, setVisibilityLoadError] = useState(false);
   const [loading,      setLoading]      = useState(true);
   const [search,       setSearch]       = useState('');
   const [searchOpen,   setSearchOpen]   = useState(false);
@@ -402,8 +404,13 @@ export default function SalesDashboard() {
     if (codes.length === 0) { setVisibilityItems([]); return; }
     const month = new Date().toISOString().slice(0, 7);
     fetchOutletVisibilityStatuses(codes, month)
-      .then((map) => { if (!cancelled) setVisibilityItems(buildVisibilityTaskItems(eligible, map, visibilityEnabled)); })
-      .catch(() => { if (!cancelled) setVisibilityItems([]); });
+      .then((map) => {
+        if (cancelled) return;
+        // null = could not load → no fake "capture pending" tasks; say so instead.
+        setVisibilityLoadError(map === null);
+        setVisibilityItems(map === null ? [] : buildVisibilityTaskItems(eligible, map, visibilityEnabled));
+      })
+      .catch(() => { if (!cancelled) { setVisibilityItems([]); setVisibilityLoadError(true); } });
     return () => { cancelled = true; };
   }, [outlets, role]);
 
@@ -895,6 +902,11 @@ export default function SalesDashboard() {
               </div>
             </CardHeader>
             <CardContent className="pt-0 pb-1">
+              {visibilityLoadError && (
+                <p role="alert" data-testid="visibility-status-error" className="mb-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                  Visibility tasks: {VISIBILITY_STATUS_LOAD_ERROR}
+                </p>
+              )}
               {taskGroups.length === 0 && schemeCount === 0 ? (
                 <div className="flex items-center gap-2 py-2">
                   <CheckCircle2 className="h-4 w-4 text-emerald-400" />

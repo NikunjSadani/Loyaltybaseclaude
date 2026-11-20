@@ -22,14 +22,15 @@ const mockPrisma = {
   outletSalesRecord: { findMany: jest.fn() },
   kpiDef: { findMany: jest.fn() },
   outletVisibilityRecord: { findMany: jest.fn() },
+  visibilityCapture: { findMany: jest.fn() },
   leaderboardSnapshot: { findFirst: jest.fn() },
   leaderboardEntry: { findMany: jest.fn() },
   // fix round 3: the wallet totals + negative split are read in ONE array transaction
   $transaction: jest.fn(async (ops: Promise<unknown>[], _opts?: unknown) => Promise.all(ops)),
 };
 
-const mockTenantSettings = { getConversionRate: jest.fn() };
-const mockTenant = { resolveVisibilityEnabled: jest.fn() };
+const mockTenantSettings = { getConversionRate: jest.fn(), getEffectiveSettings: jest.fn() };
+const mockTenant = { resolveVisibilityEnabled: jest.fn(), resolveVisibilityCaptureMode: jest.fn() };
 
 const user: JwtPayload = {
   sub: 'u1',
@@ -518,11 +519,13 @@ describe('GroupService.getVisibilityRollup', () => {
       // OUT-3 has no record for the month.
     ]);
 
+    mockTenant.resolveVisibilityCaptureMode.mockResolvedValueOnce('AMOUNT_UPLOAD');
     const result = await makeService().getVisibilityRollup(user, { month: '2026-07' });
 
     expect(result.available).toBe(true);
     if (!result.available) throw new Error('unreachable'); // narrows off the available:false branch
     if (!result.visibilityEnabled) throw new Error('unreachable'); // narrows to the ON branch
+    if (result.mode !== 'AMOUNT_UPLOAD') throw new Error('unreachable'); // the Excel-record branch
     expect(result.month).toBe('2026-07');
     expect(result.counts).toEqual({ total: 3, approved: 1, underReview: 0, pending: 1, noRecord: 1 });
     expect(result.outlets).toEqual([
@@ -533,6 +536,75 @@ describe('GroupService.getVisibilityRollup', () => {
     // The record read is tenant + month + group-outletCode scoped.
     const recWhere = mockPrisma.outletVisibilityRecord.findMany.mock.calls[0][0].where;
     expect(recWhere).toEqual({ clientId: 'deoleo', month: '2026-07', outletCode: { in: ['OUT-1', 'OUT-2', 'OUT-3'] } });
+    expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();
+  });
+
+  // PHOTO_APPROVAL tenants (Bajaj) — the group page must read VisibilityCapture, not the
+  // AMOUNT_UPLOAD Excel table (which is empty for a photo tenant → every shop read "No record").
+  describe('PHOTO_APPROVAL tenant', () => {
+    const groupOutlets = [
+      { id: 'o3', outletCode: 'OUT-3', name: 'Shop Three', programName: 'Unnati', programCategory: 'Elite', outletType: { code: 'RETAILER' } },
+      { id: 'o1', outletCode: 'OUT-1', name: 'Shop One', programName: 'Unnati', programCategory: 'Elite', outletType: { code: 'RETAILER' } },
+      { id: 'o2', outletCode: 'OUT-2', name: 'Shop Two', programName: 'Unnati', programCategory: 'Elite', outletType: { code: 'RETAILER' } },
+      { id: 'o4', outletCode: 'OUT-4', name: 'Shop Four', programName: 'Unnati', programCategory: 'Elite', outletType: { code: 'RETAILER' } },
+      { id: 'o5', outletCode: 'OUT-5', name: 'Shop Five', programName: 'Unnati', programCategory: 'Elite', outletType: { code: 'RETAILER' } },
+      // Out of the visibility scope (type not in outletScope) → listed, not counted.
+      { id: 'o9', outletCode: 'OUT-9', name: 'Depot', programName: null, programCategory: null, outletType: { code: 'DISTRIBUTOR' } },
+    ];
+    beforeEach(() => {
+      mockPrisma.channelPartner.findFirst
+        .mockResolvedValueOnce({ id: 'parent1' })
+        .mockResolvedValueOnce({ groupId: 'parent1' })
+        .mockResolvedValueOnce({ businessName: 'HQ', ownerName: 'Boss' });
+      mockTenant.resolveVisibilityCaptureMode.mockResolvedValueOnce('PHOTO_APPROVAL');
+      mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+        visibilityConfig: { outletScope: ['RETAILER'], frequencyPerMonth: 1, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 } },
+      });
+      // 1st outlet.findMany = the shared group load; 2nd = the photo path's scoped load.
+      mockPrisma.outlet.findMany.mockResolvedValueOnce(groupOutlets).mockResolvedValueOnce(groupOutlets);
+    });
+
+    it('reads VisibilityCapture for the CURRENT window and returns plain-status-ready codes + counts', async () => {
+      const now = new Date();
+      mockPrisma.visibilityCapture.findMany.mockResolvedValueOnce([
+        { outletId: 'o1', status: 'APPROVED', receivedAt: now, reviewedAt: now, currentVersion: 1 },
+        { outletId: 'o2', status: 'SUBMITTED', receivedAt: now, reviewedAt: null, currentVersion: 1 },
+        { outletId: 'o3', status: 'CHANGES_REQUESTED', receivedAt: now, reviewedAt: now, currentVersion: 2 },
+        { outletId: 'o4', status: 'REJECTED', receivedAt: now, reviewedAt: now, currentVersion: 1 },
+        // o5: no capture yet.
+      ]);
+      const result = await makeService().getVisibilityRollup(user, {});
+      if (!result.available || !result.visibilityEnabled || result.mode !== 'PHOTO_APPROVAL') throw new Error('expected photo branch');
+
+      expect(mockPrisma.outletVisibilityRecord.findMany).not.toHaveBeenCalled();
+      const where = mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where;
+      expect(where.clientId).toBe('deoleo');
+      expect(where.windowKey).toBe(result.windowKey);
+      expect(result.windowKey).toMatch(/^\d{4}-\d{2}-P1$/);
+      expect(where.outletId.in.sort()).toEqual(['o1', 'o2', 'o3', 'o4', 'o5']); // never the out-of-scope depot
+      expect(result.counts).toEqual({ total: 5, approved: 1, waiting: 1, needsRetake: 1, rejected: 1, notCaptured: 1, notInScope: 1 });
+      expect(result.outlets.map((o) => [o.outletCode, o.status, o.inScope])).toEqual([
+        ['OUT-1', 'APPROVED', true],
+        ['OUT-2', 'SUBMITTED', true],
+        ['OUT-3', 'CHANGES_REQUESTED', true],
+        ['OUT-4', 'REJECTED', true],
+        ['OUT-5', null, true],
+        ['OUT-9', null, false],
+      ]);
+      // The photo-path outlet load excludes deactivated outlets (same as the coverage denominator).
+      expect(mockPrisma.outlet.findMany.mock.calls[1][0].where).toMatchObject({ parentId: 'parent1', clientId: 'deoleo', deletedAt: null, deactivatedAt: null });
+    });
+
+    it('a group with no in-scope outlets does not query captures', async () => {
+      mockTenantSettings.getEffectiveSettings.mockResolvedValue({
+        visibilityConfig: { outletScope: ['NOTHING'], frequencyPerMonth: 2, allowedSalesLevels: [], geoFence: { enabled: false, radiusMeters: 50 } },
+      });
+      const result = await makeService().getVisibilityRollup(user, {});
+      if (!result.available || !result.visibilityEnabled || result.mode !== 'PHOTO_APPROVAL') throw new Error('expected photo branch');
+      expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();
+      expect(result.counts.total).toBe(0);
+      expect(result.counts.notInScope).toBe(6);
+    });
   });
 });
 

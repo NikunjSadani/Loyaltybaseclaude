@@ -13,6 +13,11 @@ import {
 } from './visibility/visibility-upload';
 import { aoaToSheetSafe } from '../common/xlsx';
 import { isPartnerLoginRole } from '../partner/partner-display.helper';
+import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
+import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
+
+/** Cap on outlet codes per outlet-statuses call (a manager's whole roster fits; abuse doesn't). */
+export const OUTLET_STATUS_MAX_CODES = 2000;
 
 interface ErrorRow {
   rowNumber: number;
@@ -91,6 +96,87 @@ export class VisibilityService {
     ]);
 
     return { records, total, page, limit };
+  }
+
+  /**
+   * GET /v1/visibility/outlet-statuses?outletCodes=&month= — the AMOUNT_UPLOAD (Excel) status of
+   * a batch of outlets for one month, as a map outletCode → { status, dateOfCapture, approvedBy,
+   * capturedByEmployeeName }. Backs the sales outlets/tasks/dashboard badges; before this route
+   * existed those calls 404'd and the UI silently showed every outlet as "not captured".
+   *
+   * - Master gate (visibilityEnabled) + MODE gate: AMOUNT_UPLOAD only. A PHOTO_APPROVAL tenant
+   *   gets a clear 400 (its status lives in VisibilityCapture — /visibility/sales/eligible).
+   * - Partner logins: 403.
+   * - SALES callers see ONLY outlets in their downline (active assignments, the same reach the
+   *   photo path uses); a code outside their reach is simply absent (never another team's data).
+   *   Non-sales tenant staff (CLIENT_ADMIN / MIS) and the Gifsy operator: tenant-wide.
+   * - `outletCodes` = comma-joined, each segment URI-encoded by the FE (codes may contain ','),
+   *   capped at 2,000 codes per call; `month` must be YYYY-MM.
+   */
+  async getOutletStatuses(user: JwtPayload, outletCodesRaw: string | undefined, month: string | undefined) {
+    await this.assertVisibilityEnabled(user);
+    if (isPartnerLoginRole(user.role)) throw new ForbiddenException('Forbidden');
+    if (!month || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
+      throw new BadRequestException('month must be YYYY-MM.');
+    }
+    const mode = await this.tenant.resolveVisibilityCaptureMode(user.clientId);
+    if (mode !== 'AMOUNT_UPLOAD') {
+      throw new BadRequestException(
+        'This tenant records visibility by photo capture; use the photo visibility status instead.',
+      );
+    }
+
+    const codes = [
+      ...new Set(
+        (outletCodesRaw ?? '')
+          .split(',')
+          .map((s) => {
+            try { return decodeURIComponent(s).trim(); } catch { return s.trim(); }
+          })
+          .filter((s) => s.length > 0),
+      ),
+    ];
+    if (codes.length === 0) return {};
+    if (codes.length > OUTLET_STATUS_MAX_CODES) {
+      throw new BadRequestException(`At most ${OUTLET_STATUS_MAX_CODES} outlet codes per request.`);
+    }
+
+    let allowed = codes;
+    if (user.role.startsWith('SALES_')) {
+      const caller = await this.prisma.salesUser.findFirst({
+        where: { userId: user.sub, clientId: user.clientId, deletedAt: null },
+        select: { id: true },
+      });
+      if (!caller) throw new ForbiddenException('Only sales users with a team may read outlet visibility.');
+      const edges = await loadSalesHierarchy(this.prisma, user.clientId);
+      const subtree = [...descendantSalesUserIds(caller.id, edges)];
+      const assignments = await this.prisma.salesUserAssignment.findMany({
+        where: { salesUserId: { in: subtree }, unassignedAt: null, outletId: { not: null } },
+        select: { outlet: { select: { outletCode: true, clientId: true } } },
+      });
+      const reach = new Set(
+        assignments
+          .filter((a) => a.outlet && a.outlet.clientId === user.clientId)
+          .map((a) => a.outlet!.outletCode),
+      );
+      allowed = codes.filter((c) => reach.has(c));
+      if (allowed.length === 0) return {};
+    }
+
+    const records = await this.prisma.outletVisibilityRecord.findMany({
+      where: { clientId: user.clientId, month, outletCode: { in: allowed } },
+      select: { outletCode: true, status: true, dateOfCapture: true, approvedBy: true, capturedByEmployeeName: true },
+    });
+    const out: Record<string, { status: OutletVisibilityStatus; dateOfCapture: string | null; approvedBy: string | null; capturedByEmployeeName: string | null }> = {};
+    for (const r of records) {
+      out[r.outletCode] = {
+        status: r.status,
+        dateOfCapture: r.dateOfCapture ? r.dateOfCapture.toISOString() : null,
+        approvedBy: r.approvedBy,
+        capturedByEmployeeName: r.capturedByEmployeeName,
+      };
+    }
+    return out;
   }
 
   /** POST /v1/admin/visibility/bulk-upload (multipart "file"). */
