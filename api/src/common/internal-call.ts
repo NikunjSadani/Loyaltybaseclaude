@@ -7,8 +7,14 @@ import * as crypto from 'crypto';
  * first-use mark) or `x-client-user-agent` (the browser UA used for the device fingerprint) are only honoured
  * when the request also carries `x-internal-proxy-secret` equal to the INTERNAL_PROXY_SECRET env shared by the
  * API and the frontend services. Constant-time compare. FAIL-SAFE: when the env is unset (or < 16 chars) NOTHING
- * is trusted — the API then always marks first use and fingerprints from the request's own User-Agent.
+ * is trusted — the API then always marks first use and treats every refresh's device fingerprint as UNKNOWN (so a
+ * never-used successor is not handed back until the secret is configured; nobody is ever killed for it).
  */
+
+/** Is a usable INTERNAL_PROXY_SECRET configured on this process? (startup check + Daily Ops Digest) */
+export function internalSecretConfigured(secret: string | undefined = process.env.INTERNAL_PROXY_SECRET): boolean {
+  return (secret ?? '').trim().length >= 16;
+}
 export const INTERNAL_SECRET_HEADER = 'x-internal-proxy-secret';
 
 export function isTrustedInternalCall(

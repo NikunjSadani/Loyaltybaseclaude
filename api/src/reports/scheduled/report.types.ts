@@ -338,7 +338,17 @@ export interface DigestInput {
    * repeated never-used-successor handbacks for one user (possible shared stolen session), and failed
    * first-use marks (the lenient handback stays open until they land). Hidden when all zero.
    */
-  authEvents?: SectionResult<{ reuseKills: number; repeatedHandbacks: number; firstUseMarkFailures: number }>;
+  authEvents?: SectionResult<{
+    reuseKills: number;
+    repeatedHandbacks: number;
+    firstUseMarkFailures: number;
+    /** Background handback audit writes that failed (AUTH_EVENT handback_audit_failed). */
+    handbackAuditFailures?: number;
+    /** Post-grace replays refused because the device fingerprint was UNKNOWN (no alarm; the device re-signs in). */
+    deviceUnknownRefusals?: number;
+    /** False when INTERNAL_PROXY_SECRET is unset / too short on the API: device binding is OFF. */
+    internalSecretConfigured?: boolean;
+  }>;
   /** Gifsy-wide Voucher Dispersal; hidden when every figure is zero, "couldn't load" when it failed. */
   voucherDispersal?: SectionResult<VoucherDispersalSection>;
   /**

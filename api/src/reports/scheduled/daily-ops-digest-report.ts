@@ -312,6 +312,17 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
     if (a.firstUseMarkFailures > 0) {
       out.push({ text: `Sign-in security: ${plural(a.firstUseMarkFailures, 'session first-use mark', 'session first-use marks')} failed to save`, events: a.firstUseMarkFailures });
     }
+    if ((a.handbackAuditFailures ?? 0) > 0) {
+      const n = a.handbackAuditFailures ?? 0;
+      out.push({ text: `Sign-in security: ${plural(n, 'session handback audit write', 'session handback audit writes')} failed`, events: n });
+    }
+    if ((a.deviceUnknownRefusals ?? 0) > 0) {
+      const n = a.deviceUnknownRefusals ?? 0;
+      out.push({ text: `Sign-in security: ${plural(n, 'returning device', 'returning devices')} had to sign in again because the device could not be identified`, events: n });
+    }
+    if (a.internalSecretConfigured === false) {
+      out.push({ text: 'Sign-in security: INTERNAL_PROXY_SECRET is not configured on the API — device binding is OFF (lost-response devices must sign in again)', events: 1 });
+    }
   }
   const vd = input.voucherDispersal;
   if (!vd) return out;

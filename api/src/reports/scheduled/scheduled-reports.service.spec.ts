@@ -150,6 +150,10 @@ const tdsMock = {
   report194R: jest.fn().mockResolvedValue({ rows: [], summary: { totalExcessDeductedPaise: 0n, excessRetailerCount: 0 } }),
 };
 
+// The Gifsy-wide sign-in security line flags a missing INTERNAL_PROXY_SECRET; these digest tests run with it set
+// (the missing-secret line itself is covered in auth-events-digest.spec.ts).
+process.env.INTERNAL_PROXY_SECRET = process.env.INTERNAL_PROXY_SECRET || 'test-internal-secret-0123456789';
+
 describe('ScheduledReportsService — Daily Operations Digest', () => {
   let prisma: ReturnType<typeof makePrisma>;
   let store: ReturnType<typeof makeSettingsStore>;

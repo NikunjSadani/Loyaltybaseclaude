@@ -1,3 +1,4 @@
+import { internalSecretConfigured } from '../../common/internal-call';
 import { TdsService } from '../../tds/tds.service';
 import { financialYear } from '../../tds/tds.helpers';
 import { randomUUID } from 'crypto';
@@ -553,6 +554,9 @@ export class ScheduledReportsService {
       reuseKills: await authCount('SECURITY_EVENT', 'refresh_token_reuse'),
       repeatedHandbacks: await authCount('SECURITY_EVENT', 'repeated_unused_successor_handoff'),
       firstUseMarkFailures: await authCount('AUTH_EVENT', 'first_use_mark_failed'),
+      handbackAuditFailures: await authCount('AUTH_EVENT', 'handback_audit_failed'),
+      deviceUnknownRefusals: await authCount('AUTH_EVENT', 'handback_refused_device_unknown'),
+      internalSecretConfigured: internalSecretConfigured(),
     }));
 
     return { window, dateLabel, tenants: out, gifsyOtpFailed, voucherDispersal, authEvents, runNotices, sharedFailures };

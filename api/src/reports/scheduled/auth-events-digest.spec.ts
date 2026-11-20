@@ -15,6 +15,20 @@ describe('Daily Ops Digest — sign-in security (Gifsy-wide)', () => {
     );
   });
 
+  it('L3/L4/M1: unknown-device refusals, failed handback audits and a missing INTERNAL_PROXY_SECRET are listed', () => {
+    const items = gifsyWideItems({
+      authEvents: {
+        ok: true,
+        data: { reuseKills: 0, repeatedHandbacks: 0, firstUseMarkFailures: 0, handbackAuditFailures: 2, deviceUnknownRefusals: 3, internalSecretConfigured: false },
+      },
+    } as any).map((i) => i.text);
+    expect(items).toEqual([
+      expect.stringMatching(/2 session handback audit writes failed/),
+      expect.stringMatching(/3 returning devices had to sign in again because the device could not be identified/),
+      expect.stringMatching(/INTERNAL_PROXY_SECRET is not configured .* device binding is OFF/),
+    ]);
+  });
+
   it('hidden when everything is zero', () => {
     expect(gifsyWideItems({ authEvents: { ok: true, data: { reuseKills: 0, repeatedHandbacks: 0, firstUseMarkFailures: 0 } } } as any)).toEqual([]);
   });

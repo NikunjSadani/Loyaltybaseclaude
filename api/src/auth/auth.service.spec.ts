@@ -130,6 +130,26 @@ describe('AuthService', () => {
     expect(service).toBeDefined();
   });
 
+  it('M1: in production, a missing / short INTERNAL_PROXY_SECRET is logged as an ERROR at startup', () => {
+    const env = { node: process.env.NODE_ENV, secret: process.env.INTERNAL_PROXY_SECRET };
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      process.env.NODE_ENV = 'production';
+      delete process.env.INTERNAL_PROXY_SECRET;
+      service.onModuleInit();
+      expect(error).toHaveBeenCalledWith(expect.stringMatching(/INTERNAL_PROXY_SECRET is not configured/));
+      error.mockClear();
+      process.env.INTERNAL_PROXY_SECRET = 'a-proper-secret-0123456789';
+      service.onModuleInit();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+      process.env.NODE_ENV = env.node;
+      if (env.secret === undefined) delete process.env.INTERNAL_PROXY_SECRET;
+      else process.env.INTERNAL_PROXY_SECRET = env.secret;
+    }
+  });
+
   // â”€â”€ getMe â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   describe('getMe', () => {
     const partnerUser = { sub: 'u1', role: 'CHANNEL_PARTNER', clientId: 'deoleo', phone: '99', name: 'P' } as any;
@@ -1741,7 +1761,7 @@ describe('AuthService', () => {
     });
     const sessionB = (over: Record<string, unknown> = {}) => ({
       id: 'sess_b', clientId: 'deoleo', userId: 'u1', token: 'b.access', refreshToken: 'rt-b',
-      revokedAt: null, firstUsedAt: null, handedBackAt: null, createdFingerprint: 'fp-device',
+      revokedAt: null, firstUsedAt: null, handedBackAt: null, createdFingerprint: 'v3:fp-device',
       createdAt: new Date(Date.now() - 2 * HOUR), expiresAt: new Date(Date.now() + 28 * 24 * HOUR),
       ...over,
     });
@@ -1773,7 +1793,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(replayedA(ago)).mockResolvedValueOnce(sessionB());
       armRenew();
 
-      const res = await service.refreshToken('rt', { fingerprint: 'fp-device' });
+      const res = await service.refreshToken('rt', { fingerprint: 'v3:fp-device' });
       await service.settleBackgroundWork(); // audit rows are written AFTER the response (H-A b)
 
       expect(res).toEqual({ accessToken: 'mock.jwt.token', refreshToken: expect.any(String) }); // a FRESH pair, not B's stale one
@@ -1784,7 +1804,7 @@ describe('AuthService', () => {
       });
       // …and C is minted from B (single lineage), bound to the replaying device.
       const created = mockPrisma.userSession.create.mock.calls[0][0].data;
-      expect(created).toMatchObject({ rotatedFromId: 'sess_b', createdFingerprint: 'fp-device' });
+      expect(created).toMatchObject({ rotatedFromId: 'sess_b', createdFingerprint: 'v3:fp-device' });
       // No kill, no security event; one info audit row with its OWN action.
       expect(mockPrisma.user.update).not.toHaveBeenCalled();
       expect(securityEventCalls()).toHaveLength(0);
@@ -1799,7 +1819,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.user.update.mockResolvedValue({});
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).rejects.toThrow('Session expired');
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).rejects.toThrow('Session expired');
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
       expect(securityEventCalls()).toHaveLength(1);
       expect(securityEventCalls()[0][0].data.metadata.reason).toBe('successor_used');
@@ -1809,7 +1829,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(replayedA(2 * HOUR)).mockResolvedValueOnce(sessionB());
       mockPrisma.auditLog.create.mockResolvedValue({});
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-attacker' })).rejects.toThrow('Session expired');
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-attacker' })).rejects.toThrow('Session expired');
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
       expect(mockPrisma.user.update).not.toHaveBeenCalled(); // no stamp
       expect(revokeAllCalls()).toHaveLength(0); // no revoke-all…
@@ -1820,23 +1840,33 @@ describe('AuthService', () => {
       expect(alarms[0][0].data.metadata).toMatchObject({ event: 'refresh_handback_refused', reason: 'device_mismatch' });
     });
 
-    it('M-2: UNKNOWN device (no client fingerprint, e.g. an older frontend) → plain 401, NO kill, NO alarm', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValueOnce(replayedA(2 * HOUR)).mockResolvedValueOnce(sessionB());
+    it.each([
+      ['no client fingerprint (untrusted call / older frontend)', {}, 'v3:fp-device'],
+      ['a stored PRE-v3 fingerprint (row written before the stable scheme)', { fingerprint: 'v3:fp-device' }, 'legacy-hash-without-prefix'],
+    ])('M1/L3: UNKNOWN device — %s → plain 401, NO kill, NO SECURITY_EVENT, one INFO audit row + counter', async (_l, opts, stored) => {
+      mockPrisma.userSession.findFirst.mockResolvedValueOnce(replayedA(2 * HOUR)).mockResolvedValueOnce(sessionB({ createdFingerprint: stored }));
+      mockPrisma.auditLog.create.mockResolvedValue({});
+      const before = service.deviceUnknownRefusals;
 
-      await expect(service.refreshToken('rt', {})).rejects.toThrow('Session expired');
+      await expect(service.refreshToken('rt', opts)).rejects.toThrow('Session expired');
+      await service.settleBackgroundWork();
+
       expect(mockPrisma.user.update).not.toHaveBeenCalled();
-      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
-      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled(); // not even a lineage revoke
+      const rows = mockPrisma.auditLog.create.mock.calls.map((c: any) => c[0].data);
+      expect(rows.filter((d: any) => d.entityType === 'SECURITY_EVENT')).toHaveLength(0);
+      expect(rows).toEqual([expect.objectContaining({ entityType: 'AUTH_EVENT', metadata: expect.objectContaining({ event: 'handback_refused_device_unknown' }) })]);
+      expect(service.deviceUnknownRefusals).toBe(before + 1);
     });
 
     it('H-A (a): the handback REPLY was lost too — the old token replayed again later, newest tip still UNUSED, same device → renewed AGAIN', async () => {
       mockPrisma.userSession.findFirst
         .mockResolvedValueOnce(replayedA(2 * HOUR))
         .mockResolvedValueOnce(sessionB({ revokedAt: new Date(Date.now() - 60_000), handedBackAt: new Date(Date.now() - 60_000) }))
-        .mockResolvedValueOnce(sessionB({ id: 'sess_c', token: 'c.access', refreshToken: 'rt-c', createdFingerprint: 'fp-device' }));
+        .mockResolvedValueOnce(sessionB({ id: 'sess_c', token: 'c.access', refreshToken: 'rt-c', createdFingerprint: 'v3:fp-device' }));
       armRenew();
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
       expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
         where: { id: 'sess_c', revokedAt: null, firstUsedAt: null, handedBackAt: null },
         data: { revokedAt: expect.any(Date), handedBackAt: expect.any(Date) },
@@ -1857,7 +1887,7 @@ describe('AuthService', () => {
         .mockResolvedValueOnce(sessionB({ id: 'tip' }));
       mockPrisma.auditLog.create.mockResolvedValue({});
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).rejects.toThrow('Session expired');
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).rejects.toThrow('Session expired');
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
       expect(mockPrisma.user.update).not.toHaveBeenCalled();
       const alarm = mockPrisma.auditLog.create.mock.calls.find((c: any) => c[0]?.data?.entityType === 'SECURITY_EVENT');
@@ -1866,19 +1896,47 @@ describe('AuthService', () => {
       expect(lineageRevokeOf('sess_a')).toBe(true);
     });
 
-    it('LOW1: a token that was ITSELF handed back (outside its 6 s window) cannot take a newer session → 401 + SECURITY_EVENT, no kill', async () => {
+    it('L1: a replayed token that was ITSELF handed back earlier, newest tip unused, SAME device → a normal (capped) handback', async () => {
+      mockPrisma.userSession.findFirst
+        .mockResolvedValueOnce({ ...replayedA(2 * HOUR), handedBackAt: new Date(Date.now() - 60_000) })
+        .mockResolvedValueOnce(sessionB());
+      armRenew();
+
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
+      expect(mockPrisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('L1: …the same from a DIFFERENT device → device mismatch: 401 + this lineage ends + SECURITY_EVENT', async () => {
       mockPrisma.userSession.findFirst
         .mockResolvedValueOnce({ ...replayedA(2 * HOUR), handedBackAt: new Date(Date.now() - 60_000) })
         .mockResolvedValueOnce(sessionB());
       mockPrisma.auditLog.create.mockResolvedValue({});
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).rejects.toThrow('Session expired');
-      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
-      expect(mockPrisma.user.update).not.toHaveBeenCalled();
-      const alarm = mockPrisma.auditLog.create.mock.calls.find((c: any) => c[0]?.data?.entityType === 'SECURITY_EVENT');
-      expect(alarm![0].data.metadata).toMatchObject({ reason: 'handed_back_token_replayed' });
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-other' })).rejects.toThrow('Session expired');
       expect(revokeAllCalls()).toHaveLength(0);
       expect(lineageRevokeOf('sess_a')).toBe(true);
+      const alarm = mockPrisma.auditLog.create.mock.calls.find((c: any) => c[0]?.data?.entityType === 'SECURITY_EVENT');
+      expect(alarm![0].data.metadata).toMatchObject({ reason: 'device_mismatch' });
+    });
+
+    it('L2: the 24 h cap counts the WHOLE lineage — handbacks of the replayed token\'s ANCESTORS count too', async () => {
+      // Replaying a NEWER token of the lineage must not reset the count: 4 ancestors handed back + this token = 5.
+      const anc = (id: string, parent: string | null, agoMs: number) => ({
+        ...sessionB({ id, rotatedFromId: parent, revokedAt: new Date(Date.now() - agoMs), handedBackAt: new Date(Date.now() - agoMs) }),
+      });
+      mockPrisma.userSession.findFirst
+        .mockResolvedValueOnce({ ...replayedA(30 * 60_000), rotatedFromId: 'p1', handedBackAt: new Date(Date.now() - 30 * 60_000) })
+        .mockResolvedValueOnce(sessionB()) // forward: the live, unused tip
+        .mockResolvedValueOnce(anc('p1', 'p2', 2 * HOUR))
+        .mockResolvedValueOnce(anc('p2', 'p3', 4 * HOUR))
+        .mockResolvedValueOnce(anc('p3', 'p4', 6 * HOUR))
+        .mockResolvedValueOnce(anc('p4', null, 8 * HOUR));
+      mockPrisma.auditLog.create.mockResolvedValue({});
+
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).rejects.toThrow('Session expired');
+      expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+      const alarm = mockPrisma.auditLog.create.mock.calls.find((c: any) => c[0]?.data?.entityType === 'SECURITY_EVENT');
+      expect(alarm![0].data.metadata).toMatchObject({ reason: 'handback_cap_reached' });
     });
 
     it('M-1: within 6 s of a handback the lineage converges EVEN IF the tip was already used (grace before the used check) + LOW2 repeat audit', async () => {
@@ -1888,7 +1946,7 @@ describe('AuthService', () => {
         .mockResolvedValueOnce(sessionB({ id: 'sess_c', token: 'c.access', refreshToken: 'rt-c', firstUsedAt: new Date() }));
       mockPrisma.auditLog.create.mockResolvedValue({});
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).resolves.toEqual({ accessToken: 'c.access', refreshToken: 'rt-c' });
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).resolves.toEqual({ accessToken: 'c.access', refreshToken: 'rt-c' });
       await service.settleBackgroundWork();
       expect(mockPrisma.user.update).not.toHaveBeenCalled();
       const repeats = mockPrisma.auditLog.create.mock.calls.filter((c: any) => c[0]?.data?.metadata?.event === 'REFRESH_HANDOFF_REPEAT');
@@ -1902,7 +1960,7 @@ describe('AuthService', () => {
         .mockResolvedValueOnce(sessionB({ revokedAt: new Date(Date.now() - 1_000), handedBackAt: new Date(Date.now() - 1_000) }))
         .mockResolvedValueOnce(sessionB({ id: 'sess_c', token: 'c.access', refreshToken: 'rt-c' }));
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).resolves.toEqual({ accessToken: 'c.access', refreshToken: 'rt-c' });
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).resolves.toEqual({ accessToken: 'c.access', refreshToken: 'rt-c' });
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
       expect(securityEventCalls()).toHaveLength(0);
     });
@@ -1915,7 +1973,7 @@ describe('AuthService', () => {
         .mockResolvedValueOnce(sessionB({ id: 'sess_c', token: 'c.access', refreshToken: 'rt-c' })); // …into C
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 0 }); // our conditional claim lost
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).resolves.toEqual({ accessToken: 'c.access', refreshToken: 'rt-c' });
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).resolves.toEqual({ accessToken: 'c.access', refreshToken: 'rt-c' });
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
       expect(securityEventCalls()).toHaveLength(0);
     });
@@ -1928,7 +1986,7 @@ describe('AuthService', () => {
       armRenew();
       mockPrisma.auditLog.count.mockResolvedValue(count);
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
       await service.settleBackgroundWork();
       expect(repeatAlarms()).toHaveLength(alarms);
     });
@@ -1938,12 +1996,12 @@ describe('AuthService', () => {
       armRenew();
       mockPrisma.auditLog.create.mockImplementationOnce(() => new Promise(() => undefined)); // never settles
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
 
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(replayedA(2 * HOUR)).mockResolvedValueOnce(sessionB());
       mockPrisma.auditLog.create.mockRejectedValueOnce(new Error('audit db down'));
       const before = service.handbackAuditFailures;
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
       await new Promise((r) => setImmediate(r));
       await new Promise((r) => setImmediate(r));
       expect(service.handbackAuditFailures).toBe(before + 1);
@@ -1954,7 +2012,7 @@ describe('AuthService', () => {
         .mockResolvedValueOnce(replayedA(31 * 24 * HOUR))
         .mockResolvedValueOnce(sessionB({ expiresAt: new Date(Date.now() - 1_000) }));
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).rejects.toThrow('Session expired');
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).rejects.toThrow('Session expired');
       expect(mockPrisma.user.update).not.toHaveBeenCalled();
       expect(securityEventCalls()).toHaveLength(0);
     });
@@ -1964,7 +2022,7 @@ describe('AuthService', () => {
       armRenew();
       mockPrisma.auditLog.create.mockRejectedValueOnce(new Error('audit db down'));
 
-      await expect(service.refreshToken('rt', { fingerprint: 'fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
+      await expect(service.refreshToken('rt', { fingerprint: 'v3:fp-device' })).resolves.toMatchObject({ accessToken: 'mock.jwt.token' });
     });
 
     it('a holder refresh records the device fingerprint on the new session (S-H1a binding source)', async () => {
@@ -1972,8 +2030,8 @@ describe('AuthService', () => {
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.userSession.create.mockResolvedValue({});
 
-      await service.refreshToken('rt', { fingerprint: 'fp-device' });
-      expect(mockPrisma.userSession.create.mock.calls[0][0].data.createdFingerprint).toBe('fp-device');
+      await service.refreshToken('rt', { fingerprint: 'v3:fp-device' });
+      expect(mockPrisma.userSession.create.mock.calls[0][0].data.createdFingerprint).toBe('v3:fp-device');
     });
     const rotated30sAgoLive = () => ({
       id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,

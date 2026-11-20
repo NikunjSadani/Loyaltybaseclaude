@@ -1,12 +1,14 @@
 import {
   Injectable, UnauthorizedException, BadRequestException,
   Logger, ForbiddenException, NotFoundException,
-  HttpException, HttpStatus, ServiceUnavailableException,
+  HttpException, HttpStatus, ServiceUnavailableException, OnModuleInit,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { Prisma, User, UserSession } from '@prisma/client';
+import { isKnownFingerprint } from './session-fingerprint';
+import { internalSecretConfigured } from '../common/internal-call';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { Msg91Service } from '../notifications/msg91.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -101,8 +103,19 @@ export const REFRESH_TX_OPTS = { maxWait: 1_500, timeout: 4_000 } as const;
 // Values stored in paise (1 rupee = 100 paise) to avoid float arithmetic
 
 @Injectable()
-export class AuthService {
+export class AuthService implements OnModuleInit {
   private readonly logger = new Logger(AuthService.name);
+
+  /** M1 — a missing / short INTERNAL_PROXY_SECRET silently disables device binding: say so LOUDLY at startup. */
+  onModuleInit(): void {
+    if (process.env.NODE_ENV === 'production' && !internalSecretConfigured()) {
+      this.logger.error(
+        'INTERNAL_PROXY_SECRET is not configured (or shorter than 16 chars): the API cannot trust the browser ' +
+          'device headers from the frontend — every refresh fingerprint is UNKNOWN, so a lost-response replay is NOT ' +
+          'handed back (that device must sign in again). Set it on BOTH the API and frontend services.',
+      );
+    }
+  }
 
   static readonly POINTS_TO_PAISE = 100; // 1 point = ₹1 = 100 paise
 
@@ -911,6 +924,7 @@ export class AuthService {
       if (handback.kind === 'kill') await this.killLineage(session, handback.reason);
       // A refusal ends only THIS device's attempt (re-login); nobody else is logged out.
       else if (handback.alarm && handback.reason) await this.alarmRefusedHandback(session, handback.reason);
+      else if (handback.reason === 'device_unknown') this.noteUnknownDevice(session);
     }
 
     throw new UnauthorizedException('Session expired — please log in again.');
@@ -1053,19 +1067,19 @@ export class AuthService {
    *  1. M-1 / LOW2 — a handback within the grace window (6 s) of this lineage (the replayed token's own, or a
    *     later link's): a concurrent sibling of the SAME resume → converge on the live tip's stored pair
    *     (audited as a repeat). Evaluated BEFORE the "used" check, exactly like the holder in-grace path.
-   *  2. LOW1 — the replayed token was ITSELF handed back earlier (outside its 6 s window): it can't be used to
-   *     take a newer session → refuse (401) + end THIS lineage + SECURITY_EVENT. No all-device kill.
+   *  2. (L1) a replayed token that was ITSELF handed back earlier is treated like any other replay below: same
+   *     device + still-unused tip → a normal (capped) handback; a different device → the mismatch path (alarm).
    *  3. no live tip → strict kill (classic reuse).
    *  4. any link USED (its access token authenticated a request, or its holder refreshed it) → strict kill of
    *     every session + SECURITY_EVENT — thief detection: a thief who obtained the tip and used it marked it.
    *  5. tip naturally expired → plain 401, no alarm.
-   *  6. fingerprint UNKNOWN (no client UA, e.g. an older frontend in a deploy window) → plain 401 for this
-   *     device, no alarm, never a kill (M-2).
+   *  6. fingerprint UNKNOWN — the presented one (untrusted call, older frontend, non-browser UA) or the stored
+   *     one (written before the v3 scheme) → plain 401 for this device + INFO audit row, no alarm, never a kill.
    *  7. fingerprint MISMATCH (H-A c) → 401 + end THIS lineage only + SECURITY_EVENT — NOT the all-device kill
    *     (a different browser/OS family gets nothing; the user's other devices stay signed in; a thief who
    *     rotated first and holds this lineage's newest session is cut off with it).
-   *  8. H-A (a) cap — HANDBACK_CAP_PER_LINEAGE handbacks in this lineage within 24 h → 401 + end this lineage
-   *     + SECURITY_EVENT (no all-device kill).
+   *  8. H-A (a) cap — HANDBACK_CAP_PER_LINEAGE handbacks in this WHOLE lineage (ancestors of the replayed token
+   *     included) within 24 h → 401 + end this lineage + SECURITY_EVENT (no all-device kill).
    *  9. otherwise C1 RENEW FORWARD from the live tip under a CONDITIONAL claim (still unused, never handed
    *     back): the device gets a FRESH pair, the lineage stays a single chain. H-A (a): this may happen again
    *     later (lost handback reply) while the newest tip is still unused and the device matches.
@@ -1104,19 +1118,22 @@ export class AuthService {
       this.background(() => this.auditAuthEvent(predecessor, 'REFRESH_HANDOFF_REPEAT', { handedBackSessionId: tip.id }));
       return { kind: 'tokens', tokens: { accessToken: tip.token, refreshToken: tip.refreshToken } };
     }
-    // 2. LOW1 — a token that was itself handed back (outside its window) can't take a newer session.
-    if (predecessor.handedBackAt) return { kind: 'refuse', reason: 'handed_back_token_replayed', alarm: true };
     // 3–5.
     if (!tip || tip.revokedAt !== null) return { kind: 'kill', reason: 'no_live_successor' };
     if (links.some((l) => l.firstUsedAt !== null)) return { kind: 'kill', reason: 'successor_used' };
     if (!tipLive) return { kind: 'refuse' };
     // 6–7. Device binding against the creator of the FIRST successor (the device that asked for it).
     const creatorFingerprint = links[0].createdFingerprint;
-    if (!ctx.fingerprint || !creatorFingerprint) return { kind: 'refuse', reason: 'device_unknown' };
+    if (!isKnownFingerprint(ctx.fingerprint) || !isKnownFingerprint(creatorFingerprint)) {
+      return { kind: 'refuse', reason: 'device_unknown' };
+    }
     if (ctx.fingerprint !== creatorFingerprint) return { kind: 'refuse', reason: 'device_mismatch', alarm: true };
-    // 8. H-A (a) cap per lineage per 24 h.
-    const recentHandbacks = handedTimes.filter((t) => ctx.receivedAt - t <= HANDBACK_REPEAT_WINDOW_MS).length;
-    if (recentHandbacks >= HANDBACK_CAP_PER_LINEAGE) return { kind: 'refuse', reason: 'handback_cap_reached', alarm: true };
+    // 8. H-A (a) cap: handbacks in the WHOLE lineage within 24 h (L2) — this token's descendants (walked above)
+    //    AND its ancestors, so replaying a newer token of the same lineage can't reset the count.
+    const windowStart = ctx.receivedAt - HANDBACK_REPEAT_WINDOW_MS;
+    const lineageHandbacks = [...handedTimes, ...(await this.ancestorHandbackTimes(predecessor, windowStart))]
+      .filter((t) => t >= windowStart).length;
+    if (lineageHandbacks >= HANDBACK_CAP_PER_LINEAGE) return { kind: 'refuse', reason: 'handback_cap_reached', alarm: true };
 
     // 9. C1 renew forward.
     const outcome = await this.rotateSession({ ...tip, user: predecessor.user }, ctx, 'handback');
@@ -1132,9 +1149,39 @@ export class AuthService {
     return { kind: 'tokens', tokens: outcome.tokens };
   }
 
+  /** handedBackAt times of the replayed token's ANCESTORS that can still fall in the cap window (L2). */
+  private async ancestorHandbackTimes(predecessor: UserSession, windowStart: number): Promise<number[]> {
+    const out: number[] = [];
+    let parentId = predecessor.rotatedFromId;
+    for (let hop = 0; parentId && hop < MAX_HANDBACK_CHAIN; hop++) {
+      const parent = await this.prisma.userSession.findFirst({ where: { id: parentId, userId: predecessor.userId } });
+      if (!parent) break;
+      if (parent.handedBackAt) out.push(parent.handedBackAt.getTime());
+      // A link revoked before the window can't have been handed back inside it, nor can its ancestors.
+      if (parent.revokedAt && parent.revokedAt.getTime() < windowStart) break;
+      parentId = parent.rotatedFromId;
+    }
+    return out;
+  }
+
+  /**
+   * L3 — a replay refused because the device is UNKNOWN (untrusted call / older frontend / non-browser UA /
+   * pre-v3 stored fingerprint): plain 401, no alarm — but never silent: an INFO audit row (Daily Ops Digest
+   * counts them) + a per-instance counter.
+   */
+  deviceUnknownRefusals = 0;
+  noteUnknownDevice(predecessor: UserSession & { user: User }): void {
+    this.deviceUnknownRefusals += 1;
+    this.background(() => this.auditAuthEvent(predecessor, 'handback_refused_device_unknown', {}));
+  }
+
   /** Background work started after a committed handback (never awaited by the request). */
   private readonly pendingBackground = new Set<Promise<void>>();
-  /** Failed background audit writes since start (also logged + written as an AUTH_EVENT when possible). */
+  /**
+   * Failed background audit writes since start on this instance. Each failure is logged as an error AND — best
+   * effort, it may fail for the same reason — written as an AUTH_EVENT `handback_audit_failed`, which the Daily
+   * Ops Digest counts. (Cloud Run may throttle CPU after the response, so background writes can land late.)
+   */
   handbackAuditFailures = 0;
 
   private background(work: () => Promise<void>): void {
@@ -1142,7 +1189,18 @@ export class AuthService {
       .then(work)
       .catch((err: unknown) => {
         this.handbackAuditFailures += 1;
-        this.logger.error(`Session handback audit failed: ${(err as Error)?.message ?? err}`);
+        const message = (err as Error)?.message ?? String(err);
+        this.logger.error(`Session handback audit failed: ${message}`);
+        return this.prisma.auditLog
+          .create({
+            data: {
+              action: 'REFRESH_HANDOFF',
+              entityType: 'AUTH_EVENT',
+              entityId: 'system',
+              metadata: { event: 'handback_audit_failed', error: message.slice(0, 300) },
+            },
+          })
+          .then(() => undefined, () => undefined);
       })
       .finally(() => {
         this.pendingBackground.delete(p);

@@ -213,10 +213,10 @@ d(`AuthService.refreshToken × real Postgres [${MODE ?? 'skipped'}]`, () => {
     ['2 days', 48 * HOUR],
   ])('C1: lost response — the old token replayed %s later from the SAME device, successor never used → renewed forward, stays logged in', async (_l, ago) => {
     const { userId, sessionId, refreshToken } = await seedUserWithSession();
-    const first = await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }); // response "lost"
+    const first = await auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-phone' }); // response "lost"
     await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - ago) } });
 
-    const replay = await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' });
+    const replay = await auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-phone' });
 
     expect(replay.refreshToken).not.toBe(first.refreshToken); // a FRESH pair (renewed forward)
     const b = await prisma.userSession.findFirstOrThrow({ where: { rotatedFromId: sessionId } });
@@ -232,12 +232,12 @@ d(`AuthService.refreshToken × real Postgres [${MODE ?? 'skipped'}]`, () => {
 
   it('H-A (a): the handback reply is lost TOO — same device replays the old token again later → renewed again, still signed in', async () => {
     const { userId, sessionId, refreshToken } = await seedUserWithSession();
-    await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }); // lost
+    await auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-phone' }); // lost
     await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 2 * HOUR) } });
-    const first = await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }); // handback reply lost too
+    const first = await auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-phone' }); // handback reply lost too
     await prisma.userSession.updateMany({ where: { userId, handedBackAt: { not: null } }, data: { handedBackAt: new Date(Date.now() - 60_000) } });
 
-    const second = await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' });
+    const second = await auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-phone' });
 
     expect(second.refreshToken).not.toBe(first.refreshToken);
     expect(await liveSessions(userId)).toBe(1);
@@ -246,22 +246,22 @@ d(`AuthService.refreshToken × real Postgres [${MODE ?? 'skipped'}]`, () => {
 
   it('H-A (c): the old token replayed from a DIFFERENT device → 401, only that lineage ends + SECURITY_EVENT, nothing renewed', async () => {
     const { userId, sessionId, refreshToken } = await seedUserWithSession();
-    await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' });
+    await auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-phone' });
     await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 2 * HOUR) } });
 
-    await expect(auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-thief' })).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-thief' })).rejects.toBeInstanceOf(UnauthorizedException);
     expect(await liveSessions(userId)).toBe(0);
     expect(await prisma.auditLog.count({ where: { entityType: 'SECURITY_EVENT', entityId: userId } })).toBe(1);
   });
 
   itServer('S-H1b: two CONCURRENT post-grace replays of the same old token → exactly one renewal, both get the same pair', async () => {
     const { userId, sessionId, refreshToken } = await seedUserWithSession();
-    await auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' });
+    await auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-phone' });
     await prisma.userSession.update({ where: { id: sessionId }, data: { revokedAt: new Date(Date.now() - 2 * HOUR) } });
 
     const [a, b] = await Promise.all([
-      auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }),
-      auth.refreshToken(refreshToken, { fingerprint: 'fp-e2e-phone' }),
+      auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-phone' }),
+      auth.refreshToken(refreshToken, { fingerprint: 'v3:fp-e2e-phone' }),
     ]);
 
     expect(b).toEqual(a);

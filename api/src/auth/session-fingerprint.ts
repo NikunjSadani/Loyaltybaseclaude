@@ -1,33 +1,46 @@
 import * as crypto from 'crypto';
 
 /**
- * S-H1(a) / M-2 — a STABLE device-class fingerprint of the client that made a refresh request.
+ * S-H1(a) / M-2 / M1 / L5 — a STABLE, version-free device-class fingerprint of the BROWSER behind a refresh.
  *
- * Deliberately coarse: browser FAMILY + OS FAMILY + mobile flag — never version numbers — so a Chrome / iOS /
- * Android update between a rotation and the replay does NOT change it (a browser update must not log anyone
- * out). The browser's values reach the API as `x-client-user-agent` / `x-client-ua-platform` /
- * `x-client-ua-mobile` (forwarded by our Next server and only trusted with the internal secret — see
- * common/internal-call.ts); a direct caller is fingerprinted from its own User-Agent.
+ * Coarse on purpose: browser FAMILY + OS GROUP — never version numbers, and never the mobile flag:
+ *  - a Chrome / iOS / Android update does not change it (an update must not log anyone out);
+ *  - the "Request desktop site" toggle (Android Chrome reports Linux/X11 and drops "Mobile"; iPad/iPhone Safari
+ *    reports Macintosh) does not change it either: android↔linux and ios↔macos are one OS GROUP each (L5).
  *
- * Returns null (UNKNOWN) when there is no User-Agent at all: an unknown fingerprint is never handed a session
- * and never triggers a kill (see AuthService.handbackUnusedSuccessor).
+ * Only a REAL browser User-Agent produces a fingerprint. A non-browser UA (Node / undici — i.e. our own Next server
+ * when the internal secret is missing or wrong — curl, scripts) yields null = UNKNOWN: an unknown fingerprint is never
+ * handed a session and never counts as a mismatch (no alarm, no lineage end). See AuthService.handbackUnusedSuccessor.
  *
- * This narrows a handback to "the same kind of device": it is NOT an identity. Anyone using the same browser
- * family on the same OS family produces the same value — see the residual-risk notes in P1-sessions-design.md.
+ * Stored values carry a version prefix (`v3:`); any stored value without it (written before this scheme) is UNKNOWN
+ * on comparison — never a mismatch.
+ *
+ * This narrows a handback to "the same kind of device": it is NOT an identity. Anyone using the same browser family
+ * on the same OS group produces the same value — see the residual-risk notes in P1-sessions-design.md.
  */
-export function sessionFingerprint(input: {
-  userAgent?: string | null;
-  platform?: string | null;
-  mobile?: string | null;
-}): string | null {
+export const FINGERPRINT_VERSION = 'v3';
+
+export function sessionFingerprint(input: { userAgent?: string | null; platform?: string | null; mobile?: string | null }): string | null {
   const ua = (input.userAgent ?? '').trim();
-  if (!ua) return null;
-  const { browser, os, mobile } = deviceClass(ua, input.mobile);
-  return crypto.createHash('sha256').update(`v2|${browser}|${os}|${mobile ? 1 : 0}`).digest('hex');
+  if (!looksLikeBrowser(ua)) return null;
+  const { browser, osGroup } = deviceClass(ua);
+  if (browser === 'other' || osGroup === 'other') return null;
+  const hash = crypto.createHash('sha256').update(`${FINGERPRINT_VERSION}|${browser}|${osGroup}`).digest('hex');
+  return `${FINGERPRINT_VERSION}:${hash}`;
+}
+
+/** A stored / presented fingerprint is usable for comparison only if it is a current-scheme browser fingerprint. */
+export function isKnownFingerprint(fp: string | null | undefined): fp is string {
+  return typeof fp === 'string' && fp.startsWith(`${FINGERPRINT_VERSION}:`);
+}
+
+/** Real browsers all send "Mozilla/5.0 (" … ; Node's fetch ("node" / "undici"), curl, scripts do not. */
+export function looksLikeBrowser(ua: string): boolean {
+  return /^Mozilla\/5\.0 \(/.test(ua);
 }
 
 /** Exposed for tests / diagnostics: the version-free device class a fingerprint is built from. */
-export function deviceClass(ua: string, mobileHint?: string | null): { browser: string; os: string; mobile: boolean } {
+export function deviceClass(ua: string): { browser: string; os: string; osGroup: string } {
   const browser =
     /\bEdgA?\//.test(ua) || /\bEdg(iOS)?\//.test(ua) ? 'edge'
       : /\bOPR\/|\bOpera\b/.test(ua) ? 'opera'
@@ -42,9 +55,9 @@ export function deviceClass(ua: string, mobileHint?: string | null): { browser: 
         : /\bCrOS\b/.test(ua) ? 'chromeos'
           : /\bWindows\b/.test(ua) ? 'windows'
             : /\bMac OS X\b|\bMacintosh\b/.test(ua) ? 'macos'
-              : /\bLinux\b/.test(ua) ? 'linux'
+              : /\bLinux\b|\bX11\b/.test(ua) ? 'linux'
                 : 'other';
-  const hint = (mobileHint ?? '').trim();
-  const mobile = hint === '?1' ? true : hint === '?0' ? false : /\bMobile\b|\bAndroid\b|\biPhone\b|\biPod\b/.test(ua);
-  return { browser, os, mobile };
+  // L5 — "desktop site" toggles flip android→linux and ios→macos: one group each.
+  const osGroup = os === 'android' || os === 'linux' ? 'android-linux' : os === 'ios' || os === 'macos' ? 'apple' : os;
+  return { browser, os, osGroup };
 }

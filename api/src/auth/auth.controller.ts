@@ -65,12 +65,11 @@ export class AuthController {
     @Headers('x-refresh-deadline') deadlineHeader?: string,
     // S-H1(a): the BROWSER's User-Agent + UA client hints, forwarded by the Next proxy / route handler
     // (this request's own User-Agent is Node's). Honoured ONLY with the server-to-server secret
-    // (x-internal-proxy-secret, see common/internal-call.ts); otherwise the request's own User-Agent is used.
+    // (x-internal-proxy-secret, see common/internal-call.ts); otherwise the fingerprint is UNKNOWN.
     @Headers(INTERNAL_SECRET_HEADER) internalSecret?: string,
     @Headers('x-client-user-agent') clientUa?: string,
     @Headers('x-client-ua-platform') clientPlatform?: string,
     @Headers('x-client-ua-mobile') clientMobile?: string,
-    @Headers('user-agent') ownUa?: string,
   ) {
     const receivedAt = Date.now();
     const budget = Number(budgetHeader);
@@ -78,14 +77,17 @@ export class AuthController {
     const deadline = Number(deadlineHeader);
     const clientDeadlineMs = Number.isFinite(deadline) && deadline > 0 ? deadline : undefined;
     const trusted = isTrustedInternalCall(internalSecret);
-    // Trusted Next server: fingerprint the BROWSER from x-client-* — and if that is missing (an older frontend
-    // during a deploy window) the fingerprint is UNKNOWN (null), which can never be handed back but never kills
-    // either (M-2). Untrusted / direct caller: its own User-Agent (client x-client-* is ignored).
-    const fingerprint = trusted
-      ? clientUa
-        ? sessionFingerprint({ userAgent: clientUa, platform: clientPlatform, mobile: clientMobile })
-        : null
-      : sessionFingerprint({ userAgent: ownUa });
+    // M1 — only a TRUSTED call (our Next server, valid internal secret) is fingerprinted, from the browser's
+    // x-client-* headers. Anything else — an untrusted call (missing / drifted secret, older frontend, a direct
+    // caller) or a trusted call without x-client-user-agent — is UNKNOWN (null): never handed back, but never a
+    // device mismatch either (no alarm, no lineage end). A non-browser UA also yields null (sessionFingerprint).
+    const fingerprint = trusted && clientUa
+      ? sessionFingerprint({ userAgent: clientUa, platform: clientPlatform, mobile: clientMobile })
+      : null;
+    if (!trusted && (clientUa || clientPlatform || clientMobile)) {
+      // Our Next server sent browser headers without a valid secret: the secret is missing / drifted on one side.
+      this.logger.warn('refresh: x-client-* received WITHOUT a valid x-internal-proxy-secret — ignored (device fingerprint unknown). Check INTERNAL_PROXY_SECRET on the API and frontend services.');
+    }
     // L1: lets staging confirm the headers actually arrive through the proxy chain (never logs values).
     this.logger.debug(
       `refresh: x-refresh-budget-ms=${budgetMs ?? 'absent'} x-refresh-deadline=${clientDeadlineMs !== undefined ? 'present' : 'absent'} ` +
