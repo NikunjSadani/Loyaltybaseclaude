@@ -25,7 +25,7 @@ import {
   SETTABLE_TICKET_STATUSES,
 } from './dto/tickets.dto';
 import { escapeHtml, pickTenantDomain, ticketEmailLink, ticketPath } from './ticket-link';
-import { TICKET_REMARKS_EMAIL_KEY, readTicketRemarksEmail } from './ticket-remarks-inbox';
+import { TICKET_REMARKS_EMAIL_KEY, readTicketRemarksRecipients } from './ticket-remarks-inbox';
 import { RemarksEmailData, istDate, renderRemarksEmail } from './remarks-email';
 import {
   OUTLET_REFERENCE_TYPE,
@@ -115,10 +115,15 @@ function humanize(v: string): string {
   return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
-/** The remarks email outcome: sent or not, and to whom (the client's inbox vs the chosen admin). */
+/**
+ * The remarks email outcome: sent or not, and to whom (the client's configured To list = INBOX, vs the
+ * chosen admin = ADMIN). `address` = the To addresses joined with ", " (one address in the single-To
+ * case, as before); `to` / `cc` = the full lists; `rejected` = addresses the relay refused while the
+ * rest were accepted (sent stays true, the refusal is noted on the ticket and in the response).
+ */
 export type RemarksEmailOutcome =
-  | { sent: true; recipientKind: 'INBOX' | 'ADMIN'; address: string }
-  | { sent: false; reason: string; recipientKind: 'INBOX' | 'ADMIN'; address: string | null };
+  | { sent: true; recipientKind: 'INBOX' | 'ADMIN'; address: string; to: string[]; cc: string[]; rejected: string[] }
+  | { sent: false; reason: string; recipientKind: 'INBOX' | 'ADMIN'; address: string | null; to: string[]; cc: string[]; rejected: string[] };
 
 /** Tenant-wide stat-card counts for the admin list. */
 export interface TicketSummary {
@@ -842,6 +847,9 @@ export class TicketsService {
       // Where the email went (or was meant to go): the client's ticket remarks inbox, or the chosen admin.
       emailRecipientKind: email.recipientKind,
       emailRecipient: email.address,
+      emailTo: email.to,
+      emailCc: email.cc,
+      ...(email.rejected.length ? { emailRejected: email.rejected } : {}),
       ...(email.sent ? {} : { emailError: email.reason }),
     };
   }
@@ -1029,42 +1037,51 @@ export class TicketsService {
     // Who the email is (or was meant to be) for — set once the recipient is resolved; every note and
     // the response are worded from it (the client's inbox vs the chosen admin).
     let recipientKind: 'INBOX' | 'ADMIN' = 'ADMIN';
-    let to = '';
+    let toList: string[] = [];
+    let cc: string[] = [];
+    const toText = () => toList.join(', ');
+    const ccText = () => (cc.length ? ` (cc ${cc.join(', ')})` : '');
     const describe = () =>
       recipientKind === 'INBOX'
-        ? `the client's ticket remarks inbox ${to}`
-        : `${p.targetName}${to ? ` (${to})` : ''}`;
+        ? `the client's ticket remarks inbox ${toText()}${ccText()}`
+        : `${p.targetName}${toList.length ? ` (${toText()})` : ''}${ccText()}`;
     const notSent = async (reason: string): Promise<RemarksEmailOutcome> => {
       await this.recordEmailOutcome(
         p.ticket.id,
         p.actorId,
         `Email to ${describe()} was NOT sent: ${reason}. ${p.targetName} was notified in-app only.`,
       );
-      return { sent: false, reason, recipientKind, address: to || null };
+      return { sent: false, reason, recipientKind, address: toList.length ? toText() : null, to: toList, cc, rejected: [] };
     };
     // Each prep step reports its OWN failure — a lookup error is never passed off as "no email on file".
-    // Recipient: the client's shared "ticket remarks email" when one is set (ONLY that address — the
-    // chosen admin is named in the body and still gets the bell); otherwise the chosen admin's own email.
+    // Recipients (ticket-remarks-inbox.ts): the client's configured To list when set (ONLY those — the
+    // chosen admin is named in the body and still gets the bell); otherwise the chosen admin's own
+    // email. The client's CC list (if any) is copied in both cases. Nothing configured → as before.
     let toInbox = false;
     try {
       const inboxRow = await this.prisma.programSetting.findUnique({
         where: { clientId_settingKey: { clientId: p.ticket.clientId, settingKey: TICKET_REMARKS_EMAIL_KEY } },
         select: { settingValue: true },
       });
-      const inbox = readTicketRemarksEmail(inboxRow?.settingValue);
-      if (inbox) {
-        to = inbox;
+      const configured = readTicketRemarksRecipients(inboxRow?.settingValue);
+      if (configured.to.length) {
+        toList = configured.to;
+        cc = configured.cc;
         toInbox = true;
         recipientKind = 'INBOX';
       } else {
+        cc = configured.cc;
         const u = await this.prisma.user.findFirst({ where: { id: p.targetId }, select: { email: true } });
-        to = (u?.email ?? '').trim();
+        const own = (u?.email ?? '').trim();
+        toList = own ? [own] : [];
+        // The admin's own address is never also copied.
+        if (own) cc = cc.filter((x) => x !== own.toLowerCase());
       }
     } catch (e) {
       this.logger.error(`[tickets] remarks email recipient lookup for ${p.ticket.id} failed: ${e}`);
       return notSent('the email recipient could not be looked up (database error)');
     }
-    if (!to) return notSent('the client admin has no email address on file');
+    if (!toList.length) return notSent('the client admin has no email address on file');
     let link = '';
     let linkNote: string | null = null;
     try {
@@ -1099,18 +1116,25 @@ export class TicketsService {
     });
     const { subject, html } = renderRemarksEmail(data);
 
+    let rejected: string[] = [];
     try {
-      await this.msg91.sendEmail({ to: [to], subject, html });
+      // One message: real To + Cc headers (Cc omitted when empty → identical to the previous send).
+      const res = await this.msg91.sendEmail({ to: toList, ...(cc.length ? { cc } : {}), subject, html });
+      rejected = Array.isArray(res?.rejected) ? res.rejected : [];
     } catch (e) {
       this.logger.error(`[tickets] remarks email for ${p.ticket.id} failed: ${(e as Error)?.message ?? e}`);
       return notSent('the mail relay refused or timed out');
     }
+    const ccPart = cc.length ? `, cc ${cc.join(', ')}` : '';
+    const rejectedPart = rejected.length
+      ? ` The mail relay REJECTED ${rejected.join(', ')} — they did NOT get this email.`
+      : '';
     await this.recordEmailOutcome(
       p.ticket.id,
       p.actorId,
-      `${toInbox ? `Email sent to ${to} (client's ticket remarks inbox) — asked: ${p.targetName}` : `Email sent to ${p.targetName} (${to})`} with link ${link}.${linkNote ? ` Note: ${linkNote}.` : ''}`,
+      `${toInbox ? `Email sent to ${toText()} (client's ticket remarks inbox)${ccPart} — asked: ${p.targetName}` : `Email sent to ${p.targetName} (${toText()})${ccPart}`} with link ${link}.${linkNote ? ` Note: ${linkNote}.` : ''}${rejectedPart}`,
     );
-    return { sent: true, recipientKind, address: to };
+    return { sent: true, recipientKind, address: toText(), to: toList, cc, rejected };
   }
 
   /**

@@ -1,4 +1,5 @@
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsIn,
@@ -303,12 +304,27 @@ export class UpdateOutletTypeConfigDto {
 }
 
 /**
- * Body for PUT /v1/gifsy/clients/:slug/ticket-remarks-email. One address, or '' / null to clear.
- * Shape is checked here; the single-address + email rules live in parseTicketRemarksEmailInput.
+ * Body for PUT /v1/gifsy/clients/:slug/ticket-remarks-email: `{ to: string[], cc: string[] }`
+ * (empty lists clear), or the legacy `{ email }` (one address / '' / null — CC kept as is).
+ * Shape is checked here; the email + list rules live in parseTicketRemarksRecipientsInput.
  */
 export class SetTicketRemarksEmailDto {
   @IsOptional()
   @IsString()
   @MaxLength(320)
   email?: string | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(320, { each: true })
+  to?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @MaxLength(320, { each: true })
+  cc?: string[];
 }

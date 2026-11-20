@@ -9,8 +9,9 @@ import {
 import {
   TICKET_REMARKS_EMAIL_AUDIT,
   TICKET_REMARKS_EMAIL_KEY,
-  parseTicketRemarksEmailInput,
-  readTicketRemarksEmail,
+  parseTicketRemarksRecipientsInput,
+  readTicketRemarksRecipients,
+  ticketRemarksSettingValue,
 } from '../tickets/ticket-remarks-inbox';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -407,9 +408,13 @@ export class GifsyService {
         select: { createdAt: true, actor: { select: { name: true } } },
       }),
     ]);
+    const { to, cc } = readTicketRemarksRecipients(row?.settingValue);
     return {
       slug,
-      email: readTicketRemarksEmail(row?.settingValue),
+      to,
+      cc,
+      // Legacy single-address field (first To) — kept so an older console build still reads it.
+      email: to[0] ?? null,
       lastChange: last ? { byName: last.actor?.name ?? 'Unknown', at: last.createdAt } : null,
     };
   }
@@ -422,20 +427,27 @@ export class GifsyService {
   }
 
   /**
-   * PUT /v1/gifsy/clients/:slug/ticket-remarks-email {email} — set (one validated address) or clear
-   * ('' / null removes the row → back to "email the chosen admin"). Audit-logged with old → new.
+   * PUT /v1/gifsy/clients/:slug/ticket-remarks-email {to[], cc[]} (or legacy {email}) — set the To
+   * (≤5) and CC (≤10) lists; both empty removes the row → exactly the previous "email the chosen
+   * admin" behaviour. Audit-logged with old → new.
    */
-  async setTicketRemarksEmail(user: JwtPayload, slug: string, dto: { email?: string | null }) {
+  async setTicketRemarksEmail(
+    user: JwtPayload,
+    slug: string,
+    dto: { email?: string | null; to?: string[]; cc?: string[] },
+  ) {
     this.assertOwner(user);
     await this.assertClientExists(slug);
-    const next = parseTicketRemarksEmailInput(dto.email);
     const where = { clientId_settingKey: { clientId: slug, settingKey: TICKET_REMARKS_EMAIL_KEY } };
     const prior = await this.prisma.programSetting.findUnique({ where, select: { settingValue: true } });
-    const before = readTicketRemarksEmail(prior?.settingValue);
-    if (before === next) return this.ticketRemarksEmailView(slug);
+    const before = readTicketRemarksRecipients(prior?.settingValue);
+    const next = parseTicketRemarksRecipientsInput(dto, before.cc);
+    const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+    if (same(before.to, next.to) && same(before.cc, next.cc)) return this.ticketRemarksEmailView(slug);
+    const value = ticketRemarksSettingValue(next);
 
     await this.prisma.$transaction(async (tx) => {
-      if (next === null) {
+      if (next.to.length === 0 && next.cc.length === 0) {
         await tx.programSetting.deleteMany({ where: { clientId: slug, settingKey: TICKET_REMARKS_EMAIL_KEY } });
       } else {
         await tx.programSetting.upsert({
@@ -443,12 +455,12 @@ export class GifsyService {
           create: {
             clientId: slug,
             settingKey: TICKET_REMARKS_EMAIL_KEY,
-            settingValue: { email: next },
+            settingValue: value,
             category: 'support',
-            description: "Shared inbox for 'Ask client admin for remarks' emails",
+            description: "To / CC recipients for 'Ask client admin for remarks' emails",
             updatedById: user.sub,
           },
-          update: { settingValue: { email: next }, updatedById: user.sub },
+          update: { settingValue: value, updatedById: user.sub },
         });
       }
       await tx.auditLog.create({
@@ -457,8 +469,8 @@ export class GifsyService {
           entityType: TICKET_REMARKS_EMAIL_AUDIT,
           entityId: slug,
           actorId: user.sub,
-          oldValues: { email: before },
-          newValues: { email: next },
+          oldValues: { to: before.to, cc: before.cc },
+          newValues: { to: next.to, cc: next.cc },
           metadata: { slug, key: TICKET_REMARKS_EMAIL_KEY },
         },
       });

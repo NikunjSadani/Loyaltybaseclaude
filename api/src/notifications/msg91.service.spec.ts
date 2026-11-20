@@ -475,7 +475,7 @@ describe('Msg91Service.sendEmail (SMTP relay)', () => {
     const service = new Msg91Service(makeConfig({})); // no SMTP password
     await expect(
       service.sendEmail({ to: ['a@b.com'], subject: 'Daily report', html: '<p>hi</p>' }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ skipped: true, accepted: [], rejected: [] });
 
     expect(createTransport).not.toHaveBeenCalled();
     expect(sendMail).not.toHaveBeenCalled();
@@ -485,7 +485,7 @@ describe('Msg91Service.sendEmail (SMTP relay)', () => {
     const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'pw' }));
     await expect(
       service.sendEmail({ to: [], subject: 'Daily report', html: '<p>hi</p>' }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ skipped: true, accepted: [], rejected: [] });
 
     expect(createTransport).not.toHaveBeenCalled();
   });
@@ -514,6 +514,23 @@ describe('Msg91Service.sendEmail (SMTP relay)', () => {
       html: '<h1>Report</h1>',
     });
     expect(close).toHaveBeenCalled();
+  });
+
+  it('cc: one message with a real Cc; returns the relay-rejected addresses (partial accept)', async () => {
+    sendMail.mockResolvedValue({ messageId: '<x>', accepted: ['a@acme.com'], rejected: ['Bad@acme.com'] });
+    const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'secret-pw' }));
+    const res = await service.sendEmail({ to: ['a@acme.com'], cc: ['bad@acme.com'], subject: 'S', html: '<p/>' });
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(sendMail.mock.calls[0][0]).toEqual({ from: 'reports@notify.gifsy.in', to: ['a@acme.com'], cc: ['bad@acme.com'], subject: 'S', html: '<p/>' });
+    expect(res).toEqual({ skipped: false, accepted: ['a@acme.com'], rejected: ['bad@acme.com'] });
+  });
+
+  it('empty cc → no cc key (existing callers unchanged); unconfigured → skipped', async () => {
+    const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'secret-pw' }));
+    await service.sendEmail({ to: ['a@acme.com'], cc: [], subject: 'S', html: '<p/>' });
+    expect(sendMail.mock.calls[0][0]).not.toHaveProperty('cc');
+    const off = new Msg91Service(makeConfig({}));
+    expect(await off.sendEmail({ to: ['a@acme.com'], subject: 'S', html: '<p/>' })).toEqual({ skipped: true, accepted: [], rejected: [] });
   });
 
   it('throws a clear error when the SMTP send fails (and still closes the transport)', async () => {
