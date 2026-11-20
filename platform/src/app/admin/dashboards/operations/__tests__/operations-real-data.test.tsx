@@ -8,10 +8,12 @@
  *  - RD3: the visibility card is ABSENT when payload.visibility === null
  *  - RD4: the visibility card is PRESENT when payload.visibility is provided
  *  - RD5: on fetch failure an error state shows and NO fabricated numbers appear
+ *  - RD6: PHOTO_APPROVAL month-wise funnel — waiting / needs re-take, approval-rate definition, real flags list,
+ *         month picker refetches the visibility block only
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { vi, describe, it, expect, afterEach } from 'vitest';
 import OperationsDashboardPage from '../page';
 
@@ -129,5 +131,81 @@ describe('Admin Operations Dashboard — real data', () => {
     expect(screen.queryByTestId('operations-visibility-card')).not.toBeInTheDocument();
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  });
+
+  describe('RD6: PHOTO_APPROVAL month-wise funnel', () => {
+    const PHOTO = {
+      enabled: true, mode: 'PHOTO_APPROVAL', month: '2026-10',
+      submitted: 40, approved: 20, waiting: 10, needsRetake: 6, rejected: 4,
+      approvalRatePct: 66.7, flagged: 3, duplicate: 2, outsideFence: 1, fraudFlagPct: 7.5,
+      participatingOutlets: 40, inScopeOutlets: 50, participationPct: 80,
+    };
+    const FLAGS = {
+      month: '2026-10', flagged: 3,
+      rows: [
+        { captureId: 'c1', outletCode: 'A1', outletName: 'One', windowKey: '2026-10-P1', status: 'APPROVED',
+          reasons: ['DUPLICATE_PHOTO'], duplicateOf: [{ outletCode: 'Z9', windowKey: '2026-08-P1' }], outsidePhotos: [] },
+        { captureId: 'c2', outletCode: 'A2', outletName: 'Two', windowKey: '2026-10-P1', status: 'WAITING',
+          reasons: ['OUTSIDE_FENCE'], duplicateOf: [], outsidePhotos: ['Window 1'] },
+      ],
+      pagination: { page: 1, pageSize: 50, total: 2, pages: 1 },
+    };
+    function routeFetch() {
+      const fn = vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.startsWith('/api/admin/dashboard/operations/visibility/flags')) return { ok: true, json: async () => ({ success: true, data: FLAGS }) };
+        if (u.startsWith('/api/admin/dashboard/operations/visibility')) {
+          return { ok: true, json: async () => ({ success: true, data: { visibility: { ...PHOTO, month: '2026-09', submitted: 5 } } }) };
+        }
+        return { ok: true, json: async () => ({ ...BASE_PAYLOAD, visibility: PHOTO }) };
+      });
+      vi.stubGlobal('fetch', fn);
+      return fn;
+    }
+
+    it('shows waiting and needs re-take separately, the approval-rate definition, and the real flag counts', async () => {
+      routeFetch();
+      render(<OperationsDashboardPage />);
+      const card = await screen.findByTestId('operations-visibility-card');
+      expect(within(card).getByText('Waiting for review')).toBeInTheDocument();
+      expect(within(card).getByText('Needs re-take')).toBeInTheDocument();
+      expect(within(card).getByText('66.7%')).toBeInTheDocument();
+      expect(within(card).getByText('20 approved of 30 reviewed')).toBeInTheDocument();
+      expect(within(card).getByRole('img', { name: /Approved ÷ \(Approved \+ Needs re-take \+ Rejected\)/ })).toBeInTheDocument();
+      expect(within(card).getByText('3 flagged · 2 duplicate · 1 outside fence')).toBeInTheDocument();
+      expect(within(card).getByText('40 of 50 in-scope outlets')).toBeInTheDocument();
+    });
+
+    it('the flags list shows the reason per capture', async () => {
+      routeFetch();
+      render(<OperationsDashboardPage />);
+      const card = await screen.findByTestId('operations-visibility-card');
+      fireEvent.click(within(card).getByRole('button', { name: /see the 3 flagged captures/i }));
+      const list = await screen.findByTestId('operations-visibility-flags');
+      expect(await within(list).findByText('Duplicate photo')).toBeInTheDocument();
+      expect(within(list).getByText(/same photo as Z9 \(Aug 2026\)/)).toBeInTheDocument();
+      expect(within(list).getByText('Photo outside the outlet fence')).toBeInTheDocument();
+      expect(within(list).getByText(/— Window 1/)).toBeInTheDocument();
+    });
+
+    it('picking a month refetches only the visibility block for that month', async () => {
+      const fn = routeFetch();
+      render(<OperationsDashboardPage />);
+      await screen.findByTestId('operations-visibility-card');
+      const select = screen.getByLabelText('Visibility funnel month') as HTMLSelectElement;
+      const other = Array.from(select.options).map((o) => o.value).find((v) => v !== '2026-10')!;
+      fireEvent.change(select, { target: { value: other } });
+      await waitFor(() =>
+        expect(fn.mock.calls.map((c) => String(c[0]))).toContain(`/api/admin/dashboard/operations/visibility?month=${other}`),
+      );
+      expect(await screen.findByText('Sep 2026 · captures for in-scope outlets: review funnel, fraud flags & outlet participation', { exact: false })).toBeInTheDocument();
+    });
+
+    it('AMOUNT_UPLOAD (no mode) keeps the old card', async () => {
+      mockFetch(PAYLOAD_VIS_ON);
+      render(<OperationsDashboardPage />);
+      expect(await screen.findByText('of addressable outlets')).toBeInTheDocument();
+      expect(screen.queryByLabelText('Visibility funnel month')).not.toBeInTheDocument();
+    });
   });
 });

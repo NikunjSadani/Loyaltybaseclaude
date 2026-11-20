@@ -7,17 +7,20 @@
    payload an explicit error state is shown (never a mock fallback). Metrics the backend
    cannot source (e.g. first-response when the ticket flow never writes firstResponseAt)
    arrive as null and render as "—". The visibility card renders ONLY when the payload's
-   `visibility` block is non-null (tenant has the feature enabled).
+   `visibility` block is non-null (tenant has the feature enabled). PHOTO_APPROVAL tenants get a MONTH-WISE funnel
+   (`mode: 'PHOTO_APPROVAL'`, month picker → GET /api/admin/dashboard/operations/visibility?month=) with real
+   duplicate / outside-fence flags (list → .../operations/visibility/flags); AMOUNT_UPLOAD tenants keep the old card.
    Mirrors the fetch/loading/error/styling pattern of /admin/dashboards/kyc/page.tsx.
 ──────────────────────────────────────────────────────────────────────────────── */
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Banknote, CheckCircle, XCircle, Clock, AlertCircle,
-  Ticket as TicketIcon, Timer, ShieldCheck, Loader2, Eye,
+  Ticket as TicketIcon, Timer, ShieldCheck, Loader2, Eye, Info, X,
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
+import { PLAIN_STATUS_LABEL, PlainStatus, monthLabel, monthOptions, windowShortLabel } from '@/lib/visibility-report';
 
 const DARK_NAVY = '#1A1A2E';
 
@@ -54,8 +57,10 @@ interface TicketsBlock {
   ageBuckets: AgeBucket[];
 }
 
-interface VisibilityBlock {
+/** AMOUNT_UPLOAD tenants — the unchanged all-time funnel. */
+interface LegacyVisibilityBlock {
   enabled: boolean;
+  mode?: undefined;
   submitted: number;
   approved: number;
   rejected: number;
@@ -63,6 +68,48 @@ interface VisibilityBlock {
   approvalRatePct: number;
   fraudFlagPct: number;
   participationPct: number;
+}
+
+/** PHOTO_APPROVAL tenants — one month, in-scope outlets (VISIBILITY-POSM-DESIGN.md §Metrics). */
+interface PhotoVisibilityBlock {
+  enabled: true;
+  mode: 'PHOTO_APPROVAL';
+  month: string;
+  submitted: number;
+  approved: number;
+  waiting: number;
+  needsRetake: number;
+  rejected: number;
+  /** approved ÷ (approved + needs re-take + rejected); null when nothing has been decided yet. */
+  approvalRatePct: number | null;
+  flagged: number;
+  duplicate: number;
+  outsideFence: number;
+  /** flagged ÷ submitted; null when nothing was submitted. */
+  fraudFlagPct: number | null;
+  participatingOutlets: number;
+  inScopeOutlets: number;
+  participationPct: number;
+}
+
+type VisibilityBlock = LegacyVisibilityBlock | PhotoVisibilityBlock;
+
+interface FlagRow {
+  captureId: string;
+  outletCode: string;
+  outletName: string;
+  windowKey: string;
+  status: PlainStatus;
+  reasons: Array<'DUPLICATE_PHOTO' | 'OUTSIDE_FENCE'>;
+  duplicateOf: Array<{ outletCode: string; windowKey: string }>;
+  outsidePhotos: string[];
+}
+
+interface FlagsPage {
+  month: string;
+  flagged: number;
+  rows: FlagRow[];
+  pagination: { page: number; pageSize: number; total: number; pages: number };
 }
 
 interface SettlementBlock {
@@ -102,19 +149,28 @@ interface StatCardProps {
   label: string;
   value: string;
   sub?: string;
+  /** A plain-words definition, shown as a tooltip on the info icon (and to screen readers). */
+  hint?: string;
   icon: React.ElementType;
   iconBg: string;
   iconColor: string;
   valColor: string;
 }
 
-function StatCard({ label, value, sub, icon: Icon, iconBg, iconColor, valColor }: StatCardProps) {
+function StatCard({ label, value, sub, hint, icon: Icon, iconBg, iconColor, valColor }: StatCardProps) {
   return (
     <Card className="border border-gray-100 shadow-sm rounded-2xl">
       <CardContent className="pt-6">
         <div className="flex items-center justify-between">
           <div className="min-w-0">
-            <p className="text-sm text-gray-500">{label}</p>
+            <p className="text-sm text-gray-500 flex items-center gap-1">
+              {label}
+              {hint && (
+                <span title={hint} aria-label={hint} role="img" className="text-gray-400 cursor-help">
+                  <Info className="w-3.5 h-3.5" />
+                </span>
+              )}
+            </p>
             <p className={`text-3xl font-bold mt-1 ${valColor}`}>{value}</p>
             {sub && <p className="text-[11px] text-gray-400 mt-1">{sub}</p>}
           </div>
@@ -240,6 +296,8 @@ export default function AdminOperationsDashboardPage() {
   }
 
   const { scope, payouts, tickets, visibility, settlement } = data;
+  const photoVisibility = visibility && visibility.mode === 'PHOTO_APPROVAL' ? visibility : null;
+  const legacyVisibility = visibility && visibility.mode !== 'PHOTO_APPROVAL' ? visibility : null;
 
   return (
     <div className="space-y-6" data-testid="operations-dashboard">
@@ -370,8 +428,11 @@ export default function AdminOperationsDashboardPage() {
         </CardContent>
       </Card>
 
-      {/* ── Visibility funnel — rendered ONLY when the feature is enabled (payload non-null) ── */}
-      {visibility && (
+      {/* ── Visibility funnel — PHOTO_APPROVAL tenants: month-wise card with real fraud flags ── */}
+      {photoVisibility && <PhotoVisibilityCard initial={photoVisibility} />}
+
+      {/* ── Visibility funnel (AMOUNT_UPLOAD) — rendered ONLY when the feature is enabled (payload non-null) ── */}
+      {legacyVisibility && (
         <Card className="border border-gray-100 shadow-sm rounded-2xl" data-testid="operations-visibility-card">
           <CardHeader>
             <div className="flex items-center gap-2">
@@ -386,35 +447,35 @@ export default function AdminOperationsDashboardPage() {
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
               <StatCard
                 label="Approval Rate"
-                value={fmtPct(visibility.approvalRatePct)}
-                sub={`${fmtInt(visibility.approved)} approved`}
+                value={fmtPct(legacyVisibility.approvalRatePct)}
+                sub={`${fmtInt(legacyVisibility.approved)} approved`}
                 icon={CheckCircle} iconBg="bg-green-100" iconColor="text-green-700" valColor="text-green-700"
               />
               <StatCard
                 label="Fraud Flag Rate"
-                value={fmtPct(visibility.fraudFlagPct)}
+                value={fmtPct(legacyVisibility.fraudFlagPct)}
                 sub="flagged submissions"
                 icon={AlertCircle} iconBg="bg-red-100" iconColor="text-red-600" valColor="text-red-700"
               />
               <StatCard
                 label="Participation"
-                value={fmtPct(visibility.participationPct)}
+                value={fmtPct(legacyVisibility.participationPct)}
                 sub="of addressable outlets"
                 icon={Eye} iconBg="bg-purple-100" iconColor="text-purple-600" valColor="text-purple-700"
               />
               <StatCard
                 label="Submitted"
-                value={fmtInt(visibility.submitted)}
+                value={fmtInt(legacyVisibility.submitted)}
                 sub="entered review"
                 icon={TicketIcon} iconBg="bg-blue-100" iconColor="text-blue-600" valColor="text-blue-700"
               />
             </div>
             <BarList
               rows={[
-                { label: 'Submitted', value: visibility.submitted },
-                { label: 'Approved', value: visibility.approved },
-                { label: 'Rejected', value: visibility.rejected },
-                { label: 'Flagged', value: visibility.flagged },
+                { label: 'Submitted', value: legacyVisibility.submitted },
+                { label: 'Approved', value: legacyVisibility.approved },
+                { label: 'Rejected', value: legacyVisibility.rejected },
+                { label: 'Flagged', value: legacyVisibility.flagged },
               ]}
               color="#8b5cf6"
             />
@@ -423,5 +484,226 @@ export default function AdminOperationsDashboardPage() {
       )}
 
     </div>
+  );
+}
+
+/* ─── Visibility (PHOTO_APPROVAL) — month-wise funnel + real fraud flags ───────── */
+
+const APPROVAL_RATE_HINT =
+  'Approved ÷ (Approved + Needs re-take + Rejected) for this month’s captures. Captures still waiting for review are not counted until a reviewer decides.';
+const FRAUD_RATE_HINT =
+  'Flagged ÷ Submitted. A capture is flagged when one of its photos is also used in another capture (duplicate photo), or a photo was taken outside the outlet’s fence.';
+const PARTICIPATION_HINT =
+  'In-scope outlets (KYC-approved, in the visibility scope) with at least one capture this month ÷ all in-scope outlets.';
+
+const REASON_LABEL: Record<FlagRow['reasons'][number], string> = {
+  DUPLICATE_PHOTO: 'Duplicate photo',
+  OUTSIDE_FENCE: 'Photo outside the outlet fence',
+};
+
+const fmtPctOrDash = (n: number | null) => (n === null ? '—' : fmtPct(n));
+
+function PhotoVisibilityCard({ initial }: { initial: PhotoVisibilityBlock }) {
+  const [v, setV] = useState<PhotoVisibilityBlock>(initial);
+  const [month, setMonth] = useState(initial.month);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showFlags, setShowFlags] = useState(false);
+  const months = useMemo(() => {
+    const opts = monthOptions();
+    // Keep the server's month selectable even if the local clock disagrees.
+    return opts.some((o) => o.value === initial.month) ? opts : [{ value: initial.month, label: monthLabel(initial.month) }, ...opts];
+  }, [initial.month]);
+  const reqId = React.useRef(0);
+
+  const pick = (m: string) => {
+    setMonth(m);
+    setShowFlags(false);
+    const id = ++reqId.current;
+    setLoading(true);
+    setError(null);
+    fetch(`/api/admin/dashboard/operations/visibility?month=${encodeURIComponent(m)}`, { headers: { ...authHeader() } })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`Request failed (${r.status})`);
+        const json: unknown = await r.json();
+        const payload = (json && typeof json === 'object' && 'data' in json ? (json as { data: unknown }).data : json) as
+          | { visibility?: VisibilityBlock | null }
+          | null;
+        const next = payload?.visibility;
+        if (!next || next.mode !== 'PHOTO_APPROVAL') throw new Error('No visibility data was returned.');
+        if (id === reqId.current) setV(next);
+      })
+      .catch((e: unknown) => { if (id === reqId.current) setError(e instanceof Error ? e.message : 'Failed to load'); })
+      .finally(() => { if (id === reqId.current) setLoading(false); });
+  };
+
+  return (
+    <Card className="border border-gray-100 shadow-sm rounded-2xl" data-testid="operations-visibility-card">
+      <CardHeader>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Eye className="w-5 h-5 text-purple-600" />
+            <CardTitle>Visibility Program Funnel</CardTitle>
+          </div>
+          <label className="flex items-center gap-2 text-xs text-gray-500">
+            Month
+            <select
+              aria-label="Visibility funnel month"
+              value={month}
+              onChange={(e) => pick(e.target.value)}
+              className="border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
+            >
+              {months.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+            {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" aria-label="Loading" />}
+          </label>
+        </div>
+        <p className="text-xs text-gray-500 mt-0.5">
+          {monthLabel(v.month)} · captures for in-scope outlets: review funnel, fraud flags &amp; outlet participation
+        </p>
+      </CardHeader>
+      <CardContent className="pb-6">
+        {error && (
+          <p role="alert" className="mb-4 text-xs text-red-600">Couldn&apos;t load {monthLabel(month)} — {error} Showing {monthLabel(v.month)}.</p>
+        )}
+        <div className={`grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6 transition-opacity ${loading ? 'opacity-60' : ''}`}>
+          <StatCard
+            label="Approval Rate"
+            value={fmtPctOrDash(v.approvalRatePct)}
+            sub={`${fmtInt(v.approved)} approved of ${fmtInt(v.approved + v.needsRetake + v.rejected)} reviewed`}
+            hint={APPROVAL_RATE_HINT}
+            icon={CheckCircle} iconBg="bg-green-100" iconColor="text-green-700" valColor="text-green-700"
+          />
+          <StatCard
+            label="Fraud Flag Rate"
+            value={fmtPctOrDash(v.fraudFlagPct)}
+            sub={`${fmtInt(v.flagged)} flagged · ${fmtInt(v.duplicate)} duplicate · ${fmtInt(v.outsideFence)} outside fence`}
+            hint={FRAUD_RATE_HINT}
+            icon={AlertCircle} iconBg="bg-red-100" iconColor="text-red-600" valColor="text-red-700"
+          />
+          <StatCard
+            label="Participation"
+            value={fmtPct(v.participationPct)}
+            sub={`${fmtInt(v.participatingOutlets)} of ${fmtInt(v.inScopeOutlets)} in-scope outlets`}
+            hint={PARTICIPATION_HINT}
+            icon={Eye} iconBg="bg-purple-100" iconColor="text-purple-600" valColor="text-purple-700"
+          />
+          <StatCard
+            label="Submitted"
+            value={fmtInt(v.submitted)}
+            sub="captures this month"
+            icon={TicketIcon} iconBg="bg-blue-100" iconColor="text-blue-600" valColor="text-blue-700"
+          />
+        </div>
+        <BarList
+          rows={[
+            { label: 'Submitted', value: v.submitted },
+            { label: PLAIN_STATUS_LABEL.APPROVED, value: v.approved },
+            { label: PLAIN_STATUS_LABEL.WAITING, value: v.waiting },
+            { label: PLAIN_STATUS_LABEL.NEEDS_RETAKE, value: v.needsRetake },
+            { label: PLAIN_STATUS_LABEL.REJECTED, value: v.rejected },
+            { label: 'Flagged', value: v.flagged },
+          ]}
+          color="#8b5cf6"
+        />
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={() => setShowFlags((x) => !x)}
+            disabled={v.flagged === 0}
+            className="text-xs font-medium text-[var(--brand-primary)] hover:underline disabled:text-gray-400 disabled:no-underline"
+          >
+            {v.flagged === 0 ? 'No flagged captures this month' : showFlags ? 'Hide flagged captures' : `See the ${fmtInt(v.flagged)} flagged capture${v.flagged === 1 ? '' : 's'}`}
+          </button>
+        </div>
+        {showFlags && <FlagList month={v.month} onClose={() => setShowFlags(false)} />}
+      </CardContent>
+    </Card>
+  );
+}
+
+function FlagList({ month, onClose }: { month: string; onClose: () => void }) {
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<FlagsPage | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(`/api/admin/dashboard/operations/visibility/flags?month=${encodeURIComponent(month)}&page=${page}&pageSize=50`, {
+      headers: { ...authHeader() },
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`Request failed (${r.status})`);
+        const json: unknown = await r.json();
+        const payload = (json && typeof json === 'object' && 'data' in json ? (json as { data: unknown }).data : json) as FlagsPage;
+        if (!payload || !Array.isArray(payload.rows)) throw new Error('No data was returned.');
+        if (!cancelled) setData(payload);
+      })
+      .catch((e: unknown) => { if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [month, page]);
+
+  return (
+    <section className="mt-4 border border-gray-100 rounded-xl" aria-label="Flagged captures" data-testid="operations-visibility-flags">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
+        <p className="text-xs font-semibold text-gray-700">Flagged captures — {monthLabel(month)}</p>
+        <button type="button" onClick={onClose} aria-label="Close flagged captures" className="p-1 rounded hover:bg-gray-100 text-gray-500">
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+      {error ? (
+        <p role="alert" className="px-3 py-4 text-xs text-red-600">Couldn&apos;t load the flagged captures — {error}</p>
+      ) : !data ? (
+        <div className="flex justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-gray-300" aria-label="Loading flagged captures" /></div>
+      ) : (
+        <div className={`overflow-x-auto ${loading ? 'opacity-60' : ''}`}>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-gray-500">
+                <th className="px-3 py-2 font-medium">Outlet</th>
+                <th className="px-3 py-2 font-medium">Window</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+                <th className="px-3 py-2 font-medium">Why it is flagged</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.rows.map((r) => (
+                <tr key={r.captureId} className="border-t border-gray-100 align-top">
+                  <td className="px-3 py-2"><p className="font-medium text-gray-800">{r.outletName}</p><p className="text-gray-500">{r.outletCode}</p></td>
+                  <td className="px-3 py-2 text-gray-700">{windowShortLabel(r.windowKey)}</td>
+                  <td className="px-3 py-2 text-gray-700">{PLAIN_STATUS_LABEL[r.status] ?? r.status}</td>
+                  <td className="px-3 py-2 text-gray-700">
+                    <ul className="space-y-0.5">
+                      {r.reasons.map((reason) => (
+                        <li key={reason}>
+                          <span className="font-medium">{REASON_LABEL[reason]}</span>
+                          {reason === 'DUPLICATE_PHOTO' && r.duplicateOf.length > 0 && (
+                            <span className="text-gray-500"> — same photo as {r.duplicateOf.slice(0, 3).map((d) => `${d.outletCode} (${monthLabel(d.windowKey.slice(0, 7))})`).join(', ')}{r.duplicateOf.length > 3 ? ` +${r.duplicateOf.length - 3} more` : ''}</span>
+                          )}
+                          {reason === 'OUTSIDE_FENCE' && (
+                            <span className="text-gray-500"> — {r.outsidePhotos.length ? r.outsidePhotos.join(', ') : 'recorded outside at capture'}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {data.pagination.pages > 1 && (
+            <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-gray-100 text-xs text-gray-600">
+              <button type="button" disabled={page <= 1 || loading} onClick={() => setPage((p) => p - 1)} className="px-2 py-1 rounded hover:bg-gray-100 disabled:opacity-40">Previous</button>
+              <span>Page {data.pagination.page} of {data.pagination.pages}</span>
+              <button type="button" disabled={page >= data.pagination.pages || loading} onClick={() => setPage((p) => p + 1)} className="px-2 py-1 rounded hover:bg-gray-100 disabled:opacity-40">Next</button>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   );
 }

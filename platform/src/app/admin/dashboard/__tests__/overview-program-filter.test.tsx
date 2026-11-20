@@ -178,4 +178,26 @@ describe('Admin Overview — program filter', () => {
     await waitFor(() => expect(urls(fn, '/api/admin/dashboard/kpis')).toContain('/api/admin/dashboard/kpis?program=Gold'));
     expect(((await screen.findByTestId('overview-program-filter')) as HTMLSelectElement).value).toBe('Gold');
   });
+
+  it('OV-VIS: Pending Visibility Approvals is month-wise — Waiting for review + Needs re-take, month picker refetches', async () => {
+    const fn = mockFetch({ ...KPIS, visibility: { month: '2026-11', waiting: 7, needsRetake: 3 } });
+    render(<DashboardPage />);
+    expect(await screen.findByTestId('kpi-visibility-retake')).toHaveTextContent('Needs re-take (waiting on reps): 3');
+    expect(screen.getByTestId('kpi-visibility-month')).toHaveTextContent('Waiting for review · Nov 2026');
+    // Default month → the request is unchanged (no visibilityMonth param).
+    expect(urls(fn, '/api/admin/dashboard/kpis')).toEqual(['/api/admin/dashboard/kpis']);
+    const select = screen.getByLabelText('Visibility approvals month') as HTMLSelectElement;
+    const older = Array.from(select.options).map((o) => o.value).find((v) => v !== '2026-11')!;
+    fireEvent.change(select, { target: { value: older } });
+    await waitFor(() =>
+      expect(urls(fn, '/api/admin/dashboard/kpis')).toContain(`/api/admin/dashboard/kpis?visibilityMonth=${older}`),
+    );
+  });
+
+  it('OV-VIS2: AMOUNT_UPLOAD / visibility off (visibility null) → the tile is exactly as before', async () => {
+    mockFetch({ ...KPIS, visibility: null });
+    render(<DashboardPage />);
+    expect(await screen.findByText('4,321')).toBeInTheDocument();
+    expect(screen.queryByTestId('kpi-visibility-month')).not.toBeInTheDocument();
+  });
 });
