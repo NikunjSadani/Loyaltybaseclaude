@@ -83,6 +83,24 @@ reply is pinned to the request it read (`metadata.clientRemarks.requestedAt`).
    ticket or overwriting ESCALATED. On ANY 409 the UI reloads the ticket automatically, says what changed
    (e.g. "status: In Progress → Closed") and keeps the user's typed text.
 
+## Ticket remarks email (per client — owner-approved 2026-11-20, TENANT-SCOPED)
+
+Gifsy console → Clients → <client> → **Support tickets** card (GIFSY_ADMIN only; the card is not rendered for
+GIFSY_STAFF and the API refuses them). Field "Ticket remarks email": one address (trimmed, lowercased; a list is
+refused), Save, saved/error states, "Last changed by X on date" from the audit log.
+
+- Stored as one `program_settings` row per tenant: key `ticketRemarksEmail`, value `{ email }`. Written ONLY by
+  `PUT /v1/gifsy/clients/:slug/ticket-remarks-email {email | '' | null}` (read: `GET` same path) — `@Roles('GIFSY_ADMIN')`,
+  deliberately no `@RequirePermission` (a staff can never pass), role re-checked in the service. The generic
+  `PUT /v1/admin/settings` refuses the key. Every change writes an `audit_logs` row (`entityType
+  TICKET_REMARKS_EMAIL`, `entityId` = slug, old → new). Clearing deletes the row.
+- **Set** → "Ask client admin for remarks" emails go ONLY to that address (never to the chosen admin's personal
+  email). The email names the admin who was asked; the chosen admin still gets the in-app bell and still replies in
+  the portal. The Gifsy-only outcome note says "Email sent to <address> (client's ticket remarks inbox) — asked: <name>".
+- **Unset** (default — every tenant today incl. Deoleo) → byte-identical to before: the chosen admin's own email,
+  "Hi <name>" greeting, outcome note "Email sent to <name> (<their email>)".
+- Not shown to client admins (optional read-only display deliberately not added).
+
 ## Raised by / outlet
 
 `ticket-submitter.ts`: partner raiser → "Outlet owner — <owner name>"; SALES_* → "<name> · <hierarchy level

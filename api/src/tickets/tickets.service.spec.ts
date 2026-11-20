@@ -42,6 +42,7 @@ const mockPrisma = {
     findMany: jest.fn(async ({ where }: { where: Record<string, any> }) => USERS.filter((u) => matchUser(u, where))),
   },
   clientDomain: { findFirst: jest.fn(), findMany: jest.fn() },
+  programSetting: { findUnique: jest.fn() },
   outlet: { findMany: jest.fn(), findFirst: jest.fn() },
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findFirst: jest.fn() },
@@ -106,6 +107,7 @@ describe('TicketsService', () => {
     mockPrisma.outlet.findMany.mockResolvedValue([]);
     mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
     mockPrisma.clientDomain.findMany.mockResolvedValue([]);
+    mockPrisma.programSetting.findUnique.mockResolvedValue(null); // no ticket remarks inbox (default)
     mockPrisma.$queryRaw.mockResolvedValue([]);
     mockNotifications.writeInApp.mockResolvedValue({ id: 'n1' });
     mockMsg91.sendEmail.mockResolvedValue(undefined);
@@ -830,6 +832,66 @@ describe('TicketsService', () => {
       expect(res).not.toHaveProperty('summary');
       expect(res).not.toHaveProperty('awaitingClient');
       expect(mockPrisma.ticket.groupBy).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── per-client "Ticket remarks email" (2026-11-20, tenant-scoped) ─────────────
+
+  describe('ticket remarks inbox', () => {
+    it('set → the email goes ONLY to the inbox, names the admin asked; the admin still gets the bell', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { email: 'tickets@deoleo.example' } });
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      expect(mockPrisma.programSetting.findUnique.mock.calls[0][0].where).toEqual({
+        clientId_settingKey: { clientId: 'deoleo', settingKey: 'ticketRemarksEmail' },
+      });
+      expect(mockMsg91.sendEmail).toHaveBeenCalledTimes(1);
+      const mail = mockMsg91.sendEmail.mock.calls[0][0];
+      expect(mail.to).toEqual(['tickets@deoleo.example']); // NOT ca@deoleo.example
+      expect(mail.html).toContain('has asked <strong>Deoleo Admin</strong> (client admin) for remarks');
+      expect(mail.html).toContain("ticket remarks inbox");
+      expect(mockNotifications.writeInApp).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cadmin1' }));
+      expect(mockPrisma.ticketMessage.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          internalVisibility: 'GIFSY_ONLY',
+          message: expect.stringMatching(/^Email sent to tickets@deoleo\.example \(client's ticket remarks inbox\) — asked: Deoleo Admin/),
+        }),
+      });
+      expect(res).toMatchObject({ emailSent: true });
+    });
+
+    it('set → used even when the chosen admin has no personal email', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { email: 'tickets@deoleo.example' } });
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin2', note: 'pls' }, 'x');
+      expect(mockMsg91.sendEmail.mock.calls[0][0].to).toEqual(['tickets@deoleo.example']);
+      expect(res).toMatchObject({ emailSent: true });
+    });
+
+    it('unset → exactly as before: the chosen admin\'s own email, personal greeting', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      const mail = mockMsg91.sendEmail.mock.calls[0][0];
+      expect(mail.to).toEqual(['ca@deoleo.example']);
+      expect(mail.html).toContain('<p>Hi Deoleo Admin,</p>');
+      expect(mail.html).not.toContain('remarks inbox');
+      expect(mockPrisma.ticketMessage.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ message: expect.stringMatching(/^Email sent to Deoleo Admin \(ca@deoleo\.example\)/) }),
+      });
+    });
+
+    it('a stored but invalid value is ignored (falls back to the admin email)', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { email: 'junk' } });
+      await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      expect(mockMsg91.sendEmail.mock.calls[0][0].to).toEqual(['ca@deoleo.example']);
+    });
+
+    it('the generic settings PUT refuses the key (only the Gifsy-console endpoint writes it)', async () => {
+      const { AdminCoreService } = await import('../admin-core/admin-core.service');
+      const svc = Object.create(AdminCoreService.prototype) as InstanceType<typeof AdminCoreService>;
+      await expect(svc.upsertSetting(gifsy, { key: 'ticketRemarksEmail', value: { email: 'a@b.com' } } as never))
+        .rejects.toBeInstanceOf(ForbiddenException);
     });
   });
 });

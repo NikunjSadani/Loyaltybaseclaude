@@ -25,6 +25,7 @@ import {
   SETTABLE_TICKET_STATUSES,
 } from './dto/tickets.dto';
 import { escapeHtml, pickTenantDomain, ticketEmailLink, ticketPath } from './ticket-link';
+import { TICKET_REMARKS_EMAIL_KEY, readTicketRemarksEmail } from './ticket-remarks-inbox';
 import {
   OUTLET_REFERENCE_TYPE,
   PARTNER_ROLES,
@@ -848,13 +849,26 @@ export class TicketsService {
       return { sent: false as const, reason };
     };
     // Each prep step reports its OWN failure — a lookup error is never passed off as "no email on file".
+    // Recipient: the client's shared "ticket remarks email" when one is set (ONLY that address — the
+    // chosen admin is named in the body and still gets the bell); otherwise the chosen admin's own email.
     let to = '';
+    let toInbox = false;
     try {
-      const u = await this.prisma.user.findFirst({ where: { id: p.targetId }, select: { email: true } });
-      to = (u?.email ?? '').trim();
+      const inboxRow = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId: p.ticket.clientId, settingKey: TICKET_REMARKS_EMAIL_KEY } },
+        select: { settingValue: true },
+      });
+      const inbox = readTicketRemarksEmail(inboxRow?.settingValue);
+      if (inbox) {
+        to = inbox;
+        toInbox = true;
+      } else {
+        const u = await this.prisma.user.findFirst({ where: { id: p.targetId }, select: { email: true } });
+        to = (u?.email ?? '').trim();
+      }
     } catch (e) {
       this.logger.error(`[tickets] remarks email recipient lookup for ${p.ticket.id} failed: ${e}`);
-      return notSent("the client admin's email address could not be looked up (database error)");
+      return notSent('the email recipient could not be looked up (database error)');
     }
     if (!to) return notSent('the client admin has no email address on file');
     let link = '';
@@ -881,8 +895,15 @@ export class TicketsService {
     if (!link) return notSent('the ticket link could not be built');
 
     const html = [
-      `<p>Hi ${escapeHtml(p.targetName)},</p>`,
-      `<p>${escapeHtml(p.by)} from Gifsy support needs your remarks on support ticket <strong>${escapeHtml(p.ticket.ticketNumber)}</strong> — "${escapeHtml(p.ticket.subject)}".</p>`,
+      ...(toInbox
+        ? [
+            `<p>Hello,</p>`,
+            `<p>${escapeHtml(p.by)} from Gifsy support has asked <strong>${escapeHtml(p.targetName)}</strong> (client admin) for remarks on support ticket <strong>${escapeHtml(p.ticket.ticketNumber)}</strong> — "${escapeHtml(p.ticket.subject)}". This was sent to your programme's ticket remarks inbox; ${escapeHtml(p.targetName)} can reply in the admin portal.</p>`,
+          ]
+        : [
+            `<p>Hi ${escapeHtml(p.targetName)},</p>`,
+            `<p>${escapeHtml(p.by)} from Gifsy support needs your remarks on support ticket <strong>${escapeHtml(p.ticket.ticketNumber)}</strong> — "${escapeHtml(p.ticket.subject)}".</p>`,
+          ]),
       `<blockquote style="border-left:3px solid #ccc;margin:0;padding:4px 12px;color:#333">${escapeHtml(p.note).replace(/\n/g, '<br>')}</blockquote>`,
       `<p><a href="${escapeHtml(link)}">Open the ticket and reply</a></p>`,
       `<p style="color:#888;font-size:12px">Your reply is visible to Gifsy support and your admin team only — never to the outlet or sales team.</p>`,
@@ -897,7 +918,7 @@ export class TicketsService {
     await this.recordEmailOutcome(
       p.ticket.id,
       p.actorId,
-      `Email sent to ${p.targetName} (${to}) with link ${link}.${linkNote ? ` Note: ${linkNote}.` : ''}`,
+      `${toInbox ? `Email sent to ${to} (client's ticket remarks inbox) — asked: ${p.targetName}` : `Email sent to ${p.targetName} (${to})`} with link ${link}.${linkNote ? ` Note: ${linkNote}.` : ''}`,
     );
     return { sent: true };
   }

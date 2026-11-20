@@ -6,6 +6,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { TICKET_REMARKS_EMAIL_KEY } from '../tickets/ticket-remarks-inbox';
 import { Prisma, KycStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
@@ -1387,6 +1388,14 @@ export class AdminCoreService {
     // GIFSY_ADMIN-only Points Engine endpoint (which passes allowPlatformOnlyKey). Blocking it here stops
     // the generic PUT /v1/admin/settings — reachable by a GIFSY_STAFF holding tenancy:write_finance — from
     // turning the money shortcut ON for a tenant, bypassing the owner-only guarantee. Mirrors tdsStatutory.
+    // GIFSY-ADMIN-ONLY support config: the per-client ticket remarks inbox is written ONLY through the
+    // dedicated, validated, audited Gifsy-console endpoint (PUT /v1/gifsy/clients/:slug/ticket-remarks-email).
+    if (dto.key === TICKET_REMARKS_EMAIL_KEY) {
+      throw new ForbiddenException(
+        'The ticket remarks email can only be changed by a Gifsy Admin on the client page in the Gifsy console.',
+      );
+    }
+
     if (dto.key === 'pointsEngine' && !opts?.allowPlatformOnlyKey) {
       throw new ForbiddenException(
         'The points engine settings can only be changed via the dedicated owner-only Points Engine screen.',

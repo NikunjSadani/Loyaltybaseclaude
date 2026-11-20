@@ -9,6 +9,7 @@ import {
   IsString,
   Matches,
   Max,
+  MaxLength,
   Min,
   ValidateIf,
 } from 'class-validator';
@@ -287,4 +288,15 @@ export class UpdateOutletTypeConfigDto {
   @IsOptional()
   @IsBoolean()
   salesAssistedRedeemEnabled?: boolean;
+}
+
+/**
+ * Body for PUT /v1/gifsy/clients/:slug/ticket-remarks-email. One address, or '' / null to clear.
+ * Shape is checked here; the single-address + email rules live in parseTicketRemarksEmailInput.
+ */
+export class SetTicketRemarksEmailDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(320)
+  email?: string | null;
 }

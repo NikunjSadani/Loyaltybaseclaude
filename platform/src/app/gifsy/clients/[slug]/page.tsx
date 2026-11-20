@@ -15,6 +15,7 @@ import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from 
 import { getToken } from '@/lib/auth-client';
 import { useCanManageHelpVideos } from '@/lib/help-videos-access';
 import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
+import { TicketRemarksEmailCard } from '@/components/operator/ticket-remarks-email-card';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feature metadata — label + description for each toggle
@@ -505,6 +506,13 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
       <Section icon={Power} title="Behaviour flags" defaultOpen>
         <BehaviourFlagsSection config={config} onSave={saveClient} saving={saving} />
       </Section>
+
+      {/* Support tickets — the client's shared "Ticket remarks email" (GIFSY_ADMIN only; API-enforced) */}
+      {canManageHelpVideos && (
+        <Section icon={Bell} title="Support tickets" defaultOpen>
+          <TicketRemarksEmailCard slug={config.slug} />
+        </Section>
+      )}
 
       {/* Partner-app tab visibility (features.partnerApp) — same PATCH, nested deep-merge */}
       <Section icon={Users} title="Partner app tabs">
