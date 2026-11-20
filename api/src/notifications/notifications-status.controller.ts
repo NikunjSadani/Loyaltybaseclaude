@@ -1,5 +1,6 @@
 import { Body, Controller, ForbiddenException, Headers, Post, Query } from '@nestjs/common';
 import { timingSafeEqual } from 'crypto';
+import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/roles.decorator';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { MessageDeliveryStatusService } from './message-delivery-status.service';
@@ -27,6 +28,11 @@ export class NotificationsStatusController {
    * writes) instead of silently accepting them. Acks fast → the handler does only the minimal
    * guarded row update(s) and returns. Never throws on a bad/partial payload.
    */
+  // @SkipThrottle: MSG91 posts delivery reports from a few shared IPs, and the report webhook fires
+  // for EVERY outbound message on the MSG91 number (not only ours) — a bulk send produces
+  // thousands/min. The global 60/min IP bucket 429'd them and MSG91 auto-PAUSED the webhook
+  // (prod 2026-11-19). The secret check below is the guard; unmatched reports are no-ops.
+  @SkipThrottle()
   @Public()
   @Post('status')
   async statusWebhook(

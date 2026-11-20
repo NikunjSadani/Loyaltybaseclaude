@@ -13,7 +13,7 @@ import {
   Max,
 } from 'class-validator';
 import { PAGE_SIZE_MAX } from '../../common/validators/page-size';
-import { TicketCategory, TicketPriority, TicketStatus } from '@prisma/client';
+import { TicketCategory, TicketNoteVisibility, TicketPriority, TicketStatus } from '@prisma/client';
 
 export class CreateTicketDto {
   @IsEnum(TicketCategory)
@@ -27,6 +27,15 @@ export class CreateTicketDto {
   @IsString()
   @MinLength(1)
   description!: string;
+
+  /**
+   * Optional — the outlet this ticket is about (Outlet.id). Sent by the sales app's "For an
+   * Outlet" flow; validated against the raiser's scope and stored as referenceType 'OUTLET'.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  outletId?: string;
 }
 
 export class EscalateTicketDto {
@@ -41,6 +50,38 @@ export class EscalateTicketDto {
   @IsOptional()
   @IsEnum(TicketPriority)
   priority?: TicketPriority; // service defaults to HIGH
+}
+
+/**
+ * Assign / unassign a ticket (Gifsy operators only). `assigneeId: null` unassigns. The
+ * assignee must be an active Gifsy operator who may work on the ticket's tenant (owner, or
+ * staff holding a grant for it) or an active CLIENT_ADMIN of the ticket's own tenant.
+ */
+export class AssignTicketDto {
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  assigneeId!: string | null;
+}
+
+/** Gifsy asks one of the ticket tenant's CLIENT_ADMINs for remarks. */
+export class RequestClientRemarksDto {
+  @IsString()
+  @MinLength(1, { message: 'Pick the client admin to ask' })
+  clientAdminId!: string;
+
+  @IsString()
+  @MinLength(1, { message: 'Describe what you need from the client admin' })
+  @MaxLength(2000)
+  note!: string;
+}
+
+/** The client admin's reply to a remarks request (stored as an INTERNAL message). */
+export class ClientRemarksReplyDto {
+  @IsString()
+  @MinLength(1)
+  @MaxLength(5000)
+  message!: string;
 }
 
 /** Allowed status transitions a support admin can drive from the console. */
@@ -66,6 +107,22 @@ export class AddMessageDto {
   @IsOptional()
   @IsBoolean()
   isInternal?: boolean; // defaults to false
+
+  /**
+   * Internal notes only. A Gifsy operator's note defaults to GIFSY_ONLY; SHARED_WITH_CLIENT shares it
+   * with the tenant's admin desk. A client-desk note is always SHARED_WITH_CLIENT (this is ignored).
+   */
+  @IsOptional()
+  @IsEnum(TicketNoteVisibility)
+  visibility?: TicketNoteVisibility;
+}
+
+/** Gifsy cancels a pending remarks request and resumes the ticket. */
+export class CancelClientRemarksDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }
 
 export class ListTicketsQueryDto {
@@ -76,6 +133,28 @@ export class ListTicketsQueryDto {
   @IsOptional()
   @IsEnum(TicketCategory)
   category?: TicketCategory;
+
+  /** Support admins: comma-separated priorities, e.g. "HIGH,CRITICAL". */
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  priorities?: string;
+
+  /** Support admins: who raised it — "outlet" (outlet owner) or "sales" (a sales rep). */
+  @IsOptional()
+  @IsIn(['outlet', 'sales'])
+  source?: 'outlet' | 'sales';
+
+  /** Support admins: free-text search (ticket number, subject, raiser name, outlet name / code). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  q?: string;
+
+  /** CLIENT_ADMIN only: just the tickets waiting on THIS admin's remarks. */
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  awaitingMine?: 'true' | 'false';
 
   @IsOptional()
   @Type(() => Number)

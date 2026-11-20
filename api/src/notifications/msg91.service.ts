@@ -608,4 +608,13 @@ export class Msg91Service {
       transporter.close();
     }
   }
+
+  /**
+   * Whether sendEmail will actually attempt an SMTP send (MSG91_SMTP_PASS set). sendEmail itself
+   * silently returns when unconfigured (DEV bypass); callers that report "email sent" to a user
+   * check this first so an unconfigured environment is never reported as delivered.
+   */
+  isEmailConfigured(): boolean {
+    return !!this.config.get<string>('MSG91_SMTP_PASS')?.trim();
+  }
 }

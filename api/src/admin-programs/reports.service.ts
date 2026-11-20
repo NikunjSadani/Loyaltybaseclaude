@@ -22,11 +22,18 @@ import {
   TicketAgingRow,
   ticketAgingXlsxRows,
 } from './reports/report-helpers';
+import {
+  OUTLET_REFERENCE_TYPE,
+  TICKET_CREATOR_SELECT,
+  describeRaisedBy,
+  resolveTicketOutlet,
+} from '../tickets/ticket-submitter';
 
 const ALLOWED_STATUSES = new Set<string>([
-  'OPEN', 'IN_PROGRESS', 'PENDING_USER', 'RESOLVED', 'CLOSED', 'ESCALATED',
+  'OPEN', 'IN_PROGRESS', 'PENDING_USER', 'RESOLVED', 'CLOSED', 'ESCALATED', 'WAITING_ON_CLIENT',
 ]);
-const DEFAULT_STATUSES = ['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'ESCALATED'];
+// WAITING_ON_CLIENT (asked the client admin for remarks) is an open ticket → aged by default.
+const DEFAULT_STATUSES = ['OPEN', 'IN_PROGRESS', 'PENDING_USER', 'ESCALATED', 'WAITING_ON_CLIENT'];
 
 const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
@@ -206,10 +213,29 @@ export class ReportsService {
         updatedAt: true,
         firstResponseAt: true,
         slaBreached: true,
-        createdBy: { select: { name: true } },
+        referenceType: true,
+        referenceId: true,
+        // Who raised it (outlet owner vs sales person + designation) + the outlet — same rules
+        // as the tickets console (tickets/ticket-submitter.ts).
+        createdBy: { select: TICKET_CREATOR_SELECT },
         assignedTo: { select: { name: true } },
       },
     });
+
+    const refIds = [
+      ...new Set(
+        tickets
+          .filter((t) => t.referenceType === OUTLET_REFERENCE_TYPE && t.referenceId)
+          .map((t) => t.referenceId as string),
+      ),
+    ];
+    const refOutlets = refIds.length
+      ? await this.prisma.outlet.findMany({
+          where: { id: { in: refIds }, clientId: user.clientId },
+          select: { id: true, outletCode: true, name: true },
+        })
+      : [];
+    const outletById = new Map((refOutlets ?? []).map((o) => [o.id, o]));
 
     const rows: TicketAgingRow[] = tickets.map((t) =>
       buildTicketAgingRow(
@@ -220,6 +246,8 @@ export class ReportsService {
           priority: String(t.priority),
           status: String(t.status),
           createdByName: t.createdBy?.name ?? 'Unknown',
+          raisedBy: describeRaisedBy(t.createdBy).label,
+          outletCode: resolveTicketOutlet(t, t.createdBy, outletById)?.outletCode ?? '',
           assignedToName: t.assignedTo?.name ?? undefined,
           createdAt: t.createdAt,
           updatedAt: t.updatedAt,

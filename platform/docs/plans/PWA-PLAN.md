@@ -8,7 +8,7 @@
 > worker (which must not run over churning UI) is now safe to build. Owner confirmed minor future tweaks are
 > expected — handled by the SW update strategy below (content-hashed assets + versioned precache + update prompt).
 
-## Notification reminder — Bajaj only (owner 2026-11-19, branch `feat/notif-reminder`, unmerged)
+## Notification reminder — Bajaj only (owner 2026-11-19) — ✅ LIVE on prod `1fa2305c`
 A reminder after login / on app open for users who haven't allowed notifications, with **device-specific steps**
 (wording = the Bajaj training deck). No WhatsApp. **TENANT-SCOPED** — gated on slug `bajaj` exactly like
 `PushSubscriptionManager`; Deoleo + every other tenant keep the old one-line bar / generic sentence, unchanged.

@@ -75,6 +75,8 @@ export class OperationsDashboardService {
     'IN_PROGRESS',
     'PENDING_USER',
     'ESCALATED',
+    // Waiting on the client admin's remarks — still an open (unresolved) ticket.
+    'WAITING_ON_CLIENT',
   ]);
 
   /** mean of a numeric array; null for an empty array (no NaN, no fabricated 0). */

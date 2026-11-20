@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils';
 import { clearAssumedContext, storedUserFromAuthMe } from '@/lib/auth-client';
 import { isStaleDeploymentError, recoverFromStaleDeployment } from '@/lib/stale-deploy';
 import { api } from '@/lib/api-client';
+import { readNextParam, returnPathForRole } from '@/lib/return-to';
 
 type Step = 'mobile' | 'otp';
 
@@ -31,6 +32,12 @@ function getRoleDashboard(role?: string): string {
   if (['SSS', 'WHOLESALER', 'SUB_STOCKIST'].includes(r)) return '/partner/select';
   if (['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'].includes(r)) return '/sales/dashboard';
   return '/admin/dashboard'; // CLIENT_ADMIN, MIS_USER
+}
+
+/** Post-sign-in destination: a safe `?next=` deep link the role may open, else the role's home. */
+function postLoginTarget(role?: string): string {
+  const next = typeof window !== 'undefined' ? returnPathForRole(readNextParam(window.location.search), role) : null;
+  return next ?? getRoleDashboard(role);
 }
 
 export default function LoginPage() {
@@ -78,7 +85,7 @@ export default function LoginPage() {
           // what the post-OTP path persists (id/name/role/phone + the partner header's
           // businessName/outletName when present; never the token — AF-6).
           localStorage.setItem('user', JSON.stringify(storedUserFromAuthMe({ ...res.data, role: res.data.role })));
-          window.location.href = getRoleDashboard(res.data.role);
+          window.location.href = postLoginTarget(res.data.role);
           return; // keep the loader up while the browser navigates away
         }
       } catch {
@@ -203,7 +210,7 @@ export default function LoginPage() {
       if (result.user) localStorage.setItem('user', JSON.stringify(result.user));
 
       toast.success('Logged in successfully!');
-      window.location.href = getRoleDashboard(result.role);
+      window.location.href = postLoginTarget(result.role);
     } catch (e) {
       // Deploy-skew stale action id → self-heal with a one-shot reload (audit F1).
       if (isStaleDeploymentError(e) && recoverFromStaleDeployment()) return;

@@ -51,6 +51,7 @@ import { OperatorBanner } from '@/components/operator/operator-banner';
 import { SiteFooter } from '@/components/layout/site-footer';
 import { AdminRouteGuard } from '@/components/rbac/admin-route-guard';
 import { DownloadsNavBadge } from '@/components/exports/downloads-nav-badge';
+import { NotificationBell } from '@/components/notifications/notification-bell';
 
 // All possible nav items — feature flags control which are visible
 const ALL_NAV_ITEMS = [
@@ -483,7 +484,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Notifications hidden until P7 notification worker (#21) */}
+            {/* In-app bell (shared notifications module). Admin rows today: support-ticket
+                assign / escalate / client-remarks events (SUPPORT-TICKETS.md). */}
+            <NotificationBell tone="light" fallbackUrl="/admin/dashboard" />
 
             {/* User menu */}
             <div className="relative">
