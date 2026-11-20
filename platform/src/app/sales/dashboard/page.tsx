@@ -402,7 +402,8 @@ export default function SalesDashboard() {
     const eligible = outlets.filter((o) => VISIBILITY_ELIGIBLE_OUTLET_TYPES.includes(o.type));
     const codes = eligible.map((o) => o.outletCode).filter(Boolean);
     if (codes.length === 0) { setVisibilityItems([]); return; }
-    const month = new Date().toISOString().slice(0, 7);
+    // The visibility month is the IST calendar month (the UTC month is still the previous one 00:00–05:30 IST on the 1st).
+    const month = istMonthKey(new Date());
     fetchOutletVisibilityStatuses(codes, month)
       .then((map) => {
         if (cancelled) return;

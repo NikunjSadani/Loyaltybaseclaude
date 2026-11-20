@@ -90,6 +90,8 @@ type VisibilityStatus = 'APPROVED' | 'UNDER_REVIEW' | 'PENDING' | null;
 
 type GroupVisibility =
   | { available: false }
+  // The request FAILED (network / server error) — shown as a visible error, never hidden (no silent pass-through).
+  | { available: false; loadError: true }
   | { available: true; visibilityEnabled: false }
   | {
       // AMOUNT_UPLOAD (Excel records) tenants — `mode` is absent on an older API.
@@ -511,7 +513,16 @@ function VisibilitySection({ state }: { state: Loadable<GroupVisibility> }) {
       </SectionShell>
     );
   }
-  // Unavailable OR master toggle OFF → hide the section entirely.
+  if ('loadError' in state && state.loadError) {
+    return (
+      <SectionShell icon={<Eye className="h-3 w-3" />} title="Visibility" testId="group-visibility-section">
+        <p role="alert" data-testid="group-visibility-error" className="m-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          Couldn&apos;t load visibility for your outlets right now. Please try again later.
+        </p>
+      </SectionShell>
+    );
+  }
+  // Unavailable OR master toggle OFF (a successful answer) → hide the section entirely.
   if (!state.available || state.visibilityEnabled !== true) return null;
   if (state.mode === 'PHOTO_APPROVAL') return <PhotoVisibilitySection state={state} />;
 
@@ -697,9 +708,11 @@ export default function GroupOverviewPage() {
       .then((res) => { if (!cancelled) setTargets(res.success ? res.data : { available: false }); })
       .catch(() => { if (!cancelled) setTargets({ available: false }); });
 
+    // Visibility: a FAILED request is shown as an error in the section (owner rule: no silent
+    // pass-through) — only a successful "not available / switched off" answer hides it.
     api.get<GroupVisibility>('/api/partner/group/visibility')
-      .then((res) => { if (!cancelled) setVisibility(res.success ? res.data : { available: false }); })
-      .catch(() => { if (!cancelled) setVisibility({ available: false }); });
+      .then((res) => { if (!cancelled) setVisibility(res.success && res.data ? res.data : { available: false, loadError: true }); })
+      .catch(() => { if (!cancelled) setVisibility({ available: false, loadError: true }); });
 
     api.get<GroupLeaderboard>('/api/partner/group/leaderboard')
       .then((res) => { if (!cancelled) setLeaderboard(res.success ? res.data : { available: false }); })

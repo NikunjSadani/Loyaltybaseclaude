@@ -37,6 +37,21 @@ describe('fetchOutletVisibilityStatuses', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('chunks at 250 codes so each URL stays well under header limits (server cap stays 2,000)', async () => {
+    expect(OUTLET_STATUS_CHUNK).toBe(250);
+    // Long, comma-bearing codes (worst case after per-code encoding) — 1,000 codes → 4 requests.
+    const codes = Array.from({ length: 1000 }, (_, i) => `BAJAJ-RLP,${String(i).padStart(6, '0')}-XX`);
+    const fetchMock = vi.fn(() => ok({}));
+    vi.stubGlobal('fetch', fetchMock);
+    await fetchOutletVisibilityStatuses(codes, '2026-11');
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    for (const call of fetchMock.mock.calls as unknown[][]) {
+      const url = String(call[0]);
+      expect(new URLSearchParams(url.split('?')[1]).get('outletCodes')!.split(',')).toHaveLength(250);
+      expect(url.length).toBeLessThan(8000);
+    }
+  });
+
   it('chunks a large roster and merges; one failed chunk → null', async () => {
     const codes = Array.from({ length: OUTLET_STATUS_CHUNK + 5 }, (_, i) => `C${i}`);
     const fetchMock = vi.fn()

@@ -38,6 +38,7 @@ import {
   VISIBILITY_REJECT_REASON_LABELS,
   visibilityStatusLabel,
   reviewActionLabel,
+  IMPORTED_REVIEW_ACTOR_LABEL,
   hasRejectedPhoto,
   type Pagination,
   type PhotoFenceStatus,
@@ -344,9 +345,11 @@ function photoHeightClass(single: boolean, tight: boolean): string {
 }
 
 function PhotoCard({
-  media: m, outletName, single, tight, showReview, reviewable, busy, disabled, onReview,
+  media: m, outletName, single, tight, showReview, reviewable, busy, disabled, onReview, captureRejected = false,
 }: {
   media: VisibilityMediaRef;
+  /** The WHOLE capture was rejected (reject-all) → a rejected photo's chip reads "Rejected", not "Needs re-take". */
+  captureRejected?: boolean;
   outletName: string;
   /** The only photo on the capture → shown larger and centred. */
   single: boolean;
@@ -423,6 +426,7 @@ function PhotoCard({
           busy={busy}
           disabled={disabled}
           onReview={onReview}
+          captureRejected={captureRejected}
         />
       )}
     </figure>
@@ -435,9 +439,10 @@ function PhotoCard({
  * controls — each calling the per-photo endpoint.
  */
 function PhotoReviewControls({
-  fieldId, review, reviewable, busy, disabled, onReview,
+  fieldId, review, reviewable, busy, disabled, onReview, captureRejected = false,
 }: {
   fieldId: string;
+  captureRejected?: boolean;
   review: VisibilityMediaRef['review'];
   reviewable: boolean;
   busy: boolean;
@@ -472,7 +477,7 @@ function PhotoReviewControls({
       </span>
     ) : status === 'REJECTED' ? (
       <span data-testid={`photo-review-${fieldId}`} className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600">
-        <XCircle className="w-3 h-3" /> {visibilityStatusLabel('CHANGES_REQUESTED')}
+        <XCircle className="w-3 h-3" /> {visibilityStatusLabel(captureRejected ? 'REJECTED' : 'CHANGES_REQUESTED')}
         {review?.reasonCode ? ` · ${reasonLabel(review.reasonCode)}` : ''}
       </span>
     ) : (
@@ -917,6 +922,7 @@ function CaptureReview({
                   // A whole-capture call in flight (busy) locks every per-photo control too.
                   disabled={busy || (photoBusy != null && photoBusy !== m.fieldId)}
                   onReview={reviewPhoto}
+                  captureRejected={detail.status === 'REJECTED'}
                 />
               ))}
             </div>
@@ -1105,6 +1111,11 @@ function reasonLabel(code: string): string {
  * already says "Waiting for review"). Never a blank name: an unknown reviewer reads "Unknown user".
  */
 function reviewedByLine(d: VisibilityCaptureDetail): string | null {
+  // Imported old-app capture: the old app approved it — never name the admin who ran the import.
+  if (d.imported) {
+    const at = d.lastReview?.at ?? d.reviewedAt;
+    return at ? `${IMPORTED_REVIEW_ACTOR_LABEL} on ${formatIst(at)}` : IMPORTED_REVIEW_ACTOR_LABEL;
+  }
   if (d.lastReview) return `Reviewed by ${d.lastReview.actorName || 'Unknown user'} on ${formatIst(d.lastReview.at)}`;
   const at = d.reviewedAt;
   if (d.status !== 'SUBMITTED' && at) return `Reviewed by ${d.approvedBy?.name || 'Unknown user'} on ${formatIst(at)}`;

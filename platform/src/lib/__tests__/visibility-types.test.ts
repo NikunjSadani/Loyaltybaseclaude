@@ -24,6 +24,7 @@ import {
   visibilityStatusLabel,
   captureUiStateLabel,
   reviewActionLabel,
+  actionableStateLabel,
   type SalesEligibleOutlet,
   type VisibilityFormField,
   type VisibilityFormSchema,
@@ -330,6 +331,23 @@ describe('plain visibility status words', () => {
     expect(VISIBILITY_SUMMARY_BUCKET_LABELS.in_review).toBe('Waiting for review');
     expect(VISIBILITY_SUMMARY_BUCKET_LABELS.pending).toBe('Not captured yet');
     expect(VISIBILITY_SUMMARY_BUCKET_LABELS.rejected).toBe('Rejected / Needs re-take');
+  });
+
+  it('actionableStateLabel: a late row the rep can still act on never reads "Missed"', () => {
+    expect(actionableStateLabel('late', null, true)).toBe('Not captured yet');
+    expect(actionableStateLabel('late', 'REJECTED', true)).toBe('Rejected');
+    expect(actionableStateLabel('late', 'CHANGES_REQUESTED', true)).toBe('Needs re-take');
+    // Window closed and nothing to do → Missed (the owner's rule).
+    expect(actionableStateLabel('late', null, false)).toBe('Missed');
+    expect(actionableStateLabel('rejected', 'CHANGES_REQUESTED', true)).toBe('Needs re-take');
+    expect(actionableStateLabel('due', null, true)).toBe('Not captured yet');
+  });
+
+  it('backfilled whole-capture rows read as the outcome only (no invented "all photos" click)', () => {
+    expect(reviewActionLabel({ action: 'CAPTURE_APPROVED_ALL', version: 1, statusAfter: 'APPROVED', backfilled: true })).toBe('Approved');
+    expect(reviewActionLabel({ action: 'CAPTURE_REJECTED_ALL', version: 1, statusAfter: 'REJECTED', backfilled: true })).toBe('Rejected');
+    expect(reviewActionLabel({ action: 'CHANGES_REQUESTED_RESULT', version: 1, statusAfter: 'CHANGES_REQUESTED', backfilled: true })).toBe('Sent back — "Needs re-take"');
+    expect(reviewActionLabel({ action: 'CAPTURE_APPROVED_ALL', version: 1, statusAfter: 'APPROVED', backfilled: false })).toBe('Approved all photos');
   });
 
   it('review-history action labels are plain words', () => {

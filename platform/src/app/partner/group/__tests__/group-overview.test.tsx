@@ -242,6 +242,19 @@ describe('GO Visibility — per-outlet capture status (read-only, flag-gated)', 
     expect(screen.queryByTestId('group-visibility-section')).not.toBeInTheDocument();
   });
 
+  it('a FAILED visibility request shows a visible error in the section (never hidden)', async () => {
+    stubFetch(AVAILABLE_PAYLOAD);
+    const base = global.fetch as unknown as (input: unknown) => Promise<unknown>;
+    vi.stubGlobal('fetch', vi.fn((input: unknown) =>
+      String(input).includes('/api/partner/group/visibility')
+        ? Promise.reject(new Error('network down'))
+        : base(input)));
+    render(<GroupOverviewPage />);
+
+    expect(await screen.findByTestId('group-visibility-error')).toHaveTextContent(/Couldn.t load visibility/);
+    expect(screen.getByTestId('group-visibility-section')).toBeInTheDocument();
+  });
+
   it('renders the counts summary + a status row per outlet when visibilityEnabled', async () => {
     stubFetch(AVAILABLE_PAYLOAD, { visibility: VISIBILITY_ON_PAYLOAD });
     render(<GroupOverviewPage />);

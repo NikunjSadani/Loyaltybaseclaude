@@ -123,11 +123,15 @@ export function buildPhotoCaptureTaskItems(
       // Lead word = the shared plain status words (VISIBILITY_STATUS_WORDS).
       const subtitle = isChangesRequested(o)
         ? `${VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED} — re-take the flagged photos${o.rejectionReason ? `: ${o.rejectionReason}` : ''}`
-        : o.windowState === 'rejected'
+        // A late row is still actionable here (it is in this task list) → never "Missed" (owner: Missed
+        // only once the window closes for good); it reads by its capture status instead.
+        : o.windowState === 'rejected' || (o.windowState === 'late' && o.status === 'REJECTED')
           ? `${VISIBILITY_STATUS_WORDS.REJECTED} — re-take the photos${o.rejectionReason ? `: ${o.rejectionReason}` : ''}`
-          : o.windowState === 'late'
-            ? `${VISIBILITY_STATUS_WORDS.MISSED} — this period's visibility photos were not approved in time`
-            : `${VISIBILITY_STATUS_WORDS.NOT_CAPTURED} — capture visibility this period`;
+          : o.windowState === 'late' && o.status === 'SUBMITTED'
+            ? `${VISIBILITY_STATUS_WORDS.SUBMITTED}`
+            : o.windowState === 'late'
+              ? `${VISIBILITY_STATUS_WORDS.NOT_CAPTURED} — overdue, capture visibility now`
+              : `${VISIBILITY_STATUS_WORDS.NOT_CAPTURED} — capture visibility this period`;
       return {
         id:       `vis-${o.outletId}`,
         title:    o.outletName,

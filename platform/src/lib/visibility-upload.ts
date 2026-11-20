@@ -140,7 +140,9 @@ function authHeader(): Record<string, string> {
  * @param outletCodes  Array of outletCode strings (matching Outlet.outletCode in DB)
  * @param month        YYYY-MM string
  */
-export const OUTLET_STATUS_CHUNK = 1000;
+// 250 codes per request (the server still accepts up to 2,000): each code is URL-encoded and some
+// outlet codes are long, so 250 keeps the query string well under proxy / header size limits (~8 KB).
+export const OUTLET_STATUS_CHUNK = 250;
 
 export async function fetchOutletVisibilityStatuses(
   outletCodes: string[],

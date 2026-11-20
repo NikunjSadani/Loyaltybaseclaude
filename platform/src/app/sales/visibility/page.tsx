@@ -29,6 +29,7 @@ import {
   isResubmitCapture,
   isChangesRequested,
   CAPTURE_UI_STATE_LABELS,
+  actionableStateLabel,
   type CaptureUiState, type SalesEligibleOutlet, type SalesEligibleResponse,
 } from '@/lib/visibility-types';
 import { useGifsySettings } from '@/lib/gifsy-settings';
@@ -373,7 +374,7 @@ function SalesVisibilityContent() {
                   <div className="flex items-center gap-2">
                     <p className="text-sm font-semibold text-gray-900 truncate min-w-0 flex-1">{o.outletName}</p>
                     <span className={`shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${cfg.badge}`}>
-                      {cfg.label}
+                      {actionableStateLabel(state, o.status ?? null, actionable)}
                     </span>
                   </div>
                   <p className="text-xs text-gray-400 mt-0.5 truncate">

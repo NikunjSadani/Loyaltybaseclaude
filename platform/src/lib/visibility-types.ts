@@ -259,7 +259,8 @@ export const VISIBILITY_REJECT_REASON_LABELS: Record<VisibilityRejectReasonCode,
 /**
  * THE plain status words for Visibility (owner 2026-11-20) — the ONE place admin, sales and
  * partner UI take a status label from. Codes stay in data; only the words shown change. The
- * server-side Excel export uses the same words. Two extra words cover "no capture" rows:
+ * server-side Excel export's wording is NOT changed on this branch — it is handled in the report
+ * branch. Two extra words cover "no capture" rows:
  * NOT_CAPTURED (window still open) and MISSED (window closed without an approved capture).
  */
 export const VISIBILITY_STATUS_WORDS = {
@@ -315,6 +316,21 @@ export function captureUiStateLabel(
 ): string {
   if (state === 'rejected' && status === 'CHANGES_REQUESTED') return VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED;
   return CAPTURE_UI_STATE_LABELS[state] ?? state;
+}
+
+/**
+ * Label for a row the rep can STILL act on (a task / a capture button). Owner rule: "Missed" only
+ * once the window is closed for good — a `late` row that is still actionable is not missed yet,
+ * so it reads by its capture status instead ("Not captured yet" / "Rejected" / "Needs re-take" /
+ * "Waiting for review"). A non-actionable row keeps the normal state label.
+ */
+export function actionableStateLabel(
+  state: CaptureUiState,
+  status: VisibilityCaptureStatus | null | undefined,
+  actionable: boolean,
+): string {
+  if (state === 'late' && actionable) return visibilityStatusLabel(status ?? null);
+  return captureUiStateLabel(state, status ?? null);
 }
 
 /**
@@ -745,8 +761,26 @@ export interface VisibilityReviewEvent {
   createdAt: string;
 }
 
-/** Plain-words description of a review-history action. */
-export function reviewActionLabel(e: Pick<VisibilityReviewEvent, 'action' | 'version' | 'statusAfter'>): string {
+/**
+ * Who "reviewed" an imported old-app capture — the SAME text the API and the migration backfill use
+ * (api/src/visibility/visibility-review-events.ts IMPORTED_REVIEW_ACTOR_LABEL). The row's approvedBy is
+ * only the Gifsy admin who ran the import, so it is never shown as the reviewer.
+ */
+export const IMPORTED_REVIEW_ACTOR_LABEL = 'Imported — old app approval';
+
+/**
+ * Plain-words description of a review-history action. A backfilled whole-capture row is a SUMMARY of
+ * the capture's outcome rebuilt from earlier records (not a known "approved all photos" click), so it
+ * reads as the outcome only.
+ */
+export function reviewActionLabel(
+  e: Pick<VisibilityReviewEvent, 'action' | 'version' | 'statusAfter'> & { backfilled?: boolean },
+): string {
+  if (e.backfilled) {
+    if (e.action === 'CAPTURE_APPROVED_ALL') return 'Approved';
+    if (e.action === 'CAPTURE_REJECTED_ALL') return 'Rejected';
+    if (e.action === 'CHANGES_REQUESTED_RESULT') return `Sent back — "${VISIBILITY_STATUS_WORDS.CHANGES_REQUESTED}"`;
+  }
   switch (e.action) {
     case 'SUBMITTED': return 'Submitted photos';
     case 'RESUBMITTED': return `Re-took photos (version ${e.version})`;
@@ -766,6 +800,8 @@ export function reviewActionLabel(e: Pick<VisibilityReviewEvent, 'action' | 'ver
 export interface VisibilityCaptureDetail extends VisibilityCapture {
   /** Permanent review timeline, newest first (absent on an older API). */
   reviewHistory?: VisibilityReviewEvent[];
+  /** Imported old-app capture (photos under /vendor-import/) — reviewer = the old app, never an admin. */
+  imported?: boolean;
   /** Latest review decision of the CURRENT version; null = not reviewed yet. */
   lastReview?: { actorName: string | null; actorUserId: string | null; at: string; action: VisibilityReviewAction } | null;
   media: VisibilityMediaRef[];

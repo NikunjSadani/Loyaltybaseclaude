@@ -11,6 +11,7 @@ import {
 import { KYCStatus } from '@/types';
 import { kycTaskHrefFor } from '@/lib/sales-kyc-link';
 import { fetchTaskConfig, DEFAULT_TASK_CONFIG, type TaskConfig } from '@/lib/task-config';
+import { istMonthKey } from '@/lib/ist-date';
 import {
   fetchOutletVisibilityStatuses,
   VISIBILITY_ELIGIBLE_OUTLET_TYPES,
@@ -298,7 +299,8 @@ export default function TasksPage() {
     setRoleState(getRole());
 
     const headers = authHeader();
-    const currentMonth = new Date().toISOString().slice(0, 7);
+    // IST calendar month (same rule as the sales dashboard) — never the UTC month.
+    const currentMonth = istMonthKey(new Date());
 
     // Fetch eligible schemes (real, roster-based §13.4), outlets, and task config in
     // parallel. schemeApi.listSalesEligible() uses the api client (cookie auth) — no token read.
