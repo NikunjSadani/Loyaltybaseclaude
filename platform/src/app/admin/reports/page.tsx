@@ -8,7 +8,8 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
 import { DownloadActionStatus } from '@/components/exports/download-action-status'
-import { RedemptionReportCard } from './redemption-report-card'
+import { REDEMPTION_REPORT_HIDDEN_ROLES, RedemptionReportCard } from './redemption-report-card'
+import { useAdminSession } from '@/lib/admin-session'
 
 interface ReportConfig {
   id: string
@@ -150,7 +151,11 @@ export default function ReportsPage() {
   // (GIFSY_ADMIN / MIS_USER / CLIENT_ADMIN), so the tile shows exactly when the report would answer. Hidden until the
   // probe answers and on any failure — switch-off tenants (Deoleo) see the list unchanged.
   const enabled = useEnabledProbes(allReports)
-  const reports = allReports.filter((r) => !r.enabledProbe || enabled[r.enabledProbe] === true)
+  // The Redemption report is GIFSY_ADMIN / CLIENT_ADMIN only (API @Roles) — hidden for MIS users.
+  const { role } = useAdminSession()
+  const reports = allReports
+    .filter((r) => !r.enabledProbe || enabled[r.enabledProbe] === true)
+    .filter((r) => r.custom !== 'redemption' || !REDEMPTION_REPORT_HIDDEN_ROLES.includes(role))
   const categories = ['all', 'operational', 'business', 'finance', 'engagement']
   const filtered = activeCategory === 'all' ? reports : reports.filter(r => r.category === activeCategory)
 

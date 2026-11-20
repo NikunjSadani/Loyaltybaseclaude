@@ -3,11 +3,13 @@
 /**
  * "Redemption report" card on the admin Reports hub (owner-approved 2026-11-20, all clients).
  *
- * Filters: Redeemed on From / To (IST days, default = this IST month to date), status, reward type, zone, state.
- * The live line under the filters comes from GET /api/reports/redemptions (orders · points · ₹ for the same filters,
- * the client's zone/state values, and whether the file will be prepared in the background). The button downloads
- * GET /api/reports/redemptions/export through the shared download action (200 → file, 202 → Downloads page,
- * 404 → "0 redemptions matched these filters.").
+ * Filters: Redeemed on From / To (IST days, default = this IST month to date; a cleared date snaps back to that default
+ * so the screen always shows what will be used), status, reward type, zone, state.
+ * The live line comes from GET /api/reports/redemptions (orders · points DEDUCTED · ₹ for the same filters, points
+ * requested, the client's zone/state values, its ASM-level label, and whether the file will be prepared in the
+ * background). Download is enabled only when that line loaded and shows at least one order — otherwise the reason is
+ * shown (no client chosen for an un-assumed Gifsy admin, 0 orders, server error, invalid range).
+ * Roles: GIFSY_ADMIN / GIFSY_STAFF / CLIENT_ADMIN (the API answers 403 to MIS_USER — the card is hidden for it).
  */
 import { useEffect, useMemo, useState } from 'react'
 import { Download, FileSpreadsheet, RefreshCw } from 'lucide-react'
@@ -18,6 +20,8 @@ import { DownloadActionStatus } from '@/components/exports/download-action-statu
 
 export const REDEMPTION_SUMMARY_URL = '/api/reports/redemptions'
 export const REDEMPTION_EXPORT_URL = '/api/reports/redemptions/export'
+/** Roles that may NOT use this report (the API's @Roles excludes them). */
+export const REDEMPTION_REPORT_HIDDEN_ROLES: readonly string[] = ['MIS_USER']
 
 const STATUS_OPTIONS: Array<[string, string]> = [
   ['', 'All statuses'],
@@ -40,11 +44,13 @@ const TYPE_OPTIONS: Array<[string, string]> = [
 
 interface Summary {
   orders: number
-  points: number
+  pointsDeducted: number
   valueInr: number
+  pointsRequested: number
   preparedInBackground: boolean
   zones: string[]
   states: string[]
+  asmLevelLabel: string | null
 }
 
 /** Today and the 1st of this month, as IST calendar days (YYYY-MM-DD). */
@@ -54,28 +60,28 @@ export function istMonthToDate(now = new Date()): { from: string; to: string } {
 }
 
 const inr = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
+const num = (n: number) => n.toLocaleString('en-IN')
 
 const fieldClass = 'w-full text-xs border border-gray-200 rounded px-2 py-1.5 bg-white'
 
 export function RedemptionReportCard() {
   const dl = useDownloadAction()
-  const initial = useMemo(() => istMonthToDate(), [])
-  const [from, setFrom] = useState(initial.from)
-  const [to, setTo] = useState(initial.to)
+  const defaults = useMemo(() => istMonthToDate(), [])
+  const [from, setFrom] = useState(defaults.from)
+  const [to, setTo] = useState(defaults.to)
   const [status, setStatus] = useState('')
   const [rewardType, setRewardType] = useState('')
   const [zone, setZone] = useState('')
   const [state, setState] = useState('')
   const [summary, setSummary] = useState<Summary | null>(null)
   const [summaryError, setSummaryError] = useState<string | null>(null)
-  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [summaryLoading, setSummaryLoading] = useState(true)
+  const [forbidden, setForbidden] = useState(false)
 
-  const rangeError = from && to && from > to ? 'The From date must be on or before the To date.' : null
+  const rangeError = from > to ? 'The From date must be on or before the To date.' : null
 
   const query = useMemo(() => {
-    const p = new URLSearchParams()
-    if (from) p.set('from', from)
-    if (to) p.set('to', to)
+    const p = new URLSearchParams({ from, to })
     if (status) p.set('status', status)
     if (rewardType) p.set('rewardType', rewardType)
     if (zone) p.set('zone', zone)
@@ -87,38 +93,55 @@ export function RedemptionReportCard() {
   useEffect(() => {
     if (rangeError) return
     let cancelled = false
+    setSummaryLoading(true)
     const timer = setTimeout(() => {
-      setSummaryLoading(true)
       Promise.resolve()
         .then(() => fetch(`${REDEMPTION_SUMMARY_URL}?${query}`))
         .then(async (res) => {
           let body: { data?: Summary; error?: string; message?: string | string[] } | null = null
           try { body = res && typeof res.json === 'function' ? await res.json() : null } catch { body = null }
           if (cancelled) return
+          if (res?.status === 403) { setForbidden(true); return }
           if (res?.ok && body?.data && typeof body.data.orders === 'number') {
             setSummary(body.data)
             setSummaryError(null)
           } else {
             const msg = body?.error ?? (Array.isArray(body?.message) ? body?.message.join(' ') : body?.message)
             setSummary(null)
-            setSummaryError(msg || "Couldn't load the summary for these filters.")
+            setSummaryError(msg || "Couldn't load the summary for these filters — try again.")
           }
         })
         .catch(() => {
-          if (!cancelled) { setSummary(null); setSummaryError("Couldn't reach the server for the summary.") }
+          if (!cancelled) { setSummary(null); setSummaryError("Couldn't reach the server for the summary — try again.") }
         })
         .finally(() => { if (!cancelled) setSummaryLoading(false) })
     }, 300)
     return () => { cancelled = true; clearTimeout(timer) }
   }, [query, rangeError])
 
+  if (forbidden) return null
+
+  // Why Download is off (shown under the button). null = ready.
+  const blockedReason = rangeError
+    ? rangeError
+    : summaryLoading
+      ? null // brief — the button stays disabled while counting
+      : summaryError
+        ? summaryError
+        : summary && summary.orders === 0
+          ? 'No redemptions match these filters — nothing to download.'
+          : null
+  const canDownload = !rangeError && !summaryLoading && !summaryError && !!summary && summary.orders > 0
+
   const handleExport = () => {
-    if (rangeError) return
+    if (!canDownload) return
     void dl.run(`${REDEMPTION_EXPORT_URL}?${query}`, { fallbackFileName: `redemption-report-${from}-to-${to}.xlsx` })
   }
 
   const zones = summary?.zones ?? []
   const states = summary?.states ?? []
+  const asmLevel = summary?.asmLevelLabel ?? null
+  const summaryBy = ['zone', 'state', ...(asmLevel ? [asmLevel] : []), 'reward', 'status'].join(', ')
 
   return (
     <Card className="flex flex-col sm:col-span-2" data-testid="redemption-report-card">
@@ -132,21 +155,35 @@ export function RedemptionReportCard() {
             <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-purple-100 text-purple-800">Business</span>
           </div>
         </div>
-        <CardDescription className="text-xs mt-2">
-          Every redemption order in the range: reward, points and ₹ value, current status with the time of each stage,
-          outlet, sales hierarchy, delivery tracking and cash payout reference — plus a status-history sheet and a summary
-          by zone, state, ASM, reward and status.
+        <CardDescription className="text-xs mt-2" data-testid="redemption-description">
+          Every redemption order in the range: reward, points deducted and ₹ value, current status with the time of each
+          stage, outlet, sales hierarchy, delivery tracking and cash payout reference — plus a status-history sheet and a
+          summary by {summaryBy}.
         </CardDescription>
       </CardHeader>
       <CardContent className="pt-0 flex-1 flex flex-col justify-end gap-2">
         <div className="grid grid-cols-2 gap-2">
           <label className="text-xs text-gray-500">
             <span className="mb-1 block">Redeemed from</span>
-            <input type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} className={fieldClass} aria-label="Redeemed from" />
+            <input
+              type="date"
+              value={from}
+              max={defaults.to}
+              onChange={(e) => setFrom(e.target.value || defaults.from)}
+              className={fieldClass}
+              aria-label="Redeemed from"
+            />
           </label>
           <label className="text-xs text-gray-500">
             <span className="mb-1 block">Redeemed to</span>
-            <input type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} className={fieldClass} aria-label="Redeemed to" />
+            <input
+              type="date"
+              value={to}
+              max={defaults.to}
+              onChange={(e) => setTo(e.target.value || defaults.to)}
+              className={fieldClass}
+              aria-label="Redeemed to"
+            />
           </label>
           <label className="text-xs text-gray-500">
             <span className="mb-1 block">Status</span>
@@ -179,35 +216,38 @@ export function RedemptionReportCard() {
         </div>
 
         <div className="text-xs min-h-[2rem]" data-testid="redemption-summary" aria-live="polite">
-          {rangeError ? (
-            <p className="text-red-700" role="alert">{rangeError}</p>
-          ) : summaryError ? (
-            <p className="text-amber-800">{summaryError}</p>
-          ) : summary ? (
+          {rangeError ? null : summaryLoading ? (
+            <p className="text-gray-400">Counting orders…</p>
+          ) : summary && !summaryError ? (
             <>
               <p className="text-gray-700">
-                <span className="font-semibold">{summary.orders.toLocaleString('en-IN')}</span> orders ·{' '}
-                {summary.points.toLocaleString('en-IN')} points · {inr(summary.valueInr)}
+                <span className="font-semibold">{num(summary.orders)}</span> orders · {num(summary.pointsDeducted)} points
+                deducted · {inr(summary.valueInr)}
               </p>
-              {summary.orders === 0 && <p className="text-gray-500">No redemptions match these filters.</p>}
+              {summary.pointsRequested !== summary.pointsDeducted && (
+                <p className="text-gray-500">{num(summary.pointsRequested)} points requested (incl. unconfirmed / refunded orders)</p>
+              )}
               {summary.orders > 0 && summary.preparedInBackground && (
-                <p className="text-gray-500">More than 31 days — the file will be prepared under Downloads.</p>
+                <p className="text-gray-500">Large file — it will be prepared under Downloads.</p>
               )}
             </>
-          ) : summaryLoading ? (
-            <p className="text-gray-400">Counting orders…</p>
           ) : null}
         </div>
 
         <Button
           onClick={handleExport}
-          disabled={dl.blocked || !!rangeError}
+          disabled={dl.blocked || !canDownload}
           size="sm"
           className="w-full bg-[var(--brand-primary)] hover:bg-[#a00d24] text-white text-xs"
         >
           {dl.busy ? <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> : <Download className="h-3 w-3 mr-1" />}
           {downloadButtonLabel(dl, 'Download redemption report')}
         </Button>
+        {blockedReason && (
+          <p className={`text-xs ${rangeError ? 'text-red-700' : 'text-amber-800'}`} role="alert" data-testid="redemption-blocked">
+            {blockedReason}
+          </p>
+        )}
         <DownloadActionStatus action={dl} />
       </CardContent>
     </Card>
