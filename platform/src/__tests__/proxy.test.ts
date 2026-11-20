@@ -813,6 +813,24 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
     expect(sib.status).toBe(307);
   });
 
+  it('security: client-sent server-to-server headers are STRIPPED before the /api rewrite (x-gifsy-no-first-use, x-client-*, secret)', async () => {
+    mockJwt.mockResolvedValue({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
+    const res = await run(makeReq('/api/wallet/me', {
+      cookies: { token: 'valid' },
+      headers: {
+        'x-gifsy-no-first-use': '1',
+        'x-internal-proxy-secret': 'guess',
+        'x-client-user-agent': 'forged',
+        'x-client-ua-platform': '"forged"',
+        'x-client-ua-mobile': '?1',
+      },
+    }));
+    expect(isNext(res)).toBe(true);
+    for (const h of ['x-gifsy-no-first-use', 'x-internal-proxy-secret', 'x-client-user-agent', 'x-client-ua-platform', 'x-client-ua-mobile']) {
+      expect(fwd(res, h)).toBeNull();
+    }
+  });
+
   it('B1: a CLIENT-sent x-session-refreshed is stripped (cannot fake a proxy rotation)', async () => {
     mockJwt.mockResolvedValue({ payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } } as never);
     const res = await run(makeReq('/admin/users', { cookies: { token: 'valid' }, headers: { 'x-session-refreshed': '1' } }));

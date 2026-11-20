@@ -145,6 +145,23 @@ describe('refreshTokensViaBackend — typed outcome (dead vs transient)', () => 
     expect(sent).toBeLessThanOrEqual(Date.now() + 4_000);
   });
 
+  it('security: sends x-internal-proxy-secret ONLY when INTERNAL_PROXY_SECRET is configured (server-side env)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve({ data: { accessToken: 'a' } }) });
+    vi.stubGlobal('fetch', fetchMock);
+    const prev = process.env.INTERNAL_PROXY_SECRET;
+    try {
+      delete process.env.INTERNAL_PROXY_SECRET;
+      await refreshTokensViaBackend('r1');
+      expect(fetchMock.mock.calls[0][1].headers['x-internal-proxy-secret']).toBeUndefined();
+      process.env.INTERNAL_PROXY_SECRET = 'shared-secret-0123456789' + String.fromCharCode(13); // trailing CR (Windows secret) is trimmed
+      await refreshTokensViaBackend('r1');
+      expect(fetchMock.mock.calls[1][1].headers['x-internal-proxy-secret']).toBe('shared-secret-0123456789');
+    } finally {
+      if (prev === undefined) delete process.env.INTERNAL_PROXY_SECRET;
+      else process.env.INTERNAL_PROXY_SECRET = prev;
+    }
+  });
+
   it('S-H1a: forwards the browser UA + client hints as x-client-*, and omits them when absent', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve({ data: { accessToken: 'a' } }) });
     vi.stubGlobal('fetch', fetchMock);

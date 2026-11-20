@@ -83,6 +83,13 @@ const INTERNAL_REQUEST_HEADERS = [
   'x-user-role',
   'x-partner-id',
   'x-session-refreshed', // SESSION_REFRESHED_HEADER — set only by the proxy's silent refresh
+  // Server-to-server headers the API trusts only with the internal secret — a browser must never be able
+  // to send them through our /api rewrite (security re-audit, 2026-11-20).
+  'x-gifsy-no-first-use',
+  'x-internal-proxy-secret',
+  'x-client-user-agent',
+  'x-client-ua-platform',
+  'x-client-ua-mobile',
 ] as const
 
 export const ROLE_ROUTES: Record<string, string[]> = {

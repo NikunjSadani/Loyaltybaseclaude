@@ -133,6 +133,17 @@ export function clientHintsFrom(headers: { get(name: string): string | null }): 
   };
 }
 
+/**
+ * The server-to-server secret shared with the API (env INTERNAL_PROXY_SECRET on BOTH services). The API only
+ * honours `x-client-*` and `x-gifsy-no-first-use` when it is present and correct (the API is public, so a
+ * browser could otherwise forge them). Server-side only — never sent to, or readable by, the browser.
+ * Empty when unset → the header is omitted and the API falls back to its fail-safe behaviour.
+ */
+export function internalSecretHeaders(): Record<string, string> {
+  const secret = (process.env.INTERNAL_PROXY_SECRET ?? '').trim();
+  return secret ? { 'x-internal-proxy-secret': secret } : {};
+}
+
 export async function refreshTokensViaBackend(refreshToken: string, client: ClientHints = {}): Promise<RefreshOutcome> {
   try {
     for (let attempt = 0; ; attempt++) {
@@ -142,6 +153,7 @@ export async function refreshTokensViaBackend(refreshToken: string, client: Clie
           'Content-Type': 'application/json',
           // The backend must not commit this rotation after we may have given up on it (F1).
           'x-refresh-budget-ms': String(REFRESH_CLIENT_DEADLINE_MS),
+          ...internalSecretHeaders(),
           ...(client.userAgent ? { 'x-client-user-agent': client.userAgent } : {}),
           ...(client.platform ? { 'x-client-ua-platform': client.platform } : {}),
           ...(client.mobile ? { 'x-client-ua-mobile': client.mobile } : {}),

@@ -7,6 +7,7 @@ import { ActivityTrackingService } from '../../activity/activity-tracking.servic
 import { activityContextFromRequest, isBackgroundRequest } from '../../activity/client-medium';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
 import { SESSION_TTL_DAYS } from '../auth.constants';
+import { INTERNAL_SECRET_HEADER, isTrustedInternalCall } from '../../common/internal-call';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
@@ -101,7 +102,8 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
    *    carries it; a sid-less token could only still be valid within ACCESS_TTL of that deploy.)
    *  - M1: a server-side call made in the SAME request in which the proxy just rotated the session
    *    (`x-gifsy-no-first-use: 1`, sent by the Next server actions in that case) is not proof the
-   *    browser received the new session — it must not count as use.
+   *    browser received the new session — it must not count as use. Only trusted with the internal
+   *    server-to-server secret (common/internal-call.ts).
    *  - Set-once and cheap: `WHERE firstUsedAt IS NULL` (concurrency-safe) and a per-instance memo, so
    *    each session costs at most one write per API instance — never a write per request. AWAITED, so
    *    the mark lands before the request that used the session proceeds.
@@ -112,7 +114,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     if (!payload.sid || payload.sid !== sessionId) return;
     if (this.firstUseMarked.has(sessionId)) return;
     const headers = ((req as { headers?: Record<string, unknown> } | undefined)?.headers ?? {}) as Record<string, unknown>;
-    if (headers['x-gifsy-no-first-use'] === '1') return;
+    // Honoured ONLY from our own Next server (shared secret, constant-time): the API is public, and a
+    // forged header would let a thief keep a session "unused" and evade reuse detection. Fail-safe: no
+    // INTERNAL_PROXY_SECRET configured → never honoured → first use is always marked.
+    if (headers['x-gifsy-no-first-use'] === '1' && isTrustedInternalCall(headers[INTERNAL_SECRET_HEADER])) return;
     try {
       await this.prisma.userSession.updateMany({
         where: { id: sessionId, firstUsedAt: null },

@@ -23,6 +23,7 @@ import {
   accessCookieMaxAge,
   refreshTokensViaBackend,
   clientHintsFrom,
+  internalSecretHeaders,
   sessionCookieOptions as cookieOptions,
 } from '@/lib/auth-refresh';
 
@@ -232,7 +233,7 @@ async function proxyRotatedThisRequest(): Promise<boolean> {
  * response can still be lost). Flag it so the API's first-use mark skips it.
  */
 async function noFirstUseIfJustRotated(): Promise<Record<string, string>> {
-  return (await proxyRotatedThisRequest()) ? { 'x-gifsy-no-first-use': '1' } : {};
+  return (await proxyRotatedThisRequest()) ? { 'x-gifsy-no-first-use': '1', ...internalSecretHeaders() } : {};
 }
 
 /** Value of one cookie in a raw `Cookie:` header (the ORIGINAL request cookies). */

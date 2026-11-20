@@ -4,6 +4,7 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { sessionFingerprint } from './session-fingerprint';
+import { INTERNAL_SECRET_HEADER, isTrustedInternalCall } from '../common/internal-call';
 import { SendOtpDto, VerifyOtpDto, RefreshTokenDto, AssumeTenantDto } from './dto/auth.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { Public, Roles } from '../common/decorators/roles.decorator';
@@ -63,7 +64,9 @@ export class AuthController {
     // Secondary, shorten-only cap (epoch ms) for time lost before receipt (cold start) — see service.
     @Headers('x-refresh-deadline') deadlineHeader?: string,
     // S-H1(a): the BROWSER's User-Agent + UA client hints, forwarded by the Next proxy / route handler
-    // (this request's own User-Agent is Node's). A direct caller falls back to its own User-Agent.
+    // (this request's own User-Agent is Node's). Honoured ONLY with the server-to-server secret
+    // (x-internal-proxy-secret, see common/internal-call.ts); otherwise the request's own User-Agent is used.
+    @Headers(INTERNAL_SECRET_HEADER) internalSecret?: string,
     @Headers('x-client-user-agent') clientUa?: string,
     @Headers('x-client-ua-platform') clientPlatform?: string,
     @Headers('x-client-ua-mobile') clientMobile?: string,
@@ -74,15 +77,19 @@ export class AuthController {
     const budgetMs = Number.isFinite(budget) && budget > 0 ? budget : undefined;
     const deadline = Number(deadlineHeader);
     const clientDeadlineMs = Number.isFinite(deadline) && deadline > 0 ? deadline : undefined;
-    const fingerprint = sessionFingerprint({
-      userAgent: clientUa || ownUa,
-      platform: clientPlatform,
-      mobile: clientMobile,
-    });
-    // L1: lets staging confirm the headers actually arrive through the proxy chain.
+    const trusted = isTrustedInternalCall(internalSecret);
+    // Trusted Next server: fingerprint the BROWSER from x-client-* — and if that is missing (an older frontend
+    // during a deploy window) the fingerprint is UNKNOWN (null), which can never be handed back but never kills
+    // either (M-2). Untrusted / direct caller: its own User-Agent (client x-client-* is ignored).
+    const fingerprint = trusted
+      ? clientUa
+        ? sessionFingerprint({ userAgent: clientUa, platform: clientPlatform, mobile: clientMobile })
+        : null
+      : sessionFingerprint({ userAgent: ownUa });
+    // L1: lets staging confirm the headers actually arrive through the proxy chain (never logs values).
     this.logger.debug(
       `refresh: x-refresh-budget-ms=${budgetMs ?? 'absent'} x-refresh-deadline=${clientDeadlineMs !== undefined ? 'present' : 'absent'} ` +
-        `x-client-user-agent=${clientUa ? 'present' : 'absent'}`,
+        `internal=${trusted ? 'trusted' : 'untrusted'} x-client-user-agent=${clientUa ? 'present' : 'absent'}`,
     );
     return this.authService.refreshToken(dto.refreshToken, { budgetMs, receivedAt, clientDeadlineMs, fingerprint });
   }

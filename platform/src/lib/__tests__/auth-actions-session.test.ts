@@ -118,9 +118,19 @@ describe('refreshSession — B1 no double rotation + B3 transient', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await assumeTenantAction('acme');
+    const prev = process.env.INTERNAL_PROXY_SECRET;
+    process.env.INTERNAL_PROXY_SECRET = 'shared-secret-0123456789';
+    try {
+      await assumeTenantAction('acme');
+    } finally {
+      if (prev === undefined) delete process.env.INTERNAL_PROXY_SECRET;
+      else process.env.INTERNAL_PROXY_SECRET = prev;
+    }
 
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: 'Bearer B-access', 'x-gifsy-no-first-use': '1' });
+    // The flag is only honoured by the API together with the internal secret.
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      Authorization: 'Bearer B-access', 'x-gifsy-no-first-use': '1', 'x-internal-proxy-secret': 'shared-secret-0123456789',
+    });
   });
 
   it('M1: a normal server action (no rotation in this request) does NOT send the flag', async () => {

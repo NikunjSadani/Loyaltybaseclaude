@@ -115,13 +115,47 @@ describe('JwtStrategy', () => {
       expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
     });
 
-    it('FU5 (M1): a server-side call flagged x-gifsy-no-first-use (same-request proxy rotation) does NOT count as use', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
-      await strategy.validate(
-        { headers: { ...REQ.headers, 'x-gifsy-no-first-use': '1' } },
-        { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' } as any,
-      );
-      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+    it('FU5 (M1): a server-side call flagged x-gifsy-no-first-use WITH the internal secret does NOT count as use', async () => {
+      const prev = process.env.INTERNAL_PROXY_SECRET;
+      process.env.INTERNAL_PROXY_SECRET = 'test-internal-secret-0123456789';
+      try {
+        mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+        await strategy.validate(
+          { headers: { ...REQ.headers, 'x-gifsy-no-first-use': '1', 'x-internal-proxy-secret': 'test-internal-secret-0123456789' } },
+          { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' } as any,
+        );
+        expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+      } finally {
+        if (prev === undefined) delete process.env.INTERNAL_PROXY_SECRET;
+        else process.env.INTERNAL_PROXY_SECRET = prev;
+      }
+    });
+
+    it('FU5b (security): a FORGED x-gifsy-no-first-use (no / wrong secret, or secret not configured) is ignored → use IS marked', async () => {
+      const prev = process.env.INTERNAL_PROXY_SECRET;
+      try {
+        for (const [env, presented] of [
+          [undefined, 'whatever-secret-value-123'],
+          ['test-internal-secret-0123456789', 'wrong-secret-value-0123456789x'],
+          ['test-internal-secret-0123456789', undefined],
+        ] as Array<[string | undefined, string | undefined]>) {
+          if (env === undefined) delete process.env.INTERNAL_PROXY_SECRET;
+          else process.env.INTERNAL_PROXY_SECRET = env;
+          const s = new JwtStrategy(makeConfig('supersecret'), mockPrisma as any, mockActivity as any);
+          mockPrisma.userSession.updateMany.mockClear();
+          mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+          await s.validate(
+            { headers: { ...REQ.headers, 'x-gifsy-no-first-use': '1', ...(presented ? { 'x-internal-proxy-secret': presented } : {}) } },
+            { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' } as any,
+          );
+          expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+            where: { id: 'sess_1', firstUsedAt: null }, data: { firstUsedAt: expect.any(Date) },
+          });
+        }
+      } finally {
+        if (prev === undefined) delete process.env.INTERNAL_PROXY_SECRET;
+        else process.env.INTERNAL_PROXY_SECRET = prev;
+      }
     });
 
     it('FU6 (M3): the session lookup selects only id + expiresAt (no dependency on newer columns)', async () => {
