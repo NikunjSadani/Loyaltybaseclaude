@@ -47,11 +47,15 @@ describe('returnPathForRole', () => {
   it('an unsafe next is never honoured', () => {
     expect(returnPathForRole('//evil.example/admin', 'CLIENT_ADMIN')).toBeNull();
   });
-  it('the Visibility photo viewer is a return target for admin + sales roles (not partner / MIS)', () => {
+  it('the Visibility photo viewer is a return target for EVERY signed-in role (the page says "no access")', () => {
     const photo = '/visibility/photo?key=visibility-media%2Fbajaj%2Fa.jpg';
-    for (const r of ['CLIENT_ADMIN', 'GIFSY_ADMIN', 'GIFSY_STAFF', 'SALES_ISR', 'SALES_SO']) expect(returnPathForRole(photo, r)).toBe(photo);
-    expect(returnPathForRole(photo, 'WHOLESALER')).toBeNull();
-    expect(returnPathForRole(photo, 'MIS_USER')).toBeNull();
+    for (const r of ['CLIENT_ADMIN', 'GIFSY_ADMIN', 'GIFSY_STAFF', 'SALES_ISR', 'SALES_SO', 'MIS_USER', 'WHOLESALER', 'SSS', 'VENDOR']) {
+      expect(returnPathForRole(photo, r)).toBe(photo);
+    }
+    // Only the viewer page itself — not a look-alike prefix, and never an unsafe target.
+    expect(returnPathForRole('/visibility/photos-admin', 'MIS_USER')).toBeNull();
+    expect(returnPathForRole('/visibility', 'MIS_USER')).toBeNull();
+    expect(returnPathForRole('//evil.example/visibility/photo?key=x', 'MIS_USER')).toBeNull();
   });
 });
 
