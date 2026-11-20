@@ -156,7 +156,7 @@ describe('GO — Partner Group Overview (read-only)', () => {
     });
     render(<GroupOverviewPage />);
     expect((await screen.findByTestId('group-owed-points')).textContent).toBe(
-      'Outlets in this group owe 2,986 pts — repaid from their next earnings (not counted above).',
+      'Wallets in this group owe 2,986 pts — repaid from their next earnings (not counted above).',
     );
     expect(screen.getByTestId('group-outlet-negative').textContent).toBe('Owed — repaid from next earnings');
     const rows = screen.getAllByTestId('group-outlet-row');

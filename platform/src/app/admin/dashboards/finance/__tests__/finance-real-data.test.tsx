@@ -78,7 +78,7 @@ describe('Admin Finance Dashboard — real data', () => {
     }));
     render(<FinanceDashboardPage />);
     expect(
-      await screen.findByText(/Liability counts positive balances only; 2,986 pts owed by 2 outlets with a negative balance are shown separately\./),
+      await screen.findByText(/Liability counts positive balances only — 2,986 pts owed by 2 wallets with a negative balance are not included\./),
     ).toBeInTheDocument();
   });
 

@@ -79,7 +79,7 @@ export interface ReversalAttention {
   }>;
   expiryOffsetCappedTotal?: number;
   /** Fix round 3: V2 reversals that booked debt on a credit whose expiry history isn't linked (no lot). */
-  expiryUntracked?: Array<{ at: string; creditReversalId: string; walletId: string | null; outletCode: string | null; owed: number | null; action: string }>;
+  expiryUntracked?: Array<{ at: string; creditReversalId: string; walletId: string | null; outletCode: string | null; owed: number | null; recovered?: number | null; action: string }>;
   expiryUntrackedTotal?: number;
   refusals?: Refusal[];
   refusalsTotal?: number;
@@ -167,7 +167,7 @@ export default function ReversalEngineAttentionBanner({ canLiftPause = false }: 
   if (cappedTotal > 0) parts.push(`${cappedTotal} points expir${cappedTotal === 1 ? 'y' : 'ies'} with debt not fully booked on the credit (last 30 days)`);
   const untrackedTotal = data.expiryUntrackedTotal ?? 0;
   const untracked = data.expiryUntracked ?? [];
-  if (untrackedTotal > 0) parts.push(`${untrackedTotal} reversal${untrackedTotal === 1 ? '' : 's'} booked debt without the credit's expiry history (last 30 days)`);
+  if (untrackedTotal > 0) parts.push(`${untrackedTotal} reversal${untrackedTotal === 1 ? '' : 's'} of a credit whose expiry history is unknown (last 30 days)`);
   if (refusalTotal > 0) parts.push(`${refusalTotal} points reversal${refusalTotal === 1 ? '' : 's'} refused — Gifsy must act (last 30 days)`);
   if (data.modeError && !data.modeWarning) parts.push('reversal engine setting unreadable');
   if (!paused && parts.length === 0 && !data.modeWarning) return null;
@@ -246,13 +246,14 @@ export default function ReversalEngineAttentionBanner({ canLiftPause = false }: 
           )}
           {untracked.length > 0 && (
             <div data-testid="attention-expiry-untracked">
-              <p className="font-semibold mb-1">Debt booked without the credit&apos;s expiry history ({untrackedTotal})</p>
+              <p className="font-semibold mb-1">Reversals of a credit whose expiry history is unknown ({untrackedTotal})</p>
               <ul className="space-y-1">
                 {untracked.map((u, i) => (
                   <li key={`${u.creditReversalId}-${i}`} className="break-words">
                     {fmtSince(u.at)} · reversal {u.creditReversalId}
                     {u.outletCode ? ` · outlet ${u.outletCode}` : ''}
-                    {u.owed != null ? ` · ${u.owed} pts booked as debt` : ''} — {u.action}
+                    {u.recovered ? ` · ${u.recovered} pts taken` : ''}
+                    {u.owed ? ` · ${u.owed} pts booked as debt` : ''} — {u.action}
                   </li>
                 ))}
               </ul>

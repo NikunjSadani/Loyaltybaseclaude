@@ -773,9 +773,11 @@ function HeroUntargetedLine({ kpi }: { kpi: AggKpi | null }) {
 ══════════════════════════════════════════════════════════════════════════ */
 
 function WholesalerHero({
-  primary, walletPoints, lastUpdatedLabel, v2 = false, soFarKpi = null,
+  primary, walletPoints, lastUpdatedLabel, v2 = false, soFarKpi = null, owedFromReversal = false,
 }: {
   primary: AggKpi | null; walletPoints: number | null; lastUpdatedLabel?: string; v2?: boolean;
+  /** Negative wallets only (fix round 4, item 6): the debt comes from a reversed credit — same signal as the wallet page. */
+  owedFromReversal?: boolean;
   /** v2 only: set when no KPI has a target → the neutral "so far" zone replaces the scored KPI zone. */
   soFarKpi?: AggKpi | null;
 }) {
@@ -852,7 +854,7 @@ function WholesalerHero({
           {/* Owner decision 2 (2026-11-19): a negative balance is shown as it is, with what it means */}
           {walletPoints !== null && walletPoints < 0 && (
             <p data-testid="hero-negative-note" className="text-[10px] text-amber-200 mt-1 max-w-[14rem] leading-snug">
-              {negativeBalanceNote({ redeemable: walletPoints })}
+              {negativeBalanceNote({ redeemable: walletPoints, owedFromReversal })}
             </p>
           )}
         </div>
@@ -1134,6 +1136,8 @@ export default function PartnerDashboard() {
   // Raw per-outlet KPIs — aggregated below once the tenant flag is known (identity.features).
   const [targetOutlets, setTargetOutlets] = useState<ApiOutlet[]>([]);
   const [walletPoints, setWalletPoints] = useState<number | null>(null);
+  // Fix round 4 (item 6): for a NEGATIVE balance only, the wallet page's own signal (GET /api/wallet owedFromReversal).
+  const [owedFromReversal, setOwedFromReversal] = useState(false);
 
   // Outlet type is sourced from the AUTHORITATIVE /partner/me identity hook (NOT the
   // unreliable denormalized target-upload string) — see the hero selection below.
@@ -1208,6 +1212,14 @@ export default function PartnerDashboard() {
         if (cancelled || !json.success) return;
         const pts = json.data?.user?.channelPartner?.wallets?.[0]?.redeemablePoints;
         setWalletPoints(typeof pts === 'number' ? pts : null);
+        if (typeof pts === 'number' && pts < 0) {
+          return fetch('/api/wallet', { headers: { ...authHeader() } })
+            .then((r) => r.json())
+            .then((w: { success?: boolean; data?: { owedFromReversal?: boolean } }) => {
+              if (!cancelled && w?.success) setOwedFromReversal(w.data?.owedFromReversal === true);
+            })
+            .catch(() => {}); // the generic note stays
+        }
       })
       .catch(() => {}); // wallet zone falls back to "—"
 
@@ -1339,7 +1351,7 @@ export default function PartnerDashboard() {
       )}
 
       {/* ── 1. CURRENT CYCLE KPI HERO (outlet-specific) ── */}
-      {isWholesaler && <WholesalerHero primary={primary} walletPoints={walletPoints} lastUpdatedLabel={lastUpdatedLabel} v2={v2} soFarKpi={soFarKpi} />}
+      {isWholesaler && <WholesalerHero primary={primary} walletPoints={walletPoints} lastUpdatedLabel={lastUpdatedLabel} v2={v2} soFarKpi={soFarKpi} owedFromReversal={owedFromReversal} />}
       {isMT         && <MTHero aggKpis={aggKpis} lastUpdatedLabel={lastUpdatedLabel} v2={v2} />}
       {!isWholesaler && !isMT && <RetailerHero primary={primary} lastUpdatedLabel={lastUpdatedLabel} v2={v2} soFarKpi={soFarKpi} />}
 

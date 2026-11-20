@@ -109,4 +109,18 @@ describe('U — Points Summary rules (real points-presence signal)', () => {
     expect((await screen.findByTestId('profile-redeemable')).textContent).toBe('−2,986');
     expect(screen.getByTestId('profile-negative-note').textContent).toBe("You owe 2,986 pts — it's repaid from your next earnings.");
   });
+
+  it('fix round 4 item 6: the profile reads the same signal as the wallet page — "from a reversed credit" when /api/wallet says so', async () => {
+    const neg = JSON.parse(JSON.stringify(ME));
+    neg.data.user.channelPartner.wallets = [{ redeemablePoints: -2986, lockedPoints: 0 }];
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) =>
+      url === '/api/wallet' ? { success: true, data: { owedFromReversal: true } } : neg,
+    );
+    await renderAndLoad();
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('profile-negative-note').textContent).toBe(
+        "You owe 2,986 pts from a reversed credit — it's repaid from your next earnings.",
+      ),
+    );
+  });
 });

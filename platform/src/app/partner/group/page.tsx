@@ -174,7 +174,7 @@ function GroupTotalsCard({ totals, conversionRate }: { totals: GroupTotals; conv
 
       {(totals.owedPoints ?? 0) > 0 && (
         <p data-testid="group-owed-points" className="mt-2 text-[11px] leading-snug text-amber-200">
-          {totals.owedWallets ? `${formatPoints(totals.owedWallets)} outlet${totals.owedWallets === 1 ? '' : 's'}` : 'Outlets'} in this group owe {formatPoints(totals.owedPoints ?? 0)} pts — repaid from their next earnings (not counted above).
+          {totals.owedWallets ? `${formatPoints(totals.owedWallets)} wallet${totals.owedWallets === 1 ? '' : 's'}` : 'Wallets'} in this group owe {formatPoints(totals.owedPoints ?? 0)} pts — repaid from their next earnings (not counted above).
         </p>
       )}
 

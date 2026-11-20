@@ -519,8 +519,9 @@ export default function PayoutStatusPage() {
       {engineMode !== null && engineMode !== 'LEGACY' && (
         <ReversalEngineAttentionBanner canLiftPause={session.role === 'GIFSY_ADMIN'} />
       )}
-      {/* Audit item 9 (2026-11-19): every wallet in debt + the reversal(s) behind it (nothing on a LEGACY tenant). */}
-      {engineMode !== null && engineMode !== 'LEGACY' && <WalletsInDebtSection />}
+      {/* Audit item 9 + owner D2 (2026-11-19): every wallet below zero on ANY tenant (LEGACY included — e.g. imported
+          negatives) + the reversal(s) behind it when there are any. Renders nothing when no wallet is below zero. */}
+      <WalletsInDebtSection />
 
       {/* Filter */}
       {periods.length > 1 && (

@@ -29,7 +29,7 @@ interface ProfileData {
     gstNumber: string;
     panNumber: string;
   };
-  wallet: { redeemable: number; locked: number };
+  wallet: { redeemable: number; locked: number; owedFromReversal?: boolean };
   /** Beneficiary on file (from /auth/me). Any field may be null when not captured yet. */
   bank: {
     bankName: string | null;
@@ -140,6 +140,17 @@ export default function ProfilePage() {
             // Default VERIFIED so an older record / Deoleo (no status, or always VERIFIED) shows.
             paymentDetailsStatus: cp?.paymentDetailsStatus ?? 'VERIFIED',
           });
+          // Fix round 4 (item 6): a NEGATIVE balance also reads the wallet page's own "from a reversed credit" signal.
+          if ((w?.redeemablePoints ?? 0) < 0) {
+            api
+              .get<{ owedFromReversal?: boolean }>('/api/wallet')
+              .then((r) => {
+                if (r.success && r.data?.owedFromReversal) {
+                  setProfile((p) => (p ? { ...p, wallet: { ...p.wallet, owedFromReversal: true } } : p));
+                }
+              })
+              .catch(() => {});
+          }
         } else {
           setError('Could not load your profile. Please try again.');
         }
@@ -322,7 +333,7 @@ export default function ProfilePage() {
                 {/* Owner decision 2 (2026-11-19): a negative balance is shown as it is, with what it means */}
                 {profile.wallet.redeemable < 0 && (
                   <p data-testid="profile-negative-note" className="text-xs text-amber-700 mt-1">
-                    {negativeBalanceNote({ redeemable: profile.wallet.redeemable })}
+                    {negativeBalanceNote({ redeemable: profile.wallet.redeemable, owedFromReversal: profile.wallet.owedFromReversal })}
                   </p>
                 )}
               </div>
