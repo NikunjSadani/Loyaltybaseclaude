@@ -73,6 +73,7 @@ the Scheme decision; the dead reward columns in the current module are removed, 
   current window** and opening the capture sheet.
 - **D15 — Reporting:** Gifsy coverage view **per window** (captured / pending / approved / rejected / missed) +
   tenant **read-only** + **Excel export with auth-gated photo links** and a geo-fence-flag column.
+  *(Excel export REDESIGNED 2026-11-20 — monthly, plain-English, per-photo columns: see §17.)*
 - **D16 — Reference/sample image per photo field is IN v1** (Gifsy uploads an example shot shown to the rep).
 - **D17 — Single visibility configuration per tenant** (one outlet-scope + frequency + levels + form). The owner's
   spec is singular; multiple concurrent named visibility programs are OUT of v1 (the model can extend later).
@@ -199,7 +200,7 @@ per-photo instruction + sample image, and a real admin approve/reject queue.
 
 Admin (GIFSY): `PUT /config` (outletScope/freq/levels/geoFence), `PUT /form` (versioned), `GET /form`,
 `GET /captures` (queue, filters), `GET /captures/:id`, `POST /captures/:id/approve`, `POST /captures/:id/reject`,
-`GET /report`, `GET /report/tenant` (read-only), `GET /report/export`, auth-gated `GET /captures/media?key=`.
+`GET /report`, `GET /report/tenant` (read-only), `GET /report/export[?month=YYYY-MM][&windowKey=]` (§17), auth-gated `GET /captures/media?key=`.
 Sales: `GET /sales/eligible` (in-scope outlets + current-window status, reach+level scoped),
 `POST /captures/media` (upload), `POST /capture` (submit → window key computed + geo-fence enforced),
 `POST /captures/:id/resubmit` (after reject). All gated by `visibilityEnabled` + role/level + reach + capture-mode.
@@ -302,3 +303,52 @@ only**; AMOUNT_UPLOAD Excel mode kept as the alternate `visibilityCaptureMode`.
 4. **Prod cutover** — merge develop→main + owner-approved gate; prod pre-check the legacy visibility tables (prod
    dead-scaffolding may have rows — pre-check like scheme). Post-cutover **infra**: Cloud Scheduler for the weekly
    reminder + `VISIBILITY_REMINDER_SECRET`; the `visibility-media/` GCS lifecycle (Standard 4mo → Archive → delete 7y).
+
+---
+
+## 17. Visibility Excel report — redesign (2026-11-20, ⚠️ PLATFORM-WIDE, owner-approved in-session)
+
+Export kind `visibility-captures` (`api/src/exports/kinds/batch1/visibility-captures.ts`), `GET /v1/visibility/report/export`
+(GIFSY_ADMIN + CLIENT_ADMIN, `visibility:read`). Applies to every photo-capture tenant (Bajaj is the main one).
+
+- **Scope:** one IST month — `?month=YYYY-MM`, default = the request's IST month (→ Downloads page, background) — or one
+  window `?windowKey=YYYY-MM-Pn` (old param, kept; streams now). A month reads every window key P1..P4 of that month.
+  Imported old-app history is included in its month and labelled **Source = "Imported (old app)"** (photo keys under
+  `/vendor-import/`, BAJAJ-PROD-OUTLET-IMPORT §8); everything else is "Portal app".
+- **Sheet "Visibility"** — one row per capture (outlet × window): Outlet Code · Outlet Name · Outlet Type · Programme ·
+  Sub-programme · City · State · Window · Source · Status (**Waiting for review** / **Approved** / **Needs re-take** /
+  **Rejected**) · Captured by · Rep code · Rep designation · Manager (first ACTIVE manager up the chain, "Name
+  (Designation)", `firstActiveApproverId`) · Captured on · Submitted on · Re-takes (currentVersion − 1) · Location
+  check (Inside fence / Outside fence / Unverifiable + m + ±accuracy; imported = "Not recorded (old app)") · Duplicate
+  photo (Yes/No) · Reviewed by / Reviewed on (latest per-photo review, else the whole-capture reviewer) · Overall remark
+  (whole-capture reject reason, else "Re-take needed: <photo label>: <reason>; …").
+  Then per CAMERA field — the union across the form versions in scope, ordered by the CURRENT form, header = the
+  field's LABEL (duplicate labels get " (2)"): `<Label> – Photo` (clickable "Open photo") · `– Decision` (Approved /
+  Rejected / Pending / **Not applicable** when the field's visibleWhen hides it for the outlet / blank when not taken) ·
+  `– Reason` · `– Reviewed by` · `– Reviewed on` · `– Location`.
+- **Sheet "Review history"** — one row per submitted version per photo (`VisibilityCaptureSubmission` + its
+  `photoReviews` snapshot). An older version without a snapshot reads "Not recorded". Imported captures have no
+  submission rows. Full who/when history for whole-capture rejects is recorded from the next release (noted on About).
+- **Sheet "Not captured"** — in-scope outlets (the SAME `visibilityAddressableOutletWhere` as the coverage tiles) with no
+  capture for an expected window of the scope (`windowsForMonth(month, frequencyPerMonth)`): assigned rep(s) (active
+  SalesUserAssignment) + manager; status **"Not captured yet"** while the window is open (IST), else **"Missed"**.
+- **Sheet "About"** — scope, generated-at (IST), counts per status (= the Visibility sheet), meanings of every status and
+  column, how photo links work (+ the domain-picker note when the link fell back).
+- **Photo links** — ABSOLUTE `https://<tenant primary host>/visibility/photo?key=<encoded key>`; host via
+  `pickTenantDomain` + `tenantPortalLink` (`api/src/tickets/ticket-link.ts`, the ticket-email rule: strictly the
+  isPrimary domain, never a staging/uat host in prod, fallback `<slug>.gifsy.in`; staging → `uat-` host; local → the
+  request origin). Target = the platform page `app/visibility/photo/page.tsx`: a signed-in PAGE (proxy `ROLE_ROUTES
+  ['/visibility']` + sign-in return-to = GIFSY_ADMIN, GIFSY_STAFF, CLIENT_ADMIN, SALES_*; NOT public) that loads
+  `/api/visibility/captures/media?key=` (role-gated, tenant-pinned), shows it full-width with Download, and says "You
+  don't have access to this photo" (403) / "Photo not found" (404 / no key). A signed-out click → sign-in → back to
+  the photo.
+- **Cells:** text via the streaming writer (`cellSafe` formula-injection guard on every string; hyperlinks as real
+  cell links). Dates are IST text "20 Nov 2026, 3:05 pm" — the streaming writer runs without a styles table (memory),
+  so real date cells would show as serial numbers.
+- **Performance:** captures keyset-paged (≤ 2,000; windowKey, outletCode, id); per page one query each for duplicate
+  hashes, reference geo, reviewer names (cached across pages); the tenant's sales directory is read once.
+- **Status report** (`visibility-status`, JSON + xlsx) uses the same status words.
+- **Admin UI:** the Reports tab keeps "Export Excel" (selected window) and adds "Whole month" + "Export month".
+- Tests: `visibility-captures.spec.ts` (workbook read-back), platform `app/visibility/photo/__tests__`, proxy +
+  return-to role tests.
+
