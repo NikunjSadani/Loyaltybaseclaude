@@ -22,6 +22,7 @@ import {
   REFRESH_MAX_AGE,
   accessCookieMaxAge,
   refreshTokensViaBackend,
+  clientHintsFrom,
   sessionCookieOptions as cookieOptions,
 } from '@/lib/auth-refresh';
 
@@ -42,7 +43,7 @@ export async function assumeTenantAction(
   try {
     const res = await fetch(`${API_URL}/v1/auth/assume-tenant`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(await noFirstUseIfJustRotated()) },
       body: JSON.stringify({ clientId }),
       signal: AbortSignal.timeout(12_000),
     });
@@ -117,7 +118,7 @@ export async function exitTenantAction(): Promise<{ success: boolean }> {
     try {
       const res = await fetch(`${API_URL}/v1/auth/exit-tenant`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(await noFirstUseIfJustRotated()) },
         signal: AbortSignal.timeout(12_000),
       });
       if (res.ok) {
@@ -199,7 +200,7 @@ export async function refreshSession(): Promise<{ ok: boolean; transient?: boole
 
   if (!refreshToken) return { ok: false };
 
-  const outcome = await refreshTokensViaBackend(refreshToken);
+  const outcome = await refreshTokensViaBackend(refreshToken, clientHintsFrom(requestHeaders)); // S-H1a
   if (outcome.kind !== 'ok') {
     // Do NOT delete the refresh cookie here: on a transient failure the session is still alive.
     // Leave the cookies intact — a truly dead session keeps 401ing and SessionExpiryGuard bounces
@@ -213,6 +214,26 @@ export async function refreshSession(): Promise<{ ok: boolean; transient?: boole
 
 /** Mirror of proxy.ts SESSION_REFRESHED_HEADER (proxy.ts can't be imported into a server action). */
 const SESSION_REFRESHED_HEADER = 'x-session-refreshed';
+
+/**
+ * Did the proxy rotate the session in THIS very request? (marker set by the proxy AND proof: the refresh
+ * cookie we now see differs from the one the browser sent — a forged marker fails the proof.)
+ */
+async function proxyRotatedThisRequest(): Promise<boolean> {
+  const requestHeaders = await headers();
+  if (requestHeaders.get(SESSION_REFRESHED_HEADER) !== '1') return false;
+  const merged = (await cookies()).get('refresh_token')?.value;
+  return !!merged && merged !== readCookie(requestHeaders.get('cookie'), 'refresh_token');
+}
+
+/**
+ * M1 — a backend call this server action makes with the access token the proxy minted in THIS request
+ * must not count as the browser "using" that session: the browser may never receive the new cookies (the
+ * response can still be lost). Flag it so the API's first-use mark skips it.
+ */
+async function noFirstUseIfJustRotated(): Promise<Record<string, string>> {
+  return (await proxyRotatedThisRequest()) ? { 'x-gifsy-no-first-use': '1' } : {};
+}
 
 /** Value of one cookie in a raw `Cookie:` header (the ORIGINAL request cookies). */
 function readCookie(cookieHeader: string | null, name: string): string | undefined {

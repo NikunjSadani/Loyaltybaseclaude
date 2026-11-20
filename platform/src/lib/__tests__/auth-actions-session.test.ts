@@ -87,6 +87,56 @@ describe('refreshSession — B1 no double rotation + B3 transient', () => {
     expect(setOf('refresh_token')?.value).toBe('r-next');
   });
 
+  it('S-H1a: refreshSession forwards the browser User-Agent + UA client hints to the backend refresh', async () => {
+    store.set('refresh_token', 'r-old');
+    requestHeaders.set('user-agent', 'Mozilla/5.0 (iPhone) Safari/17');
+    requestHeaders.set('sec-ch-ua-platform', '"iOS"');
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ data: { accessToken: jwtWithExp(nowSecs() + ONE_HOUR), refreshToken: 'r-new' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await refreshSession();
+
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      'x-client-user-agent': 'Mozilla/5.0 (iPhone) Safari/17',
+      'x-client-ua-platform': '"iOS"',
+    });
+    requestHeaders.delete('user-agent');
+    requestHeaders.delete('sec-ch-ua-platform');
+  });
+
+  it('M1: a server action calling the backend with the token the proxy minted in THIS request flags it as not-a-first-use', async () => {
+    store.set('token', 'B-access'); // merged (proxy-minted) access token
+    store.set('refresh_token', 'B-refresh');
+    requestHeaders.set('x-session-refreshed', '1');
+    requestHeaders.set('cookie', 'refresh_token=A-refresh'); // the browser still sent A
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ data: { accessToken: jwtWithExp(nowSecs() + ONE_HOUR), refreshToken: 'x', brandName: 'Acme' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await assumeTenantAction('acme');
+
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: 'Bearer B-access', 'x-gifsy-no-first-use': '1' });
+  });
+
+  it('M1: a normal server action (no rotation in this request) does NOT send the flag', async () => {
+    store.set('token', 'A-access');
+    store.set('refresh_token', 'A-refresh');
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ data: { accessToken: jwtWithExp(nowSecs() + ONE_HOUR), refreshToken: 'x', brandName: 'Acme' } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await assumeTenantAction('acme');
+
+    expect(fetchMock.mock.calls[0][1].headers['x-gifsy-no-first-use']).toBeUndefined();
+  });
+
   it('without the marker it still rotates normally (one backend call)', async () => {
     store.set('refresh_token', 'r-old');
     const fetchMock = vi.fn().mockResolvedValue({

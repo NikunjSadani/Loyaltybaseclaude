@@ -112,7 +112,28 @@ export type RefreshOutcome =
  * On ANY failure the caller MUST leave the existing cookies intact: deleting the refresh cookie on
  * a transient failure would strand a session that is actually still alive.
  */
-export async function refreshTokensViaBackend(refreshToken: string): Promise<RefreshOutcome> {
+/**
+ * S-H1(a) — the BROWSER's identifying headers, forwarded to the API on every refresh. The refresh call is
+ * server-to-server (proxy / route handler → API), so the API would otherwise only see Node's User-Agent.
+ * The API hashes these into the session's device fingerprint; a never-used-successor handback requires the
+ * replaying request to come from the same fingerprint.
+ */
+export interface ClientHints {
+  userAgent?: string | null;
+  platform?: string | null;
+  mobile?: string | null;
+}
+
+/** Read the client hints from an incoming browser request's headers. */
+export function clientHintsFrom(headers: { get(name: string): string | null }): ClientHints {
+  return {
+    userAgent: headers.get('user-agent'),
+    platform: headers.get('sec-ch-ua-platform'),
+    mobile: headers.get('sec-ch-ua-mobile'),
+  };
+}
+
+export async function refreshTokensViaBackend(refreshToken: string, client: ClientHints = {}): Promise<RefreshOutcome> {
   try {
     for (let attempt = 0; ; attempt++) {
       const res = await fetch(`${API_URL}/v1/auth/refresh`, {
@@ -121,6 +142,9 @@ export async function refreshTokensViaBackend(refreshToken: string): Promise<Ref
           'Content-Type': 'application/json',
           // The backend must not commit this rotation after we may have given up on it (F1).
           'x-refresh-budget-ms': String(REFRESH_CLIENT_DEADLINE_MS),
+          ...(client.userAgent ? { 'x-client-user-agent': client.userAgent } : {}),
+          ...(client.platform ? { 'x-client-ua-platform': client.platform } : {}),
+          ...(client.mobile ? { 'x-client-ua-mobile': client.mobile } : {}),
           'x-refresh-deadline': String(Date.now() + REFRESH_CLIENT_DEADLINE_MS),
         },
         body: JSON.stringify({ refreshToken }),

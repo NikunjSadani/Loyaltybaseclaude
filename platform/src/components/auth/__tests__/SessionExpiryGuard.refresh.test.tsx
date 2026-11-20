@@ -1,13 +1,13 @@
 /**
- * SessionExpiryGuard — refresh outcome handling (2026-11-20 audit round: H3 / M1 / M2 / M4 / L3).
+ * SessionExpiryGuard — refresh outcome handling (2026-11-20 audit rounds).
  *
- * The guard refreshes via POST /auth/session-refresh and reads a real status:
- *   200 → ok (retry the original request) · 401 → dead (login, with `next`) · anything else → transient.
- * Transient never logs out: a role=status "Reconnecting…" banner, background retries with backoff,
- * one reload after recovery (unless the user has typed on the page), counted ONCE per refresh outcome.
+ * The guard only reacts to SESSION 401s (`x-auth-failure: session`), refreshes via POST /auth/session-refresh
+ * and reads a real status: 200 ok · 401 dead (login, with `next`) · 503/network/timeout → "unavailable" ·
+ * other → "error". A transient outcome never logs out and never reloads the page: a role=status banner with
+ * "Retry now", background retries (2/4/8/16/30 s, then every 60 s), and retries on online / visible / focus.
  */
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, act } from '@testing-library/react';
+import { render, cleanup, screen, act, fireEvent } from '@testing-library/react';
 import React from 'react';
 
 const assign = vi.fn();
@@ -42,8 +42,10 @@ afterEach(() => {
   window.fetch = realFetch;
 });
 
+type Api = number | { status: number; marker?: string | null };
+
 /** Route the network: the refresh endpoint and the app's /api calls get separate scripted answers. */
-function mountWith(opts: { refresh: Array<number | 'network'>; api: number[] }) {
+function mountWith(opts: { refresh: Array<number | 'network' | 'timeout'>; api: Api[] }) {
   const refreshQ = [...opts.refresh];
   const apiQ = [...opts.api];
   const backend = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
@@ -51,9 +53,14 @@ function mountWith(opts: { refresh: Array<number | 'network'>; api: number[] }) 
     if (url.includes('/auth/session-refresh')) {
       const next = refreshQ.shift() ?? 503;
       if (next === 'network') throw new TypeError('Failed to fetch');
+      if (next === 'timeout') throw Object.assign(new Error('timed out'), { name: 'TimeoutError' });
       return new Response(null, { status: next });
     }
-    return new Response(null, { status: apiQ.shift() ?? 200 });
+    const a = apiQ.shift() ?? 200;
+    const status = typeof a === 'number' ? a : a.status;
+    // Session 401s carry the marker by default (as the proxy / JwtAuthGuard send them).
+    const marker = typeof a === 'number' ? (a === 401 ? 'session' : null) : a.marker ?? null;
+    return new Response(null, { status, headers: marker ? { 'x-auth-failure': marker } : {} });
   });
   window.fetch = backend as unknown as typeof window.fetch;
   render(React.createElement(mod.default));
@@ -76,11 +83,23 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
     expect(banner()).toBeNull();
   });
 
-  it('the refresh POST carries the CSRF header', async () => {
+  it('the refresh POST carries the CSRF header and a timeout signal (H4)', async () => {
     const { backend } = mountWith({ refresh: [200], api: [401, 200] });
     await window.fetch('/api/wallet/me');
     const call = backend.mock.calls.find((c) => String(c[0]).includes('/auth/session-refresh'))!;
     expect(call[1]).toMatchObject({ method: 'POST', headers: { 'x-session-refresh': '1' } });
+    expect(call[1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('H1: a 401 WITHOUT the session marker (business error, e.g. wrong OTP) → no refresh, no resend, no logout', async () => {
+    const { backend, refreshCalls } = mountWith({ refresh: [200], api: [{ status: 401, marker: null }] });
+
+    const res = await window.fetch('/api/rewards/redeem/confirm', { method: 'POST', body: '{"otp":"1"}' });
+
+    expect(res.status).toBe(401);
+    expect(refreshCalls()).toBe(0);
+    expect(backend.mock.calls.filter((c) => String(c[0]).includes('/api/')).length).toBe(1); // NOT resent
+    expect(assign).not.toHaveBeenCalled();
   });
 
   it('DEAD (refresh endpoint 401) → login with expired=1 and next', async () => {
@@ -95,18 +114,32 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
     expect(target.searchParams.get('next')).toBe('/admin/users');
   });
 
-  it.each([503, 500, 404, 'network' as const])('TRANSIENT (%s) → original 401 returned, NO redirect, a role=status Reconnecting banner', async (r) => {
+  it.each([503, 'network' as const, 'timeout' as const])(
+    'UNAVAILABLE (%s) → original 401 returned, NO redirect, NO reload, "Reconnecting…" banner with Retry',
+    async (r) => {
+      mountWith({ refresh: [r], api: [401] });
+
+      const res = await act(() => window.fetch('/api/wallet/me'));
+
+      expect(res.status).toBe(401);
+      expect(assign).not.toHaveBeenCalled();
+      expect(reload).not.toHaveBeenCalled();
+      expect(banner()?.textContent).toMatch(/Reconnecting/);
+      expect(screen.getByRole('button', { name: /Retry now/ })).toBeTruthy();
+    },
+  );
+
+  it.each([400, 404])('ERROR (%i from the refresh endpoint) → "Something went wrong" banner (not "connection"), session kept', async (r) => {
     mountWith({ refresh: [r], api: [401] });
 
-    const res = await act(() => window.fetch('/api/wallet/me'));
+    await act(() => window.fetch('/api/wallet/me'));
 
-    expect(res.status).toBe(401);
+    expect(banner()?.textContent).toMatch(/Something went wrong/);
+    expect(banner()?.textContent).not.toMatch(/interrupted/);
     expect(assign).not.toHaveBeenCalled();
-    expect(reload).not.toHaveBeenCalled();
-    expect(banner()?.textContent).toMatch(/Reconnecting/);
   });
 
-  it('H3: 3 parallel 401s sharing ONE transient refresh → ONE refresh call, no reload, no redirect', async () => {
+  it('3 parallel 401s sharing ONE transient refresh → ONE refresh call, no reload, no redirect', async () => {
     const { refreshCalls } = mountWith({ refresh: [503], api: [401, 401, 401] });
 
     await act(() => Promise.all([window.fetch('/api/a'), window.fetch('/api/b'), window.fetch('/api/c')]));
@@ -116,22 +149,39 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
     expect(assign).not.toHaveBeenCalled();
   });
 
-  it('M1: transient → retries in the background with backoff; on recovery the page reloads ONCE to re-fetch', async () => {
+  it('H2: recovery after a transient outage → banner disappears, NO reload, `session:restored` event for opt-in pages', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { refreshCalls } = mountWith({ refresh: [503, 503, 200], api: [401] });
+    const restored = vi.fn();
+    window.addEventListener('session:restored', restored);
 
     await act(() => window.fetch('/api/wallet/me'));
-    expect(refreshCalls()).toBe(1);
-    await act(() => vi.advanceTimersByTimeAsync(mod.RECONNECT_BACKOFF_MS[0])); // 2nd attempt (503)
+    await act(() => vi.advanceTimersByTimeAsync(mod.RECONNECT_BACKOFF_MS[0]));
     expect(refreshCalls()).toBe(2);
-    expect(reload).not.toHaveBeenCalled();
-    await act(() => vi.advanceTimersByTimeAsync(mod.RECONNECT_BACKOFF_MS[1])); // 3rd attempt (200)
+    await act(() => vi.advanceTimersByTimeAsync(mod.RECONNECT_BACKOFF_MS[1]));
     expect(refreshCalls()).toBe(3);
-    expect(reload).toHaveBeenCalledTimes(1);
-    expect(assign).not.toHaveBeenCalled();
+
+    expect(reload).not.toHaveBeenCalled();
+    expect(banner()).toBeNull();
+    expect(restored).toHaveBeenCalledTimes(1);
+    window.removeEventListener('session:restored', restored);
   });
 
-  it('M1: a background retry that finds the session DEAD → login (not a stuck banner)', async () => {
+  it('M4: keeps retrying after the 5 fast attempts — every 60 s — never gives up into a stuck state', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { refreshCalls } = mountWith({ refresh: Array(12).fill(503), api: [401] });
+
+    await act(() => window.fetch('/api/wallet/me'));
+    let total = 0;
+    for (const ms of mod.RECONNECT_BACKOFF_MS) total += ms;
+    await act(() => vi.advanceTimersByTimeAsync(total + 3 * 60_000));
+
+    expect(refreshCalls()).toBeGreaterThanOrEqual(1 + mod.RECONNECT_BACKOFF_MS.length + 3);
+    expect(assign).not.toHaveBeenCalled();
+    expect(banner()).not.toBeNull();
+  });
+
+  it('a background retry that finds the session DEAD → login (not a stuck banner)', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     mountWith({ refresh: [503, 401], api: [401] });
 
@@ -139,45 +189,18 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
     await act(() => vi.advanceTimersByTimeAsync(mod.RECONNECT_BACKOFF_MS[0]));
 
     expect(assign).toHaveBeenCalledTimes(1);
-    expect(reload).not.toHaveBeenCalled();
   });
 
-  it('M1: reloads are capped — a second recovery inside the window asks instead of reloading again', async () => {
-    window.sessionStorage.setItem('gifsy:session-reload-at', String(Date.now()));
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    mountWith({ refresh: [503, 200], api: [401] });
-
-    await act(() => window.fetch('/api/wallet/me'));
-    await act(() => vi.advanceTimersByTimeAsync(mod.RECONNECT_BACKOFF_MS[0]));
-
-    expect(reload).not.toHaveBeenCalled();
-    expect(banner()?.textContent).toMatch(/Connection restored/);
-  });
-
-  it('H3: the user has TYPED on this page → recovery never reloads (input kept), banner asks them to retry', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    mountWith({ refresh: [503, 200], api: [401] });
-    const input = document.createElement('input');
-    document.body.appendChild(input);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-
-    await act(() => window.fetch('/api/wallet/me'));
-    await act(() => vi.advanceTimersByTimeAsync(mod.RECONNECT_BACKOFF_MS[0]));
-
-    expect(reload).not.toHaveBeenCalled();
-    expect(banner()?.textContent).toMatch(/unsaved changes are kept/);
-    input.remove();
-  });
-
-  it('H3: OFFLINE → no timed retries; waits for the `online` event, then refreshes', async () => {
+  it('M4: OFFLINE → offline banner WITH Retry, no timed retries; `online` triggers a refresh', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
     const { refreshCalls } = mountWith({ refresh: ['network', 200], api: [401] });
 
     await act(() => window.fetch('/api/wallet/me'));
     expect(banner()?.textContent).toMatch(/offline/);
-    await act(() => vi.advanceTimersByTimeAsync(60_000));
-    expect(refreshCalls()).toBe(1); // nothing while offline
+    expect(screen.getByRole('button', { name: /Retry now/ })).toBeTruthy();
+    await act(() => vi.advanceTimersByTimeAsync(5 * 60_000));
+    expect(refreshCalls()).toBe(1);
 
     Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true });
     await act(async () => {
@@ -185,10 +208,27 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(refreshCalls()).toBe(2);
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(banner()).toBeNull();
   });
 
-  it('L3: any successful /api response clears the banner and cancels the backoff', async () => {
+  it('M4: the tab becoming visible again (iOS resume) retries immediately; so does "Retry now"', async () => {
+    const { refreshCalls } = mountWith({ refresh: [503, 503, 200], api: [401] });
+
+    await act(() => window.fetch('/api/wallet/me'));
+    expect(refreshCalls()).toBe(1);
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(refreshCalls()).toBe(2);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Retry now/ }));
+    });
+    expect(refreshCalls()).toBe(3);
+    expect(banner()).toBeNull();
+  });
+
+  it('any successful /api response clears the banner and cancels the backoff', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const { refreshCalls } = mountWith({ refresh: [503], api: [401, 200] });
 
@@ -196,9 +236,8 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
     expect(banner()).not.toBeNull();
     await act(() => window.fetch('/api/b')); // 200 — the session works again
     expect(banner()).toBeNull();
-    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    await act(() => vi.advanceTimersByTimeAsync(5 * 60_000));
     expect(refreshCalls()).toBe(1); // backoff cancelled
-    expect(reload).not.toHaveBeenCalled();
   });
 
   it('M4: another tab refreshed moments ago (shared cookie jar) → no second refresh exchange', async () => {
@@ -220,5 +259,11 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
 
     expect(request).toHaveBeenCalledWith('gifsy-session-refresh', expect.any(Function));
     Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined });
+  });
+
+  it('C2: a page that loads normally clears the proxy Reconnecting page backoff counter', async () => {
+    window.sessionStorage.setItem('gifsy:reconnect-attempt', '4');
+    mountWith({ refresh: [], api: [] });
+    expect(window.sessionStorage.getItem('gifsy:reconnect-attempt')).toBeNull();
   });
 });

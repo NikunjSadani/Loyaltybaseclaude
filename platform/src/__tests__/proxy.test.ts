@@ -454,7 +454,7 @@ describe('proxy — page-nav silent refresh (expired/absent access + valid refre
 
     const res = await run(makeReq('/admin/users', { cookies: { refresh_token: 'r-valid' } }));
 
-    expect(mockRefresh).toHaveBeenCalledWith('r-valid');
+    expect(mockRefresh).toHaveBeenCalledWith('r-valid', expect.any(Object));
     expect(isNext(res)).toBe(true); // continued the navigation
     expect(res.headers.get('x-middleware-rewrite')).toBeNull();
     expect(fwd(res, 'authorization')).toBe('Bearer new.jwt.tok');
@@ -592,7 +592,7 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
     expect(res.cookies.get('refresh_token')?.value).toBe('r-2');
   });
 
-  it('document (Sec-Fetch-Dest: document): TRANSIENT refresh failure → waits, retries ONCE, then /auth/login?expired=1', async () => {
+  it('C2: document TRANSIENT refresh failure → waits, retries ONCE, then the RECONNECTING page (503) — never the login page', async () => {
     mockRefresh.mockResolvedValue(TRANSIENT);
     // Fake ONLY setTimeout (the retry pause); the token hash (crypto.subtle) stays real.
     vi.useFakeTimers({ toFake: ['setTimeout'] });
@@ -606,10 +606,17 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
       await vi.advanceTimersByTimeAsync(200);
       const res = await p;
       expect(mockRefresh).toHaveBeenCalledTimes(2);
-      expect(res.status).toBe(307);
-      const loc = new URL(res.headers.get('location') as string);
-      expect(loc.pathname).toBe('/auth/login');
-      expect(loc.searchParams.get('expired')).toBe('1');
+      expect(res.status).toBe(503);
+      expect(res.headers.get('location')).toBeNull();
+      expect(res.headers.get('content-type')).toMatch(/text\/html/);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      const html = await res.text();
+      expect(html).toMatch(/Reconnecting/);
+      expect(html).toMatch(/still signed in/);
+      expect(html).toMatch(/location\.reload\(\)/); // retries THIS url — never navigates to /auth/login
+      expect(html).not.toMatch(/auth\/login/);
+      // cookies untouched
+      expect(res.cookies.get('refresh_token')?.value).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
@@ -665,8 +672,8 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
       run(expiredWithRefresh('/admin', { rsc: '1' }, 'r-B')),
     ]);
     expect(mockRefresh).toHaveBeenCalledTimes(2);
-    expect(mockRefresh).toHaveBeenCalledWith('r-A');
-    expect(mockRefresh).toHaveBeenCalledWith('r-B');
+    expect(mockRefresh).toHaveBeenCalledWith('r-A', expect.any(Object));
+    expect(mockRefresh).toHaveBeenCalledWith('r-B', expect.any(Object));
   });
 
   it('dedupe does not outlive the burst: a later refresh with the same token makes a fresh call', async () => {
@@ -705,12 +712,12 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
 
   // ── B4: no Sec-Fetch-Dest = still a document, but static-asset paths never get the retry ──
   it.each(['/Brand/deoleo.png', '/guides/tds/194r-report.png', '/some/file.svg', '/manifest.json'])(
-    'B4: %s with NO Sec-Fetch-Dest + transient failure → treated as a document (redirect) but NOT retried',
+    'B4: %s with NO Sec-Fetch-Dest + transient failure → treated as a document (reconnect page) but NOT retried',
     async (path) => {
       mockRefresh.mockResolvedValue(TRANSIENT);
       const res = await run(expiredWithRefresh(path));
       expect(mockRefresh).toHaveBeenCalledTimes(1);
-      expect(res.status).toBe(307);
+      expect(res.status).toBe(503);
     },
   );
 
@@ -729,6 +736,51 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
     const res = await run(expiredWithRefresh('/admin/users', { 'next-action': 'refreshSessionId' }));
     expect(isNext(res)).toBe(true);
     expect(fwd(res, 'x-session-refreshed')).toBe('1');
+  });
+
+  it('C2: a DEAD document refresh still goes to /auth/login?expired=1 (only dead ever logs out)', async () => {
+    mockRefresh.mockResolvedValue(DEAD);
+    const res = await run(expiredWithRefresh('/admin', { 'sec-fetch-dest': 'document' }));
+    expect(res.status).toBe(307);
+    expect(new URL(res.headers.get('location') as string).searchParams.get('expired')).toBe('1');
+  });
+
+  it('H1: session 401s from the proxy carry x-auth-failure: session (the guard ignores unmarked 401s)', async () => {
+    const api = await run(makeReq('/api/wallet/me', { cookies: { token: 'expired', refresh_token: 'r' } }));
+    expect(api.status).toBe(401);
+    expect(api.headers.get('x-auth-failure')).toBe('session');
+    mockRefresh.mockResolvedValue(DEAD);
+    const rsc = await run(expiredWithRefresh('/admin/users', { rsc: '1' }));
+    expect(rsc.status).toBe(401);
+    expect(rsc.headers.get('x-auth-failure')).toBe('session');
+  });
+
+  it('S-H1a: the browser User-Agent + UA client hints are forwarded to the refresh (device fingerprint)', async () => {
+    mockRefresh.mockResolvedValue(DEAD);
+    await run(expiredWithRefresh('/admin', {
+      'sec-fetch-dest': 'document',
+      'user-agent': 'Mozilla/5.0 (Linux; Android 14) Mobile Chrome/131',
+      'sec-ch-ua-platform': '"Android"',
+      'sec-ch-ua-mobile': '?1',
+    }));
+    expect(mockRefresh).toHaveBeenCalledWith('r-1', {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14) Mobile Chrome/131',
+      platform: '"Android"',
+      mobile: '?1',
+    });
+  });
+
+  it('dedupe never shares a result across DEVICES: same token, two User-Agents → two backend calls', async () => {
+    mockRefresh.mockResolvedValue({ kind: 'ok', accessToken: 'a', refreshToken: 'b' });
+    mockJwt.mockImplementation((async (tok: string) => {
+      if (tok === 'expired') throw new Error('exp');
+      return { payload: { role: 'CLIENT_ADMIN', sub: 'u-1' } };
+    }) as never);
+    await Promise.all([
+      run(expiredWithRefresh('/admin', { rsc: '1', 'user-agent': 'phone' })),
+      run(expiredWithRefresh('/admin', { rsc: '1', 'user-agent': 'laptop' })),
+    ]);
+    expect(mockRefresh).toHaveBeenCalledTimes(2);
   });
 
   // S1/M3 (2026-11-20): NO unauthenticated pass-through for server actions any more.

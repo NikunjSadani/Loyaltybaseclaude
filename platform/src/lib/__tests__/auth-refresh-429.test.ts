@@ -144,4 +144,15 @@ describe('refreshTokensViaBackend — typed outcome (dead vs transient)', () => 
     expect(sent).toBeGreaterThanOrEqual(before + 4_000);
     expect(sent).toBeLessThanOrEqual(Date.now() + 4_000);
   });
+
+  it('S-H1a: forwards the browser UA + client hints as x-client-*, and omits them when absent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve({ data: { accessToken: 'a' } }) });
+    vi.stubGlobal('fetch', fetchMock);
+    await refreshTokensViaBackend('r1', { userAgent: 'UA/1', platform: '"Android"', mobile: '?1' });
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      'x-client-user-agent': 'UA/1', 'x-client-ua-platform': '"Android"', 'x-client-ua-mobile': '?1',
+    });
+    await refreshTokensViaBackend('r1');
+    expect(fetchMock.mock.calls[1][1].headers['x-client-user-agent']).toBeUndefined();
+  });
 });

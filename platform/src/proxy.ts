@@ -24,6 +24,8 @@ import {
   accessCookieMaxAge,
   refreshTokensViaBackend,
   sessionCookieOptions,
+  clientHintsFrom,
+  type ClientHints,
   type RefreshOutcome,
 } from '@/lib/auth-refresh'
 
@@ -233,7 +235,8 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
   if (isApi) {
     return NextResponse.json(
       { success: false, error: token ? 'Invalid token' : 'Unauthorized' },
-      { status: 401 },
+      // H1 — this IS a session failure: SessionExpiryGuard only reacts to 401s carrying this marker.
+      { status: 401, headers: { [AUTH_FAILURE_HEADER]: 'session' } },
     )
   }
 
@@ -248,14 +251,15 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
     // makes concurrent refreshes of the same token converge on one successor pair (claim +
     // mint in a single row-locked transaction) — see auth.service.ts refreshToken.
     const isDocument = isDocumentRequest(request)
-    let outcome = await refreshAndVerify(refreshToken, secret)
+    const client = clientHintsFrom(request.headers) // S-H1a — the browser's UA, for the device fingerprint
+    let outcome = await refreshAndVerify(refreshToken, secret, client)
     if (outcome.kind === 'transient' && isDocument && !isStaticAssetPath(pathname)) {
       // A document navigation decides the user's fate, so one TRANSIENT failure (network blip,
       // timeout, 5xx) must not log them out: retry ONCE after a short pause. A DEFINITE refusal
       // (401/403 — revoked, expired, swept, reuse) is never retried: it can't change, and a
       // replay of a refused token only adds noise. Static-asset paths never get the retry.
       await new Promise((resolve) => setTimeout(resolve, DOCUMENT_REFRESH_RETRY_DELAY_MS))
-      outcome = await refreshAndVerify(refreshToken, secret)
+      outcome = await refreshAndVerify(refreshToken, secret, client)
     }
     if (outcome.kind === 'ok') {
       const { refreshed, payload: newPayload } = outcome
@@ -287,14 +291,24 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
       return outcome.kind === 'dead'
         ? NextResponse.json(
             { success: false, error: 'Unauthorized' },
-            { status: 401, headers: { 'cache-control': 'no-store' } },
+            { status: 401, headers: { 'cache-control': 'no-store', [AUTH_FAILURE_HEADER]: 'session' } },
           )
         : NextResponse.json(
             { success: false, error: 'Session refresh temporarily unavailable' },
             { status: 503, headers: { 'cache-control': 'no-store', 'retry-after': '1' } },
           )
     }
-    // A document whose refresh definitively failed (or failed transiently twice) → bounce to
+    if (outcome.kind === 'transient') {
+      // C2 (owner: an app switch / flaky network must NOT make users log in): a document whose refresh
+      // failed TRANSIENTLY twice gets a lightweight "Reconnecting…" page that retries THIS URL with
+      // backoff (and on Retry / back-online / tab-visible). The session is untouched; only a DEFINITE
+      // refusal (dead) ever goes to the login page.
+      return new NextResponse(RECONNECT_PAGE_HTML, {
+        status: 503,
+        headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'retry-after': '2' },
+      })
+    }
+    // A document whose refresh DEFINITIVELY failed (dead) → bounce to
     // login WITH ?expired=1 so the login page surfaces the "session expired" notice, carrying a
     // safe same-origin `next` (returnToForEdgeRedirect: real page loads only, never RSC/prefetch,
     // `_rsc` stripped) so the user lands back where they were after signing in.
@@ -310,6 +324,51 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
 
 /** Pause before the single retry of a TRANSIENTLY failed document-navigation refresh. */
 export const DOCUMENT_REFRESH_RETRY_DELAY_MS = 200
+
+/**
+ * H1 — response header that marks a 401 as a SESSION authentication failure (also set by the API's
+ * JwtAuthGuard). SessionExpiryGuard ignores 401s without it (e.g. a business "wrong OTP" 401).
+ */
+export const AUTH_FAILURE_HEADER = 'x-auth-failure'
+
+/**
+ * C2 — the "Reconnecting…" page served (503) when a page load's session refresh failed TRANSIENTLY.
+ * Self-contained (no app bundle needed while the backend is unreachable). It reloads the SAME URL with
+ * backoff — 2, 4, 8, 16, 30 s, then every 60 s — tracked in sessionStorage across reloads (the app's
+ * SessionExpiryGuard clears it once a page loads normally); also on "Retry now", when the browser
+ * comes back online and when the tab becomes visible again. Never sends the user to the login page.
+ */
+export const RECONNECT_PAGE_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reconnecting…</title>
+<style>
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f8fafc;color:#0f172a;
+display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+main{max-width:420px;text-align:center}h1{font-size:20px;margin:0 0 8px}p{font-size:15px;line-height:1.5;margin:0 0 16px;color:#334155}
+button{font:inherit;font-size:15px;padding:10px 20px;border-radius:8px;border:0;background:#0f172a;color:#fff;cursor:pointer}
+@media (prefers-color-scheme:dark){body{background:#0f172a;color:#f1f5f9}p{color:#cbd5e1}button{background:#f1f5f9;color:#0f172a}}
+</style></head>
+<body><main role="status" aria-live="polite">
+<h1>Reconnecting…</h1>
+<p id="msg">We couldn't reach the server just now. You are still signed in — we'll retry automatically.</p>
+<button id="retry" type="button">Retry now</button>
+</main>
+<script>
+(function () {
+  var KEY = 'gifsy:reconnect-attempt', STEPS = [2, 4, 8, 16, 30, 60], n = 0;
+  try { n = Number(sessionStorage.getItem(KEY) || 0); sessionStorage.setItem(KEY, String(n + 1)); } catch (e) {}
+  function go() { location.reload(); }
+  document.getElementById('retry').addEventListener('click', go);
+  window.addEventListener('online', go);
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') go(); });
+  if (navigator.onLine === false) {
+    document.getElementById('msg').textContent = 'You are offline. You are still signed in — we will reconnect when you are back online.';
+    return;
+  }
+  setTimeout(go, STEPS[Math.min(n, STEPS.length - 1)] * 1000);
+})();
+</script>
+</body></html>`
 
 /**
  * Internal request header the proxy sets on the FORWARDED request when it rotated the session in
@@ -359,11 +418,12 @@ async function refreshKey(refreshToken: string): Promise<string> {
 }
 
 /** Exported for tests: one backend refresh per refresh token at a time, in this instance. */
-export async function dedupedRefresh(refreshToken: string): Promise<RefreshOutcome> {
-  const key = await refreshKey(refreshToken)
+export async function dedupedRefresh(refreshToken: string, client: ClientHints = {}): Promise<RefreshOutcome> {
+  // Keyed by token AND device hints: requests from two different devices never share one result.
+  const key = await refreshKey(`${refreshToken}\n${client.userAgent ?? ''}\n${client.platform ?? ''}\n${client.mobile ?? ''}`)
   const existing = inflightRefreshes.get(key)
   if (existing) return existing
-  const pending = refreshTokensViaBackend(refreshToken).finally(() => {
+  const pending = refreshTokensViaBackend(refreshToken, client).finally(() => {
     inflightRefreshes.delete(key)
   })
   inflightRefreshes.set(key, pending)
@@ -376,8 +436,12 @@ type VerifiedOutcome =
   | { kind: 'transient' }
 
 /** Refresh (deduped) and verify the new access token. An unverifiable token counts as `dead`. */
-async function refreshAndVerify(refreshToken: string, secret: Uint8Array): Promise<VerifiedOutcome> {
-  const outcome = await dedupedRefresh(refreshToken)
+async function refreshAndVerify(
+  refreshToken: string,
+  secret: Uint8Array,
+  client: ClientHints = {},
+): Promise<VerifiedOutcome> {
+  const outcome = await dedupedRefresh(refreshToken, client)
   if (outcome.kind !== 'ok') return { kind: outcome.kind }
   try {
     return {
