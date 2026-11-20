@@ -47,7 +47,9 @@ const mockPrisma = {
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
   salesUserAssignment: { findFirst: jest.fn() },
   channelPartner: { findFirst: jest.fn() },
-  ticketMessage: { create: jest.fn() },
+  ticketMessage: { create: jest.fn(), findMany: jest.fn() },
+  wallet: { findFirst: jest.fn() },
+  kycSubmission: { findFirst: jest.fn() },
   auditLog: { create: jest.fn() },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
   $queryRaw: jest.fn(),
@@ -68,8 +70,9 @@ const T0 = new Date(Date.now() - 60_000);
 
 const ticketRow = (over: Record<string, unknown> = {}) => ({
   id: 't1', clientId: 'deoleo', ticketNumber: 'TKT-1', subject: 'Points missing', status: 'IN_PROGRESS',
-  priority: 'MEDIUM', assignedToId: null, createdById: 'user1', metadata: null, firstResponseAt: null,
-  updatedAt: T0, ...over,
+  priority: 'MEDIUM', category: 'POINTS', description: 'My points for October are missing.',
+  assignedToId: null, createdById: 'user1', metadata: null, firstResponseAt: null,
+  updatedAt: T0, createdAt: T0, ...over,
 });
 
 const pendingRemarks = (over: Record<string, unknown> = {}) => ({
@@ -108,6 +111,12 @@ describe('TicketsService', () => {
     mockPrisma.clientDomain.findFirst.mockResolvedValue(null);
     mockPrisma.clientDomain.findMany.mockResolvedValue([]);
     mockPrisma.programSetting.findUnique.mockResolvedValue(null); // no ticket remarks inbox (default)
+    mockPrisma.ticketMessage.findMany.mockResolvedValue([]);
+    mockPrisma.wallet.findFirst.mockResolvedValue(null);
+    mockPrisma.kycSubmission.findFirst.mockResolvedValue(null);
+    mockPrisma.outlet.findFirst.mockResolvedValue(null);
+    mockPrisma.salesUser.findFirst.mockResolvedValue(null);
+    mockPrisma.salesUser.findMany.mockResolvedValue([]);
     mockPrisma.$queryRaw.mockResolvedValue([]);
     mockNotifications.writeInApp.mockResolvedValue({ id: 'n1' });
     mockMsg91.sendEmail.mockResolvedValue(undefined);
@@ -492,7 +501,7 @@ describe('TicketsService', () => {
       expect(mockMsg91.sendEmail).toHaveBeenCalledTimes(1);
       const mail = mockMsg91.sendEmail.mock.calls[0][0];
       expect(mail.to).toEqual(['ca@deoleo.example']);
-      expect(mail.subject).toBe('Remarks needed: ticket TKT-1');
+      expect(mail.subject).toBe('Remarks needed: TKT-1 · Points · no outlet linked');
       // staging SERVER config → uat- tenant host even though the caller came via localhost
       expect(mail.html).toContain('https://uat-deoleoloyalty.gifsy.in/admin/tickets?ticket=t1');
       expect(mail.html).toContain('&lt;b&gt;');
@@ -848,7 +857,7 @@ describe('TicketsService', () => {
       expect(mockMsg91.sendEmail).toHaveBeenCalledTimes(1);
       const mail = mockMsg91.sendEmail.mock.calls[0][0];
       expect(mail.to).toEqual(['tickets@deoleo.example']); // NOT ca@deoleo.example
-      expect(mail.html).toContain('has asked <strong>Deoleo Admin</strong> (client admin) for remarks');
+      expect(mail.html).toContain('Asked: Deoleo Admin');
       expect(mail.html).toContain("ticket remarks inbox");
       expect(mockNotifications.writeInApp).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cadmin1' }));
       expect(mockPrisma.ticketMessage.create).toHaveBeenCalledWith({
@@ -873,7 +882,8 @@ describe('TicketsService', () => {
       await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
       const mail = mockMsg91.sendEmail.mock.calls[0][0];
       expect(mail.to).toEqual(['ca@deoleo.example']);
-      expect(mail.html).toContain('<p>Hi Deoleo Admin,</p>');
+      expect(mail.html).toContain('>Hi Deoleo Admin,</p>');
+      expect(mail.html).not.toContain('Asked: Deoleo Admin');
       expect(mail.html).not.toContain('remarks inbox');
       expect(mockPrisma.ticketMessage.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ message: expect.stringMatching(/^Email sent to Deoleo Admin \(ca@deoleo\.example\)/) }),
@@ -943,6 +953,92 @@ describe('TicketsService', () => {
       expect(res.settings).toHaveProperty('someOtherKey', 1);
       expect(res.settings).not.toHaveProperty('ticketRemarksEmail');
       expect(JSON.stringify(res)).not.toContain('tickets@deoleo.example');
+    });
+  });
+
+  describe('"Remarks needed" email — loaded data (owner 2026-11-20)', () => {
+    const creatorIs = (creator: any) => {
+      const fallback = mockPrisma.user.findFirst.getMockImplementation() as any;
+      (mockPrisma.user.findFirst as jest.Mock).mockImplementation(async (args: any) =>
+        args.where.id === creator.id ? creator : fallback(args));
+    };
+    const html = () => mockMsg91.sendEmail.mock.calls[0][0].html as string;
+    const subject = () => mockMsg91.sendEmail.mock.calls[0][0].subject as string;
+
+    it('salesperson raiser + referenced outlet: outlet block (code, name, type, program, location, KYC), designation and reporting manager', async () => {
+      creatorIs({ id: 'so1', name: 'Meera Iyer', role: 'SALES_ISR', channelPartner: null,
+        salesUser: { employeeCode: 'E1', hierarchyLevel: { name: 'ISR', code: 'ISR' } } });
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow({ createdById: 'so1', category: 'KYC', referenceType: 'OUTLET', referenceId: 'o9' }));
+      (mockPrisma.salesUser.findFirst as jest.Mock)
+        .mockResolvedValueOnce({ id: 'su-isr' })                                           // the raiser's SalesUser
+        .mockResolvedValueOnce({ user: { name: 'Rahul Verma' }, hierarchyLevel: { name: 'SO', code: 'SO' } }); // manager
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'su-isr', reportingToId: 'su-so-gone', userId: 'so1', isActive: true, deletedAt: null },
+        { id: 'su-so-gone', reportingToId: 'su-so', userId: 'x', isActive: false, deletedAt: null }, // vacant → skipped
+        { id: 'su-so', reportingToId: null, userId: 'y', isActive: true, deletedAt: null },
+      ]);
+      mockPrisma.outlet.findFirst.mockResolvedValue({
+        outletCode: 'BAJ-0042', name: 'Gupta Stores', programName: 'Bajaj Retail', programCategory: 'Gold',
+        city: 'Pune', state: 'Maharashtra', partnerId: 'p1', outletType: { name: 'Retail', code: 'RT' },
+      });
+      mockPrisma.kycSubmission.findFirst.mockResolvedValue({ status: 'PENDING_GIFSY', submittedAt: T0 });
+      await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      const h = html();
+      expect(subject()).toBe('Remarks needed: TKT-1 · KYC · Outlet BAJ-0042');
+      expect(mockPrisma.outlet.findFirst.mock.calls[0][0].where).toEqual({ id: 'o9', clientId: 'deoleo' });
+      for (const t of ['BAJ-0042 · Gupta Stores', 'Retail', 'Bajaj Retail / Gold', 'Pune, Maharashtra', 'Pending gifsy',
+        'Meera Iyer · ISR', 'Rahul Verma · SO', 'KYC status: Pending gifsy']) {
+        expect(h).toContain(t);
+      }
+      // the manager is the first ACTIVE one up the chain (the vacant SO is skipped)
+      expect((mockPrisma.salesUser.findFirst as jest.Mock).mock.calls[1][0].where).toEqual({ id: 'su-so' });
+    });
+
+    it('outlet-owner raiser: "Outlet owner — <owner>", their primary outlet, no "Reports to" row; POINTS shows the wallet', async () => {
+      creatorIs({ id: 'user1', name: 'login', role: 'WHOLESALER', salesUser: null,
+        channelPartner: { id: 'p1', ownerName: 'Ramesh Gupta', outlets: [{ id: 'o1', outletCode: 'BAJ-0007', name: 'Ramesh Traders' }], _count: { outlets: 1 } } });
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.outlet.findFirst.mockResolvedValue({ outletCode: 'BAJ-0007', name: 'Ramesh Traders', programName: null, programCategory: null,
+        city: 'Nashik', state: 'Maharashtra', partnerId: 'p1', outletType: { name: 'Wholesale', code: 'WS' } });
+      mockPrisma.wallet.findFirst.mockResolvedValue({ redeemablePoints: 12500, lifetimeEarned: 40000 });
+      await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      const h = html();
+      expect(h).toContain('Outlet owner — Ramesh Gupta');
+      expect(h).toContain('BAJ-0007 · Ramesh Traders');
+      expect(h).not.toContain('Reports to');
+      expect(h).toContain('Current wallet balance: 12,500 redeemable points');
+      expect(mockPrisma.wallet.findFirst.mock.calls[0][0].where).toEqual({ partnerId: 'p1' });
+    });
+
+    it('no outlet (older sales ticket) → "Outlet: not linked" + subject "no outlet linked"', async () => {
+      creatorIs({ id: 'so1', name: 'Meera Iyer', role: 'SALES_SO', channelPartner: null,
+        salesUser: { employeeCode: 'E1', hierarchyLevel: { name: 'SO', code: 'SO' } } });
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow({ createdById: 'so1' }));
+      await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      expect(html()).toContain('Outlet: not linked');
+      expect(subject()).toBe('Remarks needed: TKT-1 · Points · no outlet linked');
+      expect(html()).toContain('no active manager on record');
+    });
+
+    it('recent conversation: client-visible messages only (GIFSY_ONLY filtered in the query), request note excluded', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockTx.ticketMessage.create.mockResolvedValue({ id: 'req-note' });
+      mockPrisma.ticketMessage.findMany.mockResolvedValue([
+        { message: 'Newest reply', createdAt: T0, sender: { name: 'Owner', role: 'GIFSY_ADMIN' } },
+        { message: 'Outlet says: call me on 9876543210 or mail me@x.com', createdAt: T0, sender: { name: 'login', role: 'WHOLESALER', channelPartner: { ownerName: 'Ramesh' } } },
+      ]);
+      await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin1', note: 'pls' }, 'x');
+      const where = mockPrisma.ticketMessage.findMany.mock.calls[0][0].where;
+      expect(where).toEqual({
+        ticketId: 't1', id: { not: 'req-note' },
+        OR: [{ isInternal: false }, { internalVisibility: null }, { internalVisibility: 'SHARED_WITH_CLIENT' }],
+      });
+      expect(mockPrisma.ticketMessage.findMany.mock.calls[0][0].take).toBe(3);
+      const h = html();
+      expect(h.indexOf('Outlet owner — Ramesh')).toBeLessThan(h.indexOf('Newest reply')); // oldest first
+      expect(h).not.toMatch(/[6-9]\d{9}/);
+      expect(h).not.toContain('me@x.com');
+      expect(h).toContain('[phone hidden]');
     });
   });
 });

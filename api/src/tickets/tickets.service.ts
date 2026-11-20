@@ -26,6 +26,7 @@ import {
 } from './dto/tickets.dto';
 import { escapeHtml, pickTenantDomain, ticketEmailLink, ticketPath } from './ticket-link';
 import { TICKET_REMARKS_EMAIL_KEY, readTicketRemarksEmail } from './ticket-remarks-inbox';
+import { RemarksEmailData, istDate, renderRemarksEmail } from './remarks-email';
 import {
   OUTLET_REFERENCE_TYPE,
   PARTNER_ROLES,
@@ -35,7 +36,7 @@ import {
   resolveTicketOutlet,
 } from './ticket-submitter';
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
-import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
+import { descendantSalesUserIds, firstActiveApproverId } from '../sales/sales-hierarchy-access.helper';
 
 /** Human-readable labels for the system message posted on a status change. */
 const STATUS_ACTION_LABEL: Record<string, string> = {
@@ -106,6 +107,12 @@ function cancellationText(requestedFromName: string, clientReason?: string): str
   return clientReason
     ? `Gifsy support has withdrawn the request for remarks from ${requestedFromName} — ${clientReason}.`
     : `Gifsy support has withdrawn the request for remarks from ${requestedFromName}.`;
+}
+
+/** "SUBMITTED_TO_GIFSY" → "Submitted to gifsy". */
+function humanize(v: string): string {
+  const t = v.replace(/_/g, ' ').toLowerCase();
+  return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
 /** The remarks email outcome: sent or not, and to whom (the client's inbox vs the chosen admin). */
@@ -790,6 +797,7 @@ export class TicketsService {
     const metadata = { ...readMeta(ticket.metadata), clientRemarks: request } as unknown as Prisma.InputJsonValue;
     const replacedReason = `asked ${target.name} instead`;
 
+    let requestNoteId: string | null = null;
     const replaced = await this.prisma.$transaction(async (tx) => {
       const moved = await tx.ticket.updateMany({
         where: this.unchangedSince(user, ticket),
@@ -797,9 +805,10 @@ export class TicketsService {
       });
       if (moved.count !== 1) throw new ConflictException(TicketsService.CONFLICT);
       const c = await this.recordRemarksCancelled(tx, ticket, user.sub, replacedReason);
-      await tx.ticketMessage.create({
+      const requestNote = await tx.ticketMessage.create({
         data: this.note(id, user.sub, `Remarks requested from ${target.name} (client admin) by ${by}: ${text}`, 'SHARED_WITH_CLIENT'),
       });
+      requestNoteId = (requestNote as { id?: string } | undefined)?.id ?? null;
       await tx.auditLog.create({
         data: {
           action: 'UPDATE',
@@ -822,7 +831,10 @@ export class TicketsService {
       variables: { event: 'TICKET_CLIENT_REMARKS_REQUESTED', ticketId: id },
     });
 
-    const email = await this.sendRemarksEmail({ ticket, targetId: target.id, targetName: target.name, by, note: text, callerOrigin, actorId: user.sub });
+    const email = await this.sendRemarksEmail({
+      ticket, targetId: target.id, targetName: target.name, by, note: text, callerOrigin, actorId: user.sub,
+      askedAt: new Date(request.requestedAt), requestNoteId,
+    });
     return {
       message: `Remarks requested from ${target.name}`,
       requestedFrom: target,
@@ -832,6 +844,165 @@ export class TicketsService {
       emailRecipient: email.address,
       ...(email.sent ? {} : { emailError: email.reason }),
     };
+  }
+
+  /**
+   * Loads everything the "Remarks needed" email shows (rendered by remarks-email.ts). Each part
+   * degrades on its own: a failed lookup shows "unavailable" for that block and never blocks the
+   * email. Privacy: only client-visible messages (never GIFSY_ONLY notes), no phone numbers / emails /
+   * internal ids / bank or KYC document data are loaded into the email.
+   */
+  private async loadRemarksEmailData(
+    ticket: TicketRow,
+    ask: Pick<RemarksEmailData, 'askerName' | 'note' | 'askedAt' | 'askedAdminName' | 'toInbox' | 'link'> & {
+      excludeMessageId: string | null;
+    },
+  ): Promise<RemarksEmailData> {
+    const data: RemarksEmailData = {
+      askerName: ask.askerName,
+      note: ask.note,
+      askedAt: ask.askedAt,
+      askedAdminName: ask.askedAdminName,
+      toInbox: ask.toInbox,
+      link: ask.link,
+      now: new Date(),
+      ticket: {
+        number: ticket.ticketNumber,
+        category: String(ticket.category),
+        priority: String(ticket.priority),
+        createdAt: new Date(ticket.createdAt),
+      },
+      issue: { subject: ticket.subject, description: ticket.description ?? '' },
+      outlet: null,
+      raisedBy: 'unavailable',
+      context: null,
+      messages: [],
+    };
+
+    // RAISED BY (+ a salesperson's first ACTIVE manager up the chain) and OUTLET.
+    let partnerId: string | null = null;
+    let outletId: string | null = null;
+    try {
+      const creator = await this.prisma.user.findFirst({ where: { id: ticket.createdById }, select: TICKET_CREATOR_SELECT });
+      const raised = describeRaisedBy(creator);
+      let manager: string | null | undefined;
+      if (raised.kind === 'SALES') {
+        manager = null;
+        const me = await this.prisma.salesUser.findFirst({
+          where: { userId: ticket.createdById, clientId: ticket.clientId },
+          select: { id: true },
+        });
+        if (me) {
+          const nodes = await loadSalesHierarchy(this.prisma, ticket.clientId);
+          const mgrId = firstActiveApproverId(me.id, nodes);
+          if (mgrId) {
+            const mgr = await this.prisma.salesUser.findFirst({
+              where: { id: mgrId },
+              select: { user: { select: { name: true } }, hierarchyLevel: { select: { name: true, code: true } } },
+            });
+            if (mgr) {
+              const desig = mgr.hierarchyLevel?.name?.trim() || mgr.hierarchyLevel?.code?.trim() || '';
+              manager = desig ? `${mgr.user?.name ?? 'Unknown'} · ${desig}` : (mgr.user?.name ?? 'Unknown');
+            }
+          }
+        }
+      }
+      data.raisedBy = { label: raised.label, ...(manager !== undefined ? { manager } : {}) };
+      partnerId = (creator as { channelPartner?: { id?: string } | null } | null)?.channelPartner?.id ?? null;
+
+      const refId = ticket.referenceType === OUTLET_REFERENCE_TYPE ? ticket.referenceId : null;
+      const resolved = resolveTicketOutlet(ticket, creator as never, new Map(refId ? [[refId, { id: refId, outletCode: '', name: '' }]] : []));
+      outletId = resolved?.id ?? null;
+      if (outletId) {
+        const o = await this.prisma.outlet.findFirst({
+          where: { id: outletId, clientId: ticket.clientId },
+          select: {
+            outletCode: true, name: true, programName: true, programCategory: true, city: true, state: true, partnerId: true,
+            outletType: { select: { name: true, code: true } },
+          },
+        });
+        if (o) {
+          partnerId = partnerId ?? o.partnerId ?? null;
+          const kyc = await this.prisma.kycSubmission.findFirst({
+            where: { OR: [{ outletId }, ...(o.partnerId ? [{ partnerId: o.partnerId }] : [])] },
+            orderBy: { createdAt: 'desc' },
+            select: { status: true, submittedAt: true },
+          });
+          data.outlet = {
+            code: o.outletCode,
+            name: o.name,
+            type: o.outletType?.name || o.outletType?.code || null,
+            program: o.programName ?? null,
+            subProgram: o.programCategory ?? null,
+            city: o.city ?? null,
+            state: o.state ?? null,
+            kycStatus: kyc ? humanize(String(kyc.status)) : null,
+            note: resolved?.source === 'OWNER_PRIMARY' && (resolved.ownerOutletCount ?? 1) > 1
+              ? `owner's primary of ${resolved.ownerOutletCount} outlets`
+              : null,
+          };
+          // KYC context (category) reuses this lookup.
+          if (String(ticket.category) === 'KYC') {
+            data.context = {
+              heading: 'KYC',
+              lines: [kyc
+                ? `KYC status: ${humanize(String(kyc.status))}${kyc.submittedAt ? ` (submitted ${istDate(new Date(kyc.submittedAt))})` : ''}`
+                : 'No KYC submission on record for this outlet.'],
+            };
+          }
+        } else {
+          data.outlet = null; // referenced outlet not in this tenant / deleted → not linked
+        }
+      }
+    } catch (e) {
+      this.logger.warn(`[tickets] remarks email details for ${ticket.id} failed: ${e}`);
+      if (data.raisedBy === 'unavailable' || data.outlet === null) data.outlet = 'unavailable';
+    }
+
+    // CONTEXT by category (only what is cheaply and unambiguously available).
+    try {
+      const cat = String(ticket.category);
+      if (cat === 'POINTS') {
+        const w = partnerId
+          ? await this.prisma.wallet.findFirst({ where: { partnerId }, select: { redeemablePoints: true, lifetimeEarned: true } })
+          : null;
+        data.context = {
+          heading: 'Points',
+          lines: [w
+            ? `Current wallet balance: ${w.redeemablePoints.toLocaleString('en-IN')} redeemable points (lifetime earned ${w.lifetimeEarned.toLocaleString('en-IN')}).`
+            : 'No wallet is linked to this ticket.'],
+        };
+      } else if (cat === 'REDEMPTION') {
+        data.context = { heading: 'Redemption', lines: ['This ticket is not linked to a specific redemption order — check the outlet\'s orders in the portal.'] };
+      } else if (cat === 'PAYOUT') {
+        data.context = { heading: 'Payout', lines: ['This ticket is not linked to a specific payout — check the outlet\'s payouts in the portal.'] };
+      } else if (cat === 'KYC' && !data.context) {
+        data.context = { heading: 'KYC', lines: ['No outlet is linked, so the KYC status is not shown.'] };
+      }
+    } catch (e) {
+      this.logger.warn(`[tickets] remarks email context for ${ticket.id} failed: ${e}`);
+      data.context = { heading: 'Context', lines: ['Unavailable right now — see the portal.'] };
+    }
+
+    // RECENT CONVERSATION — last ≤3 messages the CLIENT may see (never GIFSY_ONLY), oldest first.
+    try {
+      const rows = await this.prisma.ticketMessage.findMany({
+        where: {
+          ticketId: ticket.id,
+          ...(ask.excludeMessageId ? { id: { not: ask.excludeMessageId } } : {}),
+          ...this.messageWhere('CLIENT'),
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 3,
+        select: { message: true, createdAt: true, sender: { select: TICKET_SENDER_SELECT } },
+      });
+      data.messages = (Array.isArray(rows) ? rows : [])
+        .reverse()
+        .map((m) => ({ who: describeRaisedBy(m.sender).label, at: new Date(m.createdAt), text: m.message }));
+    } catch (e) {
+      this.logger.warn(`[tickets] remarks email conversation for ${ticket.id} failed: ${e}`);
+    }
+    return data;
   }
 
   /** Records an email outcome as a Gifsy-only internal note (never throws). */
@@ -851,6 +1022,9 @@ export class TicketsService {
     note: string;
     callerOrigin: string;
     actorId: string;
+    askedAt?: Date;
+    /** The request note just written — not repeated under "recent conversation" (the ask is on top). */
+    requestNoteId?: string | null;
   }): Promise<RemarksEmailOutcome> {
     // Who the email is (or was meant to be) for — set once the recipient is resolved; every note and
     // the response are worded from it (the client's inbox vs the chosen admin).
@@ -914,23 +1088,19 @@ export class TicketsService {
     if (!this.msg91.isEmailConfigured()) return notSent('email (SMTP) is not configured on this environment');
     if (!link) return notSent('the ticket link could not be built');
 
-    const html = [
-      ...(toInbox
-        ? [
-            `<p>Hello,</p>`,
-            `<p>${escapeHtml(p.by)} from Gifsy support has asked <strong>${escapeHtml(p.targetName)}</strong> (client admin) for remarks on support ticket <strong>${escapeHtml(p.ticket.ticketNumber)}</strong> — "${escapeHtml(p.ticket.subject)}". This was sent to your programme's ticket remarks inbox; ${escapeHtml(p.targetName)} can reply in the admin portal.</p>`,
-          ]
-        : [
-            `<p>Hi ${escapeHtml(p.targetName)},</p>`,
-            `<p>${escapeHtml(p.by)} from Gifsy support needs your remarks on support ticket <strong>${escapeHtml(p.ticket.ticketNumber)}</strong> — "${escapeHtml(p.ticket.subject)}".</p>`,
-          ]),
-      `<blockquote style="border-left:3px solid #ccc;margin:0;padding:4px 12px;color:#333">${escapeHtml(p.note).replace(/\n/g, '<br>')}</blockquote>`,
-      `<p><a href="${escapeHtml(link)}">Open the ticket and reply</a></p>`,
-      `<p style="color:#888;font-size:12px">Your reply is visible to Gifsy support and your admin team only — never to the outlet or sales team.</p>`,
-    ].join('\n');
+    const data = await this.loadRemarksEmailData(p.ticket, {
+      askerName: p.by,
+      note: p.note,
+      askedAt: p.askedAt ?? new Date(),
+      askedAdminName: p.targetName,
+      toInbox,
+      link,
+      excludeMessageId: p.requestNoteId ?? null,
+    });
+    const { subject, html } = renderRemarksEmail(data);
 
     try {
-      await this.msg91.sendEmail({ to: [to], subject: `Remarks needed: ticket ${p.ticket.ticketNumber}`, html });
+      await this.msg91.sendEmail({ to: [to], subject, html });
     } catch (e) {
       this.logger.error(`[tickets] remarks email for ${p.ticket.id} failed: ${(e as Error)?.message ?? e}`);
       return notSent('the mail relay refused or timed out');
