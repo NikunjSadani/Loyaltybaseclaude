@@ -14,8 +14,17 @@ import {
   monthWindows,
   outsideFenceFields,
   plainStatusOf,
+  PLAIN_STATUS_LABEL,
+  DUPLICATE_LIST_CAP,
   resolveMonth,
 } from './visibility-metrics';
+import {
+  isImportedCaptureFormValues,
+  isImportedMonthRule,
+  isVendorImportKey,
+  isVisibilityImportedMonth,
+  visibilityPortalGoLiveMonth,
+} from './visibility-import.helper';
 import { outletMasterFencePolicy } from './geo-fence.helper';
 
 const NOW = new Date('2026-11-20T06:30:00Z'); // 20 Nov 2026, 12:00 IST
@@ -24,12 +33,24 @@ describe('plain statuses', () => {
   it('maps capture statuses to the plain words; no capture = Not captured yet until the window closes, then Missed', () => {
     expect(plainStatusOf('SUBMITTED', false)).toBe('WAITING');
     expect(plainStatusOf('APPROVED', true)).toBe('APPROVED');
-    expect(plainStatusOf('CHANGES_REQUESTED', true)).toBe('NEEDS_RETAKE');
+    expect(plainStatusOf('CHANGES_REQUESTED', false)).toBe('NEEDS_RETAKE');
     expect(plainStatusOf('REJECTED', false)).toBe('REJECTED');
     expect(plainStatusOf(null, false)).toBe('NOT_CAPTURED');
     expect(plainStatusOf(null, true)).toBe('MISSED');
     // A waiting capture in a closed window is still Waiting (never Missed).
     expect(plainStatusOf('SUBMITTED', true)).toBe('WAITING');
+  });
+
+  it('a re-take / rejection left when the window CLOSED is final: Not approved — window closed (never waiting on reps)', () => {
+    expect(plainStatusOf('CHANGES_REQUESTED', true)).toBe('CLOSED_NOT_APPROVED');
+    expect(plainStatusOf('REJECTED', true)).toBe('CLOSED_NOT_APPROVED');
+    expect(PLAIN_STATUS_LABEL.CLOSED_NOT_APPROVED).toBe('Not approved — window closed');
+  });
+
+  it('imported month: no capture = Not tracked (never Missed, whatever the window); a capture keeps its status', () => {
+    expect(plainStatusOf(null, true, true)).toBe('NOT_TRACKED');
+    expect(plainStatusOf(null, false, true)).toBe('NOT_TRACKED');
+    expect(plainStatusOf('APPROVED', true, true)).toBe('APPROVED');
   });
 });
 
@@ -57,34 +78,71 @@ describe('month helpers', () => {
 });
 
 describe('status counts + approval rate', () => {
-  it('folds statuses: submitted = every capture; waiting / needs re-take / approved / rejected separate', () => {
-    const c = foldStatusCounts('2026-11', [
-      { status: 'SUBMITTED', _count: { _all: 4 } },
-      { status: 'CHANGES_REQUESTED', _count: { _all: 2 } },
-      { status: 'APPROVED', _count: { _all: 6 } },
-      { status: 'REJECTED', _count: { _all: 1 } },
-    ]);
-    expect(c).toEqual({ month: '2026-11', submitted: 13, waiting: 4, needsRetake: 2, approved: 6, rejected: 1 });
+  it('folds statuses: submitted = every capture; a closed window moves re-take / rejected to "not approved — window closed"', () => {
+    const closed = (wk: string) => wk === '2026-11-P1';
+    const c = foldStatusCounts(
+      '2026-11',
+      [
+        { status: 'SUBMITTED', windowKey: '2026-11-P2', _count: { _all: 4 } },
+        { status: 'CHANGES_REQUESTED', windowKey: '2026-11-P2', _count: { _all: 2 } },
+        { status: 'CHANGES_REQUESTED', windowKey: '2026-11-P1', _count: { _all: 3 } },
+        { status: 'APPROVED', windowKey: '2026-11-P1', _count: { _all: 6 } },
+        { status: 'REJECTED', windowKey: '2026-11-P2', _count: { _all: 1 } },
+        { status: 'REJECTED', windowKey: '2026-11-P1', _count: { _all: 2 } },
+      ],
+      closed,
+    );
+    expect(c).toEqual({
+      month: '2026-11', submitted: 18, waiting: 4, needsRetake: 2, approved: 6, rejected: 1, closedNotApproved: 5,
+      waitingOnReps: 3, waitingAllMonths: 4, waitingEarlierMonths: 0,
+    });
   });
 
-  it('approval rate = approved ÷ (approved + needs re-take + rejected); waiting excluded; null when nothing decided', () => {
+  it("waiting for review counts EVERY month (Gifsy's whole queue), with the earlier-months share", () => {
+    const c = foldStatusCounts('2026-10', [{ status: 'SUBMITTED', windowKey: '2026-10-P1', _count: { _all: 2 } }], () => true, [
+      { windowKey: '2026-08-P1', _count: { _all: 5 } },
+      { windowKey: '2026-09-P2', _count: { _all: 1 } },
+      { windowKey: '2026-10-P1', _count: { _all: 2 } },
+    ]);
+    expect(c).toMatchObject({ waiting: 2, waitingAllMonths: 8, waitingEarlierMonths: 6 });
+  });
+
+  it('approval rate = approved ÷ every decided capture (incl. not approved — window closed); null when nothing decided', () => {
     expect(approvalRatePct({ approved: 6, needsRetake: 2, rejected: 1 })).toBe(66.7);
+    expect(approvalRatePct({ approved: 6, needsRetake: 0, rejected: 0, closedNotApproved: 2 })).toBe(75);
     expect(approvalRatePct({ approved: 0, needsRetake: 0, rejected: 0 })).toBeNull();
   });
 
-  it('loadMonthStatusCounts scopes to the month AND the single in-scope outlet rule; empty scope → zeros, no query', async () => {
-    const groupBy = jest.fn().mockResolvedValue([{ status: 'SUBMITTED', _count: { _all: 3 } }]);
+  it('loadMonthStatusCounts: month + single in-scope rule; the waiting queue is NOT month-limited; empty scope → zeros, no query', async () => {
+    const groupBy = jest
+      .fn()
+      .mockResolvedValueOnce([
+        { status: 'SUBMITTED', windowKey: '2026-11-P1', _count: { _all: 3 } },
+        { status: 'CHANGES_REQUESTED', windowKey: '2026-11-P1', _count: { _all: 2 } },
+      ])
+      .mockResolvedValueOnce([
+        { windowKey: '2026-09-P1', _count: { _all: 4 } },
+        { windowKey: '2026-11-P1', _count: { _all: 3 } },
+      ]);
     const prisma = { visibilityCapture: { groupBy } } as any;
     const cfg = { outletScope: ['SSS'], programs: [], subPrograms: [] };
-    const res = await loadMonthStatusCounts(prisma, 't1', cfg, '2026-11');
-    expect(res.waiting).toBe(3);
+    // Frequency 2 on 20 Nov: P1 (1–15) has closed → the 2 re-takes there are final.
+    const res = await loadMonthStatusCounts(prisma, 't1', cfg, '2026-11', { now: NOW, freq: 2 });
+    expect(res).toMatchObject({
+      waiting: 3, waitingAllMonths: 7, waitingEarlierMonths: 4, needsRetake: 0, closedNotApproved: 2, waitingOnReps: 0,
+    });
     const where = groupBy.mock.calls[0][0].where;
     expect(where.windowKey).toEqual({ startsWith: '2026-11-P' });
     expect(where.outlet).toMatchObject({ clientId: 't1', isActive: true, outletType: { code: { in: ['SSS'] } } });
+    const qWhere = groupBy.mock.calls[1][0].where;
+    expect(qWhere).toMatchObject({ clientId: 't1', status: 'SUBMITTED' });
+    expect(qWhere.windowKey).toBeUndefined();
+    expect(qWhere.outlet).toMatchObject({ isActive: true });
 
     groupBy.mockClear();
-    const none = await loadMonthStatusCounts(prisma, 't1', { ...cfg, outletScope: [] }, '2026-11');
+    const none = await loadMonthStatusCounts(prisma, 't1', { ...cfg, outletScope: [] }, '2026-11', { now: NOW, freq: 1 });
     expect(none.submitted).toBe(0);
+    expect(none.waitingAllMonths).toBe(0);
     expect(groupBy).not.toHaveBeenCalled();
   });
 });
@@ -179,6 +237,18 @@ describe('fraud flags (loadFraudFlags)', () => {
     expect(byCode.A).toBeUndefined();
   });
 
+  it('one photo shared by many captures: lists at most DUPLICATE_LIST_CAP others but keeps the full count', async () => {
+    const n = 40;
+    const captures = Array.from({ length: n }, (_, i) => cap(`c${i}`));
+    const hashes = captures.map((c) => ({ captureId: c.id, hash: 'same' }));
+    const res = await loadFraudFlags(prismaWith(captures, hashes), 't1', cfg, '2026-10', NOW, 1);
+    expect(res.duplicate).toBe(n);
+    for (const r of res.rows) {
+      expect(r.duplicateOf.length).toBe(DUPLICATE_LIST_CAP);
+      expect(r.duplicateCount).toBe(n - 1);
+    }
+  });
+
   it('a hash only on the capture itself is not a duplicate', async () => {
     const res = await loadFraudFlags(prismaWith([cap('a')], [{ captureId: 'a', hash: 'h1' }]), 't1', cfg, '2026-10', NOW, 1);
     expect(res.flagged).toBe(0);
@@ -246,7 +316,7 @@ describe('review ACTIONS in a window (digest)', () => {
     expect(res).toEqual({ actions: 1, approved: 1, rejected: 0, photosApproved: 2, photosRejected: 0 });
   });
 
-  it('per-photo decisions at different instants are separate actions; out-of-window decisions ignored', () => {
+  it('per-photo decisions the same day = ONE review (its final outcome); out-of-window decisions ignored', () => {
     const res = countReviewActions(
       [
         {
@@ -263,7 +333,40 @@ describe('review ACTIONS in a window (digest)', () => {
       START,
       END,
     );
-    expect(res).toEqual({ actions: 2, approved: 1, rejected: 1, photosApproved: 1, photosRejected: 1 });
+    expect(res).toEqual({ actions: 1, approved: 0, rejected: 1, photosApproved: 1, photosRejected: 1 });
+  });
+
+  it('rejected then re-approved the same day = ONE approved review (final outcome); decisions on two IST days = two', () => {
+    const res = countReviewActions(
+      [
+        {
+          id: 'c4',
+          status: 'APPROVED',
+          reviewedAt: new Date('2026-11-19T12:00:00Z'),
+          photoReviews: { w1: { status: 'APPROVED', reviewedAt: '2026-11-19T12:00:00.000Z', reviewedByUserId: 'g' } },
+          submissions: [{ photoReviews: { w1: { status: 'REJECTED', reasonCode: 'X', reviewedAt: '2026-11-19T06:00:00.000Z', reviewedByUserId: 'g' } } }],
+        },
+      ],
+      START,
+      END,
+    );
+    expect(res).toEqual({ actions: 1, approved: 1, rejected: 0, photosApproved: 1, photosRejected: 0 });
+
+    // 18 Nov 22:00 UTC = 19 Nov 03:30 IST; 19 Nov 20:00 UTC = 20 Nov 01:30 IST → two IST days.
+    const two = countReviewActions(
+      [
+        {
+          id: 'c5',
+          status: 'APPROVED',
+          reviewedAt: new Date('2026-11-19T20:00:00Z'),
+          photoReviews: { w1: { status: 'APPROVED', reviewedAt: '2026-11-19T20:00:00.000Z', reviewedByUserId: 'g' } },
+          submissions: [{ photoReviews: { w1: { status: 'REJECTED', reasonCode: 'X', reviewedAt: '2026-11-18T22:00:00.000Z', reviewedByUserId: 'g' } } }],
+        },
+      ],
+      Date.parse('2026-11-18T18:30:00Z'),
+      Date.parse('2026-11-20T18:30:00Z'),
+    );
+    expect(two).toMatchObject({ actions: 2, approved: 1, rejected: 1 });
   });
 
   it('legacy capture with no photo reviews: falls back to the whole-capture reviewedAt + status', () => {
@@ -278,5 +381,46 @@ describe('review ACTIONS in a window (digest)', () => {
       END,
     );
     expect(res).toMatchObject({ actions: 2, approved: 1, rejected: 1 });
+  });
+});
+
+describe('imported (old-app) history — visibility-import.helper', () => {
+  it('an imported capture = a photo stored under vendor-import/ (not "no submitting rep")', () => {
+    expect(isVendorImportKey('visibility-media/bajaj/vendor-import/prod/x/A1/2025-06_v1.jpg')).toBe(true);
+    expect(isVendorImportKey('vendor-import/x.jpg')).toBe(true);
+    expect(isVendorImportKey('visibility-media/bajaj/2026-11/A1/w1.jpg')).toBe(false);
+    expect(isVendorImportKey('visibility-media/bajaj/not-vendor-import-ish.jpg')).toBe(false);
+    expect(isImportedCaptureFormValues({ w1: 'visibility-media/bajaj/vendor-import/a.jpg' })).toBe(true);
+    expect(isImportedCaptureFormValues({ w1: { key: 'visibility-media/bajaj/vendor-import/a.jpg' } })).toBe(true);
+    expect(isImportedCaptureFormValues({ w1: { key: 'visibility-media/bajaj/2026-11/a.jpg' }, note: 'hi' })).toBe(false);
+    expect(isImportedCaptureFormValues(null)).toBe(false);
+  });
+
+  it('imported month = before the portal go-live month; no go-live → a month holding captures', () => {
+    expect(isImportedMonthRule('2026-08', '2026-10', false)).toBe(true);
+    expect(isImportedMonthRule('2026-10', '2026-10', true)).toBe(false);
+    expect(isImportedMonthRule('2026-11', '2026-10', true)).toBe(false);
+    expect(isImportedMonthRule('2025-06', null, true)).toBe(true);
+    expect(isImportedMonthRule('2026-11', null, false)).toBe(false);
+  });
+
+  it('go-live = the earliest month with a submitting rep; the loader counts only when there is no go-live', async () => {
+    const findFirst = jest.fn().mockResolvedValue({ windowKey: '2026-10-P2' });
+    const count = jest.fn();
+    const prisma = { visibilityCapture: { findFirst, count } } as any;
+    expect(await visibilityPortalGoLiveMonth(prisma, 't1')).toBe('2026-10');
+    expect(findFirst.mock.calls[0][0]).toMatchObject({
+      where: { clientId: 't1', submittedBySalesUserId: { not: null } },
+      orderBy: { windowKey: 'asc' },
+    });
+    expect(await isVisibilityImportedMonth(prisma, 't1', '2026-09')).toBe(true);
+    expect(await isVisibilityImportedMonth(prisma, 't1', '2026-10')).toBe(false);
+    expect(count).not.toHaveBeenCalled();
+
+    findFirst.mockResolvedValue(null);
+    count.mockResolvedValueOnce(12).mockResolvedValueOnce(0);
+    expect(await isVisibilityImportedMonth(prisma, 't1', '2025-06')).toBe(true);
+    expect(await isVisibilityImportedMonth(prisma, 't1', '2026-11')).toBe(false);
+    expect(count.mock.calls[0][0]).toEqual({ where: { clientId: 't1', windowKey: { startsWith: '2025-06-P' } } });
   });
 });

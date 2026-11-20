@@ -17,6 +17,7 @@ import {
   resolveMonth,
 } from './visibility-metrics';
 import { readPhotoReviews } from './visibility-types';
+import { IMPORTED_MONTH_NOTE, isImportedCaptureFormValues, isVisibilityImportedMonth } from './visibility-import.helper';
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { firstActiveApproverId } from '../sales/sales-hierarchy-access.helper';
 import type { ReportGroup } from './dto/visibility-report.dto';
@@ -48,15 +49,22 @@ export interface ReportSlot {
 }
 
 export interface StatusTally {
+  /** Visits due (outlet × window). In an IMPORTED month: only the visits the old app recorded. */
   inScope: number;
   waiting: number;
   approved: number;
+  /** Open window only — the rep can still re-take. */
   needsRetake: number;
+  /** Open window only — the rep can still capture again. */
   rejected: number;
+  /** Re-take requested / rejected and the window has closed — final ("Not approved — window closed"). */
+  closedNotApproved: number;
   notCaptured: number;
   missed: number;
-  /** approved ÷ inScope × 100 (1 dp); 0 when nothing is in scope. */
-  coveragePct: number;
+  /** Imported months only — no record from the old app (it kept only approved visits). Always 0 here. */
+  notTracked: number;
+  /** approved ÷ inScope × 100 (1 dp); 0 when nothing is in scope; null for an imported month (not tracked). */
+  coveragePct: number | null;
 }
 
 export interface BreakdownRow extends StatusTally {
@@ -83,18 +91,26 @@ const STATUS_FIELD: Record<PlainStatus, keyof Omit<StatusTally, 'inScope' | 'cov
   APPROVED: 'approved',
   NEEDS_RETAKE: 'needsRetake',
   REJECTED: 'rejected',
+  CLOSED_NOT_APPROVED: 'closedNotApproved',
   NOT_CAPTURED: 'notCaptured',
   MISSED: 'missed',
+  NOT_TRACKED: 'notTracked',
 };
 
-/** Count slots into the plain buckets. Pure (unit-tested). */
-export function tallySlots(slots: Array<Pick<ReportSlot, 'status'>>): StatusTally {
-  const t: StatusTally = { inScope: 0, waiting: 0, approved: 0, needsRetake: 0, rejected: 0, notCaptured: 0, missed: 0, coveragePct: 0 };
+/**
+ * Count slots into the plain buckets. Pure (unit-tested). `coverageTracked = false` (an imported month) →
+ * coveragePct null: the old app kept only approved visits, so there is no denominator to divide by.
+ */
+export function tallySlots(slots: Array<Pick<ReportSlot, 'status'>>, coverageTracked = true): StatusTally {
+  const t: StatusTally = {
+    inScope: 0, waiting: 0, approved: 0, needsRetake: 0, rejected: 0, closedNotApproved: 0,
+    notCaptured: 0, missed: 0, notTracked: 0, coveragePct: 0,
+  };
   for (const s of slots) {
     t.inScope += 1;
     t[STATUS_FIELD[s.status]] += 1;
   }
-  t.coveragePct = t.inScope > 0 ? Math.round((t.approved / t.inScope) * 1000) / 10 : 0;
+  t.coveragePct = !coverageTracked ? null : t.inScope > 0 ? Math.round((t.approved / t.inScope) * 1000) / 10 : 0;
   return t;
 }
 
@@ -114,7 +130,7 @@ export function groupKeyOf(slot: ReportSlot, group: ReportGroup): { key: string;
 }
 
 /** Group slots into breakdown rows, sorted by label (the "no …" bucket last). Pure. */
-export function breakdown(slots: ReportSlot[], group: ReportGroup): BreakdownRow[] {
+export function breakdown(slots: ReportSlot[], group: ReportGroup, coverageTracked = true): BreakdownRow[] {
   const by = new Map<string, { label: string; slots: ReportSlot[] }>();
   for (const s of slots) {
     const { key, label } = groupKeyOf(s, group);
@@ -124,8 +140,36 @@ export function breakdown(slots: ReportSlot[], group: ReportGroup): BreakdownRow
   }
   const isNone = (k: string) => k === UNASSIGNED || k === NO_MANAGER || k === JSON.stringify(['', '']);
   return [...by.entries()]
-    .map(([key, e]) => ({ key, label: e.label, ...tallySlots(e.slots) }))
+    .map(([key, e]) => ({ key, label: e.label, ...tallySlots(e.slots, coverageTracked) }))
     .sort((a, b) => Number(isNone(a.key)) - Number(isNone(b.key)) || a.label.localeCompare(b.label));
+}
+
+/**
+ * Who reviewed a capture, and when. Pure (unit-tested).
+ *   - Decided (APPROVED / CHANGES_REQUESTED / REJECTED): the latest photo decision's reviewer, else the whole-capture
+ *     reviewer column; the date is the capture's reviewedAt (else that photo decision).
+ *   - Waiting for review (fresh, or RESUBMITTED after a re-take): only photo decisions made AFTER its last
+ *     (re)submission (`receivedAt`) — the review in progress on the current version. Decisions carried over from
+ *     the previous version (e.g. the photos approved before the re-take) are older than the resubmission and are
+ *     ignored, so a capture waiting for review never reads as already "reviewed by" someone.
+ */
+export function reviewerOfCapture(c: {
+  status: string;
+  photoReviews: unknown;
+  approvedByUserId: string | null;
+  reviewedAt: Date | null;
+  receivedAt: Date | null;
+}): { userId: string | null; at: Date | null } {
+  const waiting = c.status === 'SUBMITTED';
+  const since = waiting && c.receivedAt ? c.receivedAt.getTime() : -Infinity;
+  let best: { userId: string; at: number } | null = null;
+  for (const r of Object.values(readPhotoReviews(c.photoReviews))) {
+    const at = Date.parse(r.reviewedAt);
+    if (!r.reviewedByUserId || !Number.isFinite(at) || at < since) continue;
+    if (!best || at > best.at) best = { userId: r.reviewedByUserId, at };
+  }
+  if (waiting) return { userId: best?.userId ?? null, at: best ? new Date(best.at) : null };
+  return { userId: best?.userId ?? c.approvedByUserId ?? null, at: c.reviewedAt ?? (best ? new Date(best.at) : null) };
 }
 
 const CHUNK = 5000;
@@ -139,8 +183,10 @@ function chunks<T>(xs: T[]): T[][] {
  * VisibilityReportService — the MONTH-WISE Visibility (POSM) report (VISIBILITY-POSM-DESIGN.md §Metrics).
  * Pick a month (default the current IST month; any past month incl. imported old-app history) and optionally
  * one window of it. Every in-scope outlet × window of the selection is one "visit due" with ONE plain status:
- * Waiting for review · Approved · Needs re-take · Rejected · Not captured yet (window open) · Missed (window
- * closed). Tiles, the Programme / Rep / Manager breakdowns and the outlet list are all computed from the SAME
+ * Waiting for review · Approved · Needs re-take / Rejected (window open — the rep can still redo it) · Not approved —
+ * window closed (re-take / rejection left when the window closed; final) · Not captured yet (window open) · Missed
+ * (no capture by window close). An IMPORTED month (before the portal went live — visibility-import.helper) lists only
+ * the visits the old app recorded, with coverage / Missed "not tracked" (importedMonthNote). Tiles, the Programme / Rep / Manager breakdowns and the outlet list are all computed from the SAME
  * slot table, so a tile, its breakdown rows and its outlet list always add up. In scope = visibilityUniverseWhere.
  * Captures that exist but are NOT counted (outlet no longer in scope, or a window key the current frequency does
  * not have) are returned in `notCounted` and shown on screen — never silently dropped.
@@ -192,6 +238,9 @@ export class VisibilityReportService {
     const closedByKey = new Map(sel.selected.map((w) => [w.key, w.closed]));
     const scoped = config.outletScope.length > 0;
     const universe = visibilityUniverseWhere(clientId, config);
+    // An IMPORTED (pre-portal) month: the old app kept only approved visits → list only what it recorded, never
+    // "Missed" / coverage against today's outlets (visibility-import.helper — the shared go-live rule).
+    const importedMonth = await isVisibilityImportedMonth(this.prisma, clientId, sel.month);
 
     const outlets = scoped
       ? await this.prisma.outlet.findMany({
@@ -213,6 +262,8 @@ export class VisibilityReportService {
             receivedAt: true,
             reviewedAt: true,
             photoReviews: true,
+            // Only to tell an imported old-app record (photo path under vendor-import/) from a portal capture.
+            formValues: true,
             approvedByUserId: true,
             submittedBySalesUserId: true,
             submittedBy: { select: { employeeCode: true, user: { select: { name: true } } } },
@@ -262,19 +313,7 @@ export class VisibilityReportService {
     // Reviewer names: the last photo decision's reviewer, else the whole-capture reviewer column.
     const reviewerOf = new Map<string, { userId: string | null; at: Date | null }>();
     for (const c of captures) {
-      let best: { userId: string; at: number } | null = null;
-      for (const r of Object.values(readPhotoReviews(c.photoReviews))) {
-        const at = Date.parse(r.reviewedAt);
-        if (r.reviewedByUserId && Number.isFinite(at) && (!best || at > best.at)) best = { userId: r.reviewedByUserId, at };
-      }
-      // A capture back in "Waiting for review" (fresh, or resubmitted after a re-take) shows only the review in
-      // progress on its CURRENT photos — never the previous version's decision, which would read as "reviewed".
-      reviewerOf.set(
-        c.id,
-        c.status === 'SUBMITTED'
-          ? { userId: best?.userId ?? null, at: best ? new Date(best.at) : null }
-          : { userId: best?.userId ?? c.approvedByUserId ?? null, at: c.reviewedAt ?? (best ? new Date(best.at) : null) },
-      );
+      reviewerOf.set(c.id, reviewerOfCapture(c));
     }
     const reviewerIds = [...new Set([...reviewerOf.values()].map((v) => v.userId).filter((v): v is string => !!v))];
     const reviewerName = new Map<string, string>();
@@ -290,8 +329,10 @@ export class VisibilityReportService {
       const managerId = repId ? managerByRep.get(repId) ?? null : null;
       for (const key of selectedKeys) {
         const c = capByKey.get(`${o.id}|${key}`) ?? null;
+        // Imported month: only the visits the old app recorded are listed (no capture = not tracked, not a slot).
+        if (importedMonth && !c) continue;
         const rev = c ? reviewerOf.get(c.id) : undefined;
-        const imported = !!c && !c.submittedBySalesUserId;
+        const imported = !!c && isImportedCaptureFormValues(c.formValues);
         slots.push({
           outletId: o.id,
           outletCode: o.outletCode,
@@ -300,7 +341,7 @@ export class VisibilityReportService {
           subProgramme: o.programCategory ?? null,
           windowKey: key,
           windowClosed: closedByKey.get(key) ?? false,
-          status: plainStatusOf(c?.status ?? null, closedByKey.get(key) ?? false),
+          status: plainStatusOf(c?.status ?? null, closedByKey.get(key) ?? false, importedMonth),
           captureId: c?.id ?? null,
           repId,
           repName: repId ? people.get(repId)?.name ?? null : null,
@@ -310,7 +351,9 @@ export class VisibilityReportService {
           capturedBy: c
             ? imported
               ? IMPORTED_LABEL
-              : `${c.submittedBy?.user?.name ?? 'Rep'}${c.submittedBy?.employeeCode ? ` (${c.submittedBy.employeeCode})` : ''}`
+              : c.submittedBy
+                ? `${c.submittedBy.user?.name ?? 'Rep'}${c.submittedBy.employeeCode ? ` (${c.submittedBy.employeeCode})` : ''}`
+                : 'Rep (no longer on file)'
             : null,
           capturedOn: c ? c.capturedAt ?? c.receivedAt : null,
           reviewedBy: rev?.userId ? reviewerName.get(rev.userId) || null : null,
@@ -319,13 +362,13 @@ export class VisibilityReportService {
         });
       }
     }
-    return { config, sel, slots, notCounted: { outOfScope, otherWindow }, outletsInScope: outlets.length };
+    return { config, sel, slots, notCounted: { outOfScope, otherWindow }, outletsInScope: outlets.length, importedMonth };
   }
 
   /** The month report: tiles + breakdowns. */
   private async computeReport(clientId: string, q: { month?: string; windowKey?: string }) {
-    const { config, sel, slots, notCounted, outletsInScope } = await this.buildSlots(clientId, q);
-    const t = tallySlots(slots);
+    const { config, sel, slots, notCounted, outletsInScope, importedMonth } = await this.buildSlots(clientId, q);
+    const t = tallySlots(slots, !importedMonth);
     const programScope = visibilityProgramScope(config);
     const allClosed = sel.selected.length > 0 && sel.selected.every((w) => w.closed);
     return {
@@ -339,12 +382,18 @@ export class VisibilityReportService {
       ...(programScope.programs.length ? { programs: programScope.programs } : {}),
       ...(programScope.subPrograms.length ? { subPrograms: programScope.subPrograms } : {}),
       outletsInScope,
+      /**
+       * true = a month before the portal went live (imported old-app history): `summary.inScope` = the visits the old
+       * app recorded, coverage is null and nothing is "Missed" — `importedMonthNote` says why, in plain words.
+       */
+      importedMonth,
+      ...(importedMonth ? { importedMonthNote: IMPORTED_MONTH_NOTE } : {}),
       summary: t,
       notCounted,
       breakdowns: {
-        programme: breakdown(slots, 'programme'),
-        rep: breakdown(slots, 'rep'),
-        manager: breakdown(slots, 'manager'),
+        programme: breakdown(slots, 'programme', !importedMonth),
+        rep: breakdown(slots, 'rep', !importedMonth),
+        manager: breakdown(slots, 'manager', !importedMonth),
       },
     };
   }

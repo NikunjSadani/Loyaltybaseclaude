@@ -676,16 +676,33 @@ describe('buildDailyOpsDigest', () => {
     expect(html).toContain('data-section="Payouts"');
   });
 
-  it('Visibility (PHOTO_APPROVAL): review actions + the two current-month queues, in plain words', () => {
+  it('Visibility (PHOTO_APPROVAL): reviews done (one per capture per day) + the open queues, in plain words', () => {
     const t = busyTenant();
-    t.visibility = ok({ submitted: 12, approved: 7, rejected: 3, pending: 9, month: '2026-11', reviewActions: 10, waiting: 6, needsRetake: 3 });
+    t.visibility = ok({
+      submitted: 12, approved: 7, rejected: 3, pending: 12, month: '2026-11', reviewActions: 10,
+      waiting: 6, waitingAllMonths: 9, waitingEarlierMonths: 3, needsRetake: 2, waitingOnReps: 3, closedNotApproved: 4,
+    });
     const html = buildDailyOpsDigest(input([t])).html;
-    expect(html).toContain('reviews done');
+    expect(html).toContain('reviews done (one per capture per day, its final outcome)');
     expect(html).toContain('sent back / rejected');
     expect(html).toContain('waiting for review');
-    expect(html).toContain('needs re-take (waiting on reps)');
-    expect(html).toContain('Right now (');
+    // The whole queue, with the earlier-months share called out.
+    expect(html).toContain('9 (3 from earlier months)');
+    expect(html).toContain('waiting on reps');
+    expect(html).toContain('not approved — window closed (November 2026)');
     expect(html).not.toContain('pending review');
+    expect(html).not.toContain('needs re-take (waiting on reps)');
+  });
+
+  it('Visibility never disappears while anything is waiting — even a quiet window with only older captures waiting', () => {
+    const t = quietTenant('bajaj', 'Bajaj');
+    t.visibility = ok({
+      submitted: 0, approved: 0, rejected: 0, pending: 2, month: '2026-11', reviewActions: 0,
+      waiting: 0, waitingAllMonths: 2, waitingEarlierMonths: 2, needsRetake: 0, waitingOnReps: 0, closedNotApproved: 0,
+    });
+    const html = buildDailyOpsDigest(input([t])).html;
+    expect(html).toContain('data-section="Visibility"');
+    expect(html).toContain('2 (2 from earlier months)');
   });
 
   it('hides empty Hubble / Visibility / Sales Import, shows them when present', () => {

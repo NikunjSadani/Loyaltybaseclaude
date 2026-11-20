@@ -190,9 +190,10 @@ export class VisibilityAdminService {
   // ── Outlets in scope (admin view) ────────────────────────────────────────────
 
   /**
-   * The addressable outlets in the tenant's configured scope: outletType.code ∈
-   * config.outletScope AND not soft-deleted / deactivated. An empty scope yields no
-   * outlets (an `in: []` match). Optional name/code/zone/state filters narrow further.
+   * The outlets in visibility scope — THE single in-scope rule (visibilityUniverseWhere: not soft-deleted /
+   * deactivated, KYC-approved `isActive`, kycIntent not NOT_INTERESTED / PARKED, outletType.code ∈
+   * config.outletScope, and the optional programs / subPrograms narrowing). An empty scope yields no outlets
+   * (an `in: []` match). Optional name/code/zone/state filters narrow further.
    */
   async listOutletsInScope(clientId: string, filters: ScopeOutletsQueryDto = {}) {
     await this.assertEnabled(clientId);

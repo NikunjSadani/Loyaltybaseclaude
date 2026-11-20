@@ -14,7 +14,7 @@
  * dashboards / digest / report can share them without cross-module wiring.
  */
 import { Prisma, VisibilityCaptureStatus } from '@prisma/client';
-import { istMonthKey } from '../common/ist-date';
+import { istDateKey, istMonthKey } from '../common/ist-date';
 import { isWindowClosed, windowsForMonth } from './visibility-window.helper';
 import { visibilityUniverseWhere, VisibilityProgramScopeLike } from './visibility-scope.helper';
 import {
@@ -29,7 +29,16 @@ import { classifyPhotoFence, outletMasterFencePolicy, PhotoFencePolicy } from '.
 // Plain statuses (owner decision 2026-11-20)
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const PLAIN_STATUSES = ['WAITING', 'APPROVED', 'NEEDS_RETAKE', 'REJECTED', 'NOT_CAPTURED', 'MISSED'] as const;
+export const PLAIN_STATUSES = [
+  'WAITING',
+  'APPROVED',
+  'NEEDS_RETAKE',
+  'REJECTED',
+  'CLOSED_NOT_APPROVED',
+  'NOT_CAPTURED',
+  'MISSED',
+  'NOT_TRACKED',
+] as const;
 export type PlainStatus = (typeof PLAIN_STATUSES)[number];
 
 /** The words shown to people. Keep in sync with platform/src/lib/visibility-report.ts (FE mirror). */
@@ -38,27 +47,48 @@ export const PLAIN_STATUS_LABEL: Record<PlainStatus, string> = {
   APPROVED: 'Approved',
   NEEDS_RETAKE: 'Needs re-take',
   REJECTED: 'Rejected',
+  CLOSED_NOT_APPROVED: 'Not approved — window closed',
   NOT_CAPTURED: 'Not captured yet',
   MISSED: 'Missed',
+  NOT_TRACKED: 'Not tracked (imported month)',
 };
 
 /**
- * One outlet-window's plain status. A capture row wins (SUBMITTED → Waiting for review, CHANGES_REQUESTED →
- * Needs re-take). No capture: "Not captured yet" while the window is open (or not started), "Missed" ONLY
- * once the window has closed.
+ * One outlet-window's plain status. A capture row wins:
+ *   SUBMITTED → Waiting for review (whatever the window — Gifsy can still review it);
+ *   CHANGES_REQUESTED / REJECTED → "Needs re-take" / "Rejected" ONLY while the window is open (the rep can still
+ *   resubmit); once the window has closed a resubmit is refused (visibility-capture.service resubmitCapture), so
+ *   it is final: "Not approved — window closed" — never counted as waiting on reps.
+ * No capture: "Not captured yet" while the window is open (or not started), "Missed" ONLY once the window has
+ * closed — except in an IMPORTED month (visibility-import.helper), where the old app kept only approved visits,
+ * so a missing capture is "Not tracked", never "Missed".
  */
-export function plainStatusOf(status: VisibilityCaptureStatus | null | undefined, windowClosed: boolean): PlainStatus {
+export function plainStatusOf(
+  status: VisibilityCaptureStatus | null | undefined,
+  windowClosed: boolean,
+  importedMonth = false,
+): PlainStatus {
   switch (status) {
     case 'SUBMITTED':
       return 'WAITING';
     case 'APPROVED':
       return 'APPROVED';
     case 'CHANGES_REQUESTED':
-      return 'NEEDS_RETAKE';
+      return windowClosed ? 'CLOSED_NOT_APPROVED' : 'NEEDS_RETAKE';
     case 'REJECTED':
-      return 'REJECTED';
+      return windowClosed ? 'CLOSED_NOT_APPROVED' : 'REJECTED';
     default:
+      if (importedMonth) return 'NOT_TRACKED';
       return windowClosed ? 'MISSED' : 'NOT_CAPTURED';
+  }
+}
+
+/** isWindowClosed that never throws (a key the current frequency does not have → treated as closed). */
+export function windowClosedSafe(windowKey: string, now: Date, freq: number): boolean {
+  try {
+    return isWindowClosed(windowKey, now, freq);
+  } catch {
+    return true;
   }
 }
 
@@ -104,53 +134,111 @@ export interface MonthStatusCounts {
   month: string;
   /** Captures for in-scope outlets in this month, any status ("Submitted" on the funnel). */
   submitted: number;
+  /** This month's captures "Waiting for review". */
   waiting: number;
+  /** CHANGES_REQUESTED in a window that is still OPEN — the rep can re-take. */
   needsRetake: number;
   approved: number;
+  /** Whole-capture REJECTED in a window that is still OPEN — the rep can capture again. */
   rejected: number;
+  /** CHANGES_REQUESTED / REJECTED in a CLOSED window — final, no resubmit possible ("Not approved — window closed"). */
+  closedNotApproved: number;
+  /** needsRetake + rejected — the only captures still waiting on reps. */
+  waitingOnReps: number;
+  /**
+   * Gifsy's WHOLE review queue: every in-scope capture still "Waiting for review", ANY month (a capture submitted
+   * last month and not reviewed yet is still work to do). Never limited to `month`.
+   */
+  waitingAllMonths: number;
+  /** Of waitingAllMonths: captures from months BEFORE `month`. */
+  waitingEarlierMonths: number;
 }
 
-/** Fold a status groupBy into the plain buckets. Pure. */
+type StatusWindowRow = { status: VisibilityCaptureStatus | string; windowKey?: string; _count: { _all: number } };
+
+/**
+ * Fold a (status, windowKey) groupBy of ONE month into the plain buckets. `closedOf(windowKey)` says whether the
+ * window has closed (rows without a windowKey are treated as open). `waitingRows` = the all-month SUBMITTED groupBy
+ * by windowKey (defaults to this month's waiting only). Pure.
+ */
 export function foldStatusCounts(
   month: string,
-  rows: Array<{ status: VisibilityCaptureStatus | string; _count: { _all: number } }>,
+  rows: StatusWindowRow[],
+  closedOf: (windowKey: string) => boolean = () => false,
+  waitingRows?: Array<{ windowKey: string; _count: { _all: number } }>,
 ): MonthStatusCounts {
-  const of = (s: string) => rows.filter((r) => r.status === s).reduce((n, r) => n + r._count._all, 0);
-  const waiting = of('SUBMITTED');
-  const needsRetake = of('CHANGES_REQUESTED');
-  const approved = of('APPROVED');
-  const rejected = of('REJECTED');
-  return { month, submitted: waiting + needsRetake + approved + rejected, waiting, needsRetake, approved, rejected };
+  const res: MonthStatusCounts = {
+    month, submitted: 0, waiting: 0, needsRetake: 0, approved: 0, rejected: 0, closedNotApproved: 0,
+    waitingOnReps: 0, waitingAllMonths: 0, waitingEarlierMonths: 0,
+  };
+  for (const r of rows) {
+    const n = r._count._all;
+    const closed = r.windowKey ? closedOf(r.windowKey) : false;
+    switch (r.status) {
+      case 'SUBMITTED': res.waiting += n; break;
+      case 'APPROVED': res.approved += n; break;
+      case 'CHANGES_REQUESTED': if (closed) res.closedNotApproved += n; else res.needsRetake += n; break;
+      case 'REJECTED': if (closed) res.closedNotApproved += n; else res.rejected += n; break;
+      default: continue;
+    }
+    res.submitted += n;
+  }
+  res.waitingOnReps = res.needsRetake + res.rejected;
+  if (waitingRows) {
+    for (const r of waitingRows) {
+      res.waitingAllMonths += r._count._all;
+      if (r.windowKey.slice(0, 7) < month) res.waitingEarlierMonths += r._count._all;
+    }
+  } else {
+    res.waitingAllMonths = res.waiting;
+  }
+  return res;
 }
 
 /**
- * Status counts of a month's captures for IN-SCOPE outlets. An empty outletScope → all zeros (no query).
- * `extraOutlet` narrows further (e.g. the admin dashboard's program filter) — ANDed with the in-scope rule.
+ * Status counts of a month's captures for IN-SCOPE outlets, plus Gifsy's whole "Waiting for review" queue across
+ * every month. An empty outletScope → all zeros (no query). `extraOutlet` narrows further (e.g. the admin
+ * dashboard's program filter) — ANDed with the in-scope rule. `now` / `freq` decide which windows have closed.
  */
 export async function loadMonthStatusCounts(
   prisma: Pick<MetricsPrisma, 'visibilityCapture'>,
   clientId: string,
   config: ScopeConfig,
   month: string,
-  extraOutlet?: Prisma.OutletWhereInput,
+  opts: { now: Date; freq: number; extraOutlet?: Prisma.OutletWhereInput },
 ): Promise<MonthStatusCounts> {
-  if (!config.outletScope?.length) return foldStatusCounts(month, []);
+  if (!config.outletScope?.length) return foldStatusCounts(month, [], undefined, []);
   const universe = visibilityUniverseWhere(clientId, config);
+  const outlet = opts.extraOutlet ? { AND: [universe, opts.extraOutlet] } : universe;
   const rows = await prisma.visibilityCapture.groupBy({
-    by: ['status'],
-    where: { ...monthCaptureWhere(clientId, month), outlet: extraOutlet ? { AND: [universe, extraOutlet] } : universe },
+    by: ['status', 'windowKey'],
+    where: { ...monthCaptureWhere(clientId, month), outlet },
     _count: { _all: true },
   });
-  return foldStatusCounts(month, rows as Array<{ status: VisibilityCaptureStatus; _count: { _all: number } }>);
+  // Gifsy's queue is month-independent: every capture still waiting, whichever month it belongs to.
+  const waitingRows = await prisma.visibilityCapture.groupBy({
+    by: ['windowKey'],
+    where: { clientId, status: 'SUBMITTED', outlet },
+    _count: { _all: true },
+  });
+  return foldStatusCounts(
+    month,
+    rows as unknown as StatusWindowRow[],
+    (wk) => windowClosedSafe(wk, opts.now, opts.freq),
+    waitingRows as unknown as Array<{ windowKey: string; _count: { _all: number } }>,
+  );
 }
 
 /**
- * Approval rate = Approved ÷ (Approved + Needs re-take + Rejected) — the share of this month's captures that
- * a reviewer has decided on and that ended up approved. Captures still "Waiting for review" are NOT in the
- * denominator (no decision yet). null when nothing has been decided (never a fabricated 0 / 100).
+ * Approval rate = Approved ÷ every DECIDED capture (Approved + Needs re-take + Rejected + Not approved — window
+ * closed) — the share of this month's captures that a reviewer has decided on and that ended up approved. Captures
+ * still "Waiting for review" are NOT in the denominator (no decision yet). null when nothing has been decided
+ * (never a fabricated 0 / 100).
  */
-export function approvalRatePct(c: Pick<MonthStatusCounts, 'approved' | 'needsRetake' | 'rejected'>): number | null {
-  const reviewed = c.approved + c.needsRetake + c.rejected;
+export function approvalRatePct(
+  c: Pick<MonthStatusCounts, 'approved' | 'needsRetake' | 'rejected'> & { closedNotApproved?: number },
+): number | null {
+  const reviewed = c.approved + c.needsRetake + c.rejected + (c.closedNotApproved ?? 0);
   if (reviewed <= 0) return null;
   return Math.round((c.approved / reviewed) * 1000) / 10;
 }
@@ -195,8 +283,10 @@ export interface FlaggedCapture {
   windowKey: string;
   status: PlainStatus;
   reasons: FlagReason[];
-  /** Other captures sharing a photo with this one (outlet code + window). */
+  /** Other captures sharing a photo with this one (outlet code + window) — at most DUPLICATE_LIST_CAP listed. */
   duplicateOf: Array<{ outletCode: string; windowKey: string }>;
+  /** How many other captures share a photo with this one (the full figure; duplicateOf may list fewer). */
+  duplicateCount: number;
   /** Photo labels found outside the fence. */
   outsidePhotos: string[];
 }
@@ -211,6 +301,9 @@ export interface FraudFlagResult {
   flagRatePct: number | null;
   rows: FlaggedCapture[];
 }
+
+/** Max other captures listed per flagged capture (the count is always complete — duplicateCount). */
+export const DUPLICATE_LIST_CAP = 10;
 
 const CHUNK = 5000;
 function chunks<T>(xs: T[], n = CHUNK): T[][] {
@@ -265,27 +358,39 @@ export async function loadFraudFlags(
     );
   }
   const hashList = [...new Set(ownHashes.map((h) => h.hash).filter((h) => typeof h === 'string' && h.length > 0))];
-  const holders = new Map<string, Array<{ captureId: string; outletCode: string; windowKey: string }>>();
+  // hash → the DISTINCT captures holding it (a capture with the same photo in two fields counts once).
+  const holders = new Map<string, Map<string, { outletCode: string; windowKey: string }>>();
   for (const part of chunks(hashList)) {
     const rows = await prisma.visibilityImageHash.findMany({
       where: { clientId, hash: { in: part } },
       select: { hash: true, captureId: true, capture: { select: { outletCode: true, windowKey: true } } },
     });
     for (const r of rows) {
-      const list = holders.get(r.hash) ?? [];
-      list.push({ captureId: r.captureId, outletCode: r.capture?.outletCode ?? '', windowKey: r.capture?.windowKey ?? '' });
-      holders.set(r.hash, list);
+      const m = holders.get(r.hash) ?? new Map<string, { outletCode: string; windowKey: string }>();
+      m.set(r.captureId, { outletCode: r.capture?.outletCode ?? '', windowKey: r.capture?.windowKey ?? '' });
+      holders.set(r.hash, m);
     }
   }
+  // Linear in the number of hash rows: each capture lists at most DUPLICATE_LIST_CAP of the others sharing a photo
+  // (a hash shared by N captures would otherwise build N×N entries), and `duplicateCount` keeps the full figure.
   const dupOf = new Map<string, Map<string, { outletCode: string; windowKey: string }>>();
+  const dupCount = new Map<string, number>();
   for (const h of ownHashes) {
-    for (const other of holders.get(h.hash) ?? []) {
-      if (other.captureId === h.captureId) continue;
-      const m = dupOf.get(h.captureId) ?? new Map();
-      m.set(other.captureId, { outletCode: other.outletCode, windowKey: other.windowKey });
-      dupOf.set(h.captureId, m);
+    const list = holders.get(h.hash);
+    if (!list) continue;
+    const others = list.size - (list.has(h.captureId) ? 1 : 0);
+    if (others <= 0) continue;
+    dupCount.set(h.captureId, Math.max(dupCount.get(h.captureId) ?? 0, others));
+    const m = dupOf.get(h.captureId) ?? new Map<string, { outletCode: string; windowKey: string }>();
+    for (const [otherId, other] of list) {
+      if (m.size >= DUPLICATE_LIST_CAP) break;
+      if (otherId === h.captureId) continue;
+      m.set(otherId, other);
     }
+    dupOf.set(h.captureId, m);
   }
+  // A capture with several shared hashes: the distinct listed others may exceed the per-hash max.
+  for (const [id, m] of dupOf) dupCount.set(id, Math.max(dupCount.get(id) ?? 0, m.size));
 
   // (b) outside the fence — the reviewer's per-photo policy, resolved in bulk.
   const schemas = await loadFormSchemas(prisma, clientId, [...new Set(captures.map((c) => c.formVersion))]);
@@ -313,17 +418,16 @@ export async function loadFraudFlags(
     if (dups.length) { reasons.push('DUPLICATE_PHOTO'); duplicate += 1; }
     if (isOutside) { reasons.push('OUTSIDE_FENCE'); outsideFence += 1; }
     if (!reasons.length) continue;
-    let closed = false;
-    try { closed = isWindowClosed(c.windowKey, now, freq); } catch { closed = true; }
     rows.push({
       captureId: c.id,
       outletId: c.outletId,
       outletCode: c.outletCode,
       outletName: c.outletName,
       windowKey: c.windowKey,
-      status: plainStatusOf(c.status, closed),
+      status: plainStatusOf(c.status, windowClosedSafe(c.windowKey, now, freq)),
       reasons,
       duplicateOf: dups,
+      duplicateCount: dups.length ? dupCount.get(c.id) ?? dups.length : 0,
       outsidePhotos,
     });
   }
@@ -393,13 +497,16 @@ async function loadBoardPhotoRefs(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface ReviewActionCounts {
-  /** Review decisions made in the window (one per capture per decision instant). */
+  /**
+   * Reviews done in the window: ONE per capture per IST day — that day's FINAL outcome (several clicks on the same
+   * capture the same day, e.g. approve photo 1 then reject photo 2, count once).
+   */
   actions: number;
-  /** Decisions that only approved photos. */
+  /** Of `actions`: the day ended with every photo decided that day approved. */
   approved: number;
-  /** Decisions that rejected at least one photo (a re-take request or a whole-capture rejection). */
+  /** Of `actions`: the day ended with at least one photo sent back (re-take) or the whole capture rejected. */
   rejected: number;
-  /** Photos approved / rejected by those decisions. */
+  /** Photos whose final decision that day was approved / rejected. */
   photosApproved: number;
   photosRejected: number;
 }
@@ -413,13 +520,14 @@ export interface ReviewTraceCapture {
 }
 
 /**
- * Count review ACTIONS whose instant falls in [startMs, endMs). Reconstructed from the review trail that
- * survives a resubmission: the live capture's photoReviews AND every submission version's photoReviews snapshot
- * (persistReview mirrors the map onto the version it reviewed, so a rejection followed by a same-day resubmit is
- * still found on the old version). One photo decision = (captureId, fieldId, reviewedAt), deduped across versions
- * (an approved photo carried into the next version keeps its reviewedAt). One ACTION = (captureId, reviewedAt):
- * an approve-all / reject-all writes every photo with the same instant. A capture with NO photo decisions (legacy
- * single-unit) falls back to its whole-capture reviewedAt + current status.
+ * Count reviews done in [startMs, endMs) — ONE per capture per IST day, by that day's FINAL outcome. Reconstructed
+ * from the review trail that survives a resubmission: the live capture's photoReviews AND every submission version's
+ * photoReviews snapshot (persistReview mirrors the map onto the version it reviewed, so a rejection followed by a
+ * same-day resubmit is still found on the old version). One photo decision = (captureId, fieldId, reviewedAt),
+ * deduped across versions (an approved photo carried into the next version keeps its reviewedAt). Per capture and
+ * IST day, each photo's LAST decision that day wins; the day's outcome is "sent back / rejected" when any of those
+ * is REJECTED, else "approved". A capture with NO photo decisions (legacy single-unit) falls back to its
+ * whole-capture reviewedAt + current status.
  *
  * TODO(visibility-review-events): when the append-only review-events table lands (parallel Track — review history),
  * count its rows in the window instead of reconstructing from JSON snapshots; keep this as the fallback for
@@ -429,14 +537,19 @@ export function countReviewActions(captures: ReviewTraceCapture[], startMs: numb
   const res: ReviewActionCounts = { actions: 0, approved: 0, rejected: 0, photosApproved: 0, photosRejected: 0 };
   const inWin = (ms: number) => Number.isFinite(ms) && ms >= startMs && ms < endMs;
   for (const c of captures) {
-    const decisions = new Map<string, 'APPROVED' | 'REJECTED'>(); // `${fieldId}|${iso}` → status
+    // IST day → fieldId → that photo's LAST decision that day.
+    const byDay = new Map<string, Map<string, { ms: number; status: 'APPROVED' | 'REJECTED' }>>();
     let anyDecision = false;
     for (const snap of [c.photoReviews, ...(c.submissions ?? []).map((s) => s.photoReviews)]) {
       for (const [fieldId, r] of Object.entries(readPhotoReviews(snap))) {
         anyDecision = true;
         const ms = Date.parse(r.reviewedAt);
         if (!inWin(ms)) continue;
-        decisions.set(`${fieldId}|${new Date(ms).toISOString()}`, r.status);
+        const day = istDateKey(new Date(ms));
+        const fields = byDay.get(day) ?? new Map<string, { ms: number; status: 'APPROVED' | 'REJECTED' }>();
+        const prev = fields.get(fieldId);
+        if (!prev || ms > prev.ms) fields.set(fieldId, { ms, status: r.status });
+        byDay.set(day, fields);
       }
     }
     if (!anyDecision) {
@@ -449,16 +562,14 @@ export function countReviewActions(captures: ReviewTraceCapture[], startMs: numb
       }
       continue;
     }
-    const byInstant = new Map<string, { approved: number; rejected: number }>();
-    for (const [k, status] of decisions) {
-      const iso = k.slice(k.indexOf('|') + 1);
-      const agg = byInstant.get(iso) ?? { approved: 0, rejected: 0 };
-      if (status === 'APPROVED') { agg.approved += 1; res.photosApproved += 1; } else { agg.rejected += 1; res.photosRejected += 1; }
-      byInstant.set(iso, agg);
-    }
-    for (const agg of byInstant.values()) {
+    for (const fields of byDay.values()) {
+      let rejected = 0;
+      for (const d of fields.values()) {
+        if (d.status === 'APPROVED') res.photosApproved += 1;
+        else { res.photosRejected += 1; rejected += 1; }
+      }
       res.actions += 1;
-      if (agg.rejected > 0) res.rejected += 1;
+      if (rejected > 0) res.rejected += 1;
       else res.approved += 1;
     }
   }

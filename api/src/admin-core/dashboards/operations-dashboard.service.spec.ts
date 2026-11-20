@@ -33,6 +33,8 @@ const mockPrisma = {
   visibilityCapture: {
     groupBy: jest.fn(),
     findMany: jest.fn(),
+    findFirst: jest.fn(),
+    count: jest.fn(),
   },
   visibilityImageHash: { findMany: jest.fn() },
   visibilityFormVersion: { findMany: jest.fn() },
@@ -287,11 +289,23 @@ describe('OperationsDashboardService', () => {
       mockTenantSettings.getEffectiveSettings.mockResolvedValue({
         visibilityConfig: { outletScope: ['SSS'], frequencyPerMonth: 1, programs: [], subPrograms: [], geoFence: { enabled: true, radiusMeters: 200 } },
       });
-      mockPrisma.visibilityCapture.groupBy.mockResolvedValue([
-        { status: 'SUBMITTED', _count: { _all: 1 } },
-        { status: 'APPROVED', _count: { _all: 2 } },
-        { status: 'CHANGES_REQUESTED', _count: { _all: 1 } },
-      ]);
+      // Month groupBy (status × window) vs the all-months waiting queue (by window only).
+      mockPrisma.visibilityCapture.groupBy.mockImplementation((args: any) =>
+        Promise.resolve(
+          args.by.includes('status')
+            ? [
+                { status: 'SUBMITTED', windowKey: '2026-10-P1', _count: { _all: 1 } },
+                { status: 'APPROVED', windowKey: '2026-10-P1', _count: { _all: 2 } },
+                { status: 'CHANGES_REQUESTED', windowKey: '2026-10-P1', _count: { _all: 1 } },
+              ]
+            : [
+                { windowKey: '2026-09-P1', _count: { _all: 2 } },
+                { windowKey: '2026-10-P1', _count: { _all: 1 } },
+              ],
+        ),
+      );
+      // Portal went live long before the months under test (no imported month by default).
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({ windowKey: '2026-01-P1' });
       const captures = [cap('a', 'APPROVED'), cap('b', 'APPROVED'), cap('c', 'SUBMITTED', far, null), cap('d', 'CHANGES_REQUESTED')];
       mockPrisma.visibilityCapture.findMany.mockImplementation((args: any) =>
         Promise.resolve(args.distinct ? [{ outletId: 'o-a' }, { outletId: 'o-b' }, { outletId: 'o-c' }, { outletId: 'o-d' }] : captures),
@@ -313,13 +327,18 @@ describe('OperationsDashboardService', () => {
     });
     afterEach(() => jest.useRealTimers());
 
-    it('counts the picked month, splits waiting / needs re-take, approval rate over decided captures, real flags', async () => {
+    it('counts the picked month, splits waiting / closed-window re-take, approval rate over decided captures, real flags', async () => {
       const res = await service.operations(user, '2026-10');
       const v = res.visibility as any;
       expect(v).toMatchObject({
-        mode: 'PHOTO_APPROVAL', month: '2026-10', submitted: 4, approved: 2, waiting: 1, needsRetake: 1, rejected: 0,
-        // 2 ÷ (2 + 1 + 0)
+        mode: 'PHOTO_APPROVAL', month: '2026-10', submitted: 4, approved: 2, waiting: 1,
+        // October has closed → the re-take request can no longer be redone: final, not waiting on reps.
+        needsRetake: 0, rejected: 0, closedNotApproved: 1, waitingOnReps: 0,
+        // Gifsy's whole queue: 1 from October + 2 from earlier months.
+        waitingAllMonths: 3, waitingEarlierMonths: 2,
+        // 2 ÷ (2 + 1 not approved — window closed)
         approvalRatePct: 66.7,
+        flagDetailsAvailable: true, importedMonth: false,
         // b = duplicate of an older capture; c = photo outside the fence
         flagged: 2, duplicate: 1, outsideFence: 1, fraudFlagPct: 50,
         participatingOutlets: 4, inScopeOutlets: 8, participationPct: 50,
@@ -337,9 +356,32 @@ describe('OperationsDashboardService', () => {
     });
 
     it('no decided captures → approval rate null, not a fake 0 / 100', async () => {
-      mockPrisma.visibilityCapture.groupBy.mockResolvedValue([{ status: 'SUBMITTED', _count: { _all: 3 } }]);
+      mockPrisma.visibilityCapture.groupBy.mockResolvedValue([{ status: 'SUBMITTED', windowKey: '2026-10-P1', _count: { _all: 3 } }]);
       const res = await service.operations(user, '2026-10');
       expect((res.visibility as any).approvalRatePct).toBeNull();
+    });
+
+    it('imported month (before portal go-live): participation is not tracked (null + note), never ÷ today\'s outlets', async () => {
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({ windowKey: '2026-11-P1' });
+      const v = (await service.operations(user, '2026-10')).visibility as any;
+      expect(v).toMatchObject({ importedMonth: true, participationPct: null });
+      expect(v.importedMonthNote).toMatch(/Not tracked for imported months/);
+    });
+
+    it('client roles: counts only — the funnel says no flag details, and the flags list (outlet codes) 403s', async () => {
+      const clientAdmin: JwtPayload = { ...user, sub: 'ca1', role: 'CLIENT_ADMIN' };
+      const v = (await service.operations(clientAdmin, '2026-10')).visibility as any;
+      expect(v).toMatchObject({ flagged: 2, duplicate: 1, outsideFence: 1, flagDetailsAvailable: false });
+      await expect(service.visibilityFlags(clientAdmin, '2026-10')).rejects.toThrow('available to Gifsy only');
+    });
+
+    it('one fraud scan per tenant-month is reused by the funnel and every flag-list page', async () => {
+      await service.operations(user, '2026-10');
+      await service.visibilityFlags(user, '2026-10', 1, 1);
+      await service.visibilityFlags(user, '2026-10', 2, 1);
+      // The capture scan (no `distinct`) ran once; the participation query (distinct) is separate.
+      const scans = mockPrisma.visibilityCapture.findMany.mock.calls.filter((c: any[]) => !c[0].distinct);
+      expect(scans).toHaveLength(1);
     });
 
     it('flags list: the reason per capture, paged', async () => {

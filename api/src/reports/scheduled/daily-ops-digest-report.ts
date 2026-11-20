@@ -738,16 +738,26 @@ function tenantSections(t: TenantDigest): string {
       (v) => v.submitted === 0 && v.approved === 0 && v.rejected === 0 && v.pending === 0,
       (v) =>
         v.month !== undefined
-          ? // PHOTO_APPROVAL tenants: review ACTIONS in the window + this month's two queues (Gifsy vs reps).
+          ? // PHOTO_APPROVAL tenants: reviews done in the window (one per capture per day) + the open queues right
+            // now — Gifsy's whole review queue (any month) and what waits on reps (open windows only).
             metricLine('In window', [
               ['submitted', intIN(v.submitted)],
-              ['reviews done', intIN(v.reviewActions ?? v.approved + v.rejected)],
+              ['reviews done (one per capture per day, its final outcome)', intIN(v.reviewActions ?? v.approved + v.rejected)],
               ['approved', intIN(v.approved)],
               ['sent back / rejected', intIN(v.rejected)],
             ]) +
-            metricLine(`Right now (${monthLabel(v.month)})`, [
-              ['waiting for review', intIN(v.waiting ?? 0), accentIf(v.waiting ?? 0, 'amber')],
-              ['needs re-take (waiting on reps)', intIN(v.needsRetake ?? 0)],
+            metricLine('Right now', [
+              [
+                'waiting for review',
+                `${intIN(v.waitingAllMonths ?? v.waiting ?? 0)}${
+                  (v.waitingEarlierMonths ?? 0) > 0 ? ` (${intIN(v.waitingEarlierMonths ?? 0)} from earlier months)` : ''
+                }`,
+                accentIf(v.waitingAllMonths ?? v.waiting ?? 0, 'amber'),
+              ],
+              ['waiting on reps (re-take / capture again — window still open)', intIN(v.waitingOnReps ?? v.needsRetake ?? 0)],
+              ...((v.closedNotApproved ?? 0) > 0
+                ? ([[`not approved — window closed (${monthLabel(v.month)})`, intIN(v.closedNotApproved ?? 0)]] as Array<[string, string]>)
+                : []),
             ])
           : metricLine('In window', [
           ['submitted', intIN(v.submitted)],

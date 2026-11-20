@@ -1968,9 +1968,10 @@ export class AdminCoreService {
    * program matches nothing → zeros. `availablePrograms` = distinct trimmed outlet programs.
    *
    * Visibility (VISIBILITY-POSM-DESIGN.md §Metrics) — PHOTO_APPROVAL tenants only: MONTH-WISE (`visibilityMonth`,
-   * default the current IST month), in-scope outlets only (visibilityUniverseWhere): `pendingVisibility` = captures
-   * "Waiting for review" (Gifsy's queue) and `visibility.needsRetake` = "Needs re-take" (waiting on reps), shown
-   * separately. AMOUNT_UPLOAD tenants (no capture flow) keep the exact pre-month query and get `visibility: null`.
+   * default the current IST month), in-scope outlets only (visibilityUniverseWhere): `pendingVisibility` = EVERY
+   * capture still "Waiting for review" whatever its month (Gifsy's whole queue; `visibility.waiting` = the picked
+   * month's share, `waitingEarlierMonths` = the rest), and `visibility.waitingOnReps` = re-takes / rejections in a
+   * window still open — shown separately. AMOUNT_UPLOAD tenants (no capture flow) keep the exact pre-month query and get `visibility: null`.
    */
   async dashboardKpis(user: JwtPayload, programName?: unknown, visibilityMonth?: unknown) {
     const clientId = user.clientId;
@@ -2041,18 +2042,36 @@ export class AdminCoreService {
 
     // Suppress the visibility KPI for a tenant whose visibility module is OFF.
     let pendingVisibility = visibilityEnabled ? pendingVisibilityRaw ?? 0 : 0;
-    let visibility: { month: string; waiting: number; needsRetake: number } | null = null;
+    let visibility: {
+      month: string;
+      waiting: number;
+      waitingAllMonths: number;
+      waitingEarlierMonths: number;
+      needsRetake: number;
+      rejected: number;
+      waitingOnReps: number;
+      closedNotApproved: number;
+    } | null = null;
     if (visibilityEnabled && photoMode) {
       const cfg = (await this.tenantSettings.getEffectiveSettings(clientId)).visibilityConfig;
-      const counts = await loadMonthStatusCounts(
-        this.prisma,
-        clientId,
-        cfg,
-        vMonth,
-        variants ? { programName: programNameIn(variants) } : undefined,
-      );
-      pendingVisibility = counts.waiting;
-      visibility = { month: vMonth, waiting: counts.waiting, needsRetake: counts.needsRetake };
+      const counts = await loadMonthStatusCounts(this.prisma, clientId, cfg, vMonth, {
+        now: new Date(),
+        freq: cfg.frequencyPerMonth,
+        extraOutlet: variants ? { programName: programNameIn(variants) } : undefined,
+      });
+      // The tile = Gifsy's WHOLE review queue (every month) — a capture from an earlier month still waiting is
+      // still work to do; the picked month's share is shown beside it.
+      pendingVisibility = counts.waitingAllMonths;
+      visibility = {
+        month: vMonth,
+        waiting: counts.waiting,
+        waitingAllMonths: counts.waitingAllMonths,
+        waitingEarlierMonths: counts.waitingEarlierMonths,
+        needsRetake: counts.needsRetake,
+        rejected: counts.rejected,
+        waitingOnReps: counts.waitingOnReps,
+        closedNotApproved: counts.closedNotApproved,
+      };
     }
 
     const totalRedeemablePoints = walletAggregate._sum.redeemablePoints ?? 0;
@@ -2079,8 +2098,9 @@ export class AdminCoreService {
       activePartners,
       pendingKyc,
       pendingVisibility,
-      // Additive (PHOTO_APPROVAL tenants with visibility ON; else null): the month the tile counts + its two
-      // queues — Waiting for review (Gifsy) and Needs re-take (waiting on reps).
+      // Additive (PHOTO_APPROVAL tenants with visibility ON; else null): pendingVisibility = every capture still
+      // Waiting for review (any month); this block = the picked month's share + earlier months + what waits on
+      // reps (open windows only) + re-takes left when the window closed ("Not approved — window closed").
       visibility,
       totalRedeemablePoints,
       totalOwedPoints,

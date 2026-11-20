@@ -574,7 +574,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       ]);
     };
 
-    it('PHOTO_APPROVAL: approved / rejected = review ACTIONS in the window (a rejection then same-day resubmit still counts); pending = waiting + needs re-take this month', async () => {
+    it('PHOTO_APPROVAL: reviews = one per capture per day (a rejection then same-day resubmit still counts); waiting = EVERY month', async () => {
       visOn({}); // absent mode = PHOTO_APPROVAL
       const t = new Date(WIN.startMs + 60 * 60_000).toISOString();
       prisma.visibilityCaptureSubmission.count.mockResolvedValue(3);
@@ -585,15 +585,30 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
         },
         { id: 'c2', status: 'APPROVED', reviewedAt: new Date(t), photoReviews: { w1: { status: 'APPROVED', reviewedAt: t, reviewedByUserId: 'g' } } },
       ]);
-      prisma.visibilityCapture.groupBy.mockResolvedValue([
-        { status: 'SUBMITTED', _count: { _all: 4 } },
-        { status: 'CHANGES_REQUESTED', _count: { _all: 2 } },
-      ]);
+      // NOW = 13 Nov 2026 (frequency 1 → the November window is still open). October's 1 capture is still waiting.
+      prisma.visibilityCapture.groupBy.mockImplementation((args: { by: string[] }) =>
+        Promise.resolve(
+          args.by.includes('status')
+            ? [
+                { status: 'SUBMITTED', windowKey: '2026-11-P1', _count: { _all: 4 } },
+                { status: 'CHANGES_REQUESTED', windowKey: '2026-11-P1', _count: { _all: 2 } },
+              ]
+            : [
+                { windowKey: '2026-10-P1', _count: { _all: 1 } },
+                { windowKey: '2026-11-P1', _count: { _all: 4 } },
+              ],
+        ),
+      );
       const input = await svc.collect(NOW, '13 Nov 2026', WIN);
       const v = input.tenants[0].visibility!;
       expect(v).toEqual({
         ok: true,
-        data: { submitted: 3, approved: 1, rejected: 1, pending: 6, month: expect.stringMatching(/^\d{4}-\d{2}$/), reviewActions: 2, waiting: 4, needsRetake: 2 },
+        data: {
+          submitted: 3, approved: 1, rejected: 1,
+          // Everything still open: 5 waiting for review (any month) + 2 waiting on reps.
+          pending: 7, month: '2026-11', reviewActions: 2,
+          waiting: 4, waitingAllMonths: 5, waitingEarlierMonths: 1, needsRetake: 2, waitingOnReps: 2, closedNotApproved: 0,
+        },
       });
       // Review actions read the capture trail (updatedAt superset); pending = this month, in-scope outlets.
       expect(prisma.visibilityCapture.findMany.mock.calls[0][0].where).toEqual({ clientId: 'bajaj', updatedAt: { gte: new Date(WIN.startMs) } });

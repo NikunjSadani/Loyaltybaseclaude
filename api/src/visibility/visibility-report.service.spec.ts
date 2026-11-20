@@ -2,7 +2,7 @@
  * Unit tests for visibility-report.service.ts — the MONTH-WISE report (VISIBILITY-POSM-DESIGN.md §Metrics).
  *
  * Fixture: 5 in-scope outlets; o1 APPROVED by an IMPORTED old-app row (no submitter), o2 SUBMITTED (portal),
- * o3 CHANGES_REQUESTED, o4 REJECTED, o5 no capture. Rep r1 (o1,o2) reports to an INACTIVE m1 who reports to m2
+ * o3 CHANGES_REQUESTED, o4 REJECTED, o5 no capture. Portal go-live defaults to 2026-01 (no imported month). Rep r1 (o1,o2) reports to an INACTIVE m1 who reports to m2
  * (→ first active manager = m2); rep r2 (o3); o4/o5 unassigned. Clock pinned to 2026-11-20 IST, so 2026-10 is a
  * CLOSED window (o5 → Missed) and 2026-11 is OPEN (o5 → Not captured yet).
  *
@@ -11,7 +11,9 @@
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { VisibilityReportService, tallySlots, breakdown, groupKeyOf, IMPORTED_LABEL, ReportSlot } from './visibility-report.service';
+import {
+  VisibilityReportService, tallySlots, breakdown, groupKeyOf, IMPORTED_LABEL, ReportSlot, reviewerOfCapture,
+} from './visibility-report.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -42,21 +44,25 @@ function capturesFor(month: string, window = 'P1') {
   return [
     // Imported old-app record (Bajaj migration shape): APPROVED, no submitter, approvedBy = a Gifsy admin.
     { id: 'c1', outletId: 'o1', windowKey: wk, status: 'APPROVED', capturedAt: null, receivedAt: new Date('2026-10-05T05:00:00Z'),
-      reviewedAt: new Date('2026-10-06T05:00:00Z'), photoReviews: null, approvedByUserId: 'gadmin', submittedBySalesUserId: null, submittedBy: null },
+      reviewedAt: new Date('2026-10-06T05:00:00Z'), photoReviews: null, approvedByUserId: 'gadmin', submittedBySalesUserId: null, submittedBy: null,
+      formValues: { w1: `visibility-media/bajaj/vendor-import/prod/run/A1/${month}_v1.jpg` } },
     { id: 'c2', outletId: 'o2', windowKey: wk, status: 'SUBMITTED', capturedAt: new Date('2026-10-07T05:00:00Z'), receivedAt: new Date('2026-10-07T05:00:00Z'),
-      reviewedAt: null, photoReviews: null, approvedByUserId: null, submittedBySalesUserId: 'r1', submittedBy: { employeeCode: 'E1', user: { name: 'Ravi' } } },
+      reviewedAt: null, photoReviews: null, approvedByUserId: null, submittedBySalesUserId: 'r1', submittedBy: { employeeCode: 'E1', user: { name: 'Ravi' } },
+      formValues: { w1: { key: 'visibility-media/bajaj/A2/w1.jpg' } } },
     { id: 'c3', outletId: 'o3', windowKey: wk, status: 'CHANGES_REQUESTED', capturedAt: new Date('2026-10-08T05:00:00Z'), receivedAt: new Date('2026-10-08T05:00:00Z'),
       reviewedAt: new Date('2026-10-09T05:00:00Z'),
       photoReviews: { f1: { status: 'REJECTED', reasonCode: 'BLURRY', reviewedAt: '2026-10-09T05:00:00.000Z', reviewedByUserId: 'rev1' } },
-      approvedByUserId: null, submittedBySalesUserId: 'r2', submittedBy: { employeeCode: 'E2', user: { name: 'Sita' } } },
+      approvedByUserId: null, submittedBySalesUserId: 'r2', submittedBy: { employeeCode: 'E2', user: { name: 'Sita' } },
+      formValues: { f1: { key: 'visibility-media/bajaj/A3/f1.jpg' } } },
     { id: 'c4', outletId: 'o4', windowKey: wk, status: 'REJECTED', capturedAt: null, receivedAt: new Date('2026-10-10T05:00:00Z'),
-      reviewedAt: new Date('2026-10-11T05:00:00Z'), photoReviews: null, approvedByUserId: 'rev1', submittedBySalesUserId: 'r2', submittedBy: { employeeCode: 'E2', user: { name: 'Sita' } } },
+      reviewedAt: new Date('2026-10-11T05:00:00Z'), photoReviews: null, approvedByUserId: 'rev1', submittedBySalesUserId: 'r2', submittedBy: { employeeCode: 'E2', user: { name: 'Sita' } } as { employeeCode: string; user: { name: string } } | null,
+      formValues: { w1: { key: 'visibility-media/bajaj/A4/w1.jpg' } } },
   ];
 }
 
 const mockPrisma = {
   outlet: { findMany: jest.fn() },
-  visibilityCapture: { findMany: jest.fn(), count: jest.fn() },
+  visibilityCapture: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
   salesUserAssignment: { findMany: jest.fn() },
   salesUser: { findMany: jest.fn() },
   user: { findMany: jest.fn() },
@@ -64,8 +70,11 @@ const mockPrisma = {
 const mockTenant = { resolveVisibilityEnabled: jest.fn() };
 const mockSettings = { getEffectiveSettings: jest.fn() };
 
-function wireFixture(opts: { config?: Record<string, unknown> } = {}) {
+function wireFixture(opts: { config?: Record<string, unknown>; goLive?: string | null } = {}) {
   mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...baseConfig, ...(opts.config ?? {}) } });
+  // Portal go-live (first capture with a submitting rep): by default long before the fixture months → none imported.
+  const goLive = opts.goLive === undefined ? '2026-01' : opts.goLive;
+  mockPrisma.visibilityCapture.findFirst.mockResolvedValue(goLive ? { windowKey: `${goLive}-P1` } : null);
   mockPrisma.outlet.findMany.mockResolvedValue(OUTLETS);
   mockPrisma.visibilityCapture.findMany.mockImplementation(({ where }: any) => {
     const keys: string[] = where.windowKey.in;
@@ -125,14 +134,23 @@ describe('VisibilityReportService (month-wise)', () => {
 
   afterEach(() => jest.useRealTimers());
 
-  it('closed month: every plain status + coverage; no capture after the window closed = Missed', async () => {
+  it('closed month: re-take / rejected left at window close = Not approved — window closed; no capture = Missed', async () => {
     const res = await service.gifsyReport(gifsy, { month: '2026-10' });
     expect(res.month).toBe('2026-10');
     expect(res.windowKey).toBeNull();
     expect(res.windows).toEqual([{ key: '2026-10-P1', closed: true }]);
+    expect(res.importedMonth).toBe(false);
     expect(res.summary).toMatchObject({
-      inScope: 5, approved: 1, waiting: 1, needsRetake: 1, rejected: 1, notCaptured: 0, missed: 1, coveragePct: 20,
+      inScope: 5, approved: 1, waiting: 1, needsRetake: 0, rejected: 0, closedNotApproved: 2, notCaptured: 0, missed: 1,
+      notTracked: 0, coveragePct: 20,
     });
+    const closed = await service.gifsyOutlets(gifsy, { month: '2026-10', status: 'CLOSED_NOT_APPROVED' });
+    expect(closed.rows.map((r) => r.outletCode)).toEqual(['A3', 'A4']);
+  });
+
+  it('open window: re-take / rejected are still waiting on reps (Needs re-take / Rejected)', async () => {
+    const res = await service.gifsyReport(gifsy, { month: '2026-11' });
+    expect(res.summary).toMatchObject({ needsRetake: 1, rejected: 1, closedNotApproved: 0 });
   });
 
   it('open month (default = current IST month): no capture yet = Not captured yet, never Missed', async () => {
@@ -158,8 +176,10 @@ describe('VisibilityReportService (month-wise)', () => {
       { key: '2026-11-P1', closed: true },
       { key: '2026-11-P2', closed: false },
     ]);
-    // 5 outlets × 2 windows. P1 has the 4 captures; P2 has none → 5 not captured; P1 o5 → missed.
-    expect(res.summary).toMatchObject({ inScope: 10, approved: 1, waiting: 1, needsRetake: 1, rejected: 1, missed: 1, notCaptured: 5 });
+    // 5 outlets × 2 windows. P1 (closed) has the 4 captures; P2 has none → 5 not captured; P1 o5 → missed.
+    expect(res.summary).toMatchObject({
+      inScope: 10, approved: 1, waiting: 1, needsRetake: 0, rejected: 0, closedNotApproved: 2, missed: 1, notCaptured: 5,
+    });
     const one = await service.gifsyReport(gifsy, { month: '2026-11', windowKey: '2026-11-P2' });
     expect(one.windowKey).toBe('2026-11-P2');
     expect(one.summary).toMatchObject({ inScope: 5, notCaptured: 5, missed: 0 });
@@ -220,7 +240,7 @@ describe('VisibilityReportService (month-wise)', () => {
     expect(all.pagination).toEqual({ page: 2, pageSize: 2, total: 5, pages: 3 });
     expect(all.rows.map((r) => r.outletCode)).toEqual(['A3', 'A4']);
 
-    const retake = await service.gifsyOutlets(gifsy, { month: '2026-10', status: 'NEEDS_RETAKE' });
+    const retake = await service.gifsyOutlets(gifsy, { month: '2026-11', status: 'NEEDS_RETAKE' });
     expect(retake.rows).toEqual([
       expect.objectContaining({
         outletCode: 'A3', status: 'NEEDS_RETAKE', rep: 'Sita (E2)', manager: 'Meera',
@@ -237,6 +257,48 @@ describe('VisibilityReportService (month-wise)', () => {
     expect(ravi.groupLabel).toBe('Ravi (E1)');
   });
 
+  it('imported month (before portal go-live): only the old app visits; coverage + Missed not tracked, also for windows 2+', async () => {
+    wireFixture({ config: { frequencyPerMonth: 2 }, goLive: '2026-11' });
+    mockPrisma.visibilityCapture.findMany.mockImplementation(({ where }: any) =>
+      Promise.resolve(capturesFor('2026-10').filter((c) => c.id === 'c1' && where.windowKey.in.includes(c.windowKey))),
+    );
+    const res = await service.gifsyReport(gifsy, { month: '2026-10' });
+    expect(res.importedMonth).toBe(true);
+    expect(res.importedMonthNote).toMatch(/Not tracked for imported months/);
+    expect(res.summary).toMatchObject({ inScope: 1, approved: 1, missed: 0, notCaptured: 0, coveragePct: null });
+    expect(res.breakdowns.rep.every((r) => r.coveragePct === null && r.missed === 0)).toBe(true);
+    const p2 = await service.gifsyReport(gifsy, { month: '2026-10', windowKey: '2026-10-P2' });
+    expect(p2.summary).toMatchObject({ inScope: 0, missed: 0, coveragePct: null });
+    const missed = await service.gifsyOutlets(gifsy, { month: '2026-10', status: 'MISSED' });
+    expect(missed.pagination.total).toBe(0);
+    // The current month is a portal month as usual.
+    expect((await service.gifsyReport(gifsy, { month: '2026-11' })).importedMonth).toBe(false);
+  });
+
+  it('no portal capture at all: a month holding only imported captures is an imported month', async () => {
+    wireFixture({ goLive: null });
+    mockPrisma.visibilityCapture.count.mockImplementation(({ where }: any) =>
+      Promise.resolve(where.windowKey?.startsWith === '2026-10-P' && !where.NOT && !where.windowKey?.notIn ? 1 : 0),
+    );
+    const res = await service.gifsyReport(gifsy, { month: '2026-10' });
+    expect(res.importedMonth).toBe(true);
+    expect(res.summary.missed).toBe(0);
+  });
+
+  it('"Imported" = photo stored under vendor-import/, not "no submitting rep" (a removed rep stays a portal capture)', async () => {
+    mockPrisma.visibilityCapture.findMany.mockImplementation(({ where }: any) =>
+      Promise.resolve(
+        capturesFor('2026-10')
+          .map((c) => (c.id === 'c4' ? { ...c, submittedBySalesUserId: null, submittedBy: null } : c))
+          .filter((c) => where.windowKey.in.includes(c.windowKey)),
+      ),
+    );
+    const list = await service.gifsyOutlets(gifsy, { month: '2026-10' });
+    const by = Object.fromEntries(list.rows.map((r) => [r.outletCode, r]));
+    expect(by.A1).toMatchObject({ imported: true, capturedBy: IMPORTED_LABEL });
+    expect(by.A4).toMatchObject({ imported: false, capturedBy: 'Rep (no longer on file)' });
+  });
+
   it('a resubmitted capture back in Waiting for review never shows the previous review as "reviewed"', async () => {
     mockPrisma.visibilityCapture.findMany.mockImplementation(({ where }: any) =>
       Promise.resolve(
@@ -247,6 +309,19 @@ describe('VisibilityReportService (month-wise)', () => {
     );
     const list = await service.gifsyOutlets(gifsy, { month: '2026-10', status: 'WAITING' });
     expect(list.rows[0]).toMatchObject({ outletCode: 'A2', reviewedBy: null, reviewedOn: null });
+  });
+
+  it('waiting after a resubmit: photo reviews dated BEFORE the last (re)submission are ignored; later ones show', () => {
+    const receivedAt = new Date('2026-10-20T05:00:00Z');
+    const carried = { status: 'APPROVED', reviewedAt: '2026-10-15T05:00:00.000Z', reviewedByUserId: 'old' };
+    expect(reviewerOfCapture({ status: 'SUBMITTED', photoReviews: { w1: carried }, approvedByUserId: 'old', reviewedAt: new Date('2026-10-15T05:00:00Z'), receivedAt }))
+      .toEqual({ userId: null, at: null });
+    const fresh = { status: 'APPROVED', reviewedAt: '2026-10-21T05:00:00.000Z', reviewedByUserId: 'new' };
+    expect(reviewerOfCapture({ status: 'SUBMITTED', photoReviews: { w1: carried, w2: fresh }, approvedByUserId: 'old', reviewedAt: null, receivedAt }))
+      .toEqual({ userId: 'new', at: new Date('2026-10-21T05:00:00.000Z') });
+    // A decided capture keeps its latest decision (no resubmission filter).
+    expect(reviewerOfCapture({ status: 'APPROVED', photoReviews: { w1: carried }, approvedByUserId: 'old', reviewedAt: new Date('2026-10-15T05:00:00Z'), receivedAt }))
+      .toEqual({ userId: 'old', at: new Date('2026-10-15T05:00:00Z') });
   });
 
   it('outlet list: group without groupKey → 400', async () => {
@@ -291,6 +366,8 @@ describe('report pure helpers', () => {
       inScope: 3, approved: 1, missed: 1, waiting: 1, coveragePct: 33.3,
     });
     expect(tallySlots([]).coveragePct).toBe(0);
+    // Imported month: coverage is not tracked (null), never a fabricated 0 / 100.
+    expect(tallySlots([slot({ status: 'APPROVED' })], false).coveragePct).toBeNull();
   });
 
   it('groupKeyOf: blank programme values fall into the "No programme" bucket (trimmed)', () => {

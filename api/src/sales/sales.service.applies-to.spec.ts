@@ -9,6 +9,7 @@ import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { currentMonthKey } from '../targets/targets.helpers';
+import { visibilityOutOfScopeReason } from '../visibility/visibility-scope.helper';
 
 const mockPrisma = {
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -111,6 +112,16 @@ describe('SalesService — APPLIES-TO scope', () => {
         { salesUserId: 'isr1', outlet: { id: 'o2', outletCode: 'O2', isActive: true, programName: 'BSC', programCategory: null, outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
       ]);
       mockPrisma.visibilityCapture.findMany.mockResolvedValue([{ outletId: 'o1' }]);
+      // Emulates the DB for THE single in-scope query (visibilityUniverseWhere ∩ the subtree ids) — the explain
+      // function is the oracle, evaluated on the fixture outlets under the CURRENT config.
+      mockPrisma.outlet.findMany.mockImplementation(async ({ where }: any) => {
+        const ids: string[] = where.AND[0].id.in;
+        const cfg = (await mockTenantSettings.getEffectiveSettings()).visibilityConfig;
+        const rows = ((await mockPrisma.salesUserAssignment.findMany()) as Array<{ outlet: any }>).map((a) => a.outlet);
+        return rows
+          .filter((o) => ids.includes(o.id) && !visibilityOutOfScopeReason({ deletedAt: null, deactivatedAt: null, kycIntent: null, ...o }, cfg))
+          .map((o) => ({ id: o.id }));
+      });
       mockTenantSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...VIS, programs: [], subPrograms: [] } });
       const all: any = await service.getTeamView(caller, { kpi: 'VISIBILITY' });
       expect(all.members[0]).toMatchObject({ outletsWithTarget: 2, outletsAchieved: 1, achievedPct: 50 });

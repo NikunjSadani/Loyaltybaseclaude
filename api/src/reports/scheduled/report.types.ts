@@ -161,16 +161,27 @@ export interface VisibilitySection {
   approved: number;
   /** PHOTO_APPROVAL: review ACTIONS that rejected ≥1 photo (re-take request / whole rejection). Legacy: current status. */
   rejected: number;
-  /** PHOTO_APPROVAL: Waiting for review + Needs re-take, current month, in scope. Legacy: all SUBMITTED right now. */
+  /**
+   * PHOTO_APPROVAL: everything still open — waiting for review (ANY month, in scope) + waiting on reps (open
+   * windows). Legacy: all SUBMITTED right now. Non-zero keeps the section visible.
+   */
   pending: number;
-  /** PHOTO_APPROVAL only — the current IST month the pending figures count. Absent = the legacy lines. */
+  /** PHOTO_APPROVAL only — the current IST month the month-level figures count. Absent = the legacy lines. */
   month?: string;
-  /** PHOTO_APPROVAL only — every review action in the window. */
+  /** PHOTO_APPROVAL only — reviews done in the window: one per capture per IST day (its final outcome that day). */
   reviewActions?: number;
-  /** PHOTO_APPROVAL only — captures Waiting for review (Gifsy) this month. */
+  /** PHOTO_APPROVAL only — captures Waiting for review (Gifsy) from THIS month. */
   waiting?: number;
-  /** PHOTO_APPROVAL only — captures that Need a re-take (waiting on reps) this month. */
+  /** PHOTO_APPROVAL only — every in-scope capture Waiting for review, any month (Gifsy's whole queue). */
+  waitingAllMonths?: number;
+  /** PHOTO_APPROVAL only — of waitingAllMonths, the ones from months before `month`. */
+  waitingEarlierMonths?: number;
+  /** PHOTO_APPROVAL only — captures that Need a re-take in a window still open. */
   needsRetake?: number;
+  /** PHOTO_APPROVAL only — re-takes + whole rejections in a window still open (the rep can still redo them). */
+  waitingOnReps?: number;
+  /** PHOTO_APPROVAL only — this month's re-takes / rejections whose window has closed (final, no resubmit). */
+  closedNotApproved?: number;
 }
 
 /**

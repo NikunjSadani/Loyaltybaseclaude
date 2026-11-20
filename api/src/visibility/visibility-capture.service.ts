@@ -58,7 +58,13 @@ import {
   PhotoFencePolicy,
 } from './geo-fence.helper';
 import { SubmitCaptureDto, ResubmitCaptureDto } from './dto/visibility-capture.dto';
-import { visibilityProgramMatches, visibilityUniverseBase, withVisibilityProgramWhere } from './visibility-scope.helper';
+import {
+  OUT_OF_SCOPE_REASON_SELECT,
+  visibilityOutOfScopeReason,
+  visibilityUniverseBase,
+  visibilityUniverseWhere,
+  withVisibilityProgramWhere,
+} from './visibility-scope.helper';
 
 /** Object-key tenant folder for all visibility media (mirrors VisibilityMediaService). */
 const MEDIA_FOLDER_PREFIX = 'visibility-media/';
@@ -406,9 +412,8 @@ export class VisibilityCaptureService {
         id: true,
         outletCode: true,
         name: true,
-        // APPLIES-TO program facets (visibility programs/subPrograms) — not returned.
-        programName: true,
-        programCategory: true,
+        // The fields visibilityOutOfScopeReason reads (incl. the APPLIES-TO program facets) — not returned.
+        ...OUT_OF_SCOPE_REASON_SELECT,
         outletType: { select: { code: true, name: true } },
       },
     });
@@ -419,9 +424,12 @@ export class VisibilityCaptureService {
     const month = currentWindowKey(now, freq).slice(0, 7); // 'YYYY-MM'
     const windowKeys = windowsForMonth(month, freq);
     const levelAllowed = config.allowedSalesLevels.includes(caller.levelCode);
-    const inScope =
-      config.outletScope.includes(outlet.outletType.code) &&
-      visibilityProgramMatches(config, { program: outlet.programName, subProgram: outlet.programCategory });
+    // THE single in-scope rule (visibilityUniverseWhere — the same one submit enforces and the report counts),
+    // decided by the database; the reason only explains a "no" in plain words.
+    const inScope = await this.isOutletInScope(user.clientId, outletId, config);
+    const notInScopeReason = inScope
+      ? null
+      : visibilityOutOfScopeReason(outlet, config) ?? 'This outlet is not in the visibility scope.';
 
     const captures = await this.prisma.visibilityCapture.findMany({
       where: { clientId: user.clientId, outletId, windowKey: { in: windowKeys } },
@@ -444,6 +452,8 @@ export class VisibilityCaptureService {
         outletType: outlet.outletType,
       },
       inScope,
+      /** Plain words why this outlet is not in scope (null when it is) — shown instead of the capture button. */
+      notInScopeReason,
       canCapture: levelAllowed && inScope,
       windows: windowKeys.map((key) => {
         const { startDay, endDay } = windowBoundsForKey(key, freq);
@@ -546,11 +556,22 @@ export class VisibilityCaptureService {
     return this.persistCapture(user, config, caller, outlet, dto.formValues, capture, { captureGeo: dto.captureGeo, clientNow: dto.clientNow });
   }
 
+  /** True when the outlet is in visibility scope by THE single rule (visibilityUniverseWhere), decided in the DB. */
+  private async isOutletInScope(clientId: string, outletId: string, config: VisibilityConfigSettings): Promise<boolean> {
+    if (!config.outletScope.length) return false;
+    const row = await this.prisma.outlet.findFirst({
+      where: { AND: [{ id: outletId }, visibilityUniverseWhere(clientId, config)] },
+      select: { id: true },
+    });
+    return !!row;
+  }
+
   /**
-   * Load an addressable outlet and assert its type is in the configured scope. M2 — the
-   * predicate mirrors the coverage DENOMINATOR (deletedAt + deactivatedAt null) so a rep
-   * cannot create an APPROVED capture for a deactivated/excluded outlet that the report
-   * denominator drops (which would let coverage exceed the addressable universe).
+   * Load an outlet that is IN visibility scope — THE single rule (visibilityUniverseWhere: not deleted /
+   * deactivated, KYC-approved `isActive`, not Not-interested / Parked, type ∈ outletScope, programs) — the same
+   * predicate as the rep's capture list and the report's denominator, so a rep can never create a capture the
+   * report would not count (M2: coverage can never exceed the in-scope universe). Out of scope → 400 with the plain
+   * reason (visibilityOutOfScopeReason); an unknown / removed outlet → 404.
    */
   private async loadInScopeOutlet(
     clientId: string,
@@ -558,7 +579,8 @@ export class VisibilityCaptureService {
     config: VisibilityConfigSettings,
   ) {
     const outlet = await this.prisma.outlet.findFirst({
-      where: { id: outletId, clientId, deletedAt: null, deactivatedAt: null },
+      // An empty outletScope is `in: []` → matches nothing (D12: empty = none).
+      where: { AND: [{ id: outletId }, visibilityUniverseWhere(clientId, config)] },
       select: {
         id: true,
         outletCode: true,
@@ -576,16 +598,16 @@ export class VisibilityCaptureService {
         outletType: { select: { code: true } },
       },
     });
-    if (!outlet) throw new NotFoundException('Outlet not found.');
-    // Type scope AND (D12) the optional program / sub-program narrowing, evaluated LIVE on the
-    // outlet's current attributes (D9) — the same predicate as the listing + coverage denominator.
-    if (
-      !config.outletScope.includes(outlet.outletType.code) ||
-      !visibilityProgramMatches(config, { program: outlet.programName, subProgram: outlet.programCategory })
-    ) {
-      throw new ForbiddenException('This outlet is not in the visibility scope.');
-    }
-    return outlet;
+    if (outlet) return outlet;
+    // Not in scope (or unknown): explain it in plain words — evaluated LIVE on the outlet's current attributes (D9).
+    const raw = await this.prisma.outlet.findFirst({
+      where: { id: outletId, clientId },
+      select: OUT_OF_SCOPE_REASON_SELECT,
+    });
+    if (!raw || raw.deletedAt) throw new NotFoundException('Outlet not found.');
+    throw new BadRequestException(
+      visibilityOutOfScopeReason(raw, config) ?? 'This outlet is not in the visibility scope.',
+    );
   }
 
   /**

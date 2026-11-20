@@ -170,11 +170,21 @@ describe('AdminCoreService.dashboardKpis — Pending Visibility Approvals (PHOTO
     mockPrisma.wallet.aggregate.mockResolvedValue({ _sum: { redeemablePoints: 0 }, _count: { _all: 0 } });
     mockPrisma.payoutTransaction.groupBy.mockResolvedValue([]);
     mockPrisma.outlet.findMany.mockResolvedValue([{ programName: 'Gold' }, { programName: 'Silver' }]);
-    groupBy.mockResolvedValue([
-      { status: 'SUBMITTED', _count: { _all: 5 } },
-      { status: 'CHANGES_REQUESTED', _count: { _all: 2 } },
-      { status: 'APPROVED', _count: { _all: 9 } },
-    ]);
+    // The month groupBy (status × window) vs the all-months waiting queue (by window only).
+    groupBy.mockImplementation((args: any) =>
+      Promise.resolve(
+        args.by.includes('status')
+          ? [
+              { status: 'SUBMITTED', windowKey: '2026-11-P1', _count: { _all: 5 } },
+              { status: 'CHANGES_REQUESTED', windowKey: '2026-11-P1', _count: { _all: 2 } },
+              { status: 'APPROVED', windowKey: '2026-11-P1', _count: { _all: 9 } },
+            ]
+          : [
+              { windowKey: '2026-09-P1', _count: { _all: 4 } },
+              { windowKey: '2026-11-P1', _count: { _all: 5 } },
+            ],
+      ),
+    );
     mockTenantSettings.getVisibilityEnabledUncached.mockResolvedValue(true);
     mockTenantSettings.getEffectiveSettings.mockResolvedValue({
       visibilityConfig: { outletScope: ['SSS'], frequencyPerMonth: 1, programs: [], subPrograms: [] },
@@ -193,10 +203,17 @@ describe('AdminCoreService.dashboardKpis — Pending Visibility Approvals (PHOTO
   });
   afterEach(() => jest.useRealTimers());
 
-  it('default month = current IST month; Waiting for review and Needs re-take shown separately; in-scope outlets only', async () => {
+  it('the tile counts EVERY capture still waiting (any month), with this month\'s share + earlier months; in scope only', async () => {
     const res = await svc.dashboardKpis(user, undefined, undefined);
-    expect(res.pendingVisibility).toBe(5);
-    expect(res.visibility).toEqual({ month: '2026-11', waiting: 5, needsRetake: 2 });
+    // 5 from November + 4 still waiting from September — the September ones are NOT dropped.
+    expect(res.pendingVisibility).toBe(9);
+    expect(res.visibility).toEqual({
+      month: '2026-11', waiting: 5, waitingAllMonths: 9, waitingEarlierMonths: 4,
+      needsRetake: 2, rejected: 0, waitingOnReps: 2, closedNotApproved: 0,
+    });
+    const queueWhere = groupBy.mock.calls[1][0].where;
+    expect(queueWhere).toMatchObject({ clientId: user.clientId, status: 'SUBMITTED' });
+    expect(queueWhere.windowKey).toBeUndefined();
     const where = groupBy.mock.calls[0][0].where;
     expect(where.windowKey).toEqual({ startsWith: '2026-11-P' });
     expect(where.outlet).toMatchObject({ isActive: true, outletType: { code: { in: ['SSS'] } } });

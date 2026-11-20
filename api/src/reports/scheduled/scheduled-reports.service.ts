@@ -870,10 +870,11 @@ export class ScheduledReportsService {
   }
 
   /**
-   * PHOTO_APPROVAL tenants (VISIBILITY-POSM-DESIGN.md §Metrics): approved / rejected = review ACTIONS in the window
-   * (a rejection followed by a same-day resubmit still counts — visibility-metrics countReviewActions); pending =
-   * Waiting for review + Needs re-take for the CURRENT IST month, in-scope outlets only (the report's rule), shown
-   * separately. AMOUNT_UPLOAD tenants keep the exact previous lines (visibilityLegacy).
+   * PHOTO_APPROVAL tenants (VISIBILITY-POSM-DESIGN.md §Metrics): reviews done = ONE per capture per IST day by that
+   * day's final outcome (a rejection followed by a same-day resubmit still counts — visibility-metrics
+   * countReviewActions); waiting for review = EVERY in-scope capture still waiting, any month (with the current
+   * month's share and the earlier-months remainder); waiting on reps = re-takes / rejections in a window still open
+   * (a closed window can't be resubmitted → "not approved — window closed", reported apart). AMOUNT_UPLOAD tenants keep the exact previous lines (visibilityLegacy).
    */
   private async visibility(clientId: string, w: DigestWindow, photo: boolean, nowMs: number): Promise<VisibilitySection> {
     if (!photo) return this.visibilityLegacy(clientId, w);
@@ -882,16 +883,25 @@ export class ScheduledReportsService {
     const reviews = await loadReviewActions(this.prisma, clientId, new Date(w.startMs), new Date(w.endMs));
     const cfg = (await this.tenantSettings.getEffectiveSettings(clientId)).visibilityConfig;
     const month = istMonthKey(new Date(nowMs));
-    const counts = await loadMonthStatusCounts(this.prisma, clientId, cfg, month);
+    const counts = await loadMonthStatusCounts(this.prisma, clientId, cfg, month, {
+      now: new Date(nowMs),
+      freq: cfg.frequencyPerMonth,
+    });
     return {
       submitted,
       approved: reviews.approved,
       rejected: reviews.rejected,
-      pending: counts.waiting + counts.needsRetake,
+      // Everything still open: Gifsy's WHOLE queue (any month) + what waits on reps (open windows). Drives "hide the
+      // section when all zero" → the section never disappears while anything is waiting.
+      pending: counts.waitingAllMonths + counts.waitingOnReps,
       month,
       reviewActions: reviews.actions,
       waiting: counts.waiting,
+      waitingAllMonths: counts.waitingAllMonths,
+      waitingEarlierMonths: counts.waitingEarlierMonths,
       needsRetake: counts.needsRetake,
+      waitingOnReps: counts.waitingOnReps,
+      closedNotApproved: counts.closedNotApproved,
     };
   }
 

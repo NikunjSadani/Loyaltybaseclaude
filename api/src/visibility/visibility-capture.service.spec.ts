@@ -25,6 +25,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { VisibilityMediaService } from './visibility-media.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { windowKeyForDate } from './visibility-window.helper';
+import { visibilityOutOfScopeReason } from './visibility-scope.helper';
 
 const mockPrisma = {
   // persistCapture reads clients.features for the outlet-master geo-fence gate (outletMasterGeo).
@@ -1037,27 +1038,63 @@ describe('VisibilityCaptureService', () => {
 
   // ── APPLIES-TO (D9/D12): visibility programs / subPrograms narrow the type scope ─────────────
   describe('APPLIES-TO program scope', () => {
-    const scopedCfg = (vc: Record<string, unknown>) =>
-      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, ...vc } });
+    let activeCfg: Record<string, unknown> = config;
+    const scopedCfg = (vc: Record<string, unknown>) => {
+      activeCfg = { ...config, ...vc };
+      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: activeCfg });
+    };
+    /**
+     * Emulates the DB for the in-scope query: a `findFirst` on visibilityUniverseWhere (an `AND` with the rule) returns
+     * the row only when it is in scope (the explain-function as the oracle); a plain lookup returns the row.
+     */
+    const outletDb = (row: Record<string, unknown>) =>
+      mockPrisma.outlet.findFirst.mockImplementation(({ where }: any) => {
+        const full = { isActive: true, deletedAt: null, deactivatedAt: null, kycIntent: null, ...row };
+        if (where?.AND) {
+          const universe = where.AND[1];
+          expect(universe.AND?.[0] ?? universe).toMatchObject({ isActive: true, deactivatedAt: null, deletedAt: null });
+          return Promise.resolve(visibilityOutOfScopeReason(full as any, activeCfg as any) ? null : full);
+        }
+        return Promise.resolve(full);
+      });
 
-    it('submit 403s an in-type outlet whose program is outside visibility programs (live attrs)', async () => {
+    it('submit 400s an in-type outlet whose program is outside visibility programs, with the plain reason', async () => {
       scopedCfg({ programs: ['RLP'], subPrograms: [] });
-      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programName: 'BSC', programCategory: null });
+      outletDb({ ...outletRow, programName: 'BSC', programCategory: null });
+      const err = service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues });
+      await expect(err).rejects.toThrow(BadRequestException);
       await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }))
-        .rejects.toThrow('This outlet is not in the visibility scope.');
+        .rejects.toThrow("This outlet's programme / sub-programme is not part of the visibility programme.");
       expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
     });
 
-    it('submit 403s on a sub-program mismatch, incl. a BLANK outlet sub-program (D4)', async () => {
+    it('submit 400s on a sub-program mismatch, incl. a BLANK outlet sub-program (D4)', async () => {
       scopedCfg({ programs: [], subPrograms: ['Urban'] });
-      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programName: 'RLP', programCategory: null });
+      outletDb({ ...outletRow, programName: 'RLP', programCategory: null });
       await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }))
-        .rejects.toThrow('This outlet is not in the visibility scope.');
+        .rejects.toThrow(BadRequestException);
+    });
+
+    it('submit 400s an outlet the single in-scope rule excludes (not KYC-approved / deactivated / parked) — plain reason', async () => {
+      scopedCfg({});
+      outletDb({ ...outletRow, isActive: false });
+      await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }))
+        .rejects.toThrow('This outlet is not KYC-approved yet — visibility can be captured once its KYC is approved.');
+      outletDb({ ...outletRow, deactivatedAt: new Date('2026-01-05T00:00:00Z') });
+      await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }))
+        .rejects.toThrow('This outlet is deactivated, so visibility cannot be captured for it.');
+      outletDb({ ...outletRow, kycIntent: 'PARKED' });
+      await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }))
+        .rejects.toThrow('This outlet is marked Parked, so visibility cannot be captured for it.');
+      outletDb({ ...outletRow, outletType: { code: 'WHS' } });
+      await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }))
+        .rejects.toThrow('Outlet type WHS is not part of the visibility programme.');
+      expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
     });
 
     it('submit succeeds when the program matches case-insensitively', async () => {
       scopedCfg({ programs: ['rlp'], subPrograms: [] });
-      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, programName: 'RLP', programCategory: null });
+      outletDb({ ...outletRow, programName: 'RLP', programCategory: null });
       const res = await service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues });
       expect(res.version).toBe(1);
     });
@@ -1079,17 +1116,31 @@ describe('VisibilityCaptureService', () => {
       expect(where.outletType).toEqual({ code: { in: ['SSS'] } });
     });
 
-    it('getOutletStatus: inScope/canCapture false when the program is excluded; true when unscoped', async () => {
+    it('getOutletStatus: inScope/canCapture false + a plain reason when the program is excluded; true when unscoped', async () => {
       mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
-      mockPrisma.outlet.findFirst.mockResolvedValue({ id: 'o1', outletCode: 'OC1', name: 'Shop 1', programName: 'BSC', programCategory: null, outletType: { code: 'SSS', name: 'R' } });
+      outletDb({ id: 'o1', outletCode: 'OC1', name: 'Shop 1', programName: 'BSC', programCategory: null, outletType: { code: 'SSS', name: 'R' } });
       scopedCfg({ programs: ['RLP'], subPrograms: [] });
       const scoped = await service.getOutletStatus(user, 'o1');
       expect(scoped.inScope).toBe(false);
       expect(scoped.canCapture).toBe(false);
+      expect(scoped.notInScopeReason).toBe("This outlet's programme / sub-programme is not part of the visibility programme.");
       expect(scoped.outlet).toEqual({ outletId: 'o1', outletCode: 'OC1', outletName: 'Shop 1', outletType: { code: 'SSS', name: 'R' } });
       scopedCfg({});
       const unscoped = await service.getOutletStatus(user, 'o1');
       expect(unscoped.inScope).toBe(true);
+      expect(unscoped.notInScopeReason).toBeNull();
+    });
+
+    it('getOutletStatus uses THE single rule: a not-KYC-approved outlet of an in-scope type is NOT in scope (no button)', async () => {
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+      scopedCfg({});
+      outletDb({ id: 'o1', outletCode: 'OC1', name: 'Shop 1', isActive: false, programName: null, programCategory: null, outletType: { code: 'SSS', name: 'R' } });
+      const res = await service.getOutletStatus(user, 'o1');
+      expect(res).toMatchObject({
+        inScope: false,
+        canCapture: false,
+        notInScopeReason: 'This outlet is not KYC-approved yet — visibility can be captured once its KYC is approved.',
+      });
     });
   });
 });

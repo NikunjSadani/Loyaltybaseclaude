@@ -19,6 +19,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isSelfOrDescendant } from './sales-hierarchy-access.helper';
 import { currentMonthKey } from '../targets/targets.helpers';
 import { currentWindowKey } from '../visibility/visibility-window.helper';
+import { visibilityOutOfScopeReason } from '../visibility/visibility-scope.helper';
 
 const mockPrisma = {
   salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -1684,6 +1685,24 @@ describe('SalesService', () => {
         ]);
         // Current-window APPROVED capture on O1 only.
         mockPrisma.visibilityCapture.findMany.mockResolvedValue([{ outletId: 'o1' }]);
+        inScopeDb();
+      }
+
+      /**
+       * Emulates the DB for THE single in-scope query (`{ AND: [{ id: { in } }, visibilityUniverseWhere] }`): the
+       * assigned outlets whose current attributes pass the rule (visibilityOutOfScopeReason as the oracle).
+       */
+      function inScopeDb() {
+        mockPrisma.outlet.findMany.mockImplementation(async ({ where }: any) => {
+          const ids: string[] = where.AND[0].id.in;
+          expect(where.AND[1].AND?.[0] ?? where.AND[1]).toMatchObject({ isActive: true, deactivatedAt: null, deletedAt: null });
+          const cfg = (await mockTenantSettings.getEffectiveSettings()).visibilityConfig;
+          const rows = ((await mockPrisma.salesUserAssignment.findMany()) as Array<{ outlet: any }>).map((a) => a.outlet);
+          return rows
+            .filter((o) => ids.includes(o.id))
+            .filter((o) => !visibilityOutOfScopeReason({ deletedAt: null, deactivatedAt: null, kycIntent: null, ...o }, cfg))
+            .map((o) => ({ id: o.id }));
+        });
       }
 
       it('OVERVIEW: appends a VISIBILITY column (approved ÷ in-scope-approved-active) that folds into the score', async () => {
@@ -1752,15 +1771,17 @@ describe('SalesService', () => {
         expect(single.members[0]).toMatchObject({ id: 'so1', outletsWithTarget: 0, achievedPct: null });
       });
 
-      it('an inactive OR non-APPROVED in-scope outlet is excluded from the denominator', async () => {
+      it('the denominator is THE single in-scope rule: not-KYC-approved (inactive), deactivated or Parked outlets are excluded', async () => {
         primeVisibility();
         mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
           // in-scope + APPROVED + active → counts (den), with an approved capture → num.
           { salesUserId: 'isr1', outlet: { id: 'o1', outletCode: 'O1', isActive: true, programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
-          // in-scope + APPROVED but INACTIVE → excluded.
+          // in-scope type but INACTIVE (KYC not approved yet) → excluded.
           { salesUserId: 'isr1', outlet: { id: 'o2', outletCode: 'O2', isActive: false, programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
-          // in-scope + active but NOT_STARTED (partner-less) → excluded.
-          { salesUserId: 'isr1', outlet: { id: 'o4', outletCode: 'O4', isActive: true, programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, partner: null } },
+          // in-scope type, active, but PARKED → excluded (the old in-memory check missed this).
+          { salesUserId: 'isr1', outlet: { id: 'o4', outletCode: 'O4', isActive: true, kycIntent: 'PARKED', programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
+          // in-scope type, active, but DEACTIVATED → excluded (the old in-memory check missed this too).
+          { salesUserId: 'isr1', outlet: { id: 'o5', outletCode: 'O5', isActive: true, deactivatedAt: new Date('2026-01-02T00:00:00Z'), programName: 'Unnati', outletType: { code: 'SSS', name: 'Retailer' }, ...approved } },
         ]);
         const res: any = await service.getTeamView(caller, { kpi: 'VISIBILITY' });
         const so1 = res.members.find((m: { id: string }) => m.id === 'so1')!;
