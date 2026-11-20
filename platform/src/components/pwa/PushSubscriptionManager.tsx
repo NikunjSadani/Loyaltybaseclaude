@@ -27,6 +27,8 @@
 //   • only after the session is CONFIRMED live (GET /api/auth/me, background-tagged)
 //     — a page about to bounce to login never shows it, never auto-asks, and never
 //     uses up the "seen" flag;
+//   • "seen" is recorded only after ≥ 3 s on screen or a dismiss / tap (so the SW's
+//     first-claim reload at ~1 s doesn't use it up);
 //   • shown once per session (sessionStorage, keyed to the CONFIRMED user id) whenever
 //     notifications are NOT granted — default, denied, install-first (iPhone tab),
 //     too-old iOS or unsupported — with device-specific steps;
@@ -59,6 +61,8 @@ const SNOOZE_KEY = 'pwa-push-snooze';
 const SNOOZE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 /** Bajaj reminder: set (to the confirmed user's id) once the reminder has been on screen this session. */
 export const REMINDER_SESSION_KEY = 'pwa-notif-reminder';
+/** The reminder must stay on screen this long before it counts as "seen" (unless dismissed / acted on sooner). */
+export const REMINDER_SEEN_AFTER_MS = 3_000;
 /** How long the automatic ask may stay unanswered (Chrome's quiet chip / an ignored bubble) before the reminder shows. */
 export const AUTO_ASK_TIMEOUT_MS = 8_000;
 
@@ -140,7 +144,11 @@ export default function PushSubscriptionManager({
   appName,
 }: {
   tenantSlug?: string;
-  /** Tenant display name, used only in the Bajaj reminder's Settings steps. */
+  /**
+   * The installed app's name exactly as the install manifest gives it (`pwaAppName()` — the manifest `name` /
+   * `short_name`, e.g. "Bajaj Consumer Care Ltd" for /partner, "Bajaj Consumer Care Ltd Sales" for /sales), so the
+   * phone-Settings steps name what the phone actually lists. Never hard-coded. Used only by the Bajaj reminder.
+   */
   appName?: string;
 }) {
   const [showPrompt, setShowPrompt] = useState(false);
@@ -266,12 +274,20 @@ export default function PushSubscriptionManager({
     }
   }, [tenantSlug]);
 
-  // Mark "seen" only once the reminder is actually ON SCREEN (not while it waits behind the install modal).
+  // "Seen this session" is written ONLY when the user has really had the reminder: it stayed on screen for
+  // REMINDER_SEEN_AFTER_MS, or they dismissed / acted on it. Never at render time — on a brand-new session the
+  // service worker's first `clients.claim()` fires `controllerchange` ~1 s in and ServiceWorkerRegister reloads the
+  // page; marking at render made the reminder vanish for the whole session on exactly that first open. A dwell rule
+  // is independent of the SW (it also survives a deploy-skew reload, a pull-to-refresh, or a SW that never claims),
+  // whereas waiting for a "pending" claim can't be detected reliably on a first visit. Not counted while it waits
+  // behind the install modal.
   const installOpen = useInstallDialogOpen();
   const reminderVisible = !!reminder && !installOpen;
   const reminderUser = reminder?.userId;
   useEffect(() => {
-    if (reminderVisible && reminderUser) markReminderSeen(reminderUser);
+    if (!reminderVisible || !reminderUser) return;
+    const t = setTimeout(() => markReminderSeen(reminderUser), REMINDER_SEEN_AFTER_MS);
+    return () => clearTimeout(t);
   }, [reminderVisible, reminderUser]);
 
   const persistSnooze = () => {
@@ -313,7 +329,11 @@ export default function PushSubscriptionManager({
         androidBrowser={reminder.androidBrowser}
         host={reminder.host}
         appName={appName}
-        onClose={() => setReminder(null)}
+        onEngaged={() => markReminderSeen(reminder.userId)}
+        onClose={() => {
+          markReminderSeen(reminder.userId); // an explicit dismiss (or a finished Enable) = seen
+          setReminder(null);
+        }}
       />
     );
   }

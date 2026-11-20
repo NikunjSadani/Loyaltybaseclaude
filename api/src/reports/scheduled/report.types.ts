@@ -66,6 +66,8 @@ export interface PointsSection {
   expired: number;
   /** Wallets with redeemablePoints < 0 right now. */
   negativeWallets: number;
+  /** Owner D1 (2026-11-19): Σ |negative balances| — "points owed". Present only when negativeWallets > 0. */
+  owedPoints?: number;
 }
 
 export interface FailedRedemptionRow {

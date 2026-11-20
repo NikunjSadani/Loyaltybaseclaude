@@ -49,6 +49,13 @@ export const NOT_PARKED_OUTLET = {
 };
 
 /**
+ * The outlets a rep's lists AND counts show: not admin-PARKED and not soft-deleted. One shared
+ * filter so the dashboard counts, team roll-up, member detail and the outlets list always agree
+ * (2026-11-19: a soft-deleted outlet whose assignment was never closed used to be listed/counted).
+ */
+export const LISTED_OUTLET = { ...NOT_PARKED_OUTLET, deletedAt: null };
+
+/**
  * The member-row shape of the Team / Team-view screens (a direct report OR a report promoted past a
  * REMOVED manager — G3). The promotions are added on top of `_count.subordinates` by
  * `withPromotedReports`, so teamSize = the member's EFFECTIVE team. Two counting bases, each exactly what
@@ -290,16 +297,16 @@ export class SalesService {
     // 2026-07-03), not just that person's own submissions. Reuses the hierarchy walk.
     const userIdBySalesUserId = new Map(edges.map((s) => [s.id, s.userId]));
     const edgeById = new Map(edges.map((e) => [e.id, e]));
-    /** Login ids of the REMOVED managers between the caller and a (promoted) member — empty for a direct report. */
-    const removedManagersAbove = (memberId: string): string[] => {
-      const out: string[] = [];
+    /** The REMOVED managers (nodes) between the caller and a (promoted) member — empty for a direct report. */
+    const removedManagersAbove = (memberId: string): SalesHierarchyNode[] => {
+      const out: SalesHierarchyNode[] = [];
       const seen = new Set<string>([memberId]);
       let cur = edgeById.get(memberId)?.reportingToId ?? null;
       while (cur && cur !== salesUser.id && !seen.has(cur)) {
         seen.add(cur);
         const n = edgeById.get(cur);
         if (!n || n.deletedAt == null) break;
-        out.push(n.userId);
+        out.push(n);
         cur = n.reportingToId;
       }
       return out;
@@ -313,10 +320,16 @@ export class SalesService {
       // ids — the KYCs a removed SO filed himself stay findable under the member filter instead of vanishing.
       // Chosen over a separate "Removed: <name>" option: no new row type on the Team screen (these rows also
       // drive the team list + tiles), and the removed SO's branch is exactly what the promoted reps now carry.
+      const removedAbove = removedManagersAbove(sub.id);
       const submitterUserIds = [
         ...[...descendantSalesUserIds(sub.id, edges, { includeDeleted: true })].map((id) => userIdBySalesUserId.get(id)),
-        ...removedManagersAbove(sub.id),
+        ...removedAbove.map((n) => n.userId),
       ].filter((v, i, arr): v is string => !!v && arr.indexOf(v) === i);
+      // K1 follow-up (2026-11-19): the FILING-TIME keys of this member's branch — the member's own SalesUser.id
+      // + the removed managers above a promoted member (K4: a removed SO's own KYCs ride with them). A KYC row
+      // carrying `filingBranchKeys` (a REMOVED rep's KYC with a snapshot chain, GET /kyc) belongs to this member
+      // when the two intersect; such rows are matched ONLY this way, never by `submitterUserIds`.
+      const branchKeys = [sub.id, ...removedAbove.map((n) => n.id)];
       return {
         id: sub.id,
         employeeCode: sub.employeeCode,
@@ -328,6 +341,8 @@ export class SalesService {
         teamSize: sub._count.subordinates,
         // Login-User ids of this report + their whole downline (KYC-list branch filter).
         submitterUserIds,
+        // Filing-time branch keys (KYC-list filter for removed reps' snapshot-chain KYCs).
+        branchKeys,
         joinedAt: sub.joinedAt.toISOString(),
         // Whole-subtree rollup (self + downline) — drives the FE My-Team tiles.
         outlets: roll.outlets,
@@ -455,7 +470,7 @@ export class SalesService {
         outletId: { not: null },
         // Exclude admin-PARKED outlets so manager "KYC Pending" / "Outlets" counts never
         // include a parked outlet (same null-safe OR-wrap as buildOutlets/getMember).
-        outlet: NOT_PARKED_OUTLET,
+        outlet: LISTED_OUTLET,
       },
       select: {
         salesUserId: true,
@@ -984,7 +999,7 @@ export class SalesService {
         salesUserId: { in: [...rootSubtree] },
         unassignedAt: null,
         outletId: { not: null },
-        outlet: NOT_PARKED_OUTLET,
+        outlet: LISTED_OUTLET,
       },
       select: {
         salesUserId: true,
@@ -1308,7 +1323,7 @@ export class SalesService {
         assignments: {
           // Exclude admin-PARKED outlets from the member-detail counts + list (same null-safe
           // OR-wrap as buildOutlets), so a parked outlet is invisible in the team drill-in too.
-          where: { outletId: { not: null }, unassignedAt: null, outlet: NOT_PARKED_OUTLET },
+          where: { outletId: { not: null }, unassignedAt: null, outlet: LISTED_OUTLET },
           include: {
             outlet: {
               include: {
@@ -2506,8 +2521,9 @@ export class SalesService {
         outletId: { not: null },
         unassignedAt: null,
         // FULLY hide admin-PARKED outlets from the rep (list, counts, dashboard). Null-safe
-        // OR-wrap keeps normal + NOT_INTERESTED outlets; drops only PARKED.
-        outlet: NOT_PARKED_OUTLET,
+        // OR-wrap keeps normal + NOT_INTERESTED outlets; drops only PARKED. Soft-deleted outlets
+        // are hidden too (2026-11-19) — the ticket outlet check (and every pick) refuses them.
+        outlet: LISTED_OUTLET,
       },
       include: {
         // The assigned rep's login-User id — lets the FE KYC-list member filter match

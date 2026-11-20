@@ -782,9 +782,16 @@ function CatalogueInner() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-medium text-gray-900 truncate">{o.name}</p>
-                          <p className="text-xs text-gray-400">Balance: {o.balance.toLocaleString('en-IN')} pts</p>
+                          <p className="text-xs text-gray-400">
+                            Balance: {o.balance < 0 ? `−${(-o.balance).toLocaleString('en-IN')}` : o.balance.toLocaleString('en-IN')} pts
+                          </p>
                         </div>
-                        {!canAfford && <span className="text-[10px] text-red-400 shrink-0 font-medium">Insufficient</span>}
+                        {/* Owner decision 2 (2026-11-19): a negative balance is said plainly, never as a shortfall to top up */}
+                        {!canAfford && (
+                          <span className="text-[10px] text-red-400 shrink-0 font-medium">
+                            {o.balance < 0 ? 'Not available while the balance is negative' : 'Insufficient'}
+                          </span>
+                        )}
                         {canAfford && <ChevronRight className="h-4 w-4 text-gray-300 shrink-0" />}
                       </button>
                     );

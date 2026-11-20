@@ -184,7 +184,12 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
 
   failed('Points', t.points);
   if (t.points.ok && t.points.data.negativeWallets > 0) {
-    push(plural(t.points.data.negativeWallets, 'negative wallet', 'negative wallets'), t.points.data.negativeWallets);
+    const owed = t.points.data.owedPoints;
+    push(
+      plural(t.points.data.negativeWallets, 'negative wallet', 'negative wallets') +
+        (owed ? ` (${intIN(owed)} pts owed)` : ''),
+      t.points.data.negativeWallets,
+    );
   }
 
   // Redemption failures, Hubble voucher failures and "failed but not refunded" overlap: ONE bullet. The Hubble
@@ -607,7 +612,10 @@ function tenantSections(t: TenantDigest): string {
           ['expired', intIN(p.expired)],
         ]) +
         (p.negativeWallets > 0
-          ? metricLine('Wallets', [['negative', intIN(p.negativeWallets), 'red']])
+          ? metricLine('Wallets', [
+              ['negative', intIN(p.negativeWallets), 'red'],
+              ...(p.owedPoints ? [['pts owed', intIN(p.owedPoints), 'red'] as [string, string, 'red']] : []),
+            ])
           : ''),
     ),
     renderSection(

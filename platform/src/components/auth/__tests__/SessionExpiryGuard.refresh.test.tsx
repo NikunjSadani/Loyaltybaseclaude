@@ -58,7 +58,11 @@ describe('SessionExpiryGuard — refresh outcomes', () => {
 
     await window.fetch('/api/wallet/me');
 
-    expect(assign).toHaveBeenCalledWith('/auth/login?expired=1');
+    expect(assign).toHaveBeenCalledTimes(1);
+    const target = new URL(assign.mock.calls[0][0] as string, 'https://x.test');
+    expect(target.pathname).toBe('/auth/login');
+    expect(target.searchParams.get('expired')).toBe('1');
+    expect(target.searchParams.get('next')).toBe('/admin/users'); // develop's return-to rule
   });
 
   it('F3: the refresh ACTION call itself throws (proxy 503 / network) → TRANSIENT: original 401, NO login redirect', async () => {

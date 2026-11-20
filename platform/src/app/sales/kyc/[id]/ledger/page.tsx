@@ -156,6 +156,8 @@ export default function OutletLedgerPage({ params }: { params: Promise<{ id: str
           outletCode={o.outletCode}
           loadStatementDoc={loadStatementDoc}
           statementErrorMessage="Couldn't load this outlet's statement. Please try again."
+          showReversalReference
+          audience="staff"
         />
       )}
     </div>

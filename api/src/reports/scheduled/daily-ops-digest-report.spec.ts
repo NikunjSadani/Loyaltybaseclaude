@@ -279,6 +279,14 @@ describe('needsAttention', () => {
     ]);
   });
 
+  it('owner D1 (fix round 4 item 8): negative wallets say how many points they owe; without the figure the bullet is unchanged', () => {
+    const t = quietTenant('bajaj', 'Bajaj');
+    t.points = ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 8, owedPoints: 3549 });
+    expect(needsAttention(t)).toEqual(['8 negative wallets (3,549 pts owed)']);
+    t.points = ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 8 });
+    expect(needsAttention(t)).toEqual(['8 negative wallets']);
+  });
+
   it('Hubble failures are NOT listed twice: they ride the redemption bullet; alone only if Redemptions failed to load', () => {
     const t = quietTenant('x', 'X');
     t.redemptions = ok({ requested: 2, completed: 0, failed: 2, failedNotRefunded: 0, failedRows: [] });

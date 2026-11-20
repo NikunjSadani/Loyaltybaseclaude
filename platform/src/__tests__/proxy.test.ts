@@ -275,6 +275,16 @@ describe('proxy — Step 2: passthroughs before auth', () => {
     expect(fwd(res, 'authorization')).toBeNull();
   });
 
+  // Help & videos: the <video> element's Range requests carry only the signed query token.
+  it('PUBLIC_EXACT_PATHS (/api/help/media) passes through without a token cookie; siblings do not', async () => {
+    const res = await run(makeReq('/api/help/media?token=t'));
+    expect(isNext(res)).toBe(true);
+    expect(res.status).not.toBe(401);
+    expect(fwd(res, 'authorization')).toBeNull();
+    expect((await run(makeReq('/api/help/media-other'))).status).toBe(401);
+    expect((await run(makeReq('/api/help'))).status).toBe(401);
+  });
+
   it('other /api/public/* paths are NOT exempt → 401 without a token', async () => {
     const res = await run(makeReq('/api/public/something-else'));
     expect(res.status).toBe(401);
@@ -508,6 +518,37 @@ describe('proxy — page-nav silent refresh (expired/absent access + valid refre
     const loc = new URL(res.headers.get('location') as string);
     expect(loc.pathname).toBe('/auth/login');
     expect(loc.searchParams.get('expired')).toBeNull();
+  });
+
+  it('a signed-out deep link (ticket email) survives login: ?next=<path+query>, same-origin relative only', async () => {
+    const doc = { 'sec-fetch-dest': 'document', accept: 'text/html' };
+    const res = await run(makeReq('/admin/tickets?ticket=t1', { headers: doc }));
+    const loc = new URL(res.headers.get('location') as string);
+    expect(loc.pathname).toBe('/auth/login');
+    expect(loc.searchParams.get('next')).toBe('/admin/tickets?ticket=t1');
+    // expired-session bounce keeps it too
+    mockJwt.mockRejectedValue(new Error('exp'));
+    mockRefresh.mockResolvedValue(DEAD);
+    const res2 = await run(makeReq('/admin/tickets?ticket=t1', { headers: doc, cookies: { token: 'x', refresh_token: 'dead' } }));
+    const loc2 = new URL(res2.headers.get('location') as string);
+    expect(loc2.searchParams.get('expired')).toBe('1');
+    expect(loc2.searchParams.get('next')).toBe('/admin/tickets?ticket=t1');
+  });
+
+  it('RSC / prefetch / non-document requests never get a `next` (and `_rsc` is stripped)', async () => {
+    for (const headers of <Record<string, string>[]>[
+      { rsc: '1' },
+      { 'next-router-prefetch': '1', rsc: '1' },
+      { 'sec-fetch-dest': 'empty' },
+      { purpose: 'prefetch', 'sec-fetch-dest': 'document' },
+    ]) {
+      const res = await run(makeReq('/admin/tickets?ticket=t1&_rsc=abc', { headers }));
+      const loc = new URL(res.headers.get('location') as string);
+      expect(loc.pathname).toBe('/auth/login');
+      expect(loc.searchParams.get('next')).toBeNull();
+    }
+    const res = await run(makeReq('/admin/tickets?ticket=t1&_rsc=abc', { headers: { 'sec-fetch-dest': 'document' } }));
+    expect(new URL(res.headers.get('location') as string).searchParams.get('next')).toBe('/admin/tickets?ticket=t1');
   });
 });
 

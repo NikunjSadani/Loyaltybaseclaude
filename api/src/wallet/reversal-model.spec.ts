@@ -42,7 +42,10 @@ interface Outcome {
   model: WalletModel;
   movements: Movement[];
   rev: Movement[];
+  /** Σ shortfall — always 0 since owner decision 2026-11-19 (asserted in outcome()) */
   sumShortfall: number;
+  /** Σ owed s = r − p − c: booked as debt, repaid from future earnings (owner 2026-11-19) */
+  sumOwed: number;
   sumRecovered: number; // p + c
 }
 
@@ -50,11 +53,19 @@ function outcome(prefix: ModelEvent[], reversals: ModelEvent[]): Outcome {
   const { model, movements } = run([...prefix, ...reversals]);
   const rev = movements.slice(prefix.length);
   expect(checkInvariants(model)).toEqual([]);
+  // owner 2026-11-19: a reversal always removes the whole r from B (p + c + owed = r), nothing is written off
+  for (const m of rev) {
+    expect(m.shortfall).toBe(0);
+    expect(m.debtRestored + m.alreadyExpired + m.recovered + m.owed).toBe(m.pointsRequested);
+    expect(m.pointsDelta).toBe(-(m.pointsRequested - m.alreadyExpired) || 0);
+    expect(m.debtDelta).toBe(m.debtRestored + m.owed);
+  }
   return {
     model,
     movements,
     rev,
     sumShortfall: rev.reduce((s, m) => s + m.shortfall, 0),
+    sumOwed: rev.reduce((s, m) => s + m.owed, 0),
     sumRecovered: rev.reduce((s, m) => s + m.debtRestored + m.recovered, 0),
   };
 }
@@ -74,6 +85,7 @@ function allOrders(prefix: ModelEvent[], reversals: ModelEvent[]): Outcome[] {
     expect(o.model.state.D).toBe(ref.model.state.D);
     expect(offsets(o.model)).toEqual(offsets(ref.model));
     expect(o.sumShortfall).toBe(ref.sumShortfall);
+    expect(o.sumOwed).toBe(ref.sumOwed);
     expect(o.sumRecovered).toBe(ref.sumRecovered);
   }
   return outs;
@@ -195,9 +207,118 @@ describe('reversal-model transitions (§1.2)', () => {
     expect(s.movement).toMatchObject({
       debtRestored: 500,
       recovered: 0,
+      owed: 0,
       shortfall: 0,
       pointsDelta: -500,
     });
+  });
+
+  it('owner 2026-11-19 — over-reversal becomes debt: reverse 10,000 from a wallet holding 7,014 → B −2,986, D 2,986, nothing written off', () => {
+    const m = run([cr('X', 10000), sp(2986)]).model; // holds 7,014
+    expect(m.state).toMatchObject({ B: 7014, D: 0 });
+    const s = reverse(m, 'X', 10000);
+    expect(s.model.state).toMatchObject({ B: -2986, D: 2986 });
+    expect(s.movement).toMatchObject({
+      pointsRequested: 10000,
+      pointsDelta: -10000,
+      debtDelta: 2986,
+      debtRestored: 0,
+      recovered: 7014,
+      owed: 2986,
+      shortfall: 0,
+      lotDraws: [{ lotId: 'X', points: 7014 }],
+    });
+    expect(s.model.positions.X).toMatchObject({ offset: 0, reversed: 10000, lotRemaining: 0 });
+    expect(checkInvariants(s.model)).toEqual([]);
+    expect(holdings(s.model.state)).toBe(0);
+    // no redemption while in debt (redeemable < 0)
+    expect(() => spend(s.model, 1)).toThrow(ReversalModelError);
+    // the next credit repays the debt first: +5,000 → B 2,014, D 0, the new lot holds 2,014 (Q12)
+    const c = credit(s.model, { id: 'Y', amount: 5000, reversible: true });
+    expect(c.model.state).toMatchObject({ B: 2014, D: 0 });
+    expect(c.model.positions.Y).toMatchObject({ offset: 2986, lotRemaining: 2014 });
+    expect(checkInvariants(c.model)).toEqual([]);
+    // a smaller credit only reduces the debt: +1,000 → B −1,986, D 1,986, nothing spendable
+    const c2 = credit(s.model, { id: 'Z', amount: 1000, reversible: true });
+    expect(c2.model.state).toMatchObject({ B: -1986, D: 1986 });
+    expect(() => spend(c2.model, 1)).toThrow(ReversalModelError);
+    // the LEGACY rule (Deoleo) would have floored at 0 and written 2,986 off
+    expect(legacyReversalDecrement(7014, 10000)).toBe(7014);
+  });
+
+  describe('owner 2026-11-19 — expired points are not recovered twice (the reversed credit\'s own expired points count as recovered)', () => {
+    it('auditor example: X 10,000 fully expired, Y 5,000; reverse X 10,000 → nothing taken, no debt, Y untouched', () => {
+      const m = run([cr('X', 10000), { type: 'expire', lotId: 'X' }, cr('Y', 5000)]).model;
+      expect(m.state).toMatchObject({ B: 5000, D: 0 });
+      expect(m.positions.X).toMatchObject({ expired: 10000, lotRemaining: 0 });
+      const s = reverse(m, 'X', 10000);
+      expect(s.model.state).toMatchObject({ B: 5000, D: 0 });
+      expect(s.movement).toMatchObject({
+        pointsRequested: 10000, pointsDelta: 0, debtDelta: 0, debtRestored: 0, alreadyExpired: 10000, recovered: 0, owed: 0,
+        shortfall: 0, lotDraws: [],
+      });
+      expect(lotMap(s.model)).toEqual({ X: 0, Y: 5000 });
+      expect(s.model.positions.X).toMatchObject({ reversed: 10000, expiredCounted: 10000 });
+      expect(checkInvariants(s.model, { neverNegative: true })).toEqual([]);
+    });
+
+    it('partly expired: X 10,000 (4,000 redeemed from it, 6,000 expired), Y 5,000; reverse X → 6,000 already expired, 4,000 taken from Y\'s points, no debt', () => {
+      const m = run([cr('X', 10000), sp(4000), { type: 'expire', lotId: 'X' }, cr('Y', 5000)]).model;
+      expect(m.state).toMatchObject({ B: 5000, D: 0 });
+      expect(m.positions.X.expired).toBe(6000);
+      const s = reverse(m, 'X', 10000);
+      expect(s.movement).toMatchObject({ alreadyExpired: 6000, recovered: 4000, owed: 0, pointsDelta: -4000 });
+      expect(s.model.state).toMatchObject({ B: 1000, D: 0 });
+      expect(lotMap(s.model)).toEqual({ X: 0, Y: 1000 });
+      expect(checkInvariants(s.model)).toEqual([]);
+    });
+
+    it('partly expired AND partly spent beyond holdings: X 10,000 (7,000 redeemed, 3,000 expired), Y 2,000; reverse X → 3,000 expired, 2,000 taken, 5,000 debt', () => {
+      const m = run([cr('X', 10000), sp(7000), { type: 'expire', lotId: 'X' }, cr('Y', 2000)]).model;
+      expect(m.state).toMatchObject({ B: 2000, D: 0 });
+      expect(m.positions.X.expired).toBe(3000);
+      const s = reverse(m, 'X', 10000);
+      expect(s.movement).toMatchObject({ alreadyExpired: 3000, recovered: 2000, owed: 5000, pointsDelta: -7000, debtDelta: 5000 });
+      expect(s.model.state).toMatchObject({ B: -5000, D: 5000 });
+      expect(checkInvariants(s.model)).toEqual([]);
+    });
+
+    it('partial reversals count the expired part first and never twice; every split order gives the same totals', () => {
+      const prefix = [cr('X', 10000), sp(3000), { type: 'expire', lotId: 'X' } as ModelEvent, cr('Y', 5000)];
+      const outs = allOrders(prefix, [rev('X', 2000), rev('X', 8000)]);
+      for (const o of outs) {
+        expect(o.rev.reduce((n, mv) => n + mv.alreadyExpired, 0)).toBe(7000);
+        expect(o.sumRecovered).toBe(3000);
+        expect(o.sumOwed).toBe(0);
+        expect(o.model.state).toMatchObject({ B: 2000, D: 0 });
+      }
+      // a later expiry of what is left is still counted once
+      const m2 = run([cr('X', 1000), rev('X', 300), { type: 'expire', lotId: 'X' }]).model; // 300 taken from X's lot, 700 expired
+      const s2 = reverse(m2, 'X', 700);
+      expect(s2.movement).toMatchObject({ alreadyExpired: 700, recovered: 0, owed: 0, pointsDelta: 0 });
+      expect(() => reverse(s2.model, 'X', 1)).toThrow(/cap exceeded/);
+    });
+
+    it('a credit that landed on debt and then expired: the debt it repaid comes back (R1), its expired part is not taken again', () => {
+      // −500, X +800 (o 500, lot 300), lot X expires (e 300) → B 0, D 0; reverse X 800 → p 500, q 300 → B −500, D 500
+      const m = run([...opening(-500), cr('X', 800), { type: 'expire', lotId: 'X' }]).model;
+      expect(m.state).toMatchObject({ B: 0, D: 0 });
+      const s = reverse(m, 'X', 800);
+      expect(s.movement).toMatchObject({ debtRestored: 500, alreadyExpired: 300, recovered: 0, owed: 0, pointsDelta: -500 });
+      expect(s.model.state).toMatchObject({ B: -500, D: 500 });
+    });
+  });
+
+  it('fix round 3 A4: taking holdings that were backing EXISTING debt is recorded (debtExposed) — B 60 / D 40, reverse Y 100 → B −40', () => {
+    // −40 (D 40), X +100 (O_X 40, B 60), Y +100 (B 160), reverse X 40 (p 40 → B 120, D 40), redeem 60 → B 60, D 40, H 100
+    const m = run([...opening(-40), cr('X', 100), cr('Y', 100), rev('X', 40), sp(60)]).model;
+    expect(m.state).toMatchObject({ B: 60, D: 40 });
+    const s = reverse(m, 'Y', 100);
+    expect(s.model.state).toMatchObject({ B: -40, D: 40 });
+    expect(s.movement).toMatchObject({ recovered: 100, owed: 0, debtRestored: 0, debtExposed: 40, shortfall: 0 });
+    // a reversal that stays ≥ 0, or whose negative is fully explained by p / owed, exposes nothing
+    expect(reverse(run([cr('X', 10000), sp(2986)]).model, 'X', 10000).movement.debtExposed).toBe(0);
+    expect(reverse(run([...opening(-841), cr('X', 500)]).model, 'X', 500).movement.debtExposed).toBe(0);
   });
 
   it('spend is guarded B ≥ s', () => {
@@ -248,21 +369,22 @@ describe('reversal-model transitions (§1.2)', () => {
 // ───────────────────────────── §6 matrix ─────────────────────────────
 
 describe('§6 test matrix (both / all approval orders)', () => {
-  it('T-a: 0, f1 +500, redeem 500, f2 +300; reverse f1, f2 → B 0, D 0, Σrec 300, Σsf 500 (= today)', () => {
+  it('T-a: 0, f1 +500, redeem 500, f2 +300; reverse f1, f2 → B −500, D 500, Σrec 300, Σowed 500 (owner 2026-11-19; LEGACY: 0, 500 written off)', () => {
     const prefix = [cr('f1', 500), sp(500), cr('f2', 300)];
     const outs = allOrders(prefix, [rev('f1', 500), rev('f2', 300)]);
     for (const o of outs) {
-      expect(o.model.state.B).toBe(0);
-      expect(o.model.state.D).toBe(0);
+      expect(o.model.state.B).toBe(-500);
+      expect(o.model.state.D).toBe(500);
       expect(o.sumRecovered).toBe(300);
-      expect(o.sumShortfall).toBe(500);
-      expect(checkInvariants(o.model, { neverNegative: true })).toEqual([]);
-      // = today
+      expect(o.sumOwed).toBe(500);
+      expect(o.sumShortfall).toBe(0);
+      // LEGACY (floor 0) would end at 0 with the 500 written off — V2 books it as debt instead
       const today = legacyRun([
         ...prefix,
         ...o.rev.map((m) => rev(m.refId!, m.pointsRequested)),
       ]);
       expect(today.B[today.B.length - 1]).toBe(0);
+      expect(o.model.state.B).toBe(today.B[today.B.length - 1] - o.sumOwed);
     }
   });
 
@@ -273,22 +395,22 @@ describe('§6 test matrix (both / all approval orders)', () => {
     );
     for (const o of outs) {
       expect(o.model.state).toMatchObject({ B: -841, D: 841 });
-      expect(o.sumShortfall).toBe(0);
+      expect(o.sumOwed).toBe(0);
     }
   });
 
-  it('T-c: −100, E +500, redeem 400, X +300; reverse E, X → B −100, Σrec 400, Σsf 400', () => {
+  it('T-c: −100, E +500, redeem 400, X +300; reverse E, X → B −500, D 500, Σrec 400, Σowed 400', () => {
     const prefix = [...opening(-100), cr('E', 500), sp(400), cr('X', 300)];
     const outs = allOrders(prefix, [rev('E', 500), rev('X', 300)]);
     for (const o of outs) {
-      expect(o.model.state).toMatchObject({ B: -100, D: 100 });
+      expect(o.model.state).toMatchObject({ B: -500, D: 500 });
       expect(o.sumRecovered).toBe(400);
-      expect(o.sumShortfall).toBe(400);
+      expect(o.sumOwed).toBe(400);
     }
     // Q2: attribution is first-approved-first (order-dependent per reversal, order-free in total)
     const [eFirst, xFirst] = outs;
-    expect(eFirst.rev.map((m) => m.shortfall)).toEqual([100, 300]);
-    expect(xFirst.rev.map((m) => m.shortfall)).toEqual([0, 400]);
+    expect(eFirst.rev.map((m) => m.owed)).toEqual([100, 300]);
+    expect(xFirst.rev.map((m) => m.owed)).toEqual([0, 400]);
   });
 
   it('T-d: −1000, D +1200, E +500, reverse D, X +300; reverse E & X → B −1000, sf 0 (HEAD −700 vs −1000)', () => {
@@ -306,7 +428,7 @@ describe('§6 test matrix (both / all approval orders)', () => {
     const outs = allOrders(prefix, [rev('E', 500), rev('X', 300)]);
     for (const o of outs) {
       expect(o.model.state).toMatchObject({ B: -1000, D: 1000 });
-      expect(o.sumShortfall).toBe(0);
+      expect(o.sumOwed).toBe(0);
     }
   });
 
@@ -322,19 +444,19 @@ describe('§6 test matrix (both / all approval orders)', () => {
     const outs = allOrders(prefix, [rev('X', 100), rev('Y', 200)]);
     for (const o of outs) {
       expect(o.model.state).toMatchObject({ B: -100, D: 100 });
-      expect(o.sumShortfall).toBe(0);
+      expect(o.sumOwed).toBe(0);
     }
     // the refinement: Y-then-X takes a wallet at 0 down to −100 (today would stop at 0) — never below restored debt
     const yThenX = outs[1];
     expect(yThenX.rev.map((m) => m.pointsDelta)).toEqual([-200, -100]);
-    // reversing Z too (all 3, every order) changes nothing but adds Z's 200 shortfall
+    // reversing Z too (all 3, every order): Z's 200 were already spent → owed, booked as debt (owner 2026-11-19)
     const outs3 = allOrders(prefix, [
       rev('X', 100),
       rev('Y', 200),
       rev('Z', 200),
     ]);
-    expect(outs3[0].model.state).toMatchObject({ B: -100, D: 100 });
-    expect(outs3[0].sumShortfall).toBe(200);
+    expect(outs3[0].model.state).toMatchObject({ B: -300, D: 300 });
+    expect(outs3[0].sumOwed).toBe(200);
   });
 
   it('T-g1: partial reversal cap enforced (Σ ≤ a)', () => {
@@ -346,15 +468,15 @@ describe('§6 test matrix (both / all approval orders)', () => {
     expect(m2.state.B).toBe(0);
   });
 
-  it('T-g2: −200, X +500, redeem 100; reverse X 150 & X 350 → B −200, D 200, Σsf 100 both orders', () => {
+  it('T-g2: −200, X +500, redeem 100; reverse X 150 & X 350 → B −300, D 300, Σowed 100 both orders', () => {
     const outs = allOrders(
       [...opening(-200), cr('X', 500), sp(100)],
       [rev('X', 150), rev('X', 350)],
     );
     for (const o of outs) {
-      expect(o.model.state).toMatchObject({ B: -200, D: 200 });
+      expect(o.model.state).toMatchObject({ B: -300, D: 300 });
       expect(o.model.positions.X).toMatchObject({ offset: 0, reversed: 500 });
-      expect(o.sumShortfall).toBe(100);
+      expect(o.sumOwed).toBe(100);
     }
   });
 
@@ -368,7 +490,7 @@ describe('§6 test matrix (both / all approval orders)', () => {
       expect(o.model.state).toMatchObject({ B: -250, D: 300 });
       expect(o.model.positions.X).toMatchObject({ offset: 0, reversed: 200 });
       expect(o.model.positions.Y).toMatchObject({ offset: 0, reversed: 250 });
-      expect(o.sumShortfall).toBe(0);
+      expect(o.sumOwed).toBe(0);
     }
   });
 
@@ -400,6 +522,7 @@ describe('§6 test matrix (both / all approval orders)', () => {
     expect(after.movement).toMatchObject({
       debtRestored: 500,
       recovered: 0,
+      owed: 0,
       shortfall: 0,
     });
 
@@ -419,22 +542,26 @@ describe('§6 test matrix (both / all approval orders)', () => {
     });
     expect(s2.model.state).toMatchObject({ B: 0, D: 0 });
     const r2 = reverse(s2.model, 'X', 300);
+    // owner 2026-11-19: X's 200 that expired count as already recovered — not taken again, not owed
     expect(r2.model.state).toMatchObject({ B: -100, D: 100 });
     expect(r2.movement).toMatchObject({
       debtRestored: 100,
+      alreadyExpired: 200,
       recovered: 0,
-      shortfall: 200,
+      owed: 0,
+      shortfall: 0,
     });
   });
 
-  describe('DE-1..8 Deoleo-style positive histories: identical to today (DE-4 lot fix only)', () => {
-    const cases: [string, ModelEvent[], number, number][] = [
-      // id, events, final B, Σ shortfall
-      ['DE-1 credit, full reversal', [cr('X', 500), rev('X', 500)], 0, 0],
+  describe('DE-1..8 positive histories (D = 0): identical to LEGACY while the wallet still holds the points; an over-reversal becomes debt (owner 2026-11-19)', () => {
+    const cases: [string, ModelEvent[], number, number, number][] = [
+      // id, events, final B, final D, Σ owed (LEGACY wrote Σ owed off as shortfall and ended Σ owed higher)
+      ['DE-1 credit, full reversal', [cr('X', 500), rev('X', 500)], 0, 0, 0],
       [
         'DE-2 credit, partial spend, full reversal',
         [cr('X', 500), sp(200), rev('X', 500)],
-        0,
+        -200,
+        200,
         200,
       ],
       [
@@ -442,11 +569,13 @@ describe('§6 test matrix (both / all approval orders)', () => {
         [cr('X', 500), cr('Y', 300), rev('X', 500)],
         300,
         0,
+        0,
       ],
       [
-        'DE-5 fully spent, reversal, later credit',
+        'DE-5 fully spent, reversal, later credit (the credit repays the debt first)',
         [cr('X', 500), sp(500), rev('X', 500), cr('Y', 200)],
-        200,
+        -300,
+        300,
         500,
       ],
       [
@@ -459,32 +588,43 @@ describe('§6 test matrix (both / all approval orders)', () => {
         ],
         0,
         0,
+        0,
       ],
       [
         'DE-7 repeated partial reversals around a spend',
         [cr('X', 1000), rev('X', 200), sp(300), rev('X', 300), rev('X', 500)],
-        0,
+        -300,
+        300,
         300,
       ],
       [
         'DE-8 manual + credit, all spent, reversal',
         [cr('M', 400, false), cr('X', 600), sp(1000), rev('X', 600)],
-        0,
+        -600,
+        600,
         600,
       ],
     ];
-    it.each(cases)('%s', (_id, events, finalB, sf) => {
+    it.each(cases)('%s', (_id, events, finalB, finalD, owed) => {
       const { model, movements } = run(events);
       const today = legacyRun(events);
-      // balance after every step == today
-      let B = 0;
-      const v2B = movements.map((m) => (B += m.pointsDelta));
-      expect(v2B).toEqual(today.B);
       expect(model.state.B).toBe(finalB);
-      expect(model.state.D).toBe(0);
-      expect(movements.reduce((s, m) => s + m.shortfall, 0)).toBe(sf);
-      expect(lotMap(model)).toEqual(today.lots);
-      expect(checkInvariants(model, { neverNegative: true })).toEqual([]);
+      expect(model.state.D).toBe(finalD);
+      expect(movements.reduce((s, m) => s + m.shortfall, 0)).toBe(0);
+      expect(movements.reduce((s, m) => s + m.owed, 0)).toBe(owed);
+      // V2 = LEGACY minus the owed part (LEGACY floored at 0 and wrote it off)
+      expect(model.state.B).toBe(today.B[today.B.length - 1] - owed);
+      if (owed === 0) {
+        // nothing owed → balance after every step and the lots == LEGACY (Deoleo parity)
+        let B = 0;
+        const v2B = movements.map((m) => (B += m.pointsDelta));
+        expect(v2B).toEqual(today.B);
+        expect(lotMap(model)).toEqual(today.lots);
+        expect(checkInvariants(model, { neverNegative: true })).toEqual([]);
+      } else {
+        expect(checkInvariants(model)).toEqual([]);
+        expect(holdings(model.state)).toBe(Object.values(lotMap(model)).reduce((s, n) => s + n, 0));
+      }
     });
 
     it('DE-4 two credits, reverse the newer: B identical; lot fix — X’s own lot is burnt, not the oldest', () => {
@@ -499,13 +639,15 @@ describe('§6 test matrix (both / all approval orders)', () => {
     });
   });
 
-  it('DE-9 property: random D = 0 histories → v2 decrement == min(r, B); I1–I5 hold (2,500 cases)', () => {
+  it('DE-9 property: random D = 0 histories → v2 recovers min(r, B) (= the LEGACY decrement), owes the rest as debt; I1–I5 hold until the first over-reversal (2,500 cases)', () => {
     const rnd = prng(0xde09);
     let reversalsChecked = 0;
+    let overReversals = 0;
     for (let c = 0; c < 2500; c++) {
       let m = emptyModel();
       const steps = randInt(rnd, 3, 25);
       let nid = 0;
+      let inDebtSince = false;
       for (let i = 0; i < steps; i++) {
         const roll = rnd();
         const posIds = Object.values(m.positions).filter(
@@ -529,23 +671,34 @@ describe('§6 test matrix (both / all approval orders)', () => {
           const p = posIds[randInt(rnd, 0, posIds.length - 1)];
           const r = randInt(rnd, 1, p.amount - p.reversed);
           const s = reverse(m, p.id, r);
-          expect(0 - s.movement.pointsDelta).toBe(
-            legacyReversalDecrement(m.state.B, r),
-          );
-          expect(s.movement.debtRestored).toBe(0);
-          expect(s.movement.shortfall).toBe(r - Math.min(r, m.state.B));
-          reversalsChecked++;
+          // owner 2026-11-19: X's own expired points count as already recovered (q), the rest leaves the balance
+          const q = Math.min(r - Math.min(r, p.offset), (p.expired ?? 0) - (p.expiredCounted ?? 0));
+          expect(s.movement.alreadyExpired).toBe(q);
+          expect(s.movement.pointsDelta).toBe(-(r - q) || 0);
+          expect(s.movement.shortfall).toBe(0);
+          if (!inDebtSince) {
+            // D = 0 and every O = 0: what is taken is the LEGACY floor-0 decrement of the unexpired part
+            expect(s.movement.recovered).toBe(legacyReversalDecrement(m.state.B, r - q));
+            expect(s.movement.debtRestored).toBe(0);
+            expect(s.movement.owed).toBe(r - q - Math.min(r - q, m.state.B));
+            reversalsChecked++;
+            if (s.movement.owed > 0) {
+              overReversals++;
+              inDebtSince = true;
+            }
+          }
           m = s.model;
         }
-        expect(m.state.B).toBeGreaterThanOrEqual(0);
-        const v = checkInvariants(m, { neverNegative: true });
+        const v = checkInvariants(m, { neverNegative: !inDebtSince });
         if (v.length) throw new Error(`case ${c}: ${v.join('; ')}`);
+        if (!inDebtSince) expect(m.state.B).toBeGreaterThanOrEqual(0);
       }
     }
-    expect(reversalsChecked).toBeGreaterThan(5000);
+    expect(reversalsChecked).toBeGreaterThan(2500);
+    expect(overReversals).toBeGreaterThan(100);
   });
 
-  it('DE-10 property: random negative starts × all permutations of ≤ 4 reversals → order-free B, D, O, Σsf (2,500 cases)', () => {
+  it('DE-10 property: random negative starts × all permutations of ≤ 4 reversals → order-free B, D, O, Σowed (2,500 cases)', () => {
     const rnd = prng(0xde10);
     let permsRun = 0;
     for (let c = 0; c < 2500; c++) {
@@ -613,8 +766,11 @@ describe('§6 test matrix (both / all approval orders)', () => {
         for (const [id, r] of perm) {
           const floor = reversalFloor(w, id);
           const s = reverse(w, id, r);
-          expect(s.model.state.B).toBeGreaterThanOrEqual(floor);
-          sf += s.movement.shortfall;
+          // below the no-new-debt floor only by the owed part (owner 2026-11-19)
+          expect(s.model.state.B).toBeGreaterThanOrEqual(floor - s.movement.owed);
+          expect(s.model.state.B).toBe(w.state.B - (r - s.movement.alreadyExpired));
+          expect(s.movement.shortfall).toBe(0);
+          sf += s.movement.owed;
           w = s.model;
           const v = checkInvariants(w);
           if (v.length) throw new Error(`case ${c}: ${v.join('; ')}`);
@@ -728,7 +884,11 @@ describe('replay (§3 backfill)', () => {
         m = step.model;
       }
       const res = replay(toHistory(events, movements, lotsBefore), m.state.B);
-      expect(res.anomalies).toEqual([]);
+      // a live over-reversal (owner 2026-11-19) is exactly what the replay books as CLAWBACK_BEYOND_HOLDINGS ("owed",
+      // as debt) — the only anomaly a live history can produce, and the replayed D / O still match the live state
+      expect(res.anomalies.map((a) => a.code)).toEqual(
+        movements.filter((mv) => mv.kind === 'REVERSAL' && mv.owed > 0).map(() => 'CLAWBACK_BEYOND_HOLDINGS'),
+      );
       expect(res.state).toEqual(m.state);
       for (const p of Object.values(m.positions)) {
         expect([

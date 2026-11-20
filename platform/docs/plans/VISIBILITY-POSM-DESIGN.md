@@ -58,6 +58,15 @@ the Scheme decision; the dead reward columns in the current module are removed, 
   history. Captured data is never edited in place.
 - **D12 — Approval = GIFSY_ADMIN** in a real admin queue (replacing the fake one): approve / reject-with-reason,
   captured photos (auth-gated view), geo pin + distance-from-outlet, submission history.
+  *Review layout (2026-11-19):* the review opens in a centred dialog (~90% viewport; full-screen on a phone) —
+  header = outlet name + code + **Program / Sub-Program** + window + rep + geo verdict; photos large
+  (side by side, stacked on narrow screens); Geo-fence / Captured values / History scroll below the
+  photos; Approve/Reject are a footer pinned to the bottom of the dialog (outside the scroll area;
+  Approve right-aligned as primary); an explicit "Next capture" button after a decision. The dialog
+  starts below the Gifsy operator banner (`data-operator-banner`) so its header + close are never covered. The queue list has a Program column. **Program / Sub-Program are
+  read from the LIVE outlet master** (`Outlet.programName` / `Outlet.programCategory`, joined at read time,
+  not denormalised onto the capture) — so if the outlet's programme changes after capture, the review shows
+  the current value, not the value at capture time (deliberate: decisions follow the current programme).
 - **D13 — Outlet info view** (`sales/kyc/[id]`): a "Visibility — this period" card showing each window's status,
   with a **Capture CTA** (redirect preselected to the outlet) when the current window is due / missing / rejected.
 - **D14 — Sales Tasks:** a "Visibility captures due" group (mode-aware, reach-scoped), showing **N-of-M for the

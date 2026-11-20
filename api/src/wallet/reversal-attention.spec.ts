@@ -93,7 +93,9 @@ describe('GET reversal-engine/attention (WalletService.reversalAttention)', () =
     // tenant-scoped queries only (never another tenant's wallets)
     for (const a of calls['wallet.count']) expect(a.where.partner).toEqual({ clientId: 'bajaj' });
     expect(calls['pos.count'][0].where).toEqual({ attribution: 'UNRESOLVED', wallet: { partner: { clientId: 'bajaj' } } });
-    expect(calls['alloc.count'][0].where).toEqual({ owed: { gt: 0 }, creditReversal: { clientId: 'bajaj' } });
+    // owner 2026-11-19: a live V2 over-reversal's debt is the engine's normal outcome, not an attention item —
+    // only HISTORICAL clawbacks (overReversalDebt false) are listed
+    expect(calls['alloc.count'][0].where).toEqual({ owed: { gt: 0 }, overReversalDebt: false, creditReversal: { clientId: 'bajaj' } });
   });
 
   it('LEGACY tenant: un-backfilled wallets are the normal state → not listed (only BLOCKED ones)', async () => {
@@ -318,5 +320,117 @@ describe('fix round A — L6 target tenant of the GIFSY pause / mode actions', (
     expect(calls['programSetting.upsert']).toBeUndefined();
     await svc.setPointsReversalPause(gifsyInBajaj, { paused: true });
     expect(calls['programSetting.upsert'][0].create.clientId).toBe('bajaj');
+  });
+});
+
+describe('GET reversal-engine/wallets-in-debt (audit item 9 + fix rounds 3/4 + owner D1/D2)', () => {
+  const approvedAt = new Date('2026-11-19T06:00:00Z');
+  const harness = (allocs: unknown[], lastNonNeg: unknown[] = [], rows: unknown[] = [], noNegatives = false) => {
+    const calls: Record<string, any[]> = {};
+    const rec = (k: string, ret: unknown) => jest.fn(async (a: any) => ((calls[k] ??= []).push(a), ret));
+    const prisma: any = {
+      wallet: {
+        findFirst: rec('wallet.findFirst', noNegatives ? null : { id: 'w1' }),
+        count: rec('wallet.count', 3),
+        aggregate: rec('wallet.aggregate', { _sum: { redeemablePoints: -3867 } }),
+        findMany: rec('wallet.findMany', [
+          { id: 'w1', partnerId: 'p1', redeemablePoints: -2986, debtPoints: 2986, movementSeq: 9, partner: { businessName: 'Shop One' } },
+          { id: 'w2', partnerId: 'p2', redeemablePoints: -841, debtPoints: 841, movementSeq: 0, partner: { businessName: 'Shop Two' } },
+        ]),
+      },
+      outlet: {
+        findMany: rec('outlet.findMany', [
+          { partnerId: 'p1', outletCode: 'O1', programName: 'Gold' },
+          { partnerId: 'p2', outletCode: 'O2', programName: 'Silver' },
+        ]),
+      },
+      creditReversalAllocation: { findMany: rec('alloc.findMany', allocs) },
+      walletTransaction: { groupBy: rec('wt.groupBy', lastNonNeg), findMany: rec('wt.findMany', rows) },
+      $executeRawUnsafe: rec('$executeRawUnsafe', 0),
+    };
+    // round 5 (A2): one INTERACTIVE read-only REPEATABLE READ transaction
+    prisma.$transaction = jest.fn(async (cb: (tx: unknown) => Promise<unknown>, o: unknown) => {
+      (calls['$transaction'] ??= []).push(o);
+      return cb(prisma);
+    });
+    const svc = new WalletService(prisma as unknown as PrismaService, {} as TenantSettingsService);
+    return { svc, calls };
+  };
+
+  it('only wallets BELOW ZERO (D1), one REPEATABLE READ snapshot, totals from full aggregates, outlet CODE from the position', async () => {
+    const { svc, calls } = harness(
+      [
+        {
+          id: 'al1', creditReversalId: 'REV1', owed: 2986, debtRestored: 0, debtExposed: 0, overReversalDebt: true, engineSource: 'V2',
+          position: { walletId: 'w1', outletCode: 'O1' },
+          creditReversal: { approvedAt, fieldName: 'Volume', period: '2026-10' },
+        },
+      ],
+      [{ walletId: 'w1', _max: { seq: 7, createdAt: null } }],
+      [{ walletId: 'w1', creditReversalId: 'REV1', seq: 9, createdAt: approvedAt }],
+    );
+    const res = await svc.walletsInDebt('bajaj', { limit: 2 });
+    expect(calls['wallet.count'][0].where).toEqual({ partner: { clientId: 'bajaj' }, redeemablePoints: { lt: 0 } });
+    expect(calls['$transaction'][0]).toEqual({ isolationLevel: 'RepeatableRead' });
+    expect(calls['$executeRawUnsafe'][0]).toBe('SET TRANSACTION READ ONLY');
+    expect(calls['outlet.findMany'].at(-1).where).toMatchObject({ deletedAt: null }); // B8
+    expect(res).toMatchObject({ total: 3, totalOwedPoints: 3867, truncated: true, availablePrograms: ['Gold', 'Silver'] });
+    expect(res.wallets[0]).toMatchObject({
+      walletId: 'w1', outletCodes: ['O1'], balance: -2986, owedPoints: 2986, note: null,
+      sources: [{ allocationId: 'al1', creditReversalId: 'REV1', kind: 'OVER_REVERSAL', owedPoints: 2986, outletCode: 'O1' }],
+    });
+    expect(res.wallets[1]).toMatchObject({ walletId: 'w2', owedPoints: 841, sources: [], note: expect.stringMatching(/imported/) });
+  });
+
+  it('item 2: decided by SEQ, not approvedAt — a reversal approved "before" a later earn still counts when its row comes after the last ≥ 0 row; both positions of one reversal are listed', async () => {
+    const early = new Date('2026-11-01T00:00:00Z'); // approvedAt stamped before the lock / an earlier clock
+    const { svc } = harness(
+      [
+        { id: 'a1', creditReversalId: 'RX', owed: 100, debtRestored: 0, debtExposed: 0, overReversalDebt: true, engineSource: 'V2', position: { walletId: 'w1', outletCode: 'O1' }, creditReversal: { approvedAt: early, fieldName: 'F', period: 'P' } },
+        { id: 'a2', creditReversalId: 'RX', owed: 50, debtRestored: 0, debtExposed: 0, overReversalDebt: true, engineSource: 'V2', position: { walletId: 'w1', outletCode: 'O1' }, creditReversal: { approvedAt: early, fieldName: 'F', period: 'P' } },
+        { id: 'a3', creditReversalId: 'ROLD', owed: 10, debtRestored: 0, debtExposed: 0, overReversalDebt: true, engineSource: 'V2', position: { walletId: 'w1', outletCode: 'O1' }, creditReversal: { approvedAt: early, fieldName: 'F', period: 'P' } },
+      ],
+      [{ walletId: 'w1', _max: { seq: 5, createdAt: new Date('2026-11-20T00:00:00Z') } }],
+      [
+        { walletId: 'w1', creditReversalId: 'RX', seq: 6, createdAt: early },
+        { walletId: 'w1', creditReversalId: 'RX', seq: 7, createdAt: early },
+        { walletId: 'w1', creditReversalId: 'ROLD', seq: 3, createdAt: early },
+      ],
+    );
+    const res = await svc.walletsInDebt('bajaj');
+    expect(res.wallets[0].sources.map((x: { allocationId: string }) => x.allocationId)).toEqual(['a1', 'a2']);
+  });
+
+  it('programName applies the dashboards programme scope', async () => {
+    const { svc, calls } = harness([]);
+    await svc.walletsInDebt('bajaj', { programName: 'Gold' });
+    expect(calls['wallet.count'][0].where.partner).toMatchObject({ clientId: 'bajaj', outlets: { some: expect.objectContaining({ programName: { in: ['Gold'] } }) } });
+  });
+
+  it('round 5 B1: a tenant with NO negative wallet answers from the cheap probe — no catalogue, no snapshot', async () => {
+    const { svc, calls } = harness([], [], [], true);
+    const res = await svc.walletsInDebt('deoleo');
+    expect(res).toMatchObject({ total: 0, totalOwedPoints: 0, wallets: [], truncated: false });
+    expect(calls['wallet.findFirst'][0].where).toEqual({ partner: { clientId: 'deoleo' }, redeemablePoints: { lt: 0 } });
+    expect(calls['$transaction']).toBeUndefined();
+    expect(calls['outlet.findMany']).toBeUndefined();
+  });
+
+  it('round 5 B7: a last row at or above zero WITHOUT seq (pre-sequencing history) falls back to time', async () => {
+    const before = new Date('2026-10-01T00:00:00Z');
+    const after = new Date('2026-11-19T00:00:00Z');
+    const { svc } = harness(
+      [
+        { id: 'a1', creditReversalId: 'RNEW', owed: 5, debtRestored: 0, debtExposed: 0, overReversalDebt: true, engineSource: 'V2', position: { walletId: 'w1', outletCode: 'O1' }, creditReversal: { approvedAt: after, fieldName: 'F', period: 'P' } },
+        { id: 'a2', creditReversalId: 'ROLD', owed: 5, debtRestored: 0, debtExposed: 0, overReversalDebt: true, engineSource: 'V2', position: { walletId: 'w1', outletCode: 'O1' }, creditReversal: { approvedAt: before, fieldName: 'F', period: 'P' } },
+      ],
+      [{ walletId: 'w1', _max: { seq: null, createdAt: new Date('2026-11-01T00:00:00Z') } }],
+      [
+        { walletId: 'w1', creditReversalId: 'RNEW', seq: 9, createdAt: after },
+        { walletId: 'w1', creditReversalId: 'ROLD', seq: 4, createdAt: before },
+      ],
+    );
+    const res = await svc.walletsInDebt('bajaj');
+    expect(res.wallets[0].sources.map((x: { creditReversalId: string }) => x.creditReversalId)).toEqual(['RNEW']);
   });
 });

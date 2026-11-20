@@ -211,6 +211,8 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[]; mode?: ReversalEngine
         allocations.push(row);
         return row;
       },
+      // withExpiry (owner 2026-11-19): ε_X = Σ alreadyExpired of the position's earlier allocations
+      findMany: async ({ where }: any = {}) => allocations.filter((a) => matchWhere(a, where ?? {})).map((a) => ({ ...a })),
     },
     auditLog: {
       create: async ({ data }: any) => {
@@ -324,12 +326,15 @@ async function apply(d: Driver, ev: ModelEvent): Promise<void> {
         seq: 0,
         refId: ev.creditId,
         pointsRequested: ev.amount,
-        pointsDelta: -(res.debtRestored + res.recovered),
-        debtDelta: res.debtRestored,
+        pointsDelta: -(res.debtRestored + res.recovered + res.owed),
+        debtDelta: res.debtRestored + res.owed,
         offsetDelta: -res.debtRestored,
         offsetPositionId: ev.creditId,
         lotDraws: [],
         shortfall: res.shortfall,
+        owed: res.owed,
+        alreadyExpired: res.alreadyExpired,
+        debtExposed: res.debtExposed,
         debtRestored: res.debtRestored,
         recovered: res.recovered,
       });
@@ -349,7 +354,8 @@ async function drive(open: number, events: ModelEvent[]): Promise<Driver> {
 /** Assert the persisted state equals the WP0 model (and the passbook chain is exact). */
 function expectMatchesOracle(d: Driver, m: WalletModel, oracleMoves: Movement[]): void {
   const oracleRev = oracleMoves.filter((mv) => mv.kind === 'REVERSAL');
-  const rowless = oracleMoves.filter((mv) => mv.kind === 'EXPIRY' && mv.pointsDelta === 0).length;
+  // no wallet row: a debt-only expiry, and (A6, fix round 3) a reversal fully covered by the credit's expired points
+  const rowless = oracleMoves.filter((mv) => (mv.kind === 'EXPIRY' || mv.kind === 'REVERSAL') && mv.pointsDelta === 0).length;
   const w = d.h.wallets[0];
   expect({ B: w.redeemablePoints, D: w.debtPoints, seq: w.movementSeq }).toEqual({ ...m.state, seq: m.state.seq - rowless });
   for (const pos of Object.values(m.positions)) {
@@ -364,12 +370,18 @@ function expectMatchesOracle(d: Driver, m: WalletModel, oracleMoves: Movement[])
     const row = d.h.ledger.find((l) => l.id === d.lotOf[lot.id]);
     expect({ lot: lot.id, remaining: row ? row.remainingPoints : undefined }).toEqual({ lot: lot.id, remaining: lot.remaining });
   }
-  const sum = (ms: Movement[], k: 'shortfall' | 'recovered' | 'debtRestored') => ms.reduce((s, x) => s + x[k], 0);
+  const sum = (ms: Movement[], k: 'shortfall' | 'recovered' | 'debtRestored' | 'owed' | 'alreadyExpired') => ms.reduce((s, x) => s + x[k], 0);
+  expect(sum(d.movements, 'alreadyExpired')).toBe(sum(oracleRev, 'alreadyExpired'));
+  expect(d.h.allocations.reduce((s, a) => s + (a.alreadyExpired ?? 0), 0)).toBe(sum(oracleRev, 'alreadyExpired'));
   expect(sum(d.movements, 'shortfall')).toBe(sum(oracleRev, 'shortfall'));
+  expect(sum(d.movements, 'shortfall')).toBe(0); // owner 2026-11-19: V2 never writes points off
   expect(sum(d.movements, 'recovered')).toBe(sum(oracleRev, 'recovered'));
   expect(sum(d.movements, 'debtRestored')).toBe(sum(oracleRev, 'debtRestored'));
+  expect(sum(d.movements, 'owed')).toBe(sum(oracleRev, 'owed'));
   // allocation rows carry the same totals (one per reversal × position here)
   expect(d.h.allocations.reduce((s, a) => s + a.shortfall, 0)).toBe(sum(oracleRev, 'shortfall'));
+  expect(d.h.allocations.reduce((s, a) => s + (a.owed ?? 0), 0)).toBe(sum(oracleRev, 'owed'));
+  for (const a of d.h.allocations) expect(a.overReversalDebt ?? false).toBe((a.owed ?? 0) > 0);
   // passbook chain: seq contiguous, balanceAfter = balanceBefore + pointsDelta, chained, last = wallet
   const rows = [...d.h.walletTxns].sort((a, b) => a.seq - b.seq);
   rows.forEach((r, i) => {
@@ -397,7 +409,7 @@ function permutations<T>(xs: T[]): T[][] {
 
 /** Run every approval order through the service and the oracle; assert equality per order. Returns the finals. */
 async function allOrders(open: number, prefix: ModelEvent[], reversals: ModelEvent[]) {
-  const finals: { B: number; D: number; sf: number; rec: number }[] = [];
+  const finals: { B: number; D: number; sf: number; owed: number; rec: number }[] = [];
   for (const perm of permutations(reversals)) {
     const oracle = run([...openingEvents(open), ...prefix, ...perm]);
     expect(checkInvariants(oracle.model)).toEqual([]);
@@ -408,6 +420,7 @@ async function allOrders(open: number, prefix: ModelEvent[], reversals: ModelEve
       B: oracle.model.state.B,
       D: oracle.model.state.D,
       sf: oracleRev.reduce((s, x) => s + x.shortfall, 0),
+      owed: oracleRev.reduce((s, x) => s + x.owed, 0),
       rec: oracleRev.reduce((s, x) => s + x.debtRestored + x.recovered, 0),
     });
   }
@@ -422,19 +435,19 @@ const ex = (lotId: string): ModelEvent => ({ type: 'expire', lotId });
 // ───────────────────────── §15 test matrix through the service ─────────────────────────
 
 describe('Reversal engine v2 — §15 test matrix (service ≡ WP0, every approval order)', () => {
-  it('T-a: 0, f1 +500, redeem 500, f2 +300; reverse f1, f2 → B 0, D 0, Σrec 300, Σsf 500 (= today)', async () => {
+  it('T-a: 0, f1 +500, redeem 500, f2 +300; reverse f1, f2 → B −500, D 500, Σrec 300, Σowed 500 (owner 2026-11-19: debt, not written off)', async () => {
     const f = await allOrders(0, [cr('f1', 500), sp(500), cr('f2', 300)], [rv('f1', 500), rv('f2', 300)]);
-    for (const x of f) expect(x).toEqual({ B: 0, D: 0, sf: 500, rec: 300 });
+    for (const x of f) expect(x).toEqual({ B: -500, D: 500, sf: 0, owed: 500, rec: 300 });
   });
 
   it('T-b: −841, f1 +500, f2 +300; reverse both → B −841, shortfall 0 (R1)', async () => {
     const f = await allOrders(-841, [cr('f1', 500), cr('f2', 300)], [rv('f1', 500), rv('f2', 300)]);
-    for (const x of f) expect(x).toMatchObject({ B: -841, D: 841, sf: 0 });
+    for (const x of f) expect(x).toMatchObject({ B: -841, D: 841, sf: 0, owed: 0 });
   });
 
-  it('T-c: −100, E +500, redeem 400, X +300; reverse E, X → B −100, Σrec 400, Σsf 400', async () => {
+  it('T-c: −100, E +500, redeem 400, X +300; reverse E, X → B −500, D 500, Σrec 400, Σowed 400', async () => {
     const f = await allOrders(-100, [cr('E', 500), sp(400), cr('X', 300)], [rv('E', 500), rv('X', 300)]);
-    for (const x of f) expect(x).toMatchObject({ B: -100, sf: 400, rec: 400 });
+    for (const x of f) expect(x).toMatchObject({ B: -500, D: 500, sf: 0, owed: 400, rec: 400 });
   });
 
   it('T-d: −1000, D +1200, E +500, reverse D, X +300; reverse E, X → B −1000, sf 0 (patched code: −700 ✗)', async () => {
@@ -454,7 +467,8 @@ describe('Reversal engine v2 — §15 test matrix (service ≡ WP0, every approv
       [cr('X', 100), cr('Z', 200), sp(200), cr('Y', 200)],
       [rv('X', 100), rv('Y', 200), rv('Z', 200)],
     );
-    for (const x of f3) expect(x.B).toBe(-100);
+    // Z's 200 were already spent → owed as debt (owner 2026-11-19)
+    for (const x of f3) expect(x).toMatchObject({ B: -300, D: 300, owed: 200, sf: 0 });
   });
 
   it('T-g1..3: partial reversals — identical B across orders, and the cap a − ρ is enforced', async () => {
@@ -486,9 +500,9 @@ describe('Reversal engine v2 — §15 test matrix (service ≡ WP0, every approv
     expect(d2.h.wallets[0].expiredPoints).toBe(-o2.movements[o2.movements.length - 1].pointsDelta);
   });
 
-  it('DE-4: 0, f1 +500, redeem 500, f2 +300 → either order ends at 0 and the lot fix applies (own lot first)', async () => {
+  it('DE-4: 0, f1 +500, redeem 500, f2 +300 → either order ends at −500 / debt 500 (owner 2026-11-19) and the lot fix applies (own lot first)', async () => {
     const f = await allOrders(0, [cr('f1', 500), sp(500), cr('f2', 300)], [rv('f1', 500), rv('f2', 300)]);
-    for (const x of f) expect(x.B).toBe(0);
+    for (const x of f) expect(x).toMatchObject({ B: -500, D: 500 });
   });
 
   it('Q7: the reversed credit\'s OWN lot is drawn first — an older lot keeps its points (today burnt the oldest)', async () => {
@@ -560,28 +574,44 @@ describe('Reversal engine v2 — property tests against WP0', () => {
     }
   });
 
-  it('DE-9 (reduced): 150 random never-negative histories — every reversal removes exactly min(r, B), D stays 0', async () => {
+  it('DE-9 (reduced): 150 random never-negative histories — a reversal takes min(r, B) from the wallet (the LEGACY amount) and books the rest as debt (owner 2026-11-19); D stays 0 until then', async () => {
     const rnd = prng(42);
+    let overReversals = 0;
     for (let i = 0; i < 150; i++) {
       const open = randInt(rnd, 0, 800);
       const { prefix, reversals } = randomHistory(rnd, open, randInt(rnd, 2, 7));
       const events = [...prefix, ...reversals];
       const d: Driver = { h: harness({ wallets: [openWallet(0)], mode: 'V2' }), lotOf: {}, movements: [], revSeq: 0 };
       for (const ev of openingEvents(open)) await apply(d, ev);
+      let inDebt = false;
       for (const ev of events) {
         const B = d.h.wallets[0].redeemablePoints;
+        const D = d.h.wallets[0].debtPoints;
         await apply(d, ev);
         if (ev.type === 'reverse') {
-          const removed = B - d.h.wallets[0].redeemablePoints;
-          expect(removed).toBe(legacyReversalDecrement(B, ev.amount));
+          // the whole r leaves the balance, except the credit's own already-expired points (owner 2026-11-19)
+          const q = d.movements[d.movements.length - 1].alreadyExpired;
+          expect(B - d.h.wallets[0].redeemablePoints).toBe(ev.amount - q);
+          if (!inDebt) {
+            const taken = legacyReversalDecrement(B, ev.amount - q);
+            expect(d.movements[d.movements.length - 1].recovered).toBe(taken);
+            expect(d.h.wallets[0].debtPoints - D).toBe(ev.amount - q - taken);
+            if (ev.amount - q > taken) {
+              inDebt = true;
+              overReversals++;
+            }
+          }
         }
-        expect(d.h.wallets[0].debtPoints).toBe(0);
-        expect(d.h.positions.every((p) => p.offsetPoints === 0)).toBe(true);
+        if (!inDebt) {
+          expect(d.h.wallets[0].debtPoints).toBe(0);
+          expect(d.h.positions.every((p) => p.offsetPoints === 0)).toBe(true);
+        }
       }
       const oracle = run([...openingEvents(open), ...events]);
-      expect(checkInvariants(oracle.model, { neverNegative: true })).toEqual([]);
+      expect(checkInvariants(oracle.model, { neverNegative: !inDebt })).toEqual([]);
       expectMatchesOracle(d, oracle.model, oracle.movements);
     }
+    expect(overReversals).toBeGreaterThan(5);
   });
 });
 
@@ -782,16 +812,22 @@ describe('applyCreditReversal (WP3) — R5 / Q4 / Q5', () => {
     await credit(h, 'cp1', 'O1', 200);
     await h.service.debitRedeem('cp1', 250, {});
     const res = await reverse(h, 250);
-    expect(res.steps.map((s) => [s.requested, s.recovered, s.shortfall])).toEqual([
-      [100, 50, 50],
-      [150, 0, 150],
+    expect(res.steps.map((s) => [s.requested, s.recovered, s.owed, s.shortfall])).toEqual([
+      [100, 50, 50, 0],
+      [150, 0, 150, 0],
     ]);
     expect(h.allocations).toHaveLength(2);
+    expect(h.allocations.map((a) => [a.owed, a.overReversalDebt, a.shortfall])).toEqual([
+      [50, true, 0],
+      [150, true, 0],
+    ]);
     expect(h.positions.map((p) => p.reversedPoints)).toEqual([100, 150]);
-    expect(h.wallets[0].redeemablePoints).toBe(0);
+    // owner 2026-11-19: the 200 already redeemed are debt — B −200, D 200
+    expect(h.wallets[0]).toMatchObject({ redeemablePoints: -200, debtPoints: 200 });
     await expect(reverse(h, 51, 'R2')).rejects.toBeInstanceOf(BadRequestException);
     await reverse(h, 50, 'R2');
     expect(h.positions.map((p) => p.reversedPoints)).toEqual([100, 200]);
+    expect(h.wallets[0]).toMatchObject({ redeemablePoints: -250, debtPoints: 250 });
   });
 
   it('writes the v2 columns: seq, pointsDelta (actual), reversedCreditTxId, creditReversalId; ledger keeps −r', async () => {
@@ -807,6 +843,299 @@ describe('applyCreditReversal (WP3) — R5 / Q4 / Q5', () => {
     expect(h.ledger.find((l) => l.id === t.pointsLedgerId)).toMatchObject({ transactionType: 'ADJUST', points: -500 });
     expect(h.allocations[0]).toMatchObject({ requested: 500, debtRestored: 500, recovered: 0, shortfall: 0 });
     expect(h.wallets[0]).toMatchObject({ redeemablePoints: -841, debtPoints: 841 });
+  });
+
+  describe('owner decision 2026-11-19 — an over-reversal becomes wallet debt, repaid from future earnings', () => {
+    /** The staging example: 10,000 pts credited, 2,986 redeemed (holds 7,014), the whole 10,000 reversed. */
+    const overReversed = async () => {
+      const h = harness({ mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 10000);
+      await h.service.debitRedeem('cp1', 2986, { referenceId: 'ord-1' });
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: 7014, debtPoints: 0 });
+      const res = await reverse(h, 10000, 'REV');
+      return { h, res };
+    };
+
+    it('reverse 10,000 from a wallet holding 7,014 → balance −2,986, debt 2,986, nothing written off (amounts, ledger rows, position, allocation)', async () => {
+      const { h, res } = await overReversed();
+      expect(res).toMatchObject({ shortfall: 0, recovered: 7014, debtRestored: 0, owed: 2986 });
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: -2986, debtPoints: 2986, movementSeq: 3 });
+      // one passbook row for the whole 10,000 (the balance really moved by it) + its ledger row
+      const t = h.walletTxns[h.walletTxns.length - 1];
+      expect(t).toMatchObject({
+        transactionType: 'DEBIT_ADJUSTMENT', points: -10000, pointsDelta: -10000, seq: 3,
+        balanceBefore: 7014, balanceAfter: -2986, creditReversalId: 'REV', referenceType: 'CREDIT_REVERSAL', referenceId: 'REV',
+      });
+      // Q8: no debt / shortfall wording on the partner's passbook row
+      expect(t.description).not.toMatch(/SHORTFALL|debt/i);
+      expect(h.ledger.find((l) => l.id === t.pointsLedgerId)).toMatchObject({ transactionType: 'ADJUST', points: -10000, remainingPoints: 0 });
+      // the credit's own lot gave up the 7,014 it still held (FIFO lots stay = holdings H = 0)
+      const lot = h.ledger.find((l) => l.id === h.positions[0].lotId)!;
+      expect(lot.remainingPoints).toBe(0);
+      expect(h.positions[0]).toMatchObject({ amount: 10000, offsetPoints: 0, reversedPoints: 10000 });
+      expect(h.allocations).toEqual([
+        expect.objectContaining({
+          creditReversalId: 'REV', requested: 10000, debtRestored: 0, recovered: 7014, owed: 2986, overReversalDebt: true, shortfall: 0,
+        }),
+      ]);
+      // and the credit can't be reversed again
+      await expect(reverse(h, 1, 'REV2')).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    it('owner decision 2: the passbook row explains itself — "Credit reversed (<field · period>) −10,000 · 2,986 owed, repaid from future earnings"', async () => {
+      const h = harness({ mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 10000);
+      await h.service.debitRedeem('cp1', 2986, { referenceId: 'ord-1' });
+      await h.models.$transaction((tx: any) =>
+        h.service.applyCreditReversal(tx, {
+          batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: 'REV', points: 10000, passbookLabel: 'Volume · 2026-10',
+        }),
+      );
+      expect(h.walletTxns[h.walletTxns.length - 1].description).toBe(
+        'Credit reversed (Volume · 2026-10) −10,000 · 2,986 owed, repaid from future earnings',
+      );
+    });
+
+    it('fix round 3 A4/A5: holdings that were backing earlier debt — B 60 / D 40, reverse Y 100 → B −40, recorded + said (never "imported history")', async () => {
+      const h = harness({ wallets: [openWallet(-40)], mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 100); // X: repays the 40 debt (O 40), B 60
+      await credit(h, 'cp1', 'O2', 100, 'B2'); // Y: B 160
+      await reverse(h, 40, 'RX'); // X 40 → p 40: B 120, D 40
+      await h.service.debitRedeem('cp1', 60, {}); // B 60, D 40, H 100
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: 60, debtPoints: 40 });
+      const res = await h.models.$transaction((tx: any) =>
+        h.service.applyCreditReversal(tx, {
+          batchId: 'B2', outletCode: 'O2', fieldId: 'F1', creditReversalId: 'RY', points: 100, passbookLabel: 'Volume · 2026-10',
+        }),
+      );
+      expect(res).toMatchObject({ recovered: 100, owed: 0, debtExposed: 40, balanceBelowZero: 40 });
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: -40, debtPoints: 40 });
+      expect(h.allocations.find((a) => a.creditReversalId === 'RY')).toMatchObject({
+        recovered: 100, owed: 0, debtExposed: 40, engineSource: 'V2', overReversalDebt: false,
+      });
+      // A5: the passbook says what the BALANCE did — 40 now owed — not "100 owed" and not silent
+      expect(h.walletTxns[h.walletTxns.length - 1].description).toBe(
+        'Credit reversed (Volume · 2026-10) −100 · 40 owed, repaid from future earnings',
+      );
+    });
+
+    it('fix round 3 A5: debt a credit had paid off, restored while the balance stays ≥ 0, is NOT called "owed" on the passbook', async () => {
+      const h = harness({ wallets: [openWallet(-40)], mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 100); // X repays 40 (O 40), B 60
+      await credit(h, 'cp1', 'O2', 500, 'B2'); // B 560
+      await h.models.$transaction((tx: any) =>
+        h.service.applyCreditReversal(tx, {
+          batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: 'RX', points: 100, passbookLabel: 'Volume · 2026-10',
+        }),
+      );
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: 460, debtPoints: 40 });
+      expect(h.walletTxns[h.walletTxns.length - 1].description).toBe('Credit reversed (Volume · 2026-10) −100');
+    });
+
+    it('fix round 3 A6: the stored points ARE the balance change −(r − q) — expired points are never counted twice in ledger sums', async () => {
+      const h = harness({ mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 10000);
+      await h.service.debitRedeem('cp1', 4000, {});
+      const pos = h.positions[0];
+      const lot = h.ledger.find((l) => l.id === pos.lotId)!;
+      lot.expiresAt = later(-10);
+      await h.service.expireDuePoints({ now: NOW }); // 6,000 expired
+      lot.expiresAt = null;
+      await credit(h, 'cp1', 'O2', 5000, 'B2');
+      await reverse(h, 10000, 'REV');
+      const t = h.walletTxns[h.walletTxns.length - 1];
+      expect(t).toMatchObject({ points: -4000, pointsDelta: -4000, balanceBefore: 5000, balanceAfter: 1000 });
+      expect(h.ledger.find((l) => l.id === t.pointsLedgerId)).toMatchObject({ points: -4000 });
+      // Σ ledger points (EARN + REDEEM + EXPIRE + ADJUST) = the balance
+      const sum = h.ledger.reduce((n, l) => n + l.points, 0);
+      expect(sum).toBe(h.wallets[0].redeemablePoints);
+    });
+
+    it('fix round 4 item 1: a position WITHOUT lotId still finds its own lot via its credit row — expired points counted, nothing taken twice', async () => {
+      const h = harness({ mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 10000);
+      const pos = h.positions[0];
+      const lot = h.ledger.find((l) => l.id === pos.lotId)!;
+      lot.expiresAt = later(-10);
+      await h.service.expireDuePoints({ now: NOW }); // all 10,000 expired
+      lot.expiresAt = null;
+      await credit(h, 'cp1', 'O2', 5000, 'B2');
+      pos.lotId = null; // a backfilled position without its lot link — the credit row still carries pointsLedgerId
+      const res = await reverse(h, 10000, 'REV');
+      expect(res).toMatchObject({ alreadyExpired: 10000, recovered: 0, owed: 0 });
+      expect(h.wallets[0].redeemablePoints).toBe(5000); // Y's points untouched
+      expect(h.auditLogs).toEqual([]);
+    });
+
+    it('fix round 4 item 1: credit whose own lot cannot be found at all — flagged LOUDLY whenever points are taken or owed (not only owed)', async () => {
+      const h = harness({ mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 1000);
+      await credit(h, 'cp1', 'O2', 5000, 'B2');
+      h.positions[0].lotId = null;
+      h.walletTxns.find((t) => t.id === h.positions[0].creditTxId)!.pointsLedgerId = null; // no link at all
+      await h.models.$transaction((tx: any) =>
+        h.service.applyCreditReversal(tx, {
+          batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: 'RT', points: 1000, clientId: 'bajaj',
+        }),
+      );
+      expect(h.auditLogs).toEqual([
+        expect.objectContaining({
+          entityType: 'REVERSAL_EXPIRY_UNTRACKED', entityId: 'RT',
+          metadata: expect.objectContaining({ clientId: 'bajaj', recovered: 1000, owed: 0 }),
+        }),
+      ]);
+    });
+
+    it('round 5 A1: ONE audit row per reversal even when it touches two unlinked positions; a lot of ANOTHER wallet is not "known"', async () => {
+      const h = harness({ mode: 'V2' });
+      await h.service.creditEarn('cp1', 'bajaj', 300, { referenceType: 'CREDIT_BATCH', referenceId: 'B1', metadata: { fieldId: 'F1', outletCode: 'O1' } });
+      await h.service.creditEarn('cp1', 'bajaj', 200, { referenceType: 'CREDIT_BATCH', referenceId: 'B1', metadata: { fieldId: 'F1', outletCode: 'O1' } });
+      expect(h.positions).toHaveLength(2);
+      for (const p of h.positions) {
+        // the link points at a lot that is not a credit lot of THIS wallet → expiry history unknown
+        const lot = h.ledger.find((l) => l.id === p.lotId)!;
+        lot.walletId = 'some-other-wallet';
+      }
+      await h.models.$transaction((tx: any) =>
+        h.service.applyCreditReversal(tx, {
+          batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: 'R2P', points: 500, clientId: 'bajaj',
+        }),
+      );
+      const rows = h.auditLogs.filter((x) => x.entityType === 'REVERSAL_EXPIRY_UNTRACKED');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ entityId: 'R2P', metadata: expect.objectContaining({ recovered: 500, owed: 0 }) });
+      expect((rows[0].metadata as { positions: unknown[] }).positions).toHaveLength(2);
+    });
+
+    it('fix round 3: debt booked on a credit with NO lot link (expiry history unknown) is never silent — audit row for the banner', async () => {
+      const h = harness({ mode: 'V2' });
+      await credit(h, 'cp1', 'O1', 1000);
+      await h.service.debitRedeem('cp1', 600, {});
+      h.positions[0].lotId = null; // a backfilled credit without its lot
+      h.walletTxns.find((t) => t.id === h.positions[0].creditTxId)!.pointsLedgerId = null; // …and no link on its credit row
+      await h.models.$transaction((tx: any) =>
+        h.service.applyCreditReversal(tx, {
+          batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: 'RU', points: 1000, clientId: 'bajaj',
+        }),
+      );
+      expect(h.auditLogs).toEqual([
+        expect.objectContaining({
+          entityType: 'REVERSAL_EXPIRY_UNTRACKED', entityId: 'RU',
+          metadata: expect.objectContaining({ clientId: 'bajaj', owed: 600, outletCode: 'O1' }),
+        }),
+      ]);
+    });
+
+    it('no redemption while in debt (redeemable < 0): refused, nothing written', async () => {
+      const { h } = await overReversed();
+      const rows = h.walletTxns.length;
+      await expect(h.service.debitRedeem('cp1', 1, { referenceId: 'ord-2' })).rejects.toBeInstanceOf(BadRequestException);
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: -2986, debtPoints: 2986, movementSeq: 3 });
+      expect(h.walletTxns).toHaveLength(rows);
+    });
+
+    it('repaid from the next credit: +1,000 only reduces the debt (still nothing to redeem); +5,000 more clears it and leaves 3,014 spendable', async () => {
+      const { h } = await overReversed();
+      await credit(h, 'cp1', 'O2', 1000, 'B2');
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: -1986, debtPoints: 1986 });
+      const p2 = h.positions.find((p) => p.batchId === 'B2')!;
+      expect(p2).toMatchObject({ amount: 1000, offsetPoints: 1000 }); // the whole credit repaid debt
+      expect(h.ledger.find((l) => l.id === p2.lotId)!.remainingPoints).toBe(0);
+      await expect(h.service.debitRedeem('cp1', 1, {})).rejects.toBeInstanceOf(BadRequestException);
+
+      await credit(h, 'cp1', 'O3', 5000, 'B3');
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: 3014, debtPoints: 0 });
+      const p3 = h.positions.find((p) => p.batchId === 'B3')!;
+      expect(p3).toMatchObject({ amount: 5000, offsetPoints: 1986 });
+      expect(h.ledger.find((l) => l.id === p3.lotId)!.remainingPoints).toBe(3014);
+      await h.service.debitRedeem('cp1', 3014, { referenceId: 'ord-3' });
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: 0, debtPoints: 0 });
+      // reversing the repaying credit puts the debt it paid off back (R1) — never below the debt
+      await reverse(h, 5000, 'REV3', 'O3', 'B3');
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: -5000, debtPoints: 5000 });
+      expect(h.allocations.find((a) => a.creditReversalId === 'REV3')).toMatchObject({
+        requested: 5000, debtRestored: 1986, recovered: 0, owed: 3014, overReversalDebt: true, shortfall: 0,
+      });
+    });
+
+    describe('owner decision 2026-11-19 — expired points are not recovered twice (the reversed credit\'s own expired points)', () => {
+      const expireLotOf = async (h: H, batch: string) => {
+        const pos = h.positions.find((p) => p.batchId === batch)!;
+        const lot = h.ledger.find((l) => l.id === pos.lotId)!;
+        lot.expiresAt = later(-10);
+        await h.service.expireDuePoints({ now: NOW });
+        lot.expiresAt = null;
+      };
+
+      it('auditor example: X 10,000 fully expired, Y 5,000; reverse X 10,000 → nothing taken from Y, no debt', async () => {
+        const h = harness({ mode: 'V2' });
+        await credit(h, 'cp1', 'O1', 10000);
+        await expireLotOf(h, 'B1');
+        await credit(h, 'cp1', 'O2', 5000, 'B2');
+        expect(h.wallets[0]).toMatchObject({ redeemablePoints: 5000, debtPoints: 0, expiredPoints: 10000 });
+        const res = await reverse(h, 10000, 'REV');
+        expect(res).toMatchObject({ alreadyExpired: 10000, recovered: 0, owed: 0, debtRestored: 0, shortfall: 0 });
+        expect(h.wallets[0]).toMatchObject({ redeemablePoints: 5000, debtPoints: 0 });
+        const yLot = h.ledger.find((l) => l.id === h.positions.find((p) => p.batchId === 'B2')!.lotId)!;
+        expect(yLot.remainingPoints).toBe(5000);
+        expect(h.allocations[0]).toMatchObject({ requested: 10000, alreadyExpired: 10000, recovered: 0, owed: 0, overReversalDebt: false, shortfall: 0 });
+        // A6 (fix round 3): nothing moved → NO wallet row (no "−10,000" line that changes nothing, no seq)
+        expect(h.walletTxns.some((t) => t.referenceType === 'CREDIT_REVERSAL')).toBe(false);
+        expect(res.transactionIds).toEqual([]);
+        // never counted twice: the credit is fully reversed now
+        await expect(reverse(h, 1, 'REV2')).rejects.toBeInstanceOf(BadRequestException);
+      });
+
+      it('partly expired: X 10,000 (4,000 redeemed, 6,000 expired), Y 5,000; reverse X → 6,000 already expired, 4,000 taken, no debt', async () => {
+        const h = harness({ mode: 'V2' });
+        await credit(h, 'cp1', 'O1', 10000);
+        await h.service.debitRedeem('cp1', 4000, {});
+        await expireLotOf(h, 'B1');
+        await credit(h, 'cp1', 'O2', 5000, 'B2');
+        const res = await reverse(h, 10000, 'REV');
+        expect(res).toMatchObject({ alreadyExpired: 6000, recovered: 4000, owed: 0 });
+        expect(h.wallets[0]).toMatchObject({ redeemablePoints: 1000, debtPoints: 0 });
+      });
+
+      it('partly expired AND partly spent beyond holdings: X 10,000 (7,000 redeemed, 3,000 expired), Y 2,000 → 3,000 expired, 2,000 taken, 5,000 debt', async () => {
+        const h = harness({ mode: 'V2' });
+        await credit(h, 'cp1', 'O1', 10000);
+        await h.service.debitRedeem('cp1', 7000, {});
+        await expireLotOf(h, 'B1');
+        await credit(h, 'cp1', 'O2', 2000, 'B2');
+        const res = await reverse(h, 10000, 'REV');
+        expect(res).toMatchObject({ alreadyExpired: 3000, recovered: 2000, owed: 5000 });
+        expect(h.wallets[0]).toMatchObject({ redeemablePoints: -5000, debtPoints: 5000 });
+        expect(h.allocations[0]).toMatchObject({ alreadyExpired: 3000, recovered: 2000, owed: 5000, overReversalDebt: true, shortfall: 0 });
+      });
+
+      it('LEGACY is unchanged: the same expired credit reversed on LEGACY takes from the other credit (floor 0)', async () => {
+        const h = harness({ outlets: [{ clientId: 'bajaj', outletCode: 'O1', partnerId: 'cp1' }] });
+        await credit(h, 'cp1', 'O1', 1000);
+        const lot = h.ledger.find((l) => l.transactionType === 'EARN')!;
+        lot.expiresAt = later(-10);
+        await h.service.expireDuePoints({ now: NOW });
+        await credit(h, 'cp1', 'O2', 500, 'B2');
+        const res = await h.models.$transaction((tx: any) =>
+          h.service.reverseCreditBatchPoints(tx, { clientId: 'bajaj', batchId: 'B1', outletCode: 'O1', fieldId: 'F1', creditReversalId: 'RL', points: 1000 }),
+        );
+        expect(res).toMatchObject({ mode: 'LEGACY', alreadyExpired: 0, recovered: 500, shortfall: 500 });
+        expect(h.wallets[0].redeemablePoints).toBe(0);
+      });
+    });
+
+    it('expiry while in debt: nothing can expire from a wallet holding 0 (a stray lot is clamped to H = 0) — balance and debt unchanged', async () => {
+      const { h } = await overReversed();
+      // a lot the mirror still shows (legacy-era drift) falls due
+      h.ledger.push({
+        id: 'stray', walletId: 'w1', transactionType: 'EARN', points: 500, remainingPoints: 500, isExpired: false,
+        expiresAt: later(-10), createdAt: later(-9000),
+      });
+      const r = await h.service.expireDuePoints({ now: NOW });
+      expect(r.expiredPoints).toBe(0);
+      expect(h.wallets[0]).toMatchObject({ redeemablePoints: -2986, debtPoints: 2986, expiredPoints: 0 });
+      expect(h.walletTxns.some((t) => t.transactionType === 'DEBIT_EXPIRY')).toBe(false);
+    });
   });
 });
 
@@ -830,11 +1159,14 @@ describe('reverseCreditBatchPoints — per-tenant flag', () => {
     await credit(h, 500);
     await h.service.debitRedeem('cp1', 400, {});
     const res = await dispatch(h, 500);
-    expect(res).toEqual({ mode: 'LEGACY', shortfall: 400, walletIds: ['w1'] });
+    // LEGACY is unchanged by owner 2026-11-19: floor 0, the 400 already redeemed are written off (never debt)
+    expect(res).toEqual({ mode: 'LEGACY', shortfall: 400, recovered: 100, debtRestored: 0, owed: 0, alreadyExpired: 0, debtExposed: 0, balanceBelowZero: 0, walletIds: ['w1'] });
     expect(h.settings.modeReads).toBe(1);
     expect(h.wallets[0]).toMatchObject({ redeemablePoints: 0, debtPoints: 0, movementSeq: 4 });
     expect(h.positions[0].reversedPoints).toBe(500);
     expect(h.allocations[0]).toMatchObject({ requested: 500, debtRestored: 0, recovered: 100, shortfall: 400 });
+    expect(h.allocations[0].owed ?? 0).toBe(0);
+    expect(h.allocations[0].overReversalDebt ?? false).toBe(false);
     const t = h.walletTxns[h.walletTxns.length - 1];
     expect(t.description).toBe(
       'Clawback for reversal R1 — batch POINTS reversal [SHORTFALL: 400 pts already redeemed — owner review required]',
@@ -928,8 +1260,24 @@ describe('reverseCreditBatchPoints — per-tenant flag', () => {
     const h = harness({ wallets: [openWallet(-841)], outlets: [], mode: 'V2' });
     await credit(h, 500);
     const res = await dispatch(h, 500);
-    expect(res).toEqual({ mode: 'V2', shortfall: 0, walletIds: ['w1'] });
+    expect(res).toEqual({ mode: 'V2', shortfall: 0, recovered: 0, debtRestored: 500, owed: 0, alreadyExpired: 0, debtExposed: 0, balanceBelowZero: 500, walletIds: ['w1'] });
     expect(h.wallets[0]).toMatchObject({ redeemablePoints: -841, debtPoints: 841 });
+  });
+
+  it('SHADOW over-reversal: LEGACY applies (floor 0, written off); the v2 diff records the debt V2 would book', async () => {
+    const h = harness({ outlets: linked, mode: 'SHADOW' });
+    await credit(h, 500);
+    await h.service.debitRedeem('cp1', 400, {});
+    const res = await dispatch(h, 500);
+    expect(res).toEqual({ mode: 'SHADOW', shortfall: 400, recovered: 100, debtRestored: 0, owed: 0, alreadyExpired: 0, debtExposed: 0, balanceBelowZero: 0, walletIds: ['w1'] });
+    expect(h.wallets[0]).toMatchObject({ redeemablePoints: 0, debtPoints: 0 });
+    expect(h.auditLogs[0].metadata).toMatchObject({
+      differs: true,
+      legacy: expect.objectContaining({ removed: 100, shortfall: 400 }),
+      v2: expect.objectContaining({ removed: 500, owed: 400, shortfall: 0, debtExposed: 0, belowZero: 400 }),
+    });
+    // round 5 A1: the diff says whether V2 could count the credit's expired points
+    expect((h.auditLogs[0].metadata as { v2: { steps: Array<{ expiryKnown: boolean }> } }).v2.steps[0].expiryKnown).toBe(true);
   });
 
   it('malformed / unreadable flag → the reversal is refused, nothing written', async () => {
@@ -956,9 +1304,14 @@ describe('planV2Reversal (pure)', () => {
       new Map([['w', { B: 30, D: 0, seq: 7 }]]),
       150,
     );
-    expect(steps.map((s) => [s.debtRestored, s.recovered, s.shortfall, s.after.seq])).toEqual([
-      [60, 30, 10, 8],
-      [0, 0, 50, 9],
+    // owner 2026-11-19: what the wallet no longer holds is owed (debt), never written off
+    expect(steps.map((s) => [s.debtRestored, s.recovered, s.owed, s.shortfall, s.after.seq])).toEqual([
+      [60, 30, 10, 0, 8],
+      [0, 0, 50, 0, 9],
+    ]);
+    expect(steps.map((s) => s.after)).toEqual([
+      { B: -70, D: 70, seq: 8 },
+      { B: -120, D: 120, seq: 9 },
     ]);
   });
 });

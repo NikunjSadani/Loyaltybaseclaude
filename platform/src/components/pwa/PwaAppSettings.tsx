@@ -36,6 +36,7 @@ function BajajBlockedSteps({ onChanged }: { onChanged: (now: NotificationPermiss
   // Only ever rendered client-side (after the parent's effect read permission 'denied'), so window is available.
   const path = typeof window !== 'undefined' ? window.location.pathname : '';
   const scope = path === '/sales' || path.startsWith('/sales/') ? 'sales' : 'partner';
+  // App name = the install manifest's name (pwaAppName), e.g. "Bajaj Consumer Care Ltd Sales" — what the phone lists.
   const steps = blockedSteps(
     currentLocationPlatform(),
     typeof window !== 'undefined' ? window.location.host : 'this site',

@@ -13,7 +13,9 @@ import type { ClientConfig, FeatureKey, FeatureFlags } from '@/lib/platform/clie
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
 import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
+import { useCanManageHelpVideos } from '@/lib/help-videos-access';
 import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
+import { TicketRemarksEmailCard } from '@/components/operator/ticket-remarks-email-card';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feature metadata — label + description for each toggle
@@ -35,6 +37,7 @@ const FEATURE_META: Record<FeatureKey, { label: string; description: string }> =
   catalogueMrpSlash:        { label: 'Catalogue MRP Slash', description: "Show each item's MRP (converted to points at the tenant's rate) as a struck-through list price above the redeem points. Only appears where an MRP is set and is above the redeem price." },
   partnerDashboardV2:       { label: 'Partner Dashboard V2 (Trade)', description: "Bajaj trade partner dashboard: hides the trend chart, enlarges the points balance + Redeem, shows a 'to go' banner in the hero, and adds a this-month-vs-last-month primary-KPI card." },
   captureBankAtRedemption:  { label: 'Capture bank/UPI at redemption', description: 'Let a wholesaler with no beneficiary on file add bank/UPI in-flow at Redeem → Cash (same form/rules as KYC). Captured details stay hidden from Store Information until a payout on them completes.' },
+  helpVideos:               { label: 'Help & videos', description: 'Show a "Help & videos" entry on the sales and partner Profile: short how-to videos with numbered steps. Manage the guides from the Help & videos link at the top of the client page. When off, no entry is shown and the help endpoints refuse.' },
   wholesalerPayoutInclActivation: { label: 'Wallet: "Incl. Activation" (wholesalers)', description: 'Show a small "Incl. Activation" line under "Lifetime Payout" on a wholesaler\'s wallet card. Display only; retailers never see it.' },
   offerTiles:               { label: "This month's offers", description: "Turns on the whole offers feature: the This Month's Offers admin page and the offer tiles on the partner dashboard. When off, partners see no offers section." },
   salesImport:              { label: 'Sales Import (DMS file)', description: "Upload the distributor invoice-line file to compute importer-owned KPI achievements per month. Leave OFF unless the tenant's column mapping and KPIs are configured." },
@@ -193,6 +196,8 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
   const [saved, setSaved]   = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Help & videos authoring is GIFSY_ADMIN-only (API-enforced) — hide the link from GIFSY_STAFF.
+  const canManageHelpVideos = useCanManageHelpVideos();
 
   // The console's OWN host decides whether a tenant link needs the `uat-` staging marker, so a
   // staging console links to the staging site (not prod, which 404s for a staging-only tenant).
@@ -449,6 +454,15 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
 
         {/* Status pill + saved indicator */}
         <div className="flex items-center gap-2 shrink-0">
+          {canManageHelpVideos && (
+            <Link
+              href={`/gifsy/clients/${encodeURIComponent(config.slug)}/help-videos`}
+              data-testid="client-help-videos-link"
+              className="text-xs text-sky-400 hover:text-sky-300 border border-white/10 px-3 py-1.5 rounded-lg"
+            >
+              Help &amp; videos
+            </Link>
+          )}
           {saved && (
             <span className="flex items-center gap-1.5 text-xs text-green-400 bg-green-500/10 border border-green-500/20 px-3 py-1.5 rounded-lg">
               <CheckCircle className="w-3.5 h-3.5" />
@@ -492,6 +506,13 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
       <Section icon={Power} title="Behaviour flags" defaultOpen>
         <BehaviourFlagsSection config={config} onSave={saveClient} saving={saving} />
       </Section>
+
+      {/* Support tickets — the client's shared "Ticket remarks email" (GIFSY_ADMIN only; API-enforced) */}
+      {canManageHelpVideos && (
+        <Section icon={Bell} title="Support tickets" defaultOpen>
+          <TicketRemarksEmailCard slug={config.slug} />
+        </Section>
+      )}
 
       {/* Partner-app tab visibility (features.partnerApp) — same PATCH, nested deep-merge */}
       <Section icon={Users} title="Partner app tabs">

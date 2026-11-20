@@ -6,6 +6,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { TICKET_REMARKS_EMAIL_KEY } from '../tickets/ticket-remarks-inbox';
 import { Prisma, KycStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
@@ -1387,6 +1388,14 @@ export class AdminCoreService {
     // GIFSY_ADMIN-only Points Engine endpoint (which passes allowPlatformOnlyKey). Blocking it here stops
     // the generic PUT /v1/admin/settings — reachable by a GIFSY_STAFF holding tenancy:write_finance — from
     // turning the money shortcut ON for a tenant, bypassing the owner-only guarantee. Mirrors tdsStatutory.
+    // GIFSY-ADMIN-ONLY support config: the per-client ticket remarks inbox is written ONLY through the
+    // dedicated, validated, audited Gifsy-console endpoint (PUT /v1/gifsy/clients/:slug/ticket-remarks-email).
+    if (dto.key === TICKET_REMARKS_EMAIL_KEY) {
+      throw new ForbiddenException(
+        'The ticket remarks email can only be changed by a Gifsy Admin on the client page in the Gifsy console.',
+      );
+    }
+
     if (dto.key === 'pointsEngine' && !opts?.allowPlatformOnlyKey) {
       throw new ForbiddenException(
         'The points engine settings can only be changed via the dedicated owner-only Points Engine screen.',
@@ -1988,9 +1997,11 @@ export class AdminCoreService {
           },
         }),
 
+        // Audit item 1 (2026-11-19): liability = Σ POSITIVE balances only — a negative wallet (debt) never nets
+        // against what other wallets can redeem. Unchanged for a tenant with no negative wallet (every Deoleo wallet).
         this.prisma.wallet.aggregate({
           _sum: { redeemablePoints: true },
-          where: { partner: { clientId, ...partnerScope } },
+          where: { partner: { clientId, ...partnerScope }, redeemablePoints: { gt: 0 } },
         }),
 
         this.prisma.payoutTransaction.groupBy({
@@ -2013,6 +2024,16 @@ export class AdminCoreService {
     const pendingVisibility = visibilityEnabled ? pendingVisibilityRaw : 0;
 
     const totalRedeemablePoints = walletAggregate._sum.redeemablePoints ?? 0;
+    // Owner decisions D1/D2 (2026-11-19, every tenant): "points owed" = how far below zero balances are — Σ |negative
+    // balances| over the scoped wallets, with how many wallets — shown next to the liability, never netted into it.
+    const owedAggregate = await this.prisma.wallet.aggregate({
+      _sum: { redeemablePoints: true },
+      _count: { _all: true },
+      where: { partner: { clientId, ...partnerScope }, redeemablePoints: { lt: 0 } },
+    });
+    const negSum = owedAggregate?._sum?.redeemablePoints ?? 0;
+    const totalOwedPoints = Math.max(0, -negSum);
+    const owedWallets = totalOwedPoints > 0 ? owedAggregate?._count?._all ?? 0 : 0;
 
     const payoutSummary: Record<string, { count: number; amountPaise: number }> = {};
     for (const g of payoutGroups) {
@@ -2027,6 +2048,8 @@ export class AdminCoreService {
       pendingKyc,
       pendingVisibility,
       totalRedeemablePoints,
+      totalOwedPoints,
+      owedWallets,
       payoutSummary,
       // Additive (program filter): the echo of the applied filter, the dropdown source, and the
       // metrics that could NOT be program-scoped (none — every figure joins to an outlet).

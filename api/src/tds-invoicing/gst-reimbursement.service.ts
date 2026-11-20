@@ -33,16 +33,35 @@ export class GstReimbursementService {
 
   /**
    * GET /v1/admin/gst-reimbursements — list reimbursement rows (default the HELD release queue).
-   * Optional filters: status (HELD|RELEASED), clientId (single tenant), period (linked invoice period).
+   * Optional filters: status (HELD = release queue, GST > ₹0 | HELD_ZERO = held at ₹0 after a
+   * regenerate, nothing to release | RELEASED), clientId (single tenant), period (linked invoice period).
    * Ordered oldest-held first so the release queue is FIFO.
    */
   async list(query: ListGstReimbursementQueryDto) {
     const status = query.status ?? 'HELD';
 
-    const where: Prisma.GstReimbursementWhereInput = { status };
-    if (query.clientId) where.clientId = query.clientId;
+    // Shared tenant/period scope for the list AND the ₹0-held side count.
+    const scope: Prisma.GstReimbursementWhereInput = {};
+    if (query.clientId) scope.clientId = query.clientId;
     // period lives on the linked SERVICE invoice, not the holdback row.
-    if (query.period) where.autoInvoice = { period: query.period };
+    if (query.period) scope.autoInvoice = { period: query.period };
+
+    // A regenerated invoice whose GST dropped to ₹0 keeps its HELD row at ₹0 (never deleted — audit
+    // trail, reused if GST comes back; see InvoicesService.reconcileReimbursement). It has nothing
+    // to release, so the HELD release queue (+ its count/total) lists only rows with GST > ₹0.
+    // The ₹0 rows stay visible under status=HELD_ZERO, and the HELD response carries their count
+    // so the page can say so out loud (no silent hiding). RELEASED is unaffected.
+    const where: Prisma.GstReimbursementWhereInput =
+      status === 'HELD'
+        ? { ...scope, status: 'HELD', gstPaise: { gt: 0n } }
+        : status === 'HELD_ZERO'
+          ? { ...scope, status: 'HELD', gstPaise: 0n }
+          : { ...scope, status: 'RELEASED' };
+
+    const zeroHeldCount =
+      status === 'HELD'
+        ? await this.prisma.gstReimbursement.count({ where: { ...scope, status: 'HELD', gstPaise: 0n } })
+        : null;
 
     const rows = await this.prisma.gstReimbursement.findMany({
       where,
@@ -81,6 +100,8 @@ export class GstReimbursementService {
       period: query.period ?? null,
       count: items.length,
       totalGst: this.money(totalGstPaise),
+      /** HELD only: rows held at ₹0 that are NOT in this queue (see status=HELD_ZERO); else null. */
+      zeroHeldCount,
       items,
     };
   }
@@ -92,12 +113,15 @@ export class GstReimbursementService {
    * { id, status: HELD }. If it updates 0 rows we disambiguate:
    *   - row does not exist            → 404 NotFound
    *   - row exists but already RELEASED → 409 Conflict (idempotent no-op signal; never double-releases)
+   *   - row HELD at ₹0 (GST ≤ 0)       → 409 Conflict "Nothing to release" (never released, never audited)
    */
   async release(user: JwtPayload, id: string, dto: ReleaseGstReimbursementDto) {
     const now = new Date();
 
+    // Guarded on GST > ₹0 too: a HELD row kept at ₹0 (its invoice was regenerated without GST) has nothing to
+    // release — the guard is in the same conditional write, so a regenerate racing the release can't slip through.
     const { count } = await this.prisma.gstReimbursement.updateMany({
-      where: { id, status: 'HELD' },
+      where: { id, status: 'HELD', gstPaise: { gt: 0n } },
       data: {
         status: 'RELEASED',
         proofUrl: dto.proofUrl,
@@ -111,9 +135,14 @@ export class GstReimbursementService {
     if (count === 0) {
       const existing = await this.prisma.gstReimbursement.findUnique({
         where: { id },
-        select: { status: true },
+        select: { status: true, gstPaise: true },
       });
       if (!existing) throw new NotFoundException('GST reimbursement not found');
+      if (existing.status === 'HELD') {
+        throw new ConflictException(
+          'Nothing to release: this held GST is ₹0 (the invoice was regenerated without GST). It is kept only for the record.',
+        );
+      }
       // Already RELEASED — do not re-stamp proof/payout/releasedBy; report a conflict.
       throw new ConflictException('GST reimbursement is already released');
     }

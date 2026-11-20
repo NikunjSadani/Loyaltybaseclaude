@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { authHeader } from '@/lib/api-client';
+import { liabilitySplitNote } from '@/lib/wallet-negative';
 
 const DARK_NAVY = '#1A1A2E';
 
@@ -39,6 +40,9 @@ interface FinanceDashboardData {
     conversionRate: number;
     redeemableRupees: number;
     lockedRupees: number;
+    /** Owner D1/D2 (2026-11-19): Σ |negative balances| + how many wallets — reported separately, never netted. */
+    owedPoints?: number;
+    owedWallets?: number;
   };
   breakage: {
     period: string;
@@ -259,7 +263,7 @@ export default function AdminFinanceDashboardPage() {
         <StatCard
           label="Redeemable Liability"
           value={fmtRs(liability.redeemableRupees)}
-          sub={`${fmtInt(liability.redeemablePoints)} pts redeemable`}
+          sub={`${fmtInt(liability.redeemablePoints)} pts redeemable${liabilitySplitNote(liability.owedPoints, liability.owedWallets) ? ` · ${liabilitySplitNote(liability.owedPoints, liability.owedWallets)}` : ''}`}
           icon={Coins} iconBg="bg-emerald-100" iconColor="text-emerald-700" valColor="text-emerald-700"
         />
         <StatCard

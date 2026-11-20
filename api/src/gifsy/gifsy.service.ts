@@ -6,6 +6,12 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  TICKET_REMARKS_EMAIL_AUDIT,
+  TICKET_REMARKS_EMAIL_KEY,
+  parseTicketRemarksEmailInput,
+  readTicketRemarksEmail,
+} from '../tickets/ticket-remarks-inbox';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
@@ -136,6 +142,7 @@ function consoleFeatures(features: Record<string, unknown>) {
     offerTiles: !!features.offerTiles,
     salesImport: !!features.salesImport,
     wholesalerPayoutInclActivation: !!features.wholesalerPayoutInclActivation,
+    helpVideos: !!features.helpVideos,
     // Runtime BEHAVIOUR flags (not console modules) — edited in the console's
     // "Behaviour flags" section through this same PATCH features path.
     outletMasterGeo: !!features.outletMasterGeo,
@@ -159,7 +166,7 @@ const BOOLEAN_FEATURE_KEYS = [
   'referralModule', 'selfEnrollmentAllowed', 'nonKycOutletCampaigns', 'multiLevelApproval', 'rbacEnforcement',
   'hubbleVoucherEnabled', 'rlpBscView', 'catalogueMrpSlash', 'partnerDashboardV2', 'captureBankAtRedemption',
   'offerTiles', 'salesImport', 'outletMasterGeo', 'soDeclarationKyc', 'kycAddressProofWaiver',
-  'allowPayoutWithoutPan', 'gifsyRejectFastTrack', 'requireLocation', 'wholesalerPayoutInclActivation',
+  'allowPayoutWithoutPan', 'gifsyRejectFastTrack', 'requireLocation', 'wholesalerPayoutInclActivation', 'helpVideos',
 ] as const;
 
 /**
@@ -377,6 +384,86 @@ export class GifsyService {
   }
 
   /** Confirm the target tenant exists (404 otherwise) — shared by GET + PUT. */
+  // ── Ticket remarks email (per client; owner-approved 2026-11-20, tenant-scoped) ─────────────
+  // GIFSY_ADMIN ONLY (strict role check — a GIFSY_STAFF never reads or writes it, whatever its
+  // permissions). Stored as one ProgramSetting row per tenant; every change is audit-logged and the
+  // latest change is shown on the console card ("Last changed by X on date").
+
+  private assertOwner(user: JwtPayload): void {
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Only a Gifsy Admin can manage the ticket remarks email.');
+  }
+
+  private async ticketRemarksEmailView(slug: string) {
+    const [row, last] = await Promise.all([
+      this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId: slug, settingKey: TICKET_REMARKS_EMAIL_KEY } },
+        select: { settingValue: true },
+      }),
+      this.prisma.auditLog.findFirst({
+        where: { entityType: TICKET_REMARKS_EMAIL_AUDIT, entityId: slug },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true, actor: { select: { name: true } } },
+      }),
+    ]);
+    return {
+      slug,
+      email: readTicketRemarksEmail(row?.settingValue),
+      lastChange: last ? { byName: last.actor?.name ?? 'Unknown', at: last.createdAt } : null,
+    };
+  }
+
+  /** GET /v1/gifsy/clients/:slug/ticket-remarks-email */
+  async getTicketRemarksEmail(user: JwtPayload, slug: string) {
+    this.assertOwner(user);
+    await this.assertClientExists(slug);
+    return this.ticketRemarksEmailView(slug);
+  }
+
+  /**
+   * PUT /v1/gifsy/clients/:slug/ticket-remarks-email {email} — set (one validated address) or clear
+   * ('' / null removes the row → back to "email the chosen admin"). Audit-logged with old → new.
+   */
+  async setTicketRemarksEmail(user: JwtPayload, slug: string, dto: { email?: string | null }) {
+    this.assertOwner(user);
+    await this.assertClientExists(slug);
+    const next = parseTicketRemarksEmailInput(dto.email);
+    const where = { clientId_settingKey: { clientId: slug, settingKey: TICKET_REMARKS_EMAIL_KEY } };
+    const prior = await this.prisma.programSetting.findUnique({ where, select: { settingValue: true } });
+    const before = readTicketRemarksEmail(prior?.settingValue);
+    if (before === next) return this.ticketRemarksEmailView(slug);
+
+    await this.prisma.$transaction(async (tx) => {
+      if (next === null) {
+        await tx.programSetting.deleteMany({ where: { clientId: slug, settingKey: TICKET_REMARKS_EMAIL_KEY } });
+      } else {
+        await tx.programSetting.upsert({
+          where,
+          create: {
+            clientId: slug,
+            settingKey: TICKET_REMARKS_EMAIL_KEY,
+            settingValue: { email: next },
+            category: 'support',
+            description: "Shared inbox for 'Ask client admin for remarks' emails",
+            updatedById: user.sub,
+          },
+          update: { settingValue: { email: next }, updatedById: user.sub },
+        });
+      }
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: TICKET_REMARKS_EMAIL_AUDIT,
+          entityId: slug,
+          actorId: user.sub,
+          oldValues: { email: before },
+          newValues: { email: next },
+          metadata: { slug, key: TICKET_REMARKS_EMAIL_KEY },
+        },
+      });
+    });
+    return this.ticketRemarksEmailView(slug);
+  }
+
   private async assertClientExists(slug: string): Promise<void> {
     const client = await this.prisma.client.findUnique({
       where: { id: slug },

@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import { refreshSession } from '@/lib/auth-actions';
+import { loginUrlWithNext } from '@/lib/return-to';
 
 /**
  * Pure decision: should an API response trigger a re-login redirect?
@@ -139,7 +140,7 @@ export default function SessionExpiryGuard() {
             } catch {
               /* storage blocked — proceed to login anyway */
             }
-            window.location.assign('/auth/login?expired=1');
+            window.location.assign(loginUrlWithNext(`${window.location.pathname}${window.location.search}`, { expired: '1' }));
           }
         }
       } catch {

@@ -16,6 +16,7 @@ import {
   useDashboardProgram, withProgramParam, isTenantWideMetric, MIN_PROGRAMS_FOR_FILTER,
 } from '@/lib/dashboard-program';
 import { ProgramFilter, TenantWideNote } from '@/components/admin/dashboard/ProgramFilter';
+import { liabilitySplitNote } from '@/lib/wallet-negative';
 import { BillingProgressCard } from '@/components/admin/dashboard/BillingProgressCard';
 
 /* ─── KPI card data ──────────────────────────────────────────────────────────── */
@@ -56,6 +57,9 @@ interface ApiKpiData {
   pendingKyc:            number;
   pendingVisibility:     number;
   totalRedeemablePoints: number;
+  /** Owner D1/D2 (2026-11-19): Σ |negative balances| + how many wallets — reported apart from the liability. */
+  totalOwedPoints?:      number;
+  owedWallets?:          number;
   payoutSummary:         Record<string, { count: number; amountPaise: number }>;
   /** Real distinct Outlet.programName values (dropdown source). Older API: absent → []. */
   availablePrograms?:    string[];
@@ -201,6 +205,11 @@ export default function DashboardPage() {
                   <p className="text-2xl font-bold text-gray-900">{card.value}</p>
                   <p className="text-xs text-gray-500 mt-0.5">{card.label}</p>
                   {tenantWide(card.key) && <TenantWideNote className="mt-1" />}
+                  {card.key === 'totalRedeemablePoints' && liveKpis && liabilitySplitNote(liveKpis.totalOwedPoints, liveKpis.owedWallets) && (
+                    <p data-testid="kpi-liability-split" className="text-[11px] text-amber-700 mt-1">
+                      {liabilitySplitNote(liveKpis.totalOwedPoints, liveKpis.owedWallets)}
+                    </p>
+                  )}
                 </div>
               </div>
             );

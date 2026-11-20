@@ -20,6 +20,7 @@ import {
   UpdateClientDto,
   UpdateOutletTypeConfigDto,
   UpdateWalletSettingsDto,
+  SetTicketRemarksEmailDto,
 } from './dto/gifsy.dto';
 
 /**
@@ -134,6 +135,27 @@ export class GifsyController {
    * writes the tenant Settings panel uses (money path — conversion rate is validated
    * hard and can never be 0/negative). GIFSY_ADMIN only.
    */
+  /**
+   * GET/PUT /v1/gifsy/clients/:slug/ticket-remarks-email — the client's shared "ticket remarks"
+   * inbox. GIFSY_ADMIN ONLY: deliberately NO @RequirePermission, so a GIFSY_STAFF can never reach
+   * these routes (same owner-only posture as otp-templates); the service re-checks the role.
+   */
+  @Get('clients/:slug/ticket-remarks-email')
+  @Roles('GIFSY_ADMIN')
+  getTicketRemarksEmail(@CurrentUser() user: JwtPayload, @Param('slug') slug: string) {
+    return this.gifsy.getTicketRemarksEmail(user, slug);
+  }
+
+  @Put('clients/:slug/ticket-remarks-email')
+  @Roles('GIFSY_ADMIN')
+  setTicketRemarksEmail(
+    @CurrentUser() user: JwtPayload,
+    @Param('slug') slug: string,
+    @Body() dto: SetTicketRemarksEmailDto,
+  ) {
+    return this.gifsy.setTicketRemarksEmail(user, slug, dto);
+  }
+
   @Put('clients/:slug/wallet-settings')
   @Roles('GIFSY_ADMIN')
   // Per-tenant conversion rate / points expiry / floors = money path → finance key (D-B2).

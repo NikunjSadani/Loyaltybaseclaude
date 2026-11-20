@@ -48,6 +48,8 @@ interface ApiOpts {
   postFail?: boolean;
   /** What a 'pending' lookup answers once released (default LEGACY, no entries). */
   pendingAnswer?: { mode: string; entries: Entry[] };
+  /** Wallets below zero answered by GET …/wallets-in-debt (default none). */
+  debtWallets?: Array<Record<string, unknown>>;
 }
 
 function mockApi(opts: ApiOpts) {
@@ -57,6 +59,14 @@ function mockApi(opts: ApiOpts) {
   let release: (() => void) | null = null;
   global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    // Wallets below zero (fix round 4, item 5 — mounted on every tenant): none here.
+    if (url.includes('/reversal-engine/wallets-in-debt')) {
+      const w = opts.debtWallets ?? [];
+      return ok({
+        success: true,
+        data: { total: w.length, totalOwedPoints: w.reduce((n, x) => n + Number(x.owedPoints ?? 0), 0), limit: 1000, wallets: w },
+      });
+    }
     if (url.includes('/reversal-engine/attention')) {
       attentionCalls.push(url);
       if (opts.engineMode === null) return Promise.reject(new TypeError('Failed to fetch'));
@@ -120,6 +130,19 @@ describe('Payout status — reversal fix round B', () => {
     await waitFor(() => expect(api.attentionCalls.length).toBeGreaterThan(0));
     expect(screen.queryByLabelText('Points reversal call-outs')).toBeNull();
     expect(screen.queryByText(/Points reversal approvals are paused/)).toBeNull();
+  });
+
+  it('fix round 4 item 5 / owner D2: a LEGACY tenant with negative wallets (e.g. imported) sees the wallets-below-zero list — neutral wording', async () => {
+    mockApi({
+      engineMode: 'LEGACY',
+      debtWallets: [{
+        walletId: 'w9', partnerName: 'Imported Shop', outletCodes: ['O9'], balance: -841, debtPoints: 0, owedPoints: 841,
+        sources: [], note: 'No reversal behind it — negative from imported / earlier history',
+      }],
+    });
+    render(<PayoutStatusPage />);
+    expect((await screen.findByTestId('wallets-in-debt-summary')).textContent).toBe('1 wallet below zero · 841 pts owed');
+    expect(screen.queryByLabelText('Points reversal call-outs')).toBeNull(); // the engine banner stays off on LEGACY
   });
 
   it('banner: not mounted when the mode cannot be read', async () => {

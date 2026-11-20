@@ -434,13 +434,16 @@ export class PrismaBackfillStore implements BackfillStore {
 
   /** Read-only snapshot for the verify job. */
   async loadVerifySnapshot(clientId: string): Promise<VerifySnapshot> {
-    const wallets = await this.prisma.wallet.findMany({ where: { partner: { clientId } }, select: WALLET_COUNTERS });
+    const wallets = await this.prisma.wallet.findMany({
+      where: { partner: { clientId } },
+      select: { ...WALLET_COUNTERS, backfillCheckedAt: true },
+    });
     const ids = wallets.map((w) => w.id);
     const payoutBackfill = await loadPayoutInput(this.prisma, clientId);
     const [txs, positions, allocations, payoutAllocations] = await Promise.all([
       this.prisma.walletTransaction.findMany({
         where: { walletId: { in: ids } },
-        select: { id: true, walletId: true, seq: true, pointsDelta: true, balanceBefore: true, balanceAfter: true, transactionType: true, referenceType: true, referenceId: true, points: true },
+        select: { id: true, walletId: true, seq: true, pointsDelta: true, balanceBefore: true, balanceAfter: true, transactionType: true, referenceType: true, referenceId: true, points: true, createdAt: true },
       }),
       this.prisma.walletCreditPosition.findMany({
         where: { walletId: { in: ids } },
@@ -448,7 +451,7 @@ export class PrismaBackfillStore implements BackfillStore {
       }),
       this.prisma.creditReversalAllocation.findMany({
         where: { position: { walletId: { in: ids } } },
-        select: { positionId: true, creditReversalId: true, requested: true, recovered: true, owed: true },
+        select: { positionId: true, creditReversalId: true, requested: true, recovered: true, owed: true, overReversalDebt: true },
       }),
       this.prisma.payoutReversalAllocation.findMany({
         where: { creditReversal: { clientId } },
@@ -533,6 +536,7 @@ async function writePlan(tx: Prisma.TransactionClient, plan: WalletPlan): Promis
         recovered: a.recovered,
         owed: a.owed,
         shortfall: a.shortfall,
+        engineSource: 'BACKFILL',
       },
     });
   }

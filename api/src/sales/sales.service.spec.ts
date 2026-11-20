@@ -132,6 +132,8 @@ describe('SalesService', () => {
           teamSize: 3,
           // sub1 has no downline of its own → its branch is just itself.
           submitterUserIds: ['u-sub1'],
+          // Filing-time branch keys (K1 follow-up): a direct report → just its own SalesUser id.
+          branchKeys: ['sub1'],
           joinedAt: '2024-01-01T00:00:00.000Z',
           // No outlets/targets → rollup is all-zero (but the FIELDS are present).
           outlets: 0,
@@ -231,7 +233,7 @@ describe('SalesService', () => {
       // buildOutlets/getMember exactly (assignment-only scoping). O2 above is a
       // partner-less/NOT_STARTED outlet and STILL counts toward outlets(2)+kycPending(1).
       // The ONLY outlet filter permitted is the PARKED-exclusion OR-wrap (never isActive).
-      expect(aWhere.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] });
+      expect(aWhere.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }], deletedAt: null });
       expect(JSON.stringify(aWhere.outlet)).not.toContain('isActive');
       // Exactly ONE assignment query (in-memory rollup, not per-member).
       expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledTimes(1);
@@ -262,7 +264,7 @@ describe('SalesService', () => {
       const aWhere = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
       // The DB drops PARKED via this null-safe wrap → they never reach the in-memory
       // outlets/kycPending tally. Keeps null + NOT_INTERESTED (only PARKED is named).
-      expect(aWhere.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] });
+      expect(aWhere.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }], deletedAt: null });
       expect(JSON.stringify(aWhere.outlet)).not.toContain('NOT_INTERESTED');
     });
 
@@ -387,6 +389,9 @@ describe('SalesService', () => {
       // The detail query selects partner.id so the projection works for both.
       const include = mockPrisma.salesUser.findFirst.mock.calls[1][0].include;
       expect(include.assignments.include.outlet.include.partner.select.id).toBe(true);
+      // Member detail counts use the SAME listed-outlet filter as the outlets list (not PARKED,
+      // not soft-deleted) so counts and list agree.
+      expect(include.assignments.where.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }], deletedAt: null });
 
       expect(res.member.kycDone).toBe(1);
       expect(res.member.kycPending).toBe(1); // the partner-less NOT_STARTED outlet
@@ -599,7 +604,7 @@ describe('SalesService', () => {
         unassignedAt: null,
         // PARKED outlets are FULLY hidden from reps via a null-safe OR-wrap (keeps null +
         // NOT_INTERESTED, drops only PARKED).
-        outlet: { OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] },
+        outlet: { OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }], deletedAt: null },
       });
 
       expect(res.outlets).toHaveLength(3);
@@ -840,7 +845,9 @@ describe('SalesService', () => {
       await service.getMyOutlets(caller);
 
       const where = mockPrisma.salesUserAssignment.findMany.mock.calls[0][0].where;
-      expect(where.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }] });
+      expect(where.outlet).toEqual({ OR: [{ kycIntent: null }, { kycIntent: { not: 'PARKED' } }], deletedAt: null });
+      // Soft-deleted outlets are hidden from the rep too (they can't be picked for a ticket).
+      expect(where.outlet.deletedAt).toBeNull();
       // The wrap keeps null-kycIntent rows: the `{ kycIntent: null }` OR branch is present.
       expect(where.outlet.OR).toContainEqual({ kycIntent: null });
       // NOT_INTERESTED is NOT excluded — only PARKED is named in the `not`.
@@ -3155,6 +3162,9 @@ describe('SalesService', () => {
       const so2 = res.members.find((m: { id: string }) => m.id === 'so2')!;
       expect([...isr.submitterUserIds].sort()).toEqual(['u-isr', 'u-so']); // the removed SO's own KYCs ride with isr
       expect(so2.submitterUserIds).not.toContain('u-so'); // a direct (non-promoted) member does not
+      // K1 follow-up: filing-time branch keys — own SalesUser id, + the removed SO for the promoted member.
+      expect(isr.branchKeys).toEqual(['isr', 'so']);
+      expect(so2.branchKeys).toEqual(['so2']);
       // K5: the direct reports are loaded in a deterministic order (employeeCode), like the visibility filter.
       expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].include.subordinates.orderBy).toEqual({ employeeCode: 'asc' });
     });

@@ -113,7 +113,9 @@ export default async function RootLayout({
         <InstallPrompt tenantSlug={config.slug} />
         {/* PWA push opt-in — Bajaj auto-asks at login (gesture-required browsers fall back
             to the in-app Enable prompt); other tenants gate on NEXT_PUBLIC_PWA_PUSH_ENABLED. */}
-        {/* appName = the installed app's name (used only in the Bajaj reminder's phone-Settings steps). */}
+        {/* appName = the installed app's name from the install manifest (pwaAppName — same value as the manifest
+            name/short_name, e.g. "Bajaj Consumer Care Ltd Sales" on /sales), so the Bajaj reminder's phone-Settings
+            steps name what the phone lists. Not hard-coded. */}
         <PushSubscriptionManager
           tenantSlug={config.slug}
           appName={pwaScope ? pwaAppName(config, pwaScope) : config.branding.displayName}

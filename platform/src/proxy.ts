@@ -18,6 +18,7 @@ import { jwtVerify, type JWTPayload } from 'jose'
 import { resolveTenantSync } from '@/lib/platform/tenant-resolution'
 import { ensureWarm, refreshIfStale } from '@/lib/platform/tenant-routing-cache'
 import { resolveTrustedHost } from '@/lib/platform/edge-trust'
+import { loginUrlWithNext, returnToForEdgeRedirect } from '@/lib/return-to'
 import {
   REFRESH_MAX_AGE,
   accessCookieMaxAge,
@@ -58,7 +59,12 @@ const PUBLIC_PATHS = [
 // branding images (logo / wordmarks / favicon) that the SIGN-IN page and browser tab render
 // BEFORE login; the backend route is @Public and only ever serves validated `branding/` image
 // keys (api tenant-routing/public-branding-asset.controller.ts), so the edge must not 401 it.
-const PUBLIC_EXACT_PATHS = new Set(['/api/public/branding-assets'])
+// `/api/help/media` (Help & videos) streams one help video/poster authorised SOLELY by its short-lived signed
+// `token` query param (backend @Public, api/src/help/help-media.service.ts). An HTML5 <video> fetches it with plain
+// Range requests that never go through the client's silent-refresh path, so once the ~60 m access cookie lapses
+// mid-video the edge gate would 401 the next range and break playback — it must bypass the gate like the other
+// tokenized viewers. Exact match: nothing else lives under it.
+const PUBLIC_EXACT_PATHS = new Set(['/api/public/branding-assets', '/api/help/media'])
 
 /** Headers only the proxy may set on the forwarded request (any client-sent value is dropped). */
 const INTERNAL_REQUEST_HEADERS = [
@@ -293,12 +299,17 @@ export async function proxy(request: NextRequest, event: NextFetchEvent) {
           )
     }
     // A document whose refresh definitively failed (or failed transiently twice) → bounce to
-    // login WITH ?expired=1 so the login page surfaces the "session expired" notice.
-    return NextResponse.redirect(new URL('/auth/login?expired=1', request.url))
+    // login WITH ?expired=1 so the login page surfaces the "session expired" notice, carrying a
+    // safe same-origin `next` (returnToForEdgeRedirect: real page loads only, never RSC/prefetch,
+    // `_rsc` stripped) so the user lands back where they were after signing in.
+    return NextResponse.redirect(
+      new URL(loginUrlWithNext(returnToForEdgeRedirect(pathname, request.nextUrl.search, request.headers), { expired: '1' }), request.url),
+    )
   }
 
-  // No refresh token at all → never established a session (or fully logged out) → plain login.
-  return NextResponse.redirect(new URL('/auth/login', request.url))
+  // No refresh token at all → never established a session (or fully logged out) → login, carrying
+  // a safe same-origin `next` so a deep link (e.g. the ticket-remarks email) survives sign-in.
+  return NextResponse.redirect(new URL(loginUrlWithNext(returnToForEdgeRedirect(pathname, request.nextUrl.search, request.headers)), request.url))
 }
 
 /** Pause before the single retry of a TRANSIENTLY failed document-navigation refresh. */

@@ -477,7 +477,8 @@ class MemStore implements BackfillStore {
     const t = this.tenants.get(clientId)!;
     return {
       clientId,
-      wallets: this.wallets(clientId),
+      // like the Prisma store: a DONE wallet carries its backfill stamp (V6b's cutover point — fix round 4, item 3)
+      wallets: this.wallets(clientId).map((w) => (w.backfillStatus === 'DONE' ? { ...w, backfillCheckedAt: new Date(0).toISOString() } : w)),
       txs: [...t.histories.values()].flatMap((h) => h.txs.map((x) => ({ id: x.id, walletId: x.walletId, seq: x.seq, pointsDelta: x.pointsDelta, balanceBefore: x.balanceBefore, balanceAfter: x.balanceAfter, transactionType: x.transactionType, referenceType: x.referenceType, referenceId: x.referenceId, points: x.points }))),
       positions: this.positions.filter((p) => p.clientId === clientId),
       allocations: this.allocations.filter((a) => a.clientId === clientId),
@@ -1188,6 +1189,70 @@ describe('policy Q4 — historical clawback that exceeded holdings: "recovered X
     const v8 = runVerifyChecks(await s.loadVerifySnapshot('t'), { neverNegativeTenant: false }).find((c) => c.check.startsWith('V8'))!;
     expect(v8.status).toBe('PASS');
     expect(v8.detail).toContain('recovered 100, owed 200');
+    expect(v8.detail).not.toContain('V2 over-reversals');
+
+    // owner 2026-11-19: debt booked by a live V2 over-reversal is named as such — never as a historical clawback
+    const snap = await s.loadVerifySnapshot('t');
+    snap.allocations = snap.allocations.map((a) => ({ ...a, overReversalDebt: true }));
+    const v8b = runVerifyChecks(snap, { neverNegativeTenant: false }).find((c) => c.check.startsWith('V8'))!;
+    expect(v8b.status).toBe('PASS');
+    expect(v8b.detail).toContain('recovered 100, owed 0;');
+    expect(v8b.detail).toContain('200 booked as debt by V2 over-reversals (repaid from future earnings — not recovered, not written off)');
+    expect(v8b.detail).not.toContain('historical clawbacks');
+  });
+});
+
+describe('fix round 3 B1/B2 — V6b checks the CUTOVER balance by wallet id; later movement never fails it (V6c INFO)', () => {
+  const CUT = '2026-11-01T00:00:00.000Z';
+  const LATER = '2026-11-19T06:00:00.000Z';
+  const w = (id: string, B: number, D: number) => ({
+    id, redeemablePoints: B, debtPoints: D, movementSeq: 3, earnedPoints: 0, lifetimeEarned: 0, redeemedPoints: 0,
+    expiredPoints: 0, lifetimeRedeemed: 0, lifetimeExpired: 0, lockedPoints: 0, backfillCheckedAt: CUT,
+  });
+  const tx = (id: string, walletId: string, before: number, after: number, referenceType: string) => ({
+    id, walletId, seq: 9, pointsDelta: after - before, balanceBefore: before, balanceAfter: after,
+    transactionType: 'DEBIT_ADJUSTMENT', referenceType, referenceId: 'R', points: after - before, createdAt: LATER,
+  });
+  // W-OLD: −841 at the cutover, since EARNED 300 (now −541) and then went through a V2 reversal (now −700).
+  // W-NEW: +7,014 at the cutover, a V2 over-reversal took it to −2,986.
+  const snap = () => ({
+    clientId: 'bajaj',
+    wallets: [w('W-OLD', -700, 700), w('W-NEW', -2986, 2986)],
+    txs: [tx('t1', 'W-OLD', -841, -541, 'CREDIT_BATCH'), tx('t2', 'W-OLD', -541, -700, 'CREDIT_REVERSAL'), tx('t3', 'W-NEW', 7014, -2986, 'CREDIT_REVERSAL')],
+    positions: [],
+    allocations: [],
+    payoutAllocations: [],
+  });
+
+  it('by wallet id: the cutover balance still matches although the wallet earned and was reversed since; the new negative is V6c INFO', () => {
+    const res = runVerifyChecks(snap() as never, { neverNegativeTenant: false, expectedNegativeBalances: { 'W-OLD': -841 } });
+    expect(res.find((r) => r.check.startsWith('V6b'))).toMatchObject({ status: 'PASS' });
+    // W-OLD is still above its cutover balance (−700 > −841) → not listed; W-NEW went below zero after the cutover
+    expect(res.find((r) => r.check.startsWith('V6c'))).toMatchObject({ status: 'INFO', ids: ['W-NEW'] });
+    expect(res.find((r) => r.check.startsWith('V6c'))!.detail).toContain('1 after a credit reversal');
+  });
+
+  it('the legacy list form compares cutover balances too (not the current ones)', () => {
+    const res = runVerifyChecks(snap() as never, { neverNegativeTenant: false, expectedNegativeBalances: [-841] });
+    expect(res.find((r) => r.check.startsWith('V6b'))!.status).toBe('PASS');
+  });
+
+  it('fix round 4 item 3: a wallet sequenced directly by V2 (no backfill stamp) had 0 at the cutover — never a false V6b FAIL, listed by V6c', () => {
+    const s = snap();
+    s.wallets.push({ ...w('W-PRISTINE', -500, 500), backfillCheckedAt: null as unknown as string });
+    s.txs.push(tx('t4', 'W-PRISTINE', 0, 1000, 'CREDIT_BATCH'), tx('t5', 'W-PRISTINE', 1000, -500, 'CREDIT_REVERSAL'));
+    const res = runVerifyChecks(s as never, { neverNegativeTenant: false, expectedNegativeBalances: { 'W-OLD': -841 } });
+    expect(res.find((r) => r.check.startsWith('V6b'))!.status).toBe('PASS');
+    expect(res.find((r) => r.check.startsWith('V6c'))!.ids).toEqual(['W-NEW', 'W-PRISTINE']);
+  });
+
+  it('a changed cutover balance, or a wallet negative at the cutover that was not expected, still FAILS', () => {
+    const s = snap();
+    s.wallets[0].redeemablePoints = -650; // the cutover balance becomes −791 ≠ −841
+    const res = runVerifyChecks(s as never, { neverNegativeTenant: false, expectedNegativeBalances: { 'W-OLD': -841 } });
+    expect(res.find((r) => r.check.startsWith('V6b'))).toMatchObject({ status: 'FAIL', ids: ['W-OLD'] });
+    const res2 = runVerifyChecks(snap() as never, { neverNegativeTenant: false, expectedNegativeBalances: { 'W-NEW': 7014 } });
+    expect(res2.find((r) => r.check.startsWith('V6b'))).toMatchObject({ status: 'FAIL', ids: ['W-OLD'] }); // negative at the cutover, not expected
   });
 });
 

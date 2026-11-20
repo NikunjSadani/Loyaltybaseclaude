@@ -29,6 +29,8 @@ const CAT_FROM_DB: Record<string, TicketCategory> = {
 const STATUS_FROM_DB: Record<string, TicketStatus> = {
   OPEN: 'open', IN_PROGRESS: 'in_progress', PENDING_USER: 'waiting',
   WAITING: 'waiting', ESCALATED: 'in_progress', RESOLVED: 'resolved', CLOSED: 'closed',
+  // Defense in depth: the API masks WAITING_ON_CLIENT as IN_PROGRESS for outlets anyway.
+  WAITING_ON_CLIENT: 'in_progress',
 };
 const PRIO_FROM_DB: Record<string, TicketPriority> = {
   CRITICAL: 'high', HIGH: 'high', MEDIUM: 'medium', LOW: 'low',

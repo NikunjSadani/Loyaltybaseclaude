@@ -226,6 +226,21 @@ export class StorageService {
     await bucket.file(fromKey).copy(bucket.file(toKey));
   }
 
+  /**
+   * Server-side COMPOSE of up to 32 objects (in order) into one destination object, with its content-type set.
+   * No bytes pass through the API. Used by Help & videos to stitch a chunked video upload into one playable
+   * object. Additive (no existing caller).
+   */
+  async combineFiles(sourceKeys: string[], destKey: string, contentType: string): Promise<void> {
+    if (sourceKeys.length === 0 || sourceKeys.length > 32) {
+      throw new Error(`combineFiles: need 1–32 sources, got ${sourceKeys.length}`);
+    }
+    const bucket = this.storage.bucket(this.bucket);
+    const dest = bucket.file(destKey);
+    await bucket.combine(sourceKeys.map((k) => bucket.file(k)), dest);
+    await dest.setMetadata({ contentType });
+  }
+
   /** Upload from a stream without buffering it (non-resumable, like uploadFile). */
   async uploadStream(key: string, source: Readable, contentType: string): Promise<string> {
     const file = this.storage.bucket(this.bucket).file(key);

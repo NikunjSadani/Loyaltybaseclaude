@@ -24,6 +24,8 @@ const mockPrisma = {
   outletVisibilityRecord: { findMany: jest.fn() },
   leaderboardSnapshot: { findFirst: jest.fn() },
   leaderboardEntry: { findMany: jest.fn() },
+  // fix round 3: the wallet totals + negative split are read in ONE array transaction
+  $transaction: jest.fn(async (ops: Promise<unknown>[], _opts?: unknown) => Promise.all(ops)),
 };
 
 const mockTenantSettings = { getConversionRate: jest.fn() };
@@ -141,6 +143,8 @@ describe('GroupService.getWalletRollup', () => {
     expect(result.parent).toEqual({ businessName: 'Group HQ', ownerName: 'Big Boss' });
     expect(result.conversionRate).toBe(10);
     expect(result.totals).toEqual({
+      owedPoints: 0,
+      owedWallets: 0,
       redeemablePoints: 300,
       earnedPoints: 500,
       redeemedPoints: 150,
@@ -213,6 +217,8 @@ describe('GroupService.getWalletRollup', () => {
     expect(result.available).toBe(true);
     if (!result.available) throw new Error('unreachable'); // narrows the union for TS
     expect(result.totals).toEqual({
+      owedPoints: 0,
+      owedWallets: 0,
       redeemablePoints: 0,
       earnedPoints: 0,
       redeemedPoints: 0,
@@ -291,6 +297,24 @@ describe('GroupService.getWalletRollup', () => {
     expect(mockPrisma.outlet.findMany).not.toHaveBeenCalled();
   });
 
+  it('audit item 2: a child in debt does not net against the group available total; the debt is owedPoints', async () => {
+    mockPrisma.channelPartner.findFirst
+      .mockResolvedValueOnce({ id: 'parent1' })
+      .mockResolvedValueOnce({ groupId: 'parent1' })
+      .mockResolvedValueOnce({ businessName: 'HQ', ownerName: 'Boss' });
+    // all wallets: 5,000 + (−2,986) = 2,014; negative wallets only: −2,986
+    mockPrisma.wallet.aggregate
+      .mockResolvedValueOnce({ _sum: { redeemablePoints: 2014 } })
+      .mockResolvedValueOnce({ _sum: { redeemablePoints: -2986 }, _count: { _all: 1 } });
+    mockPrisma.outlet.findMany.mockResolvedValueOnce([]);
+    const result = await makeService().getWalletRollup(user);
+    if (!result.available) throw new Error('unreachable');
+    expect(result.totals).toMatchObject({ redeemablePoints: 5000, owedPoints: 2986, owedWallets: 1 });
+    expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.$transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'RepeatableRead' }); // one snapshot (item 7)
+    expect(mockPrisma.wallet.aggregate.mock.calls[1][0].where.redeemablePoints).toEqual({ lt: 0 });
+  });
+
   it('coerces missing aggregate keys to 0 (partial _sum)', async () => {
     mockPrisma.channelPartner.findFirst
       .mockResolvedValueOnce({ id: 'parent1' })
@@ -305,6 +329,8 @@ describe('GroupService.getWalletRollup', () => {
     expect(result.available).toBe(true);
     if (!result.available) throw new Error('unreachable'); // narrows the union for TS
     expect(result.totals).toEqual({
+      owedPoints: 0,
+      owedWallets: 0,
       redeemablePoints: 42,
       earnedPoints: 0,
       redeemedPoints: 0,

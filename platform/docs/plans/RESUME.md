@@ -10,7 +10,7 @@
 > [`archive/RESUME-ARCHIVE-2026-11-15.md`](archive/RESUME-ARCHIVE-2026-11-15.md) (the full chronology up to 2026-11-15,
 > incl. the CUTOVER LEDGER #14–#52). **Never trust a SHA written here over `git log` + the serving image (§7).**
 >
-> Last updated: **2026-11-19** (prod release `7ba69566` — the combined 17/18-Nov release — §1, §3, §4, §6).
+> Last updated: **2026-11-19 late** (prod release `1fa2305c` — §1, §3, §4, §8).
 
 Multi-tenant FMCG **trade-loyalty** platform. Operator **Gifsy**; live clients **Deoleo** (since July 2026) and
 **Bajaj Consumer Care** (go-live November 2026). Backend `api/` (NestJS + Prisma 7 — owns the DB and ALL business logic)
@@ -23,11 +23,22 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 
 | | SHA | Since | Notes |
 |---|---|---|---|
-| **Production** (`gifsy-api`, `gifsy-frontend`, job `gifsy-sales-import`) | **`7ba69566`** (verified 2026-11-19 ~00:30 IST: api / frontend / worker images `7ba69566`; migrate `gifsy-migrate-zd2zc` succeeded; 8 migrations `20261118120000…190000` applied, 0 unfinished; payout payee backfill 48,131/48,131; 0 5xx / 0 error logs after deploy) | 2026-11-19 | `origin/main` = `origin/develop` = `7ba69566` |
-| **Staging** (`*-staging`) | **`7ba69566`** | 2026-11-18 | runtime-verified per piece (below) |
-| Previous prod | `71df01f7` (≈1 h, accidental re-run of an old workflow run — no migrations) → `de2f3700` → `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-18 … 11-15 | rollback targets |
+| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import` + `gifsy-migrate`) | **`1fa2305c`** (verified 2026-11-19 ~21:45 IST: api / frontend / worker / migrate images `1fa2305c`; migrate `gifsy-migrate-dhbk7` succeeded 21:15 IST; **45** migrations applied (`20261119120000…124300` reversal engine + `20261120100000_add_help_topics`), 0 failed/rolled back; 0 error logs, 0 429/5xx after deploy; `SALES_RETENTION_V2=on` on api + worker; every tenant's reversal engine = LEGACY (no setting rows)) | 2026-11-19 | `origin/main` = `origin/develop` = `1fa2305c`; pre-release backup `1795096760898` |
+| **Staging** (`*-staging`) | **`1fa2305c`** (tickets assign/escalate push in flight — see §3) | 2026-11-19 | |
+| Previous prod | `7ba69566` → `71df01f7` → `de2f3700` → `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-19 … 11-15 | rollback targets (⚠️ a rollback below `1fa2305c` leaves the 45 additive reversal-engine/help columns+tables in place — harmless to older code) |
 
-**The 2026-11-19 prod release `7ba69566`** (all owner-approved; platform-wide items approved in-session; money paths dual-audited; release gates: only CRITICAL/HIGH block). Staging runtime checks 2026-11-18 with real logins on Bajaj:
+**The 2026-11-19 (night) prod release `f61aec24` + `1fa2305c`** (all owner-approved; platform-wide items approved in-session; money paths dual-audited; staging-verified with real Bajaj logins):
+- **Wallet Reversal Engine** shipped DORMANT: schema (45 additive migrations), LEGACY/SHADOW/V2 per-tenant flag (no rows on prod → LEGACY everywhere), backfill + verify jobs. Bajaj **staging** = V2 after the §9.1 wallet backfill (2,321 wallets, 0 blocked). Bajaj **prod** = LEGACY until its own backfill + owner go. → `WALLET-REVERSAL-ENGINE-DESIGN.md`
+- **Location gate + Location Report** (flag `features.requireLocation`, default OFF; owner switches ON for Bajaj prod). → [`LOCATION-GATE.md`](LOCATION-GATE.md)
+- **Visibility**: fence only the photos that apply to the outlet (fixes "Unverifiable" from a hidden Window 2); centred review dialog with Program/Sub-Program + large photos.
+- **Wholesaler wallet "Incl. Activation"** note under Lifetime Payout (flag `wholesalerPayoutInclActivation`; Bajaj staging ON, prod: owner).
+- **Shared outlet wallet view** — the sales outlet page renders the partner's own wallet view (platform-wide, owner-approved).
+- **Bajaj notification reminder** with device-specific (iOS / Android) steps + service-worker reload fix.
+- **Help & videos** per tenant (flag `helpVideos`, default OFF; content loaded per tenant — prod content load pending owner OK).
+- **Sales retention**: `deploy.yml` now keeps `SALES_RETENTION_V2=on` on `gifsy-api` + `gifsy-sales-import` across deploys (set live earlier on 2026-11-19 after the trim).
+- **MSG91 + Hubble webhooks exempt from the IP throttler** (`23d35290`, `1fa2305c`): MSG91's "On Outbound Report Received" webhook fires for EVERY outbound WhatsApp on the number (incl. campaigns sent straight from the MSG91 panel — ~6,000 reports on 2026-11-19, ~1,400/min at 11:28 IST, vs 5 portal messages). The 60/min IP bucket returned 3,000+ 429s and MSG91 **auto-disabled** the webhook. Fixed; owner re-enabled it (WhatsApp → Webhook → pencil → **Webhook Status** switch → Update); first report accepted 22:18 IST.
+
+**The earlier 2026-11-19 prod release `7ba69566`** (all owner-approved; platform-wide items approved in-session; money paths dual-audited; release gates: only CRITICAL/HIGH block). Staging runtime checks 2026-11-18 with real logins on Bajaj:
 - **Voucher Dispersal — edit + "Add more people" batches** (GIFSY console): whole card clickable + per-card Excel; edit name/budget (floor = spent + with Hubble + failed-may-complete + queued; audited history); numbered batches (preview → confirm / discard; one voucher per phone per campaign across batches → "Already sent in batch N"); **Mark as not bought is FINAL** (admin, audited, releases budget, closes the row); only Hubble's documented statuses (SUCCESS/PROCESSING/FAILED) are trusted; earlier-order alerts (strongest status kept, open count on page + list badge + Daily Ops Digest "still open"). Staging: edit refusal below spent ✓, edit history ✓, batch-2 DUPLICATE ✓, discard ✓, Excel ✓. → [`VOUCHER-DISPERSAL.md`](VOUCHER-DISPERSAL.md) §10–§10f
 - **Sales Import Apply / Recalculate as background jobs** + Next `/api` proxy timeout 300 s: Apply returns 202, the `gifsy-sales-import` worker applies month by month (DONE inside the write transaction), one active job per month (409 to a second click / another admin / Close / Reopen), requestId lookup, "Last apply from this file". Staging: 202 → worker in 13 s → done in 18 s; 2nd click 409; same requestId → same job ✓. → [`SALES-IMPORT-PIPELINE-PLAN.md`](SALES-IMPORT-PIPELINE-PLAN.md) §18 items 4–5 (⚠️ migration `20261118170000` is NOT re-runnable — recovery steps there)
 - **TDS 194R rules** (owner decisions 2026-11-18): per client; TDS keyed **by PAN** (payee snapshot `payeePan` on every payout / redemption; a PAN change splits the year); base = every benefit; FY = bank-file date; 10% PAN / 20% no-PAN; whole year on the current method; only 194R visibility on DEDUCT is withheld; no 194R TDS or service invoices; excess only flagged; fully withheld payouts settle without a bank line. Staging: raw SQL proven on the real DB in a rolled-back transaction; 194R/194C reports + summary cards ✓. **194C unchanged.** → `VISIBILITY-PAYOUT-TDS-INVOICING-DESIGN.md` §9 + in-app TDS guide
@@ -102,9 +113,12 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 
 | Work | Branch / worktree | State | Read |
 |---|---|---|---|
-| **Wallet Reversal Engine** (⚠️ platform-wide, owner-approved; money path) | `feat/wallet-reversal-engine` (+ `feat/wre-*`), worktree `.claude/worktrees/reversal-engine`; consolidation onto prod `7ba69566` in progress on `feat/wre-release` (worktree `.claude/worktrees/wre-release`) | WP0–WP7 built on the branch (WP7 real-Postgres concurrency suite 2026-11-16); not merged, not deployed. **Owner 2026-11-19 (TDS vs the new 194R rules) = option A:** the TDS credit is rebuilt INSIDE the whole-year 194R calculation (reversed payout leaves the base in `collect194RBases`; open/applied credits subtracted from "already deducted"; excess = deducted − credits − retailer's share; `R194|client|FY` lock; credits applied only within the client that raised them). Fully withheld PAID reversal follows prod's rule (REVERSED + ledger offset, no receivable). Dual audit after the rebuild. Per-tenant flag `reversalEngine: LEGACY / SHADOW / V2` (default LEGACY). **Owner decisions 2026-11-15/16:** Deoleo stays **LEGACY**; Bajaj → **V2**; a reversal of an already-paid payout becomes a **net receivable**, with **TDS credited back on the PAN**; every reversal shows an **outcome summary** (all tenants). Prod today runs the INTERIM rule (points reversals refused on wallets carrying debt; payout reversals whole-entry only). | `WALLET-REVERSAL-ENGINE-DESIGN.md` **on that branch** (maintained there) |
-| **Location gate + Location Report** (TENANT-SCOPED in effect, default OFF — gate, report tile/API (403 otherwise) and digest line appear only for switch-on tenants; shared code paths ⚠️ owner-approved 2026-11-18) | `feat/location-gate` (worktree `.claude/worktrees/location-gate`, from `7ba69566`; carries the held release-docs commit `29cb5a53`) | Built: `ab5a1a82` + release-gate fixes `7cf3c24c` + independent-audit fixes `e4696bcf` (9/9: GPS always stored on switch-on captures, fence-only photos record a fix, stale board fix refreshed at submit + `clientNow` clock rule, Deoleo sees no tile/note, camera disabled until settings load, 60-min freshness on visibility fixes, photo-fix budget aligned, revoked permission mid-check refuses). Flag `features.requireLocation` (Gifsy console → Behaviour flags; Bajaj ON after deploy, Deoleo OFF). No schema change. Next: full gates → staging push (owner OK) → owner switches it on for Bajaj staging → real-phone test (Android + iPhone). | `LOCATION-GATE.md` |
-| **Open follow-ups from the 2026-11-19 release** | — | KYC-list member filter uses current reporting links (a removed rep's KYC whose original manager moved shows under no member); ₹0 HELD GST reimbursement shows in the release list; minor Voucher Dispersal alert wording (duplicate MARKED alert entry, alert kind after a later mark); webhook may wait a few seconds on a lookup. | this row |
+| **Reversal engine — over-reversal debt + display** (⚠️ platform-wide, money path) | `fix/wre-overreversal-debt`, worktree `.claude/worktrees/wre-fix2` (HEAD `05979071`) | Owner decisions 2026-11-15/19: over-reversal → **debt** (negative balance, repaid from future earnings); show the negative balance as-is, redemption blocked; the reversed credit's own expired part counts as already recovered. **D1** "points owed" = how far below zero the balance is, identical on every screen; **D2** (platform-wide, approved) liability = Σ positive balances only + separate "points owed" for ALL tenants; **D3** not built (LEGACY write-offs before a LEGACY→V2 switch are not counted against the expired part — switch Bajaj prod to V2 before any reversal; prod had **0** credit reversals on 2026-11-19). Round 3 done; re-audit round 4 in progress; then full gates → staging (owner OK). WP7 real-Postgres suite not run (needs `WRE_PG_ADMIN_URL`). New migrations `20261119124400`/`124500` (sort before `20261120100000` — fine for a fresh DB; prod applies them as "new"). | `WALLET-REVERSAL-ENGINE-DESIGN.md` §8.7–§8.8 on that branch |
+| **Support tickets — assign / escalate to client admin / layout** (⚠️ platform-wide, owner-approved "all programmes"; admin header bell for ALL tenants incl. Deoleo approved 2026-11-19) | `feat/ticket-assign-escalate`, worktree `.claude/worktrees/tickets-escalate` (`8bf3d484` = round 3 `8c82c6cd` + develop) | 3 audit rounds; full gates green 2026-11-19; **push to develop (staging) in flight** (owner OK 2026-11-19); then runtime check on Bajaj staging. Migrations `20261120110000`, `…110100`, `…110200`. ⚠️ Rollback trap: an API build from before these has no note-visibility filter (client admins could read Gifsy-only notes) and breaks on `WAITING_ON_CLIENT`. | `SUPPORT-TICKETS.md` (incl. "Cutover & rollback") |
+| **Login renewal race (strict reuse)** | `fix/auth-refresh-race`, worktree `.claude/worktrees/auth-refresh-race` (`95206483`) | Final round built; **owner OK needed** on: grace 5 s → **6 s**; a server action whose refresh failed runs unauthenticated (marked `x-session-refresh-failed`). Then full gates + dual audit + staging. Real two-connection Postgres test not run. | `P1-sessions-design.md` (timing table) |
+| **Help & videos UX fixes** | `fix/help-videos-ux` (`8f4d3800`) | Built; full gates → staging. | `HELP-VIDEOS.md` |
+| **Visibility review polish** | `fix/visibility-review-polish` (`6f6e7dda`) | Built; full gates → staging. | — |
+| **MSG91 webhook "Add Condition"** (receive only portal reports) | — | Owner deferred 2026-11-19. ⚠️ Can't simply filter on `crqid`: scheme sends and some untracked paths carry none (their reports would be lost). Needs a design. | this row |
 
 ## 4. What's next / waiting on the owner
 
@@ -128,24 +142,26 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 7. **After the 2026-11-19 prod release.** DONE 2026-11-19: Bajaj `gifsyRejectFastTrack` ON (Deoleo unset), verified
    read-only; Daily Ops Digest prod recipients = 4 `@gifsy.in` addresses, verified; `reports-run-prod` 300 s / 0 retries;
    `dve` tag removed (100% on the latest revision); prod backup `1795056648426` ("pre-trim 2026-11-19").
-   **Sales trim — WAITING (owner 2026-11-19: wait for the next November upload):** the trim dry-run refuses because Bajaj
-   2026-11 has no day data; `rebuild-days` refuses because 584 outlets on today's roster have no stored November figure
-   (added after the apply). The next November file apply writes both → re-run the trim dry-run (would remove ~363,668
-   off-roster November history rows + back-fill 739 outlet ids) → owner yes → `trim --apply` (fresh backup if days have
-   passed) → `SALES_RETENTION_V2=on` on api + worker (owner OK) → prod DB disk alert at 50% (owner OK). Recipe: run
-   `trim` on the `gifsy-migrate` job (`--args=node,dist/sales-import/oneoff/sales-history-trim.main.js,trim`) and
-   `rebuild-days` on the 2 GiB `gifsy-sales-import` job, both with `--update-env-vars=TRIM_TARGET_DB=gifsy_prod`
-   (the worker job has `maxRetries=1`, so a failing dry-run runs twice — harmless).
+   **Sales trim — DONE 2026-11-19:** trim applied on prod, `SALES_RETENTION_V2=on` on api + worker (revision
+   `gifsy-api-00094-9rp`; kept across deploys by `deploy.yml` since `f61aec24`), prod DB disk alert at 50% (policy
+   `11636917613043922792`). Recipe kept for reference: `trim` on the `gifsy-migrate` job
+   (`--args=node,dist/sales-import/oneoff/sales-history-trim.main.js,trim`), `rebuild-days` on the 2 GiB
+   `gifsy-sales-import` job, both with `--update-env-vars=TRIM_TARGET_DB=gifsy_prod`.
+7a. **After the 2026-11-19 night release (`1fa2305c`) — waiting on the owner:** switch ON for Bajaj prod
+   `features.requireLocation`, `wholesalerPayoutInclActivation`, `helpVideos`; OK to load the Help & videos content on
+   prod; OK to correct the remaining non-Privilege "Unverifiable" visibility captures in one go (list + SQL + backup
+   first — 2 were corrected earlier, backup `1795068290437`); Bajaj prod wallet backfill → reversal engine V2 (backup +
+   owner OK; **before any credit reversal on Bajaj prod** — see §3 D3).
 7b. **Month-end sales files (300–350 MB):** test a 200 MB+ real Bajaj file on staging before 30 Nov (owner to send the
    file). Next release: processing as a Cloud Run Job end-to-end + direct-to-storage resumable uploads; ask Bajaj about
    daily rolling 2–3-day files.
-7c. **Open owner question:** how important alerts reach people who never allow phone notifications (web push cannot be on
-   by default) — WhatsApp for key events vs an after-login reminder; owner gave no preference yet (2026-11-18).
+7c. ~~Alerts for people without phone notifications~~ — owner chose an after-login reminder with device-specific steps
+   (built, shipped in `1fa2305c`, Bajaj).
 8. **Hubble:** ask which of Ajio / MakeMyTrip / Myntra / Uber are claim-code-only → add product ids to
    `HUBBLE_CLAIM_CODE_PRODUCT_IDS`.
-9. Then: Wallet Reversal Engine finish + rollout (Bajaj V2 first; replay Bajaj's past reversals on a data copy → if
-   they match, straight to V2). Its migrations must now sort AFTER `20261118190000`, and it must pass the digest's
-   payout write-site tripwire spec and the TDS rules in design doc §9 (PAN-keyed, `R194|client|FY` lock).
+9. Wallet Reversal Engine rollout: schema + engine are on prod (DORMANT, LEGACY everywhere). Next: ship
+   `fix/wre-overreversal-debt` (§3) → Bajaj prod backfill (dry-run → owner OK → apply) → verify → flip Bajaj to V2.
+   Deoleo stays LEGACY. **Never run points compute for Bajaj imported months (Apr 2025 – Oct 2026).**
 
 ## 5. Owner process rules (adopted — apply to every change)
 
@@ -221,6 +237,15 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
 - Absent `tdsPolicy` → `{SEC_194C, GROSS_UP}`; a malformed one throws (fail-closed).
 - Points and ₹ payouts are credited in **whole units**, rounded half-up once.
 - 8 Bajaj wallets are intentionally negative (sales returns); the interim rule refuses points reversals on wallets with debt.
+- Liability on dashboards (once `fix/wre-overreversal-debt` ships) = Σ **positive** balances; "points owed" = how far
+  below zero balances are — never net them (owner D1/D2, 2026-11-19). Bajaj prod's 8 imported negatives = −3,549 pts.
+
+**Webhooks / MSG91**
+- Every vendor webhook (MSG91 status, Hubble) must be `@SkipThrottle()` — the global 60/min bucket is keyed per IP and
+  vendors post from a few shared IPs. MSG91's WhatsApp "On Outbound Report Received" fires for EVERY message on the
+  number, incl. campaigns sent from the MSG91 panel, so volume is unrelated to portal sends. On repeated 4xx MSG91
+  **auto-disables** the webhook (email "paused"); re-enable at WhatsApp → Webhook → pencil → **Webhook Status** → Update.
+  Proof it works: `gcloud logging read … httpRequest.requestUrl:"/v1/notifications/status"` shows 201s.
 - Hubble: a timeout is **not** a "no". Never refund a Hubble order by hand — use the runbook. Hubble only documents
   order statuses SUCCESS / PROCESSING / FAILED — CANCELLED / RETURNED are OUR redemption statuses, not Hubble's.
 - TDS 194R is keyed by the **payee PAN snapshot** (`payeePan`), not the outlet's current owner; every new payout path

@@ -148,6 +148,22 @@ describe('GO — Partner Group Overview (read-only)', () => {
     );
   });
 
+  it('audit item 2 / owner decision 2 (2026-11-19): a child in debt — owed shown apart from the group total, its row negative with no ₹', async () => {
+    stubFetch({
+      ...AVAILABLE_PAYLOAD,
+      totals: { ...AVAILABLE_PAYLOAD.totals, redeemablePoints: 12_000, owedPoints: 2_986 },
+      outlets: [AVAILABLE_PAYLOAD.outlets[0], { ...AVAILABLE_PAYLOAD.outlets[1], redeemablePoints: -2_986 }],
+    });
+    render(<GroupOverviewPage />);
+    expect((await screen.findByTestId('group-owed-points')).textContent).toBe(
+      'Wallets in this group owe 2,986 pts — repaid from their next earnings (not counted above).',
+    );
+    expect(screen.getByTestId('group-outlet-negative').textContent).toBe('Owed — repaid from next earnings');
+    const rows = screen.getAllByTestId('group-outlet-row');
+    expect(rows[1].textContent).toContain('−2,986');
+    expect(rows[1].textContent).not.toMatch(/₹/);
+  });
+
   it('GO3: renders a per-outlet row for every outlet with code + points', async () => {
     stubFetch(AVAILABLE_PAYLOAD);
     render(<GroupOverviewPage />);
