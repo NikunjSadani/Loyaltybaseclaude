@@ -10,7 +10,6 @@ import {
   ForbiddenException,
   NotFoundException,
   ServiceUnavailableException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { RewardsService, decodeOrderCursor, encodeOrderCursor, hiddenVoucherFields, maskVoucherCode } from './rewards.service';
@@ -1525,7 +1524,7 @@ describe('RewardsService', () => {
       mockPrisma.wallet.findFirst.mockResolvedValue({ id: 'w1', redeemablePoints: 5000 });
 
       const err = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }).catch((e) => e);
-      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect(err).toBeInstanceOf(BadRequestException);
       expect(err.message).toBe('Too many attempts — please restart the redemption.');
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
@@ -1564,7 +1563,7 @@ describe('RewardsService', () => {
       mockPrisma.otpCode.updateMany.mockImplementation(async ({ data }: any) =>
         (data?.verifiedAt ? { count: 0 } : { count: 1 }));
       const err = await service.confirmRedeem(partner, { orderId: 'o1', otp: '123456' }).catch((e) => e);
-      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect(err).toBeInstanceOf(BadRequestException);
       expect(err.message).toBe('No active OTP found. Please restart the redemption.');
       expect(mockPrisma.otpCode.updateMany).toHaveBeenCalledWith({
         where: { id: 'otp1', verifiedAt: null }, data: { verifiedAt: expect.any(Date) },
@@ -2127,7 +2126,7 @@ describe('RewardsService', () => {
       // Confirming order A (with what the user believes is the OTP) finds NO order-A OTP → 401, no debit.
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(orderA);
       await expect(service.confirmRedeem(partner, { orderId: 'orderA', otp: '123456' }))
-        .rejects.toBeInstanceOf(UnauthorizedException);
+        .rejects.toBeInstanceOf(BadRequestException);
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
 
       // The correct per-order OTP confirms order B, and the lookup is scoped to order B's id.
@@ -2702,7 +2701,7 @@ describe('RewardsService', () => {
       const err = await service.confirmRedeemForOutlet(sales, {
         orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
       }).catch((e) => e);
-      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect(err).toBeInstanceOf(BadRequestException);
       expect(err.message).toBe('No active OTP found. Please restart the redemption.');
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
@@ -2713,7 +2712,7 @@ describe('RewardsService', () => {
       const err = await service.confirmRedeemForOutlet(sales, {
         orderId: 'o-out', otp: '123456', targetPartnerId: 'cp-out',
       }).catch((e) => e);
-      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect(err).toBeInstanceOf(BadRequestException);
       expect(err.message).toBe('Too many attempts — please restart the redemption.');
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
@@ -2813,7 +2812,7 @@ describe('RewardsService', () => {
         service.confirmRedeemForOutlet(sales, {
           orderId: 'o-out', otp: '000000', targetPartnerId: 'cp-out',
         }),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
+      ).rejects.toBeInstanceOf(BadRequestException);
       expect(mockWallet.debitRedeem).not.toHaveBeenCalled();
     });
 

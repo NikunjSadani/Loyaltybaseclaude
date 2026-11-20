@@ -295,7 +295,7 @@ function mrpSlashPoints(
    Shared by the gift + voucher sheets. Returns the message to surface, or null
    on success. The {success,data}/{success,error} envelope is unwrapped by the
    api-client, which lifts the backend's `error` string onto result.error for any
-   non-2xx response (400 insufficient/out-of-range, 401 bad OTP, etc.). */
+   non-2xx response (400 insufficient/out-of-range or bad/expired OTP, etc.). */
 
 interface RedeemPayload {
   rewardId: string;
@@ -505,7 +505,7 @@ function GiftDetailSheet({
     );
     setSubmitting(false);
     if (!result.success) {
-      // 401 bad/expired OTP, 400 not-confirmable, etc.
+      // 400 bad/expired OTP or not-confirmable, etc. (never 401: that is reserved for session expiry)
       toast.error(result.error || 'Could not confirm redemption'); return;
     }
     // Hubble auto-issuance (Bajaj GIFT_CARD) can resolve synchronously to FAILED — the
