@@ -134,8 +134,10 @@ and "Last changed by X on date" (audit log) sit under Save. Phone-width: chips w
   names the admin who was asked; the chosen admin still gets the in-app bell and replies in the portal. Outcome note:
   "Email sent to <to list> (client's ticket remarks inbox)[, cc <list>] — asked: <name>".
 - **To blank, CC set** → To the chosen admin's own email (as before; their address is dropped from CC if listed),
-  Cc the CC list; note "Email sent to <name> (<their email>), cc <list>". If the admin has no email the send is NOT
-  made (as before) and the note says so naming the CC list too.
+  Cc the CC list; note "Email sent to <name> (<their email>), cc <list>". If the admin has no email (owner decision
+  2026-11-21) the CC list receives it AS the To recipients (no Cc), body worded like the inbox case ("Hello," +
+  "Asked: <name>"), `emailRecipientKind: 'CC_ONLY'`, note "Email sent to the client's CC list <list> — <name> (the
+  admin asked) has no email address on file". No To, no CC, no admin email → NOT sent, as before.
 - **Both blank** (default — every tenant today incl. Deoleo) → byte-identical to before: the chosen admin's own email,
   no `cc` key on the send, "Hi <name>" greeting, outcome note "Email sent to <name> (<their email>)".
 - **Partial relay rejection**: `Msg91Service.sendEmail` now takes optional `cc` and returns `{ skipped, accepted,

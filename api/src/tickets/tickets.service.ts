@@ -120,10 +120,13 @@ function humanize(v: string): string {
  * chosen admin = ADMIN). `address` = the To addresses joined with ", " (one address in the single-To
  * case, as before); `to` / `cc` = the full lists; `rejected` = addresses the relay refused while the
  * rest were accepted (sent stays true, the refusal is noted on the ticket and in the response).
+ * CC_ONLY (owner 2026-11-21): To blank + CC set + the chosen admin has no email → the CC list becomes
+ * the recipients (To), so the request still reaches the client; the note says the admin had no email.
  */
+export type RemarksRecipientKind = 'INBOX' | 'ADMIN' | 'CC_ONLY';
 export type RemarksEmailOutcome =
-  | { sent: true; recipientKind: 'INBOX' | 'ADMIN'; address: string; to: string[]; cc: string[]; rejected: string[] }
-  | { sent: false; reason: string; recipientKind: 'INBOX' | 'ADMIN'; address: string | null; to: string[]; cc: string[]; rejected: string[] };
+  | { sent: true; recipientKind: RemarksRecipientKind; address: string; to: string[]; cc: string[]; rejected: string[] }
+  | { sent: false; reason: string; recipientKind: RemarksRecipientKind; address: string | null; to: string[]; cc: string[]; rejected: string[] };
 
 /** Tenant-wide stat-card counts for the admin list. */
 export interface TicketSummary {
@@ -1036,15 +1039,18 @@ export class TicketsService {
   }): Promise<RemarksEmailOutcome> {
     // Who the email is (or was meant to be) for — set once the recipient is resolved; every note and
     // the response are worded from it (the client's inbox vs the chosen admin).
-    let recipientKind: 'INBOX' | 'ADMIN' = 'ADMIN';
+    let recipientKind: RemarksRecipientKind = 'ADMIN';
     let toList: string[] = [];
     let cc: string[] = [];
     const toText = () => toList.join(', ');
     const ccText = () => (cc.length ? ` (cc ${cc.join(', ')})` : '');
+    const noAdminEmail = `${p.targetName} (the admin asked) has no email address on file`;
     const describe = () =>
       recipientKind === 'INBOX'
         ? `the client's ticket remarks inbox ${toText()}${ccText()}`
-        : `${p.targetName}${toList.length ? ` (${toText()})` : ''}${ccText()}`;
+        : recipientKind === 'CC_ONLY'
+          ? `the client's CC list ${toText()} (${noAdminEmail})`
+          : `${p.targetName}${toList.length ? ` (${toText()})` : ''}${ccText()}`;
     const notSent = async (reason: string): Promise<RemarksEmailOutcome> => {
       await this.recordEmailOutcome(
         p.ticket.id,
@@ -1076,6 +1082,14 @@ export class TicketsService {
         toList = own ? [own] : [];
         // The admin's own address is never also copied.
         if (own) cc = cc.filter((x) => x !== own.toLowerCase());
+        // Owner 2026-11-21: no admin email but a CC list → the CC list receives it (as To). Body worded
+        // like the inbox case ("Hello," + "Asked: <name>") since it is not addressed to the admin.
+        if (!own && cc.length) {
+          toList = cc;
+          cc = [];
+          toInbox = true;
+          recipientKind = 'CC_ONLY';
+        }
       }
     } catch (e) {
       this.logger.error(`[tickets] remarks email recipient lookup for ${p.ticket.id} failed: ${e}`);
@@ -1132,7 +1146,9 @@ export class TicketsService {
     await this.recordEmailOutcome(
       p.ticket.id,
       p.actorId,
-      `${toInbox ? `Email sent to ${toText()} (client's ticket remarks inbox)${ccPart} — asked: ${p.targetName}` : `Email sent to ${p.targetName} (${toText()})${ccPart}`} with link ${link}.${linkNote ? ` Note: ${linkNote}.` : ''}${rejectedPart}`,
+      `${recipientKind === 'CC_ONLY'
+        ? `Email sent to the client's CC list ${toText()} — ${noAdminEmail}`
+        : toInbox ? `Email sent to ${toText()} (client's ticket remarks inbox)${ccPart} — asked: ${p.targetName}` : `Email sent to ${p.targetName} (${toText()})${ccPart}`} with link ${link}.${linkNote ? ` Note: ${linkNote}.` : ''}${rejectedPart}`,
     );
     return { sent: true, recipientKind, address: toText(), to: toList, cc, rejected };
   }

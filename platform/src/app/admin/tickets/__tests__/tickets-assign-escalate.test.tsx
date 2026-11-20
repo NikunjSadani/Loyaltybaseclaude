@@ -838,6 +838,17 @@ describe('remarks toast names where the email went (follow-up)', () => {
     )).toBeInTheDocument();
   });
 
+  it('CC_ONLY → "email sent to the client\'s CC list <list> (the client admin has no email address on file)"', async () => {
+    routeGet({ list: [baseTicket()] });
+    postMock.mockResolvedValue({ success: true, data: { emailSent: true, emailRecipientKind: 'CC_ONLY', emailRecipient: 'ops@deoleo.example', emailCc: [] } });
+    render(<AdminTicketsPage />);
+    await openFirstTicket();
+    await ask();
+    expect(await screen.findByText(
+      "Remarks requested. The client admin was notified in-app; email sent to the client's CC list ops@deoleo.example (the client admin has no email address on file).",
+    )).toBeInTheDocument();
+  });
+
   it('ADMIN + CC → "by email (<admin>, cc <list>)"', async () => {
     routeGet({ list: [baseTicket()] });
     postMock.mockResolvedValue({ success: true, data: { emailSent: true, emailRecipientKind: 'ADMIN', emailRecipient: 'ca@deoleo.example', emailCc: ['ops@deoleo.example'] } });

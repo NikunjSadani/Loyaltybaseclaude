@@ -982,15 +982,40 @@ describe('TicketsService', () => {
       expect(res).toMatchObject({ emailSent: true, emailRecipientKind: 'ADMIN', emailRecipient: 'ca@deoleo.example', emailCc: ['ops@deoleo.example'] });
     });
 
-    it('To blank + CC set + admin has no email → NOT sent, and the note says the CC list missed it too', async () => {
+    it('To blank + CC set + admin has no email → sent TO the CC list (owner 2026-11-21); note says the admin had no email', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
+      mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { to: [], cc: ['ops@deoleo.example', 'mgr@deoleo.example'] } });
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin2', note: 'pls' }, 'x');
+      expect(mockMsg91.sendEmail).toHaveBeenCalledTimes(1);
+      const mail = mockMsg91.sendEmail.mock.calls[0][0];
+      expect(mail.to).toEqual(['ops@deoleo.example', 'mgr@deoleo.example']);
+      expect(mail).not.toHaveProperty('cc');
+      expect(mail.html).toContain('Asked: Deoleo Admin 2'); // not "Hi Deoleo Admin 2," — they are not a recipient
+      expect(gifsyOnlyNotes()[0]).toMatch(
+        /^Email sent to the client's CC list ops@deoleo\.example, mgr@deoleo\.example — Deoleo Admin 2 \(the admin asked\) has no email address on file with link /,
+      );
+      expect(res).toMatchObject({
+        emailSent: true, emailRecipientKind: 'CC_ONLY', emailRecipient: 'ops@deoleo.example, mgr@deoleo.example',
+        emailTo: ['ops@deoleo.example', 'mgr@deoleo.example'], emailCc: [],
+      });
+    });
+
+    it('CC_ONLY relay failure → NOT sent, note names the CC list and the missing admin email', async () => {
       mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
       mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: { to: [], cc: ['ops@deoleo.example'] } });
+      mockMsg91.sendEmail.mockRejectedValue(new Error('down'));
+      const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin2', note: 'pls' }, 'x');
+      expect(gifsyOnlyNotes()[0]).toBe(
+        "Email to the client's CC list ops@deoleo.example (Deoleo Admin 2 (the admin asked) has no email address on file) was NOT sent: the mail relay refused or timed out. Deoleo Admin 2 was notified in-app only.",
+      );
+      expect(res).toMatchObject({ emailSent: false, emailRecipientKind: 'CC_ONLY' });
+    });
+
+    it('no To, no CC, admin has no email → still NOT sent exactly as before', async () => {
+      mockPrisma.ticket.findFirst.mockResolvedValue(ticketRow());
       const res = await service.requestClientRemarks(gifsy, 't1', { clientAdminId: 'cadmin2', note: 'pls' }, 'x');
       expect(mockMsg91.sendEmail).not.toHaveBeenCalled();
-      expect(gifsyOnlyNotes()[0]).toBe(
-        'Email to Deoleo Admin 2 (cc ops@deoleo.example) was NOT sent: the client admin has no email address on file. Deoleo Admin 2 was notified in-app only.',
-      );
-      expect(res).toMatchObject({ emailSent: false, emailRecipient: null, emailCc: ['ops@deoleo.example'] });
+      expect(res).toMatchObject({ emailSent: false, emailRecipientKind: 'ADMIN', emailRecipient: null });
     });
 
     it('both blank (Deoleo today: no row) → exactly the previous call: no cc key at all', async () => {

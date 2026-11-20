@@ -201,7 +201,8 @@ export function TicketRemarksEmailCard({ slug }: { slug: string }) {
           Who gets the &apos;Ask client admin for remarks&apos; email. <strong className="font-medium">To</strong>: when
           set, the email goes to these addresses (the admin asked is named in the email); leave it blank and the email
           goes to the admin chosen on each ticket. <strong className="font-medium">CC</strong>: copied on every remarks
-          email either way. Press Enter or comma after each address.
+          email either way — and if To is blank and the chosen admin has no email address, the CC list receives it
+          instead. Press Enter or comma after each address.
         </p>
       </div>
       <ChipInput
