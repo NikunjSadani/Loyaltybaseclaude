@@ -8,6 +8,8 @@
  * GA4: a geolocation error with NO prior fix → resolves null
  * GA5: a geolocation error AFTER a fix → resolves the best fix seen
  * GA6: measures lockMs and always clears the watch exactly once
+ * SH1–SH5: concurrent acquires SHARE one in-flight acquisition (same fix, no early settle of the
+ *          first caller, joiner waits ≤ remaining time, fresh acquisition after settle, 5 s cap)
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -176,6 +178,97 @@ describe('acquirePreciseFix', () => {
       expect(fix!.lat).toBe(13.0);
       expect(fix!.lng).toBe(77.6);
       handle.stop();
+    });
+
+    // ── Concurrent acquires SHARE one in-flight acquisition ─────────────────────────────
+    it('SH1: two overlapping acquires (two photos seconds apart) both get the SAME good fix', async () => {
+      let cb: SuccessCb = () => {};
+      installWatch((success) => { cb = success; return 21; });
+      const handle = startPreciseWatch();
+      cb(makePos(GEO_ACQUIRE_TARGET_ACCURACY_M + 60)); // imprecise only
+      const settled: string[] = [];
+      const p1 = handle.acquire().then((f) => { settled.push('p1'); return f; });
+      vi.advanceTimersByTime(1500);
+      const p2 = handle.acquire().then((f) => { settled.push('p2'); return f; });
+      await Promise.resolve();
+      await Promise.resolve();
+      // SH5: the second call did NOT settle the first early.
+      expect(settled).toEqual([]);
+      vi.advanceTimersByTime(1000);
+      cb(makePos(GEO_ACQUIRE_TARGET_ACCURACY_M - 15, 13.1, 77.7)); // good fix → early-accept
+      const [f1, f2] = await Promise.all([p1, p2]);
+      expect(f1).not.toBeNull();
+      expect(f1!.accuracy).toBe(GEO_ACQUIRE_TARGET_ACCURACY_M - 15);
+      expect(f2).toBe(f1); // the very same fix object
+      expect(settled.sort()).toEqual(['p1', 'p2']);
+      handle.stop();
+    });
+
+    it('SH2: photo + submit-time fix — the submit acquire joins and waits ≤ the photo\'s remaining time', async () => {
+      let cb: SuccessCb = () => {};
+      installWatch((success) => { cb = success; return 22; });
+      const handle = startPreciseWatch();
+      cb(makePos(GEO_ACQUIRE_TARGET_ACCURACY_M + 30)); // imprecise best (80 m)
+      let photo: unknown = 'pending';
+      let submit: unknown = 'pending';
+      handle.acquire().then((f) => { photo = f; });
+      vi.advanceTimersByTime(3000);
+      handle.acquire().then((f) => { submit = f; }); // submit tapped 3 s into the photo's wait
+      // At the photo's cap (2 s more, NOT 5 s more) both resolve with the same best fix.
+      await vi.advanceTimersByTimeAsync(GEO_ACQUIRE_MAX_MS - 3000 - 1);
+      expect(photo).toBe('pending');
+      expect(submit).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(photo).not.toBe('pending');
+      expect((photo as { accuracy: number }).accuracy).toBe(GEO_ACQUIRE_TARGET_ACCURACY_M + 30);
+      expect(submit).toBe(photo);
+      handle.stop();
+    });
+
+    it('SH3: an acquire AFTER the shared one settled starts a FRESH acquisition with a full cap', async () => {
+      let cb: SuccessCb = () => {};
+      installWatch((success) => { cb = success; return 23; });
+      const handle = startPreciseWatch();
+      cb(makePos(GEO_ACQUIRE_TARGET_ACCURACY_M + 30));
+      const p1 = handle.acquire();
+      await vi.advanceTimersByTimeAsync(GEO_ACQUIRE_MAX_MS); // first settles at its cap
+      expect((await p1)!.accuracy).toBe(GEO_ACQUIRE_TARGET_ACCURACY_M + 30);
+      cb(makePos(GEO_ACQUIRE_TARGET_ACCURACY_M + 20)); // fresher, better, still imprecise
+      let third: unknown = 'pending';
+      const p3 = handle.acquire();
+      expect(p3).not.toBe(p1);
+      p3.then((f) => { third = f; });
+      await vi.advanceTimersByTimeAsync(GEO_ACQUIRE_MAX_MS - 1);
+      expect(third).toBe('pending'); // a full fresh 5 s window, not the old one
+      await vi.advanceTimersByTimeAsync(1);
+      expect((third as { accuracy: number }).accuracy).toBe(GEO_ACQUIRE_TARGET_ACCURACY_M + 20);
+      handle.stop();
+    });
+
+    it('SH4: the cap is still GEO_ACQUIRE_MAX_MS (5 s) per acquisition', async () => {
+      expect(GEO_ACQUIRE_MAX_MS).toBe(5000);
+      installWatch(() => 24); // no fixes at all
+      const handle = startPreciseWatch();
+      let res: unknown = 'pending';
+      handle.acquire().then((f) => { res = f; });
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(res).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1);
+      expect(res).toBeNull();
+      handle.stop();
+    });
+
+    it('SH5: stop() while two callers share an acquisition resolves BOTH with the best seen', async () => {
+      let cb: SuccessCb = () => {};
+      installWatch((success) => { cb = success; return 25; });
+      const handle = startPreciseWatch();
+      cb(makePos(GEO_ACQUIRE_TARGET_ACCURACY_M + 10));
+      const p1 = handle.acquire();
+      const p2 = handle.acquire();
+      handle.stop();
+      const [f1, f2] = await Promise.all([p1, p2]);
+      expect(f1!.accuracy).toBe(GEO_ACQUIRE_TARGET_ACCURACY_M + 10);
+      expect(f2).toBe(f1);
     });
   });
 });

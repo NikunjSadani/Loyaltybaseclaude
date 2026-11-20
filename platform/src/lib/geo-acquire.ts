@@ -58,6 +58,8 @@ export interface PreciseWatchHandle {
    * Resolve a fix to USE now (never rejects):
    *   • a fix ≤ targetAccuracyM already in hand → that fix immediately;
    *   • else wait up to maxMs MORE for a good fix, then the best-so-far (or null).
+   * Concurrent calls SHARE the one in-flight acquisition (same promise → same fix); a call after
+   * it settles starts a fresh one.
    */
   acquire(): Promise<PreciseFix | null>;
   /** Stop + clear the watch (idempotent). Resolves any pending acquire with the best seen. */
@@ -79,8 +81,16 @@ export function startPreciseWatch(opts: AcquirePreciseFixOptions = {}): PreciseW
   let watchId: number | null = null;
   let stopped = false;
   let hadError = false;
-  // At most one in-flight acquire waiter (capture is user-initiated + button-disabled while busy).
-  let waiter: { resolve: (f: PreciseFix | null) => void; timer: ReturnType<typeof setTimeout> | null } | null = null;
+  // At most ONE in-flight acquisition, SHARED by every concurrent caller. Two photos seconds apart,
+  // a photo + the submit-time fix, or a photo + a manual "Capture location" all JOIN the same
+  // pending promise and receive the same best fix (same outlet, same few seconds → one fix is
+  // valid for all). No caller ever settles/cancels another early, and a joiner never waits longer
+  // than the in-flight acquisition's remaining time (≤ maxMs from when it started).
+  let waiter: {
+    promise: Promise<PreciseFix | null>;
+    resolve: (f: PreciseFix | null) => void;
+    timer: ReturnType<typeof setTimeout> | null;
+  } | null = null;
 
   const noGeo = typeof navigator === 'undefined' || !navigator.geolocation;
 
@@ -153,16 +163,18 @@ export function startPreciseWatch(opts: AcquirePreciseFixOptions = {}): PreciseW
     if (freshGood()) return Promise.resolve(best);
     // Stopped, unsupported, or already errored with nothing → resolve the best (possibly null) now.
     if (stopped || (best === null && (noGeo || hadError))) return Promise.resolve(best);
-    // Otherwise wait up to maxMs MORE for a good fix; else the best-so-far at the cap.
-    return new Promise<PreciseFix | null>((resolve) => {
-      // A second concurrent acquire shouldn't strand the first — settle it with the best seen.
-      settleWaiter(best);
-      const timer = setTimeout(() => {
-        waiter = null;
-        resolve(best);
-      }, maxMs);
-      waiter = { resolve, timer };
+    // An acquisition is already in flight → JOIN it (same promise, same fix; no extra wait, and
+    // the earlier caller is NOT settled early).
+    if (waiter) return waiter.promise;
+    // Otherwise start ONE acquisition: wait up to maxMs MORE for a good fix; else the best-so-far
+    // at the cap. Settled by early-accept (onPos), error, stop(), or the cap — whichever first.
+    let resolveFn!: (f: PreciseFix | null) => void;
+    const promise = new Promise<PreciseFix | null>((resolve) => {
+      resolveFn = resolve;
     });
+    const timer = setTimeout(() => settleWaiter(best), maxMs);
+    waiter = { promise, resolve: resolveFn, timer };
+    return promise;
   };
 
   return { getBest: () => best, acquire, stop };
