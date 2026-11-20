@@ -18,8 +18,7 @@ import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Store, Users, ChevronRight, CheckCircle } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
-import { usePartnerIdentity, announceActivePartnerChanged, rememberActiveOutletDisplay } from '@/lib/partner-identity';
-import { setActivePartner } from '@/lib/active-partner-actions';
+import { usePartnerIdentity, announceActivePartnerChanged, rememberActiveOutletDisplay, switchActivePartner } from '@/lib/partner-identity';
 
 export default function PartnerSelectPage() {
   const router = useRouter();
@@ -36,7 +35,7 @@ export default function PartnerSelectPage() {
 
   async function chooseOutlet(partnerId: string) {
     setNavigating(true);
-    await setActivePartner(partnerId);
+    await switchActivePartner(partnerId);
     // The stored header title now names the PICKED outlet (next paint / failed refetch fallback).
     rememberActiveOutletDisplay(operableOutlets.find((o) => o.partnerId === partnerId));
     // The partner layout stays mounted across router.push — make its header/nav re-read
@@ -48,7 +47,7 @@ export default function PartnerSelectPage() {
   async function chooseGroupOverview() {
     setNavigating(true);
     // Overview is login-scoped, not an operable outlet — clear any prior selection.
-    await setActivePartner(null);
+    await switchActivePartner(null);
     // Cleared selection = the login's OWN outlet.
     rememberActiveOutletDisplay(operableOutlets.find((o) => o.isOwnLogin));
     announceActivePartnerChanged();

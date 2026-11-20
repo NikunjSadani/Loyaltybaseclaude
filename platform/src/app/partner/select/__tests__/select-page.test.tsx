@@ -38,6 +38,8 @@ vi.mock('@/lib/partner-identity', () => ({
   usePartnerIdentity: () => mockIdentity,
   announceActivePartnerChanged: () => announceMock(),
   rememberActiveOutletDisplay: (o: unknown) => rememberMock(o),
+  // The real helper = setActivePartner + clear the read cache; delegate to the server-action mock.
+  switchActivePartner: (id: string | null) => setActivePartnerMock(id),
 }));
 
 import PartnerSelectPage from '../page';

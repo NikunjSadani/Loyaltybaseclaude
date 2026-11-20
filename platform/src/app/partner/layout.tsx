@@ -7,14 +7,13 @@ import {
   Home, Wallet, Gift, User, HeadphonesIcon, Target, Medal,
   Store, Users, ChevronDown, Check, ClipboardList,
 } from 'lucide-react';
-import { setActivePartner } from '@/lib/active-partner-actions';
 import { NotificationBell } from '@/components/notifications/notification-bell';
 import { NavBottom } from '@/components/layout/nav-bottom';
 import { Sidebar } from '@/components/layout/sidebar';
 import { SiteFooter } from '@/components/layout/site-footer';
 import type { NavItem } from '@/components/layout/nav-bottom';
 import type { SidebarSection } from '@/components/layout/sidebar';
-import { usePartnerIdentity, announceActivePartnerChanged, rememberActiveOutletDisplay } from '@/lib/partner-identity';
+import { usePartnerIdentity, announceActivePartnerChanged, rememberActiveOutletDisplay, switchActivePartner } from '@/lib/partner-identity';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { appDisplayName } from '@/lib/platform/app-display-name';
 import { RequireAuth } from '@/components/auth/require-auth';
@@ -42,7 +41,7 @@ export function OutletSwitcher({
 
   const choose = async (partnerId: string) => {
     setBusy(true);
-    await setActivePartner(partnerId);
+    await switchActivePartner(partnerId);
     // Store the picked outlet's names first, so the reloaded header paints IT (not the old outlet).
     rememberActiveOutletDisplay(outlets.find((o) => o.partnerId === partnerId));
     // Hard reload so the proxy re-injects x-active-partner-id and every page refetches.
@@ -124,7 +123,7 @@ export default function PartnerLayout({ children }: { children: React.ReactNode 
   // viewing the overview. Plain <Link> otherwise; only wired for the gated group entry.
   const handleGroupOverview: React.MouseEventHandler<HTMLAnchorElement> = async (e) => {
     e.preventDefault();
-    await setActivePartner(null);
+    await switchActivePartner(null);
     rememberActiveOutletDisplay(identity.operableOutlets?.find((o) => o.isOwnLogin));
     // The layout stays mounted across router.push — refresh its header/nav to the OWN outlet.
     announceActivePartnerChanged();

@@ -7,11 +7,39 @@
  * not tied to a visible link, so it is never re-pinged on later navigations.
  *
  * "Session" = this JS context (a full page load / new tab starts over — the router's own cache does too).
+ *
+ * What a prefetch buys (node_modules/next/dist/docs/01-app/02-guides/prefetching.md): these routes are DYNAMIC, so
+ * a prefetch fetches only "Layout to first loading boundary" — i.e. the route's loading.tsx skeleton — cached ~30 s
+ * to 5 min. Every nav route therefore has a loading.tsx: a tap shows its skeleton at once while the page streams.
+ * When Next invalidates its prefetch cache (router.refresh / a server action / revalidation) it calls the
+ * `onInvalidate` we pass, and we re-prefetch that ONE href — the docs' pattern — capped per href per session so it
+ * can never become a per-render or per-navigation loop.
  */
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import type { AppRouterInstance, PrefetchOptions } from 'next/dist/shared/lib/app-router-context.shared-runtime';
 
 const prefetched = new Set<string>();
+/** Re-prefetches after a Next cache invalidation, per href per session (bounded). */
+export const MAX_REPREFETCH_PER_HREF = 10;
+const reprefetches = new Map<string, number>();
+
+/** router.prefetch with the docs' onInvalidate re-prefetch, bounded by MAX_REPREFETCH_PER_HREF. Exported for tests. */
+export function prefetchWithRefresh(router: Pick<AppRouterInstance, 'prefetch'>, href: string): void {
+  const onInvalidate = () => {
+    const n = reprefetches.get(href) ?? 0;
+    if (n >= MAX_REPREFETCH_PER_HREF) return;
+    reprefetches.set(href, n + 1);
+    prefetchWithRefresh(router, href);
+  };
+  try {
+    // `kind` is typed as required but optional at runtime (defaults to AUTO — app-router-instance.js); the docs'
+    // own example passes only { onInvalidate }.
+    router.prefetch(href, { onInvalidate } as PrefetchOptions);
+  } catch {
+    /* prefetch is an optimisation only */
+  }
+}
 
 /** Hrefs not yet prefetched this session; marks them as done. Exported for tests. */
 export function takeUnprefetched(hrefs: readonly string[]): string[] {
@@ -32,13 +60,7 @@ export function usePrefetchOnce(hrefs: readonly string[]): void {
     if (todo.length === 0) return;
     // After first paint + idle, so the warm-up never competes with the current screen's own data requests.
     const run = () => {
-      for (const h of todo) {
-        try {
-          router.prefetch(h);
-        } catch {
-          /* prefetch is an optimisation only */
-        }
-      }
+      for (const h of todo) prefetchWithRefresh(router, h);
     };
     const w = typeof window !== 'undefined' ? (window as Window & { requestIdleCallback?: (cb: () => void) => number }) : null;
     if (w?.requestIdleCallback) w.requestIdleCallback(run);
@@ -51,4 +73,5 @@ export function usePrefetchOnce(hrefs: readonly string[]): void {
 /** Test-only. */
 export function __resetPrefetchOnceForTests(): void {
   prefetched.clear();
+  reprefetches.clear();
 }

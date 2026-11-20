@@ -18,9 +18,9 @@ import { type SalesRole, getRole, canEnroll, hasTeamView } from '@/lib/sales-rol
 import { classifyPaceGap, buildCasesToGoMsg, fmtKpiNum, remainingOf } from '@/lib/pace';
 import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { getGifsySettings } from '@/lib/gifsy-settings';
-import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
-import { fetchBanners, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
-import { swr, peekCached, DASHBOARD_REUSE_MS, DASH_PREFIX } from '@/lib/session-cache';
+import { fetchTaskConfigResult, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
+import { fetchBannersResult, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
+import { swr, peekCached, invalidateCached, DASHBOARD_REUSE_MS, DASH_PREFIX } from '@/lib/session-cache';
 import { schemeApi } from '@/lib/schemes';
 import type { EligibleScheme } from '@/lib/scheme-types';
 import { fetchOutletVisibilityStatuses, VISIBILITY_ELIGIBLE_OUTLET_TYPES, VISIBILITY_STATUS_LOAD_ERROR } from '@/lib/visibility-upload';
@@ -275,6 +275,13 @@ function VisibilitySummaryCard({ counts }: { counts: VisibilitySummaryCounts }) 
   );
 }
 
+/** Plain names for the dashboard parts in the "couldn't load" notice. */
+const CORE_PART_LABEL: Record<string, string> = {
+  taskConfig: 'task settings',
+  outlets: 'your outlets',
+  kyc: 'KYC submissions',
+};
+
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function SalesDashboard() {
@@ -294,6 +301,9 @@ export default function SalesDashboard() {
   const [role,          setRoleState]     = useState<SalesRole>('SO');
   const [taskConfig,    setTaskConfig]    = useState<TaskConfig | null>(null);
   const [salesBanners,  setSalesBanners]  = useState<Banner[]>([]);
+  // Dashboard parts that failed with no previous good value to keep (audit fix 3) + a Retry trigger.
+  const [coreErrors, setCoreErrors] = useState<string[]>([]);
+  const [coreRetry, setCoreRetry] = useState(0);
   const [schemes, setSchemes] = useState<EligibleScheme[]>([]);
   // Per-rep Visibility summary (current window), computed from the same getSalesEligible
   // call that feeds the Tasks "Visibility" count — rendered (Bajaj only) as its own card.
@@ -348,56 +358,85 @@ export default function SalesDashboard() {
     // outlet-type scope can never be clobbered by a late-resolving unscoped mount request (audit
     // Finding 1). Deoleo/non-toggle tenants still issue exactly ONE no-param request there.
     // ⚠️ Banners: /api/partner/banners is @Roles(SSS, WHOLESALER, SUB_STOCKIST) on the API, so this read is a 403 for
-    // every sales user and sales banners have never rendered (fetchBanners → empty). Making them show needs a
+    // every sales user and sales banners have never rendered (fetchBannersResult → empty). Making them show needs a
     // sales-readable endpoint — an OWNER decision (banners already ticked "showInSalesApp" would start appearing).
     // Until then the call stays as-is but rides the 2-min dashboard reuse below, so it repeats far less often.
-    type CoreResult = [TaskConfig, { banners: Banner[] }, { success?: boolean; data?: { outlets?: any[] } }, unknown];
-    const coreKey = `${DASH_PREFIX}core`;
-    const hadCore = peekCached(coreKey) !== undefined;
-    swr<CoreResult>(coreKey, () => Promise.all([
-      fetchTaskConfig(),
-      fetchBanners(),
-      fetch('/api/sales/outlets').then((r) => r.json()),
-      fetch('/api/kyc').then((r) => r.json()).catch(() => null),
-    ]) as Promise<CoreResult>, {
-      maxAgeMs: DASHBOARD_REUSE_MS,
-      // Only a usable outlet list is reused; a failed one is retried on the next visit.
-      shouldCache: ([, , outletResult]) => outletResult?.success === true,
-      onValue: ([config, { banners }, outletResult, kycResult]) => {
-      if (cancelled) return;
-      // A failed background refresh keeps the cached dashboard rather than blanking it.
-      if (hadCore && outletResult?.success !== true) { setLoading(false); return; }
-      setTaskConfig(config);
-      setSalesBanners(getActiveSalesBanners(banners));
-      if (outletResult?.success && outletResult.data) {
-        setOutlets((outletResult.data.outlets ?? []).map((o: any) => ({
-          id:             o.id,
-          kycId:          o.kycId ?? '',
-          kycFiledViaOutletCode: o.kycFiledViaOutletCode ?? undefined,
-          outletCode:     o.outletCode ?? '',
-          name:           o.name,
-          mobile:         o.mobile,
-          location:       o.location ?? o.city ?? '',
-          type:           (o.type ?? 'SSS') as OutletType,
-          kycStatus:      (o.kycStatus ?? 'NOT_STARTED') as KYCStatus,
-          kycSubmittedAt: o.kycSubmittedAt,
-        })));
-      }
+    //
+    // Each part is cached ONLY when it succeeded (audit fix 3). A failed part keeps its previous good value (cached
+    // or already on screen); with nothing to keep it is flagged in `coreErrors` → the Tasks card says which figures
+    // could not load and offers Retry — never a silent 0.
+    const parts = {
+      taskConfig: () => fetchTaskConfigResult(),
+      banners:    () => fetchBannersResult(),
+      outlets:    () => fetch('/api/sales/outlets').then((r) => r.json()).catch(() => null),
+      kyc:        () => fetch('/api/kyc').then((r) => r.json()).catch(() => null),
+    } as const;
+    type PartName = keyof typeof parts;
+    const okOf: Record<PartName, (v: any) => boolean> = {
+      taskConfig: (v) => v?.ok === true,
+      banners:    (v) => v?.ok === true,
+      outlets:    (v) => v?.success === true,
+      kyc:        (v) => v?.success === true,
+    };
+    const apply: Record<PartName, (v: any) => void> = {
+      taskConfig: (v) => setTaskConfig(v.config),
+      banners:    (v) => setSalesBanners(getActiveSalesBanners(v.banners)),
+      outlets:    (v) => setOutlets((v.data?.outlets ?? []).map((o: any) => ({
+        id:             o.id,
+        kycId:          o.kycId ?? '',
+        kycFiledViaOutletCode: o.kycFiledViaOutletCode ?? undefined,
+        outletCode:     o.outletCode ?? '',
+        name:           o.name,
+        mobile:         o.mobile,
+        location:       o.location ?? o.city ?? '',
+        type:           (o.type ?? 'SSS') as OutletType,
+        kycStatus:      (o.kycStatus ?? 'NOT_STARTED') as KYCStatus,
+        kycSubmittedAt: o.kycSubmittedAt,
+      }))),
       // Approval/Rejected counts derive from SUBMISSIONS (shared with the Tasks
       // page via buildKycSubRows) so the two views can never disagree.
-      setKycSubs(buildKycSubRows(kycResult as Parameters<typeof buildKycSubRows>[0]));
-      setLoading(false);
-      },
-    })?.catch(() => { if (!cancelled) setLoading(false); });
+      kyc:        (v) => setKycSubs(buildKycSubRows(v)),
+    };
+    const names = Object.keys(parts) as PartName[];
+    let pending = names.length;
+    const settle = () => { pending -= 1; if (pending === 0 && !cancelled) setLoading(false); };
+    setCoreErrors([]);
+    for (const name of names) {
+      const key = `${DASH_PREFIX}${name}`;
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; settle(); } };
+      const hadValue = peekCached(key) !== undefined;
+      const fail = () => {
+        if (cancelled) return;
+        // Nothing good to keep → say so (banners just stay hidden; they are not a figure).
+        if (!hadValue && name !== 'banners') setCoreErrors((prev) => (prev.includes(name) ? prev : [...prev, name]));
+      };
+      swr<any>(key, parts[name], {
+        maxAgeMs: DASHBOARD_REUSE_MS,
+        shouldCache: okOf[name],
+        onValue: (v) => {
+          if (cancelled) return;
+          if (okOf[name](v)) apply[name](v);
+          else fail();
+          done();
+        },
+      })?.catch(() => { fail(); done(); });
+    }
     return () => { cancelled = true; };
-  }, []);
+  }, [coreRetry]);
 
   useEffect(() => {
+    // Another tab changed the stored role → re-read it and refresh the eligible schemes THROUGH the dashboard cache
+    // (audit fix 6): the stale entry is dropped and the fresh answer is stored for the next return.
     const onStorage = () => {
       setRoleState(getRole());
-      void schemeApi.listSalesEligible()
-        .then((r) => setSchemes(r.success ? (r.data.schemes ?? []) : []))
-        .catch(() => setSchemes([]));
+      const schemesKey = `${DASH_PREFIX}schemes`;
+      invalidateCached(schemesKey);
+      swr(schemesKey, () => schemeApi.listSalesEligible(), {
+        maxAgeMs: DASHBOARD_REUSE_MS,
+        shouldCache: (r) => r.success,
+        onValue: (r) => setSchemes(r.success ? (r.data.schemes ?? []) : []),
+      })?.catch(() => setSchemes([]));
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -952,6 +991,16 @@ export default function SalesDashboard() {
               </div>
             </CardHeader>
             <CardContent className="pt-0 pb-1">
+              {coreErrors.length > 0 && (
+                <div role="alert" data-testid="dashboard-core-error" className="mb-2 flex items-center justify-between gap-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                  <span>
+                    Couldn&apos;t load {coreErrors.map((e) => CORE_PART_LABEL[e] ?? e).join(', ')} — task counts may be incomplete.
+                  </span>
+                  <button type="button" onClick={() => setCoreRetry((n) => n + 1)} className="shrink-0 font-semibold underline">
+                    Retry
+                  </button>
+                </div>
+              )}
               {visibilityLoadError && (
                 <p role="alert" data-testid="visibility-status-error" className="mb-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
                   Visibility tasks: {VISIBILITY_STATUS_LOAD_ERROR}

@@ -6,7 +6,7 @@
  * Each returns the parsed JSON envelope (`{ success, data }`) or null on a non-2xx / network error — exactly what
  * the old inline `fetch(...).then(r => r.ok ? r.json() : null)` call sites produced. Failures are never cached.
  */
-import { getCached } from '@/lib/session-cache';
+import { getCached, FEATURES_TTL_MS } from '@/lib/session-cache';
 
 export type Envelope<T = unknown> = { success?: boolean; data?: T; error?: string } | null;
 
@@ -22,9 +22,12 @@ export const SALES_ME_URL = '/api/sales/me';
 export const OUTLET_TYPES_URL = '/api/settings/outlet-types';
 export const AUTH_ME_URL = '/api/auth/me';
 
-/** GET /api/sales/me — the sales user's identity + tenant feature flags. */
+/**
+ * GET /api/sales/me — the sales user's identity + tenant feature flags. The flags GATE screens, so this entry uses
+ * the short FEATURES_TTL_MS (60 s): an admin's feature toggle reaches reps within a minute (audit fix 7).
+ */
 export function getSalesMe<T = Record<string, unknown>>(): Promise<Envelope<T>> {
-  return getCached(SALES_ME_URL, () => jsonOrNull<T>(SALES_ME_URL), { shouldCache: isSuccess });
+  return getCached(SALES_ME_URL, () => jsonOrNull<T>(SALES_ME_URL), { shouldCache: isSuccess, ttlMs: FEATURES_TTL_MS });
 }
 
 /** GET /api/settings/outlet-types — the tenant's enabled outlet types + display-name overrides. */

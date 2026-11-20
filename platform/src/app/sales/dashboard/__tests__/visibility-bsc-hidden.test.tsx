@@ -18,9 +18,11 @@ vi.mock('next/link', () => ({
 }));
 vi.mock('@/lib/task-config', () => ({
   fetchTaskConfig: () => Promise.resolve({ customTaskItems: [], customTaskLabel: 'Reminders' }),
+  fetchTaskConfigResult: () => Promise.resolve({ config: { customTaskItems: [], customTaskLabel: 'Reminders' }, ok: true }),
 }));
 vi.mock('@/lib/banner', () => ({
   fetchBanners: () => Promise.resolve({ banners: [] }),
+  fetchBannersResult: () => Promise.resolve({ banners: [], popups: [], ok: true }),
   getActiveSalesBanners: () => [],
   getBgStyle: () => ({}),
 }));

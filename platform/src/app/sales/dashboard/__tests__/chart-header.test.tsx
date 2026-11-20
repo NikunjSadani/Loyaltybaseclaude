@@ -21,9 +21,11 @@ vi.mock('@/components/charts/sales-achievement-chart', () => ({
 }));
 vi.mock('@/lib/task-config', () => ({
   fetchTaskConfig: () => Promise.resolve(null),
+  fetchTaskConfigResult: () => Promise.resolve({ config: null, ok: true }),
 }));
 vi.mock('@/lib/banner', () => ({
   fetchBanners:              () => Promise.resolve({ banners: [] }),
+  fetchBannersResult: () => Promise.resolve({ banners: [], popups: [], ok: true }),
   getActiveSalesBanners:     () => [],
   getActiveBannersFromList:  () => [],
   getBgStyle:                () => ({}),

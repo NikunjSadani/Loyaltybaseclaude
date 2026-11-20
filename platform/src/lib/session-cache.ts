@@ -18,6 +18,12 @@
  *     in flight when the write started is not stored (generation check), so a pre-write answer can never
  *     land in the cache after the write.
  *   • Only successful values are cached (`shouldCache`); a failure is never cached and is retried next time.
+ *   • Every entry is SCOPED to the session that wrote it — host + signed-in user id (localStorage `user`) + the
+ *     GIFSY operator's assumed brand (localStorage `assumedBrand`) — so a different user / tenant / assumed brand
+ *     can never read another's entry, even in a tab that missed a clear.
+ *   • Cross-tab: other tabs clear on a `storage` change of those keys (login / logout / assume / exit in another
+ *     tab) and on a 'gifsy-session' BroadcastChannel message, which every session change, partner-outlet switch and
+ *     API write posts.
  */
 
 export const SESSION_TTL_MS = 5 * 60_000;
@@ -25,6 +31,35 @@ export const SESSION_TTL_MS = 5 * 60_000;
 export const DASHBOARD_REUSE_MS = 2 * 60_000;
 /** Key prefix of every sales-dashboard read. */
 export const DASH_PREFIX = 'dash:';
+/** Tenant feature flags gate UI — admin toggles must reach reps within a minute (audit fix 7). */
+export const FEATURES_TTL_MS = 60_000;
+
+/** localStorage keys owned by lib/auth-client.ts (USER_KEY / ASSUMED_BRAND_KEY) — the session identity. */
+export const SESSION_IDENTITY_KEYS = ['user', 'assumedBrand'] as const;
+export const SESSION_CHANNEL = 'gifsy-session';
+
+/** The current session's scope: host | user id | assumed brand. Read on every call (cheap) so it is never stale. */
+export function sessionScope(): string {
+  if (typeof window === 'undefined') return 'ssr';
+  let uid = '';
+  let brand = '';
+  try {
+    const raw = window.localStorage.getItem('user');
+    if (raw) uid = String((JSON.parse(raw) as { id?: unknown })?.id ?? '');
+  } catch {
+    uid = '';
+  }
+  try {
+    brand = window.localStorage.getItem('assumedBrand') ?? '';
+  } catch {
+    brand = '';
+  }
+  return `${window.location.host}|${uid}|${brand}`;
+}
+
+const SEP = '::';
+const scoped = (key: string) => `${sessionScope()}${SEP}${key}`;
+const unscoped = (full: string) => full.slice(full.indexOf(SEP) + SEP.length);
 
 interface Entry {
   value?: unknown;
@@ -80,14 +115,19 @@ function load<T>(key: string, loader: () => Promise<T>, shouldCache: (v: T) => b
 /** Cached value (fresh within ttlMs) or ONE shared request for it. */
 export function getCached<T>(key: string, loader: () => Promise<T>, opts: CacheOptions<T> = {}): Promise<T> {
   const ttl = opts.ttlMs ?? SESSION_TTL_MS;
-  const entry = store.get(key);
+  const full = scoped(key);
+  const entry = store.get(full);
   if (entry && entry.at !== undefined && now() - entry.at < ttl) return Promise.resolve(entry.value as T);
-  return load(key, loader, opts.shouldCache ?? defaultShouldCache);
+  return load(full, loader, opts.shouldCache ?? defaultShouldCache);
 }
 
 /** The cached value and its age, or undefined. Never triggers a request. */
 export function peekCached<T>(key: string): { value: T; ageMs: number } | undefined {
-  const entry = store.get(key);
+  return peekFull<T>(scoped(key));
+}
+
+function peekFull<T>(full: string): { value: T; ageMs: number } | undefined {
+  const entry = store.get(full);
   if (!entry || entry.at === undefined) return undefined;
   return { value: entry.value as T, ageMs: now() - entry.at };
 }
@@ -106,31 +146,77 @@ export interface SwrOptions<T> {
  */
 export function swr<T>(key: string, loader: () => Promise<T>, opts: SwrOptions<T>): Promise<T> | undefined {
   const shouldCache = opts.shouldCache ?? defaultShouldCache;
-  const cached = peekCached<T>(key);
+  const full = scoped(key);
+  const cached = peekFull<T>(full);
   if (cached) {
     opts.onValue(cached.value, 'cache');
     if (cached.ageMs < opts.maxAgeMs) return undefined;
   }
-  return load(key, loader, shouldCache).then((value) => {
+  return load(full, loader, shouldCache).then((value) => {
     opts.onValue(value, 'network');
     return value;
   });
 }
 
-/** Drop every key starting with `prefix` (or matching the predicate). */
+/** Store a value directly (e.g. a refresh made outside a loader). Scoped like every other entry. */
+export function setCached<T>(key: string, value: T): void {
+  store.set(scoped(key), { value, at: now() });
+}
+
+/** Drop every key starting with `prefix` (or matching the predicate) — in every scope. */
 export function invalidateCached(match: string | ((key: string) => boolean)): void {
   const test = typeof match === 'string' ? (k: string) => k.startsWith(match) : match;
-  for (const key of [...store.keys()]) {
-    if (test(key)) store.delete(key);
+  for (const full of [...store.keys()]) {
+    if (test(unscoped(full))) store.delete(full);
   }
   generation += 1;
 }
 
-/** Forget everything (logout / assume-tenant / exit-tenant / login / any API write). */
-export function clearSessionCache(): void {
+let channel: BroadcastChannel | null = null;
+function getChannel(): BroadcastChannel | null {
+  if (channel || typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') return channel;
+  try {
+    channel = new BroadcastChannel(SESSION_CHANNEL);
+    channel.onmessage = () => clearLocal();
+    // Node (tests / SSR tooling) keeps a process alive on an open channel; browsers have no unref.
+    (channel as unknown as { unref?: () => void }).unref?.();
+  } catch {
+    channel = null;
+  }
+  return channel;
+}
+
+function clearLocal(): void {
   store.clear();
   generation += 1;
 }
+
+/**
+ * Forget everything (logout / assume-tenant / exit-tenant / login / partner-outlet switch / any API write) in THIS
+ * tab and — unless `broadcast: false` — in every other open tab of this origin.
+ */
+export function clearSessionCache(opts: { broadcast?: boolean } = {}): void {
+  clearLocal();
+  if (opts.broadcast === false) return;
+  try {
+    getChannel()?.postMessage({ type: 'clear' });
+  } catch {
+    /* best effort — the scoped keys still keep another session's entries unreadable */
+  }
+}
+
+/** Other tabs: clear when the session identity keys change (login / logout / assume / exit elsewhere). */
+let crossTabInstalled = false;
+export function installCrossTabSessionSync(): void {
+  if (crossTabInstalled || typeof window === 'undefined') return;
+  crossTabInstalled = true;
+  getChannel();
+  window.addEventListener('storage', (e: StorageEvent) => {
+    // key === null → localStorage.clear() in another tab.
+    if (e.key === null || (SESSION_IDENTITY_KEYS as readonly string[]).includes(e.key)) clearLocal();
+  });
+}
+if (typeof window !== 'undefined') installCrossTabSessionSync();
 
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -160,4 +246,9 @@ export function noteApiMutation(method: string): void {
 export function __resetSessionCacheForTests(): void {
   store.clear();
   generation = 0;
+}
+
+/** Test-only: the raw store size (all scopes). */
+export function __sessionCacheSizeForTests(): number {
+  return store.size;
 }

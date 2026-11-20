@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname } from 'next/navigation';
 import { LayoutDashboard, ClipboardList, MapPin, User, Users, HeadphonesIcon, Trophy } from 'lucide-react';
 import { NavBottom } from '@/components/layout/nav-bottom';
 import type { NavItem } from '@/components/layout/nav-bottom';
@@ -48,10 +48,12 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
   // SalesFeaturesContext (e.g. Profile's "Help & videos" entry). null until it resolves → every flag reads OFF.
   const [features, setFeatures] = useState<FeatureFlags | null>(null);
 
+  // Re-read on every screen change THROUGH the 60 s cache: at most one /api/sales/me a minute, and the features
+  // published to every sales page (SalesFeaturesContext) are never more than ~60 s behind an admin toggle.
+  const pathname = usePathname();
   useEffect(() => {
     setRoleState(getRole());
-    // Session-cached (lib/cached-reads.ts): shared with every page's useTenantFeatures('/api/sales/me') — one
-    // request per 5 min instead of one per screen.
+    // Session-cached (lib/cached-reads.ts, 60 s): shared with every page's useTenantFeatures('/api/sales/me').
     getSalesMe<{ name?: string; employeeCode?: string; features?: unknown }>()
       .then((res) => {
         if (res?.success && res.data) {
@@ -59,11 +61,12 @@ export default function SalesLayout({ children }: { children: React.ReactNode })
           setEmpId(res.data.employeeCode ?? '');
           setFeatures(normalizeFeatures(res.data.features));
         } else {
-          setUserName(getStoredUser()?.name ?? '');
+          // A failed re-read keeps what is already on screen.
+          setUserName((prev) => prev || (getStoredUser()?.name ?? ''));
         }
       })
-      .catch(() => setUserName(getStoredUser()?.name ?? ''));
-  }, []);
+      .catch(() => setUserName((prev) => prev || (getStoredUser()?.name ?? '')));
+  }, [pathname]);
 
   // For manager roles swap "Outlets" for "Team" (managers work through people, not direct outlets)
   const navItems: NavItem[] = hasTeamView(role)

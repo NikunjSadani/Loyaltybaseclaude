@@ -203,7 +203,11 @@ export function getAssumedBrand(): string | null {
 /** Clear any GIFSY operator assumed-tenant context (called on a fresh login). */
 export function clearAssumedContext(): void {
   if (typeof window === 'undefined') return;
+  const hadHint = localStorage.getItem(ASSUMED_BRAND_KEY) !== null;
   localStorage.removeItem(ASSUMED_BRAND_KEY);
+  // The assumed context really changed → no cached read may outlive it (audit fix 2). Callers that merely
+  // re-confirm an already-clear hint (banner reconcile on every focus) don't wipe the cache each time.
+  if (hadHint) clearSessionCache();
 }
 
 /**

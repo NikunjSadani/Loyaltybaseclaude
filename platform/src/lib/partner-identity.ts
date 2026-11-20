@@ -16,6 +16,21 @@ import { useState, useEffect, useRef } from 'react';
 import { authHeader } from '@/lib/api-client';
 import { getStoredUser, updateStoredPartnerDisplay } from '@/lib/auth-client';
 import { setActivePartner } from '@/lib/active-partner-actions';
+import { clearSessionCache } from '@/lib/session-cache';
+
+/**
+ * Switch the ACTIVE partner outlet (the httpOnly `active_partner_id` cookie, via the server action) AND drop every
+ * cached read — the bell's unread count etc. belong to the previous outlet. The server action is not a /api fetch,
+ * so the global write-clear in lib/client-medium.ts never sees it (audit fix 5). Broadcast: the cookie is shared by
+ * every tab, so other tabs clear too.
+ */
+export async function switchActivePartner(partnerId: string | null): Promise<void> {
+  try {
+    await setActivePartner(partnerId);
+  } finally {
+    clearSessionCache();
+  }
+}
 import type { FeatureFlags } from '@/lib/platform/client-config';
 import { DEFAULT_FEATURES, normalizeFeatures } from '@/lib/tenant-features';
 
@@ -272,7 +287,7 @@ export function usePartnerIdentity(): PartnerIdentity {
         // healedRef so it can never loop.
         if (d?.activeSelectorInvalid === true && !healedRef.current) {
           healedRef.current = true;
-          void setActivePartner(null);
+          void switchActivePartner(null);
         }
         // Write the ACTIVE outlet's authoritative display names back into the stored user, so the
         // next mount/reload paints THIS outlet from the first frame (a sibling selection survives
