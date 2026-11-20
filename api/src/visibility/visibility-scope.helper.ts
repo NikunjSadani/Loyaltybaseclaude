@@ -55,6 +55,43 @@ export function withVisibilityProgramWhere(
   return { AND: [base, appliesToOutletWhere(scope)] };
 }
 
+/**
+ * THE single "in scope for visibility" outlet rule (VISIBILITY-POSM-DESIGN.md §Metrics, decided 2026-11-20).
+ * An outlet is in scope when a rep can actually be asked to capture it:
+ *   - not soft-deleted and not deactivated;
+ *   - `isActive: true` — the outlet is KYC-approved. A pending outlet is created `isActive:false` and only
+ *     flips on approval; the rep's capture list never shows it, so counting it would report a visit nobody
+ *     could make as "Missed". (NOT_INTERESTED and PARKED outlets are always `isActive:false` too.)
+ *   - kycIntent not NOT_INTERESTED / PARKED (belt-and-braces; `notIn` drops NULLs → the {null} branch);
+ *   - outletType.code ∈ visibilityConfig.outletScope (empty = none) AND the optional programs/subPrograms.
+ * Used by the rep capture list, the weekly reminder, the admin "outlets in scope" list, the visibility
+ * report, the admin/operations dashboards and the daily digest — so every number counts the same outlets.
+ * (Contrast the KYC program-health "addressable" universe, which deliberately has NO isActive filter — that
+ * metric is about getting outlets through KYC; this one is about outlets already through it.)
+ */
+export function visibilityUniverseWhere(
+  clientId: string,
+  cfg: VisibilityProgramScopeLike & { outletScope: ReadonlyArray<string> },
+): Prisma.OutletWhereInput {
+  return withVisibilityProgramWhere(visibilityUniverseBase(clientId, cfg.outletScope), cfg);
+}
+
+/**
+ * The FLAT part of {@link visibilityUniverseWhere} (no program narrowing) — for callers that add their own keys
+ * (an id list, a NOT clause) before wrapping with `withVisibilityProgramWhere`. It owns the top-level `OR`
+ * (kycIntent), so a caller that needs another OR must put it under `AND`.
+ */
+export function visibilityUniverseBase(clientId: string, outletScope: ReadonlyArray<string>): Prisma.OutletWhereInput {
+  return {
+    clientId,
+    deletedAt: null,
+    deactivatedAt: null,
+    isActive: true,
+    OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
+    outletType: { code: { in: [...outletScope] } },
+  };
+}
+
 // ── Write path: validate + canonicalise + carry over (plan §4, D8) ─────────────────────────────
 
 /** The facet ↔ settings-list ↔ Outlet column mapping for the two program facets. */

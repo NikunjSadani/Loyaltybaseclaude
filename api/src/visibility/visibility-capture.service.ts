@@ -58,7 +58,7 @@ import {
   PhotoFencePolicy,
 } from './geo-fence.helper';
 import { SubmitCaptureDto, ResubmitCaptureDto } from './dto/visibility-capture.dto';
-import { visibilityProgramMatches, withVisibilityProgramWhere } from './visibility-scope.helper';
+import { visibilityProgramMatches, visibilityUniverseBase, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 /** Object-key tenant folder for all visibility media (mirrors VisibilityMediaService). */
 const MEDIA_FOLDER_PREFIX = 'visibility-media/';
@@ -317,16 +317,10 @@ export class VisibilityCaptureService {
     }
 
     const outlets = await this.prisma.outlet.findMany({
-      // APPLIES-TO (D12): programs/subPrograms narrow the type scope (no-op when neither is set).
+      // THE single in-scope rule (visibilityUniverseBase — shared with the report / dashboards / digest) ∩ the
+      // caller's reach. APPLIES-TO (D12): programs/subPrograms narrow the type scope (no-op when neither is set).
       where: withVisibilityProgramWhere(
-        {
-          clientId: user.clientId,
-          id: { in: [...reach] },
-          deletedAt: null,
-          deactivatedAt: null,
-          isActive: true,
-          outletType: { code: { in: config.outletScope } },
-        },
+        { ...visibilityUniverseBase(user.clientId, config.outletScope), id: { in: [...reach] } },
         config,
       ),
       select: {

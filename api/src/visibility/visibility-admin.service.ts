@@ -14,7 +14,7 @@ import {
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { validateFormSchema } from './visibility-form.helper';
 import { SetVisibilityConfigDto, ScopeOutletsQueryDto } from './dto/visibility-admin.dto';
-import { resolveVisibilityProgramLists, withVisibilityProgramWhere } from './visibility-scope.helper';
+import { resolveVisibilityProgramLists, visibilityUniverseBase, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 /**
  * VisibilityAdminService — GIFSY_ADMIN authoring for the Visibility (POSM) feature:
@@ -198,18 +198,19 @@ export class VisibilityAdminService {
     await this.assertEnabled(clientId);
     const config = await this.getConfig(clientId);
 
-    const where: Prisma.OutletWhereInput = {
-      clientId,
-      deletedAt: null,
-      deactivatedAt: null,
-      outletType: { code: { in: config.outletScope } },
-    };
+    // THE single in-scope rule (visibilityUniverseBase — the same outlets the report counts and reps can capture).
+    // It owns the top-level OR (kycIntent), so the text search goes under AND.
+    const where: Prisma.OutletWhereInput = { ...visibilityUniverseBase(clientId, config.outletScope) };
     if (filters.zone) where.zone = filters.zone;
     if (filters.state) where.state = filters.state;
     if (filters.q) {
-      where.OR = [
-        { name: { contains: filters.q, mode: 'insensitive' } },
-        { outletCode: { contains: filters.q, mode: 'insensitive' } },
+      where.AND = [
+        {
+          OR: [
+            { name: { contains: filters.q, mode: 'insensitive' } },
+            { outletCode: { contains: filters.q, mode: 'insensitive' } },
+          ],
+        },
       ];
     }
 

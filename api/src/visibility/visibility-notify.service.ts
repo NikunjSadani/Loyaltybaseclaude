@@ -5,7 +5,7 @@ import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { currentWindowKey, windowBoundsForKey } from './visibility-window.helper';
-import { withVisibilityProgramWhere } from './visibility-scope.helper';
+import { visibilityUniverseBase, withVisibilityProgramWhere } from './visibility-scope.helper';
 
 export interface WeeklyReminderResult {
   /** Eligible tenants examined (visibilityEnabled AND capture mode PHOTO_APPROVAL). */
@@ -101,22 +101,17 @@ export class VisibilityNotifyService {
     const windowKey = currentWindowKey(now, frequencyPerMonth);
     const dueDate = this.windowEndDate(windowKey, frequencyPerMonth);
 
-    // Pending = addressable in-scope outlets with NO APPROVED capture at the current window
-    // (due / rejected / never). The addressable-universe `where` mirrors the report service's
-    // denominator (NOT `isActive:true`; kycIntent OR-wrapped so NULL-intent outlets survive).
-    // We load each outlet's single active assignment → its capturing rep (level + login userId).
+    // Pending = in-scope outlets with NO APPROVED capture at the current window (due / rejected /
+    // never). In scope = THE single visibility rule (visibilityUniverseBase — the report's
+    // denominator and the rep's capture list): KYC-approved (isActive), not deleted / deactivated /
+    // NOT_INTERESTED / PARKED, type + program scope — so a rep is never nudged about an outlet their
+    // capture list does not show. We load each outlet's single active assignment → its rep.
     const allowedLevels = new Set(allowedSalesLevels ?? []);
     const pendingOutlets = await this.prisma.outlet.findMany({
       // APPLIES-TO (D12): programs/subPrograms narrow the type scope (no-op when neither is set).
       where: withVisibilityProgramWhere(
         {
-          clientId,
-          deletedAt: null,
-          deactivatedAt: null,
-          // Don't nudge a rep about a NOT_INTERESTED (declined) or PARKED (admin-removed) outlet.
-          // notIn drops NULLs → the {null} branch keeps normal pending outlets.
-          OR: [{ kycIntent: null }, { kycIntent: { notIn: ['NOT_INTERESTED', 'PARKED'] } }],
-          outletType: { code: { in: outletScope } },
+          ...visibilityUniverseBase(clientId, outletScope),
           NOT: { visibilityCaptures: { some: { windowKey, status: 'APPROVED' } } },
         } as Prisma.OutletWhereInput,
         config,
