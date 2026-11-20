@@ -18,6 +18,8 @@ import { buildUsageReport, pageOfUsageReport, resolveUsageParams } from './usage
 import { LocationComplianceQueryDto } from './dto/location-compliance.dto';
 import { LOCATION_REQUIRED_FEATURE } from '../common/location-gate.helper';
 import { buildLocationReport, pageOfLocationReport, resolveLocationParams } from './location/location-compliance-report';
+import { RedemptionReportQueryDto } from './dto/redemption-report.dto';
+import { redemptionScreenSummary, type RedemptionScreenSummary } from './redemptions/redemption-report.summary';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -336,6 +338,15 @@ export class ReportsService {
       months,
       rows,
     });
+  }
+
+  // ── Redemption report ─────────────────────────────────────────────────────────
+  /**
+   * GET /v1/reports/redemptions — the hub card's on-screen summary (totals + per-status counts + zone/state pickers)
+   * for the same filters and tenant scope as the 'redemption-report' Excel kind. See reports/redemptions/.
+   */
+  async redemptionSummary(user: JwtPayload, q: RedemptionReportQueryDto): Promise<RedemptionScreenSummary> {
+    return redemptionScreenSummary(this.prisma, user, q, new Date());
   }
 
   // ── Usage Report ──────────────────────────────────────────────────────────────
