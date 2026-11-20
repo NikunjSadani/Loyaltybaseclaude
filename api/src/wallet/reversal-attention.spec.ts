@@ -10,7 +10,7 @@ import { approvalsPausedMessage, batchLineAmount, creditUnmappedMessage, unresol
 function attentionHarness(
   mode: 'LEGACY' | 'SHADOW' | 'V2' | 'BAD',
   pauseValue: unknown = undefined,
-  opts: { expiryRows?: any[]; refusalRows?: any[]; walletCount?: number; cappedRows?: any[] } = {},
+  opts: { expiryRows?: any[]; refusalRows?: any[]; walletCount?: number; cappedRows?: any[]; untrackedRows?: any[] } = {},
 ) {
   const calls: Record<string, any[]> = {};
   const rec = (k: string, ret: unknown) =>
@@ -25,8 +25,15 @@ function attentionHarness(
   const expiryRows = opts.expiryRows ?? [];
   const refusalRows = opts.refusalRows ?? [];
   const cappedRows = opts.cappedRows ?? [];
+  const untrackedRows = opts.untrackedRows ?? [];
   const auditRows = (a: any) =>
-    a.where.entityType === 'POINTS_EXPIRY_FAILURE' ? expiryRows : a.where.entityType === 'POINTS_EXPIRY_OFFSET_CAPPED' ? cappedRows : refusalRows;
+    a.where.entityType === 'POINTS_EXPIRY_FAILURE'
+      ? expiryRows
+      : a.where.entityType === 'POINTS_EXPIRY_OFFSET_CAPPED'
+        ? cappedRows
+        : a.where.entityType === 'REVERSAL_EXPIRY_UNTRACKED'
+          ? untrackedRows
+          : refusalRows;
   const prisma = {
     wallet: {
       // `NOT` = the V2-flip "not prepared by the backfill" query (fix round A, M2)
@@ -243,6 +250,34 @@ describe('audit B8 (2026-11-19) — an expiry that repaid debt beyond the credit
   });
 });
 
+describe('round 6 item 5 — an untracked-expiry reversal lists EVERY affected wallet', () => {
+  it('walletIds = every wallet in metadata.positions (deduped, sorted), not only the first', async () => {
+    const at = new Date();
+    const { svc } = attentionHarness('V2', undefined, {
+      untrackedRows: [
+        {
+          createdAt: at, entityId: 'REVU',
+          metadata: {
+            clientId: 'bajaj', walletId: 'w2', outletCode: 'O2', owed: 30, recovered: 10,
+            positions: [
+              { positionId: 'p1', walletId: 'w2', creditTxId: 't1', owed: 10, recovered: 5 },
+              { positionId: 'p2', walletId: 'w1', creditTxId: 't2', owed: 20, recovered: 5 },
+              { positionId: 'p3', walletId: 'w2', creditTxId: 't3', owed: 0, recovered: 0 },
+            ],
+          },
+        },
+        // an older row without positions still names its wallet
+        { createdAt: at, entityId: 'REVO', metadata: { clientId: 'bajaj', walletId: 'w9', owed: 5 } },
+      ],
+    });
+    const r = await svc.reversalAttention('bajaj');
+    expect(r.expiryUntracked.map((u: any) => [u.creditReversalId, u.walletId, u.walletIds])).toEqual([
+      ['REVU', 'w2', ['w1', 'w2']],
+      ['REVO', 'w9', ['w9']],
+    ]);
+  });
+});
+
 describe('fix round A — M2 POST reversal-engine/mode (WalletService.setReversalEngineMode)', () => {
   it('validates the value; nothing written on a bad one', async () => {
     const { svc, calls } = attentionHarness('LEGACY');
@@ -330,7 +365,6 @@ describe('GET reversal-engine/wallets-in-debt (audit item 9 + fix rounds 3/4 + o
     const rec = (k: string, ret: unknown) => jest.fn(async (a: any) => ((calls[k] ??= []).push(a), ret));
     const prisma: any = {
       wallet: {
-        findFirst: rec('wallet.findFirst', noNegatives ? null : { id: 'w1' }),
         count: rec('wallet.count', 3),
         aggregate: rec('wallet.aggregate', { _sum: { redeemablePoints: -3867 } }),
         findMany: rec('wallet.findMany', [
@@ -344,8 +378,32 @@ describe('GET reversal-engine/wallets-in-debt (audit item 9 + fix rounds 3/4 + o
           { partnerId: 'p2', outletCode: 'O2', programName: 'Silver' },
         ]),
       },
-      creditReversalAllocation: { findMany: rec('alloc.findMany', allocs) },
-      walletTransaction: { groupBy: rec('wt.groupBy', lastNonNeg), findMany: rec('wt.findMany', rows) },
+      // round 6: allocations are read ONLY for the reversals found after each wallet's last row at or above zero
+      creditReversalAllocation: {
+        findMany: jest.fn(async (a: any) => {
+          (calls['alloc.findMany'] ??= []).push(a);
+          return (allocs as any[]).filter((x) => a.where.creditReversalId.in.includes(x.creditReversalId));
+        }),
+      },
+      walletTransaction: {
+        groupBy: rec('wt.groupBy', lastNonNeg),
+        // round 6: the DB filters reversal rows to those AFTER each wallet's last row at or above zero — emulate it
+        findMany: jest.fn(async (a: any) => {
+          (calls['wt.findMany'] ??= []).push(a);
+          return (rows as any[]).filter(
+            (r) =>
+              r.creditReversalId &&
+              a.where.OR.some(
+                (c: any) =>
+                  c.walletId === r.walletId &&
+                  (!c.seq || (r.seq != null && r.seq > c.seq.gt)) &&
+                  (!c.createdAt || r.createdAt > c.createdAt.gt),
+              ),
+          );
+        }),
+      },
+      // round 6 (items 2/4): the cheap probe is raw SQL with a LITERAL `< 0` (partial index usable)
+      $queryRaw: rec('$queryRaw', noNegatives ? [] : [{ one: 1 }]),
       $executeRawUnsafe: rec('$executeRawUnsafe', 0),
     };
     // round 5 (A2): one INTERACTIVE read-only REPEATABLE READ transaction
@@ -371,7 +429,16 @@ describe('GET reversal-engine/wallets-in-debt (audit item 9 + fix rounds 3/4 + o
     );
     const res = await svc.walletsInDebt('bajaj', { limit: 2 });
     expect(calls['wallet.count'][0].where).toEqual({ partner: { clientId: 'bajaj' }, redeemablePoints: { lt: 0 } });
-    expect(calls['$transaction'][0]).toEqual({ isolationLevel: 'RepeatableRead' });
+    // round 6 (item 1): explicit timeouts sized for 5,000 wallets (Prisma defaults 5 s / 2 s expire under load)
+    expect(calls['$transaction'][0]).toEqual({ isolationLevel: 'RepeatableRead', timeout: 30_000, maxWait: 10_000 });
+    // capped reads: only the listed wallets; reversal rows only after the last ≥ 0 seq; allocations only of those reversals
+    expect(calls['wt.groupBy'][0].where).toEqual({ walletId: { in: ['w1', 'w2'] }, balanceAfter: { gte: 0 } });
+    expect(calls['wt.findMany'][0].where).toEqual({
+      creditReversalId: { not: null },
+      OR: [{ walletId: 'w1', seq: { gt: 7 } }, { walletId: 'w2' }],
+    });
+    expect(calls['alloc.findMany'][0].where).toMatchObject({ creditReversalId: { in: ['REV1'] }, position: { walletId: { in: ['w1', 'w2'] } } });
+    expect(res.anyNegative).toBe(true);
     expect(calls['$executeRawUnsafe'][0]).toBe('SET TRANSACTION READ ONLY');
     expect(calls['outlet.findMany'].at(-1).where).toMatchObject({ deletedAt: null }); // B8
     expect(res).toMatchObject({ total: 3, totalOwedPoints: 3867, truncated: true, availablePrograms: ['Gold', 'Silver'] });
@@ -410,10 +477,26 @@ describe('GET reversal-engine/wallets-in-debt (audit item 9 + fix rounds 3/4 + o
   it('round 5 B1: a tenant with NO negative wallet answers from the cheap probe — no catalogue, no snapshot', async () => {
     const { svc, calls } = harness([], [], [], true);
     const res = await svc.walletsInDebt('deoleo');
-    expect(res).toMatchObject({ total: 0, totalOwedPoints: 0, wallets: [], truncated: false });
-    expect(calls['wallet.findFirst'][0].where).toEqual({ partner: { clientId: 'deoleo' }, redeemablePoints: { lt: 0 } });
+    expect(res).toMatchObject({ total: 0, totalOwedPoints: 0, wallets: [], truncated: false, anyNegative: false });
+    // round 6 (item 4): tenant-scoped raw probe with a LITERAL `< 0` (the clientId is the only bound value)
+    const probe = calls['$queryRaw'][0];
+    expect(probe.sql).toMatch(/w\."redeemablePoints" < 0 LIMIT 1/);
+    expect(probe.text).toMatch(/cp\."clientId" = \$1 AND/); // the Postgres text binds ONLY the tenant id
+    expect(probe.values).toEqual(['deoleo']);
     expect(calls['$transaction']).toBeUndefined();
     expect(calls['outlet.findMany']).toBeUndefined();
+  });
+
+  it('round 6: no reversal row after the last ≥ 0 row → no allocation query at all', async () => {
+    const { svc, calls } = harness([], [{ walletId: 'w1', _max: { seq: 9, createdAt: null } }], [{ walletId: 'w1', creditReversalId: 'ROLD', seq: 3, createdAt: approvedAt }]);
+    const res = await svc.walletsInDebt('bajaj');
+    expect(calls['alloc.findMany']).toBeUndefined();
+    expect(res.wallets[0].sources).toEqual([]);
+  });
+
+  it('round 6 (items 2/4): anyWalletBelowZero answers the probe on its own', async () => {
+    expect(await harness([], [], [], true).svc.anyWalletBelowZero('deoleo')).toBe(false);
+    expect(await harness([]).svc.anyWalletBelowZero('bajaj')).toBe(true);
   });
 
   it('round 5 B7: a last row at or above zero WITHOUT seq (pre-sequencing history) falls back to time', async () => {

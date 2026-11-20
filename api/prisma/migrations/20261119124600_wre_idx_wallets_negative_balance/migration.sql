@@ -5,6 +5,13 @@
 -- one transaction, so CREATE INDEX CONCURRENTLY is not possible here; a plain CREATE INDEX takes a SHARE lock (reads
 -- continue, writes wait) only while it builds — wallets is small and the partial index scans it once. Plain session SET
 -- of lock_timeout: a busy table makes the file FAIL FAST — run the deploy in a quiet window.
+-- IF lock_timeout TRIPS ("canceling statement due to lock timeout"): Prisma records this migration as FAILED and every
+-- later `prisma migrate deploy` is BLOCKED (P3009) until it is resolved. Nothing was created (the file's transaction
+-- rolled back), so recovery is:
+--   npx prisma migrate resolve --rolled-back 20261119124600_wre_idx_wallets_negative_balance
+--   then re-run the deploy (the same in-VPC migrate job) in a quieter window.
+-- The probe that uses this index (WalletService.anyWalletBelowZero) is raw SQL with a LITERAL `< 0`, so the planner can
+-- prove the partial-index predicate (a bound parameter could not).
 SET lock_timeout = '5s';
 
 CREATE INDEX IF NOT EXISTS "wallets_negative_balance_idx" ON "wallets" ("redeemablePoints") WHERE "redeemablePoints" < 0;
