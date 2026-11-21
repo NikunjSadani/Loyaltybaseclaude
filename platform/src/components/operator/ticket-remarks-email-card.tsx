@@ -10,7 +10,7 @@ import { MAX_CC, MAX_TO, checkRemarksEmail } from '@/lib/ticket-remarks-email-ru
  * Gifsy console → Clients → <client> → "Support tickets" card (owner-approved 2026-11-20, tenant-scoped;
  * To + CC lists 2026-11-21). The client's "Ticket remarks email" recipients for "Ask client admin for
  * remarks":
- *   - To set   → the email goes to every To address (the admin asked is named in the email), Cc the CC list.
+ *   - To set   → the email goes to every To address (the email asks for the client's remarks; no admin is named), Cc the CC list.
  *   - To blank → the email goes to the admin chosen on each ticket (as before), Cc the CC list if any.
  * GIFSY_ADMIN only (API-enforced; the page renders this card only for the owner).
  * GET/PUT /api/gifsy/clients/:slug/ticket-remarks-email  ({ to: string[], cc: string[] }).
@@ -208,7 +208,7 @@ export function TicketRemarksEmailCard({ slug }: { slug: string }) {
         <h3 className="text-sm font-medium text-gray-800">Ticket remarks email</h3>
         <p id="ticket-remarks-email-help" className="text-xs text-gray-500">
           Who gets the &apos;Ask client admin for remarks&apos; email. <strong className="font-medium">To</strong>: when
-          set, the email goes to these addresses (the admin asked is named in the email); leave it blank and the email
+          set, the email goes to these addresses (it asks for remarks from the client, without naming one person); leave it blank and the email
           goes to the admin chosen on each ticket. <strong className="font-medium">CC</strong>: copied on every remarks
           email either way — and if To is blank and the chosen admin has no email address, the CC list receives it
           instead. Press Enter or comma after each address.
