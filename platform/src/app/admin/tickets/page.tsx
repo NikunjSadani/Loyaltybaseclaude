@@ -279,7 +279,8 @@ function EscalatePanel({ ticketId, assignees, assigneesError, onRetryAssignees, 
     } else {
       const res = await api.post<{
         emailSent?: boolean; emailError?: string; alreadyPending?: boolean; message?: string;
-        emailRecipientKind?: 'INBOX' | 'ADMIN'; emailRecipient?: string | null;
+        emailRecipientKind?: 'INBOX' | 'ADMIN' | 'CC_ONLY'; emailRecipient?: string | null;
+        emailCc?: string[]; emailRejected?: string[]; emailCcOnlyDelivered?: boolean;
       }>(
         `/api/tickets/${ticketId}/request-client-remarks`, { clientAdminId: target, note: text.trim() },
       );
@@ -290,15 +291,27 @@ function EscalatePanel({ ticketId, assignees, assigneesError, onRetryAssignees, 
       } else {
         // Word it from where the email actually went: the client's ticket remarks inbox, or the admin.
         const inbox = res.data?.emailRecipientKind === 'INBOX';
-        const where = inbox
-          ? `the client's ticket remarks inbox${res.data?.emailRecipient ? ` ${res.data.emailRecipient}` : ''}`
-          : `the client admin${res.data?.emailRecipient ? ` (${res.data.emailRecipient})` : ''}`;
-        if (res.data?.emailSent === false) {
+        const cc = res.data?.emailCc?.length ? `, cc ${res.data.emailCc.join(', ')}` : '';
+        // CC_ONLY: the chosen admin has no email, so the client's CC list received it instead.
+        const ccOnly = res.data?.emailRecipientKind === 'CC_ONLY';
+        const where = ccOnly
+          ? `the client's CC list${res.data?.emailRecipient ? ` ${res.data.emailRecipient}` : ''} (the client admin has no email address on file)`
+          : inbox
+            ? `the client's ticket remarks inbox${res.data?.emailRecipient ? ` ${res.data.emailRecipient}` : ''}${cc}`
+            : `the client admin${res.data?.emailRecipient ? ` (${res.data.emailRecipient})` : ''}${cc}`;
+        // Relay refused some addresses while accepting others — say so loudly, never as a plain success.
+        const rejected = res.data?.emailRejected?.length
+          ? ` ⚠ The mail relay REJECTED ${res.data.emailRejected.join(', ')} — they did NOT get the email.`
+          : '';
+        if (res.data?.emailSent === false && res.data.emailCcOnlyDelivered) {
+          // Distinct from "not sent at all": the CC list got it, the intended To recipients did not.
+          onDone(`Remarks requested, but the email was NOT delivered to anyone in To — ${res.data.emailError ?? 'the mail relay refused them'}. The client admin was notified in-app.`);
+        } else if (res.data?.emailSent === false) {
           onDone(`Remarks requested, but the email to ${where} was NOT sent (${res.data.emailError ?? 'unknown reason'}). The client admin was notified in-app only.`);
-        } else if (inbox) {
-          onDone(`Remarks requested. The client admin was notified in-app; email sent to ${where}.`);
+        } else if (inbox || ccOnly) {
+          onDone(`Remarks requested. The client admin was notified in-app; email sent to ${where}.${rejected}`);
         } else {
-          onDone(`Remarks requested. The client admin was notified in-app and by email${res.data?.emailRecipient ? ` (${res.data.emailRecipient})` : ''}.`);
+          onDone(`Remarks requested. The client admin was notified in-app and by email${res.data?.emailRecipient ? ` (${res.data.emailRecipient}${cc})` : ''}.${rejected}`);
         }
       }
     }

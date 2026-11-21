@@ -40,22 +40,51 @@ describe('renderRemarksEmail', () => {
 
   it('ask block: who asked, the note verbatim, asked-on time, "Asked: <admin>" when sent to the inbox', () => {
     const { html } = renderRemarksEmail(base());
-    expect(html).toContain('Priya (Gifsy) (Gifsy support) needs your remarks:');
+    expect(html).toContain('Priya (Gifsy) (Gifsy support) needs remarks from Anil Shah:');
     expect(html).toContain('Please confirm whether the October invoice for this outlet was approved.');
     expect(html).toMatch(/Asked on \d{1,2} \w{3} \d{4}, \d{1,2}:\d{2} (am|pm) IST · Asked: Anil Shah/);
+    expect(html).toContain("Sent to your programme&#39;s ticket remarks inbox. Ask Anil Shah (or another client admin) to reply in the portal.");
+    expect(html).toContain('Awaiting remarks from Anil Shah');
     expect(renderRemarksEmail(base({ toInbox: false })).html).not.toContain('Asked: Anil Shah');
+  });
+
+  it('chosen admin, no CC (every tenant default): personal copy unchanged', () => {
+    const { html } = renderRemarksEmail(base({ toInbox: false }));
+    expect(html).toContain('>Hi Anil Shah,</p>');
+    expect(html).toContain('needs your remarks:');
+    expect(html).toContain('Awaiting your remarks');
+    expect(html).toContain('Open ticket &amp; reply');
+    expect(html).toContain('Please reply in the portal — replies to this email are not read.');
+    expect(html).not.toMatch(/copied for information|Ask Anil Shah|Asked: /);
+  });
+
+  it('with a CC list: every reader sees who was asked + "copied for information" + ask them to reply', () => {
+    for (const over of [{ toInbox: true, hasCc: true }, { toInbox: false, hasCc: true }]) {
+      const { html } = renderRemarksEmail(base(over));
+      expect(html).toContain('Asked: Anil Shah');
+      expect(html).toContain('If you received this as a Cc, you&#39;re copied for information.');
+      expect(html).toContain('Ask Anil Shah (or another client admin) to reply in the portal.');
+      expect(html).toContain('Open ticket (portal login needed)');
+    }
+  });
+
+  it('CC-only (asked admin has no email): says why the CC list got it; blank admin name → "your team"', () => {
+    const { html } = renderRemarksEmail(base({ toInbox: true, ccOnly: true }));
+    expect(html).toContain('>Hello,</p>');
+    expect(html).toContain('Sent to your programme&#39;s ticket remarks CC list because Anil Shah has no email address on file.');
+    expect(renderRemarksEmail(base({ toInbox: true, askedAdminName: ' ' })).html).toContain('Asked: your team');
   });
 
   it('button + the honest "replies to this email are not read" line', () => {
     const { html } = renderRemarksEmail(base());
     expect(html).toContain('href="https://uat-bajajloyalty.gifsy.in/admin/tickets?ticket=t1"');
-    expect(html).toContain('Open ticket &amp; reply');
-    expect(html).toContain('Please reply in the portal — replies to this email are not read.');
+    expect(html).toContain('Open ticket (portal login needed)');
+    expect(html).toContain('replies to this email are not read.');
   });
 
   it('ticket block: number, category, priority, status, raised on + age', () => {
     const { html } = renderRemarksEmail(base());
-    for (const t of ['TKT-ABC1', '>Points<', '>High<', 'Awaiting your remarks', '(4 days ago)']) expect(html).toContain(t);
+    for (const t of ['TKT-ABC1', '>Points<', '>High<', 'Awaiting remarks from Anil Shah', '(4 days ago)']) expect(html).toContain(t);
   });
 
   it('issue: subject + original description, truncated at ~800 chars with a pointer to the portal', () => {

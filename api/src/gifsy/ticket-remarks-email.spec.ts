@@ -7,7 +7,12 @@ import { GifsyController } from './gifsy.controller';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { parseTicketRemarksEmailInput, readTicketRemarksEmail } from '../tickets/ticket-remarks-inbox';
+import {
+  parseTicketRemarksEmailInput,
+  parseTicketRemarksRecipientsInput,
+  readTicketRemarksEmail,
+  readTicketRemarksRecipients,
+} from '../tickets/ticket-remarks-inbox';
 
 const owner: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'Owner' };
 const staff: JwtPayload = { sub: 'staff1', role: 'GIFSY_STAFF', clientId: 'gifsy', phone: '', name: 'Staff' };
@@ -65,14 +70,14 @@ describe('GifsyService ticket remarks email', () => {
     const res = await svc.setTicketRemarksEmail(owner, 'bajaj', { email: ' Tickets@Bajaj.Example ' });
     expect(tx.programSetting.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { clientId_settingKey: { clientId: 'bajaj', settingKey: 'ticketRemarksEmail' } },
-      create: expect.objectContaining({ clientId: 'bajaj', settingValue: { email: 'tickets@bajaj.example' } }),
-      update: expect.objectContaining({ settingValue: { email: 'tickets@bajaj.example' } }),
+      create: expect.objectContaining({ clientId: 'bajaj', settingValue: { to: ['tickets@bajaj.example'], cc: [], email: 'tickets@bajaj.example' } }),
+      update: expect.objectContaining({ settingValue: { to: ['tickets@bajaj.example'], cc: [], email: 'tickets@bajaj.example' } }),
     }));
     expect(tx.auditLog.create).toHaveBeenCalledWith({ data: expect.objectContaining({
       entityType: 'TICKET_REMARKS_EMAIL', entityId: 'bajaj', actorId: 'admin1',
-      oldValues: { email: null }, newValues: { email: 'tickets@bajaj.example' },
+      oldValues: { to: [], cc: [] }, newValues: { to: ['tickets@bajaj.example'], cc: [] },
     }) });
-    expect(res).toMatchObject({ email: 'tickets@bajaj.example', lastChange: { byName: 'Owner' } });
+    expect(res).toMatchObject({ email: 'tickets@bajaj.example', to: ['tickets@bajaj.example'], cc: [], lastChange: { byName: 'Owner' } });
   });
 
   it('clear: blank removes the row (back to emailing the chosen admin) + audit', async () => {
@@ -80,8 +85,76 @@ describe('GifsyService ticket remarks email', () => {
     prisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { email: 'tickets@bajaj.example' } }).mockResolvedValueOnce(null);
     const res = await svc.setTicketRemarksEmail(owner, 'bajaj', { email: '' });
     expect(tx.programSetting.deleteMany).toHaveBeenCalledWith({ where: { clientId: 'bajaj', settingKey: 'ticketRemarksEmail' } });
-    expect(tx.auditLog.create.mock.calls[0][0].data).toMatchObject({ oldValues: { email: 'tickets@bajaj.example' }, newValues: { email: null } });
+    expect(tx.auditLog.create.mock.calls[0][0].data).toMatchObject({ oldValues: { to: ['tickets@bajaj.example'], cc: [] }, newValues: { to: [], cc: [] } });
     expect(res.email).toBeNull();
+    expect(res).toMatchObject({ to: [], cc: [] });
+  });
+
+  it('lists: To + CC normalised (trim, lowercase, dedupe) and stored with email = To[0]', async () => {
+    const { svc, prisma, tx } = makeService();
+    prisma.programSetting.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    await svc.setTicketRemarksEmail(owner, 'bajaj', {
+      to: [' A@Bajaj.Example ', 'a@bajaj.example', 'b@bajaj.example', ''],
+      cc: ['C@bajaj.example', 'c@bajaj.example '],
+    });
+    const value = { to: ['a@bajaj.example', 'b@bajaj.example'], cc: ['c@bajaj.example'], email: 'a@bajaj.example' };
+    expect(tx.programSetting.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: expect.objectContaining({ settingValue: value }) }));
+    expect(tx.auditLog.create.mock.calls[0][0].data.newValues).toEqual({ to: value.to, cc: value.cc });
+  });
+
+  it('CC only (To blank) is stored WITHOUT `email` (a rolled-back reader never treats it as an inbox)', async () => {
+    const { svc, prisma, tx } = makeService();
+    await svc.setTicketRemarksEmail(owner, 'bajaj', { to: [], cc: ['ops@bajaj.example'] });
+    expect(tx.programSetting.upsert.mock.calls[0][0].create.settingValue).toEqual({ to: [], cc: ['ops@bajaj.example'] });
+    expect(prisma.programSetting.findUnique).toHaveBeenCalled();
+  });
+
+  it('both lists empty removes the row', async () => {
+    const { svc, prisma, tx } = makeService();
+    prisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { to: ['a@b.com'], cc: ['c@d.com'] } });
+    await svc.setTicketRemarksEmail(owner, 'bajaj', { to: [], cc: [] });
+    expect(tx.programSetting.deleteMany).toHaveBeenCalled();
+    expect(tx.programSetting.upsert).not.toHaveBeenCalled();
+  });
+
+  it('legacy {email} body keeps the existing CC list (never silently wiped)', async () => {
+    const { svc, prisma, tx } = makeService();
+    prisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { to: ['old@b.com'], cc: ['c@d.com'] } });
+    await svc.setTicketRemarksEmail(owner, 'bajaj', { email: 'new@b.com' });
+    expect(tx.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({ to: ['new@b.com'], cc: ['c@d.com'], email: 'new@b.com' });
+  });
+
+  it('{ to } alone keeps the stored CC; { cc } alone keeps the stored To', async () => {
+    const { svc, prisma, tx } = makeService();
+    prisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { to: ['a@b.com'], cc: ['c@d.com'] } });
+    await svc.setTicketRemarksEmail(owner, 'bajaj', { to: ['x@b.com'] });
+    expect(tx.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({ to: ['x@b.com'], cc: ['c@d.com'], email: 'x@b.com' });
+
+    const second = makeService();
+    second.prisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { to: ['a@b.com'], cc: ['c@d.com'] } });
+    await second.svc.setTicketRemarksEmail(owner, 'bajaj', { cc: ['e@f.com'] });
+    expect(second.tx.programSetting.upsert.mock.calls[0][0].update.settingValue).toEqual({ to: ['a@b.com'], cc: ['e@f.com'], email: 'a@b.com' });
+  });
+
+  it('{ cc } alone that collides with the stored To → 400 (no silent removal)', () => {
+    expect(() => parseTicketRemarksRecipientsInput({ cc: ['a@b.com'] }, { to: ['a@b.com'], cc: [] }))
+      .toThrow('a@b.com cannot be in both To and CC — keep it in one list.');
+  });
+
+  it('old single-address record reads as To = [email], CC = [] (GET)', async () => {
+    const { svc, prisma } = makeService();
+    prisma.programSetting.findUnique.mockResolvedValue({ settingValue: { email: 'Tickets@Bajaj.Example' } });
+    expect(await svc.getTicketRemarksEmail(owner, 'bajaj')).toMatchObject({
+      to: ['tickets@bajaj.example'], cc: [], email: 'tickets@bajaj.example',
+    });
+  });
+
+  it('re-saving an old single-address record as lists with the same To is a no-op', async () => {
+    const { svc, prisma, tx } = makeService();
+    prisma.programSetting.findUnique.mockResolvedValue({ settingValue: { email: 'tickets@bajaj.example' } });
+    await svc.setTicketRemarksEmail(owner, 'bajaj', { to: ['tickets@bajaj.example'], cc: [] });
+    expect(tx.programSetting.upsert).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
   });
 
   it('no-op when unchanged (no write, no audit row)', async () => {
@@ -142,6 +215,30 @@ describe('ticket remarks email — strict printable-ASCII validation (follow-up)
 
   it('a stored value with an invisible char is never used', () => {
     expect(readTicketRemarksEmail({ email: 'tickets\u200B@bajaj.example' })).toBeNull();
+  });
+
+  it('list validation: invalid entry named by list + position; limits; overlap; mixing legacy + lists', () => {
+    const msg = (fn: () => unknown) => { try { fn(); } catch (e) { return (e as Error).message; } return 'no error'; };
+    expect(msg(() => parseTicketRemarksRecipientsInput({ to: ['a@b.com', 'nope'] }))).toBe('To address 2: "nope" is not a valid email address.');
+    expect(msg(() => parseTicketRemarksRecipientsInput({ cc: ['x@y.com, z@y.com'] }))).toMatch(/^CC address 1: Enter ONE email address/);
+    expect(msg(() => parseTicketRemarksRecipientsInput({ to: ['1@b.com', '2@b.com', '3@b.com', '4@b.com', '5@b.com', '6@b.com'] })))
+      .toBe('At most 5 To addresses are allowed (got 6).');
+    expect(msg(() => parseTicketRemarksRecipientsInput({ cc: Array.from({ length: 11 }, (_, i) => `c${i}@b.com`) })))
+      .toBe('At most 10 CC addresses are allowed (got 11).');
+    expect(msg(() => parseTicketRemarksRecipientsInput({ to: ['a@b.com'], cc: ['A@B.com'] })))
+      .toBe('a@b.com cannot be in both To and CC — keep it in one list.');
+    expect(msg(() => parseTicketRemarksRecipientsInput({ to: ['a@b.com'], email: 'c@d.com' }))).toMatch(/not both/);
+    expect(msg(() => parseTicketRemarksRecipientsInput({ to: 'a@b.com' as never }))).toMatch(/must be a list/);
+    // Exactly 5 / 10 is fine; duplicates collapse BEFORE the limit is checked.
+    expect(parseTicketRemarksRecipientsInput({ to: ['1@b.com', '2@b.com', '3@b.com', '4@b.com', '5@b.com', '5@B.com'] }).to).toHaveLength(5);
+  });
+
+  it('readTicketRemarksRecipients: new shape, legacy shape, junk dropped, overlap kept in To only', () => {
+    expect(readTicketRemarksRecipients({ email: 'a@b.com' })).toEqual({ to: ['a@b.com'], cc: [] });
+    expect(readTicketRemarksRecipients({ to: ['a@b.com', 'junk'], cc: ['a@b.com', 'c@d.com'] })).toEqual({ to: ['a@b.com'], cc: ['c@d.com'] });
+    expect(readTicketRemarksRecipients({ to: [], cc: ['c@d.com'], email: 'ignored@x.com' })).toEqual({ to: [], cc: ['c@d.com'] });
+    expect(readTicketRemarksRecipients(null)).toEqual({ to: [], cc: [] });
+    expect(readTicketRemarksEmail({ to: ['x@y.com'], cc: [] })).toBe('x@y.com');
   });
 
   it('still accepts ordinary addresses (plus, dots, hyphens, apostrophe, sub-domains)', () => {

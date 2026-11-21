@@ -5,7 +5,14 @@ import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { scrubSecrets } from './scrub-secrets';
 
 /** Reason used when MSG91 answers with a body that isn't JSON (an HTML error page, a proxy page…). */
-export const msg91NonJsonReason = (status: number) => `MSG91 returned a non-JSON response (HTTP ${status})`;
+/** sendEmail outcome — see sendEmail's doc. Addresses lowercased. */
+export interface SendEmailResult {
+  skipped: boolean;
+  accepted: string[];
+  rejected: string[];
+}
+
+export const msg91NonJsonReason =(status: number) => `MSG91 returned a non-JSON response (HTTP ${status})`;
 
 /**
  * Parse an MSG91 response body. A non-JSON body is mapped to an error-shaped object carrying a
@@ -549,13 +556,19 @@ export class Msg91Service {
    * @param params.to      recipient email addresses (no-op when empty)
    * @param params.subject the email subject line
    * @param params.html    the email body (HTML)
+   * @param params.cc      optional Cc addresses (one message, real `Cc:` header; omitted when empty)
+   * @returns the SMTP envelope outcome: `rejected` = addresses the relay refused at RCPT time while
+   *          others were accepted (nodemailer resolves on a partial accept and THROWS when every
+   *          recipient is refused). `skipped` = not attempted (empty To / SMTP unconfigured).
+   *          Acceptance by the relay is not inbox delivery — a later bounce is not visible here.
    */
-  async sendEmail(params: { to: string[]; subject: string; html: string }): Promise<void> {
+  async sendEmail(params: { to: string[]; cc?: string[]; subject: string; html: string }): Promise<SendEmailResult> {
     const { to, subject, html } = params;
+    const cc = params.cc ?? [];
 
     // Nothing to send — no-op (never errors on an empty recipient list).
     if (to.length === 0) {
-      return;
+      return { skipped: true, accepted: [], rejected: [] };
     }
 
     // MSG91 email sends over SMTP relay (Domain Settings → SMTP Integration), NOT the v5
@@ -569,9 +582,9 @@ export class Msg91Service {
     // without SMTP configured logs and returns instead of throwing (so local/CI never send).
     if (!pass) {
       this.logger.warn(
-        `[DEV] MSG91 SMTP not configured — email "${subject}" to ${to.join(', ')} skipped`,
+        `[DEV] MSG91 SMTP not configured — email "${subject}" to ${to.join(', ')}${cc.length ? ` (cc ${cc.join(', ')})` : ''} skipped`,
       );
-      return;
+      return { skipped: true, accepted: [], rejected: [] };
     }
 
     const host = this.config.get<string>('MSG91_SMTP_HOST')?.trim() || 'smtp.mailer91.com';
@@ -596,10 +609,16 @@ export class Msg91Service {
     });
 
     try {
-      const info = await transporter.sendMail({ from, to, subject, html });
+      // `cc` only when non-empty so every existing caller's message is byte-identical.
+      const info = await transporter.sendMail(cc.length ? { from, to, cc, subject, html } : { from, to, subject, html });
+      const asList = (v: unknown): string[] =>
+        (Array.isArray(v) ? v : []).map((x) => (typeof x === 'string' ? x : String((x as { address?: string })?.address ?? x)).toLowerCase());
+      const accepted = asList((info as { accepted?: unknown }).accepted);
+      const rejected = asList((info as { rejected?: unknown }).rejected);
       this.logger.log(
-        `Email "${subject}" sent to ${to.length} recipient(s) via SMTP (id ${info.messageId})`,
+        `Email "${subject}" sent to ${to.length + cc.length} recipient(s) via SMTP (id ${info.messageId})${rejected.length ? ` — relay REJECTED ${rejected.join(', ')}` : ''}`,
       );
+      return { skipped: false, accepted, rejected };
     } catch (e) {
       const reason = (e as Error)?.message ?? String(e);
       this.logger.error(`MSG91 SMTP email "${subject}" failed: ${reason}`);
