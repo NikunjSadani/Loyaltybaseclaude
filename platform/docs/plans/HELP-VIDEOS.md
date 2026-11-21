@@ -134,7 +134,16 @@ Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 5. If it says "Your phone's date and time are wrong", turn on automatic date & time in Settings.
 6. Tap "Test again".
 
-**3. Turn on notifications**
+**3. Allow camera access** *(added 2026-11-21 at the owner's request; LIVE on Bajaj staging, published)*
+*KYC photos, visibility photos and UPI QR scanning need your phone's camera.*
+1. When the phone asks to use the camera for this site, tap "Allow".
+2. If you see "Camera access is required" or "Camera access denied", the camera is blocked. Follow the step for your phone below.
+3. Android: open Chrome → ⋮ (top right) → Settings → Site settings → Camera → tap this app's site → Allow.
+4. iPhone: open Settings → Safari → Camera → Allow (or in Safari tap "aA" → Website Settings → Camera → Allow).
+5. If it says "The camera is in use by another photo or app", close that app (e.g. a video call) first.
+6. Come back to the app and tap "Retry" under the photo box.
+
+**4. Turn on notifications**
 *Get alerts for KYC approvals, rejections and reminders.*
 1. Tap your avatar (top right) to open Profile.
 2. In "App & Notifications", tap "Enable notifications".
@@ -142,7 +151,7 @@ Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 4. You should now see "Notifications: On".
 5. If it says "Notifications are blocked", allow notifications for this site in your browser settings.
 
-**4. Complete a KYC (UPI)**
+**5. Complete a KYC (UPI)**
 *Enroll an outlet and capture its UPI ID.*
 1. Go to "KYC" → "New Enrollment" and search the outlet under "Outlet Name / ID", then tap "Continue →".
 2. Fill "Partner Information" (owner name, mobile, GST/PAN) and take the "Owner Photo".
@@ -151,7 +160,7 @@ Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 5. Tick the consent boxes, get the owner's signature, and tap "Send OTP to Outlet Owner".
 6. Enter the owner's 6-digit OTP and tap "Verify" — you'll see "KYC Submitted!".
 
-**5. Complete a KYC (scan UPI QR)**
+**6. Complete a KYC (scan UPI QR)**
 *Capture the UPI ID by scanning the shop's payment QR.*
 1. Fill the Outlet, Details and Address steps as usual.
 2. On "Bank Details", choose "UPI ID" and tap "Scan QR Code".
@@ -160,7 +169,7 @@ Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 5. Tick consent, get the signature, tap "Send OTP to Outlet Owner".
 6. Enter the owner's OTP and tap "Verify".
 
-**6. Visibility capture** *(Bajaj)*
+**7. Visibility capture** *(Bajaj)*
 *Send POSM photos for your outlets.*
 1. On the Dashboard, open the "Visibility" card ("View visibility").
 2. Find the outlet (search or filters); rows marked "Due" need a capture.
@@ -169,7 +178,7 @@ Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 5. Tap "Submit capture" — you'll see "Capture submitted".
 6. If a capture is "Rejected" or "Changes requested", tap "Recapture" and submit again.
 
-**7. Check outlets & targets**
+**8. Check outlets & targets**
 *See your outlets and how they are doing against target.*
 1. On the Dashboard, check "Target Achievement" and "Target vs. Achievement".
 2. Tap "View full outlet KPIs" (managers: "View team").
@@ -177,7 +186,7 @@ Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 4. Use the period, "All Beats", "All Types" and "All Programs" filters.
 5. Tap an outlet to see its KYC status and details.
 
-**8. Re-KYC (fix flagged details)**
+**9. Re-KYC (fix flagged details)**
 *Fix the details the reviewer flagged.*
 1. Go to "KYC" and filter by "Re-KYC Required" (or "Rejected").
 2. Open the outlet and read the amber banner — it lists the fields to re-capture.
@@ -185,7 +194,7 @@ Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 4. Only the fields highlighted in amber can be edited — fix or re-upload them.
 5. Send the OTP to the owner, enter it and tap "Verify" — you'll see "Re-KYC Submitted!".
 
-**9. Raise a support ticket**
+**10. Raise a support ticket**
 *Report a problem for an outlet or yourself.*
 1. Tap "Support" in the bottom bar, then "New Ticket".
 2. Choose "For an Outlet" (search the outlet) or "My Own Issue".
