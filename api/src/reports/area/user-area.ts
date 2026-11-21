@@ -45,6 +45,18 @@ export const AREA_MAX_VALUES = 5;
 
 const ASM_CODE = 'ASM';
 const PARTNER_ROLES = new Set(['SSS', 'WHOLESALER', 'SUB_STOCKIST']);
+/** Login roles that sit above the ASM level — used for the "<N> cities" summary when the employee record has no
+ *  hierarchy level (or one this tenant does not rank). The level, when known, always wins. */
+const ABOVE_ASM_ROLES = new Set(['SALES_HO', 'SALES_STATE_HEAD']);
+
+/** Excel sheet carrying the full State / City lists of the rows summarised to "<N> cities" / "<N> states". */
+export const AREAS_FULL_SHEET = 'Areas (full)';
+export const AREAS_FULL_HEADERS = ['User', 'Mobile', 'Role', 'State (full list)', 'City (full list)'];
+/** One "Areas (full)" row, or null when the row was not summarised (its main-sheet cells are already complete). */
+export function areasFullRow(name: string, phone: string, role: string, a: Pick<UserArea, 'state' | 'city' | 'stateAll' | 'cityAll'>): string[] | null {
+  if (!a.cityAll && !a.stateAll) return null;
+  return [name, phone, role, areaCell(a.stateAll ?? a.state), areaCell(a.cityAll ?? a.city)];
+}
 
 /** One user's area — each column a sorted, distinct, never-empty list. */
 export interface UserArea {
@@ -160,9 +172,9 @@ export function areaNotes(asmHeader: string): string[] {
   const above = aboveAsmLabel(a);
   return [
     `${a}: the ${a} this user reports to in the sales hierarchy; an ${a} shows their own name. Users above the ${a} level show "${above}". "Vacant (code)" = that ${a} position is vacant in the uploaded hierarchy (we show the vacant territory, not the next manager up). Retailers / wholesalers show the ${a} of each active sales rep covering their outlet (assigned to the outlet, to its owner, or to its parent group); a rep who sits above the ${a} level shows as "${above} — Name (level)". Inactive or vacant reps are ignored.`,
-    `Zone / State / City: retailers / wholesalers — their main outlet in the outlet master (the outlet shown as their Outlet Code); a group head with no outlet of their own shows "Group — N outlets" in all four columns. Sales users — the outlets covered by them and by the active reps below them (a zone typed on the employee record wins). The Excel file lists every value; the page shows the first ${AREA_MAX_VALUES} and "+N more" (click to see all).`,
+    `Zone / State / City: retailers / wholesalers — their main outlet in the outlet master (the outlet shown as their Outlet Code); a group head with no outlet of their own shows "Group — N outlets" in all four columns. Sales users — the outlets covered by them and by the active reps below them (a zone typed on the employee record wins). The Excel files list every value (except the counts for users above the ${a} level — see the "<N> cities" note); the page shows the first ${AREA_MAX_VALUES} and "+N more" (click to see all).`,
     `"${AREA_NOT_SET}" = the value is missing in the uploaded data (no ${a} in the reporting chain, no active rep covering the outlet, no outlet assigned, or a blank outlet field). "${AREA_NOT_IN_HIERARCHY}" = admin, MIS and Gifsy logins.`,
-    `Users above the ${a} level (e.g. state / national heads, head office): City shows "<N> cities" (the number of distinct cities they cover) instead of the full list, and State shows "<N> states" when they cover more than ${AREA_MAX_VALUES} states; Zone is shown in full. On the page, hover the cell to see the full list.`,
+    `Users above the ${a} level (e.g. state / national heads, head office): City shows "<N> cities" (the number of distinct cities they cover) instead of the full list, and State shows "<N> states" when they cover more than ${AREA_MAX_VALUES} states; Zone is shown in full. Full lists: in the Excel files on the "${AREAS_FULL_SHEET}" sheet; on the page, hover the cell.`,
   ];
 }
 
@@ -345,7 +357,9 @@ export function buildUserAreaResolver(
         state: areaValues(g.states),
         city: areaValues(g.cities),
       };
-      return isAbove(su) ? summariseAboveAsm(area) : area;
+      // Above ASM by level; with no / an unranked level, by login role (SALES_HO / SALES_STATE_HEAD).
+      const above = isAbove(su) || (rankOf(su) === undefined && ABOVE_ASM_ROLES.has(role));
+      return above ? summariseAboveAsm(area) : area;
     }
     if (role.startsWith('SALES_')) return fill(AREA_NOT_SET); // a sales login with no employee record
     if (PARTNER_ROLES.has(role)) {

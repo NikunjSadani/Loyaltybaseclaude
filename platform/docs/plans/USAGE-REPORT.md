@@ -146,7 +146,10 @@ server action, not an authenticated `/api` call. Any NEW poll/timer must use `ba
   column — the tenant's own level numbers, else the canonical code order) show City as "<N> cities" when they cover 2+
   cities (one city / "Not set" as-is) and State as "<N> states" only when > 5 states; Zone unchanged; everyone else
   unchanged. Applied in the resolver (`summariseAboveAsm`), so both Excels write the count; the page shows the count
-  with the full list in the tooltip (`cityAll` / `stateAll` on the row). A 4th About / notes line explains it.
+  with the full list in the tooltip (`cityAll` / `stateAll` on the row). A 4th About / notes line explains it. Both
+  Excels add an **"Areas (full)"** sheet (User · Mobile · Role · State · City full lists) for exactly the summarised
+  rows (sheet omitted when there are none), so nothing is lost. A sales user with NO / an unranked hierarchy level
+  counts as above ASM when the login role is SALES_HO or SALES_STATE_HEAD (a known level always wins).
 
 **Area columns — staging check (2026-11-21, real logins):** ASM / Zone / State / City filled in both the App
 installed-users export and the Usage report; admin rows read "Not in sales hierarchy"; users above ASM read "Above ASM

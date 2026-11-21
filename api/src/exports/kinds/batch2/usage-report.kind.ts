@@ -31,7 +31,7 @@ import {
 } from '../../../reports/usage/usage-report';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import { parseQueryDto } from './kind-support';
-import { areaCell } from '../../../reports/area/user-area';
+import { AREAS_FULL_HEADERS, AREAS_FULL_SHEET, areaCell, areasFullRow } from '../../../reports/area/user-area';
 
 /** 'ASM' is the default header — the file uses the tenant's own ASM level name (usageReportHeaders). */
 export const USAGE_REPORT_HEADERS = [
@@ -107,7 +107,7 @@ export function usageReportCells(r: UsageRow): XlsxCell[] {
     r.name,
     normalizePhoneLast10(r.phone) ?? r.phone ?? '',
     r.role.replace(/_/g, ' '),
-    areaCell(r.asm), // full lists in the file (the page caps the display)
+    areaCell(r.asm), // full lists in the file (above-ASM City / State = counts; full lists on "Areas (full)")
     areaCell(r.zone),
     areaCell(r.state),
     areaCell(r.city),
@@ -167,6 +167,15 @@ async function run(ctx: ExportRunContext, p: UsageParams, out: XlsxStreamWriter)
   // 4. "About this report": how to read the numbers (same wording as the page). Not counted as data rows.
   const about = await out.addSheet(USAGE_ABOUT_SHEET, ['About this report', ''], { widths: [28, 110] });
   for (const line of usageAboutRows(report, p, ctx.now)) await about.addRow(line);
+
+  // 5. Full State / City lists of the above-ASM rows summarised to "<N> cities" / "<N> states" (only when any).
+  const full = report.rows
+    .map((r) => areasFullRow(r.name, normalizePhoneLast10(r.phone) ?? r.phone ?? '', r.role.replace(/_/g, ' '), r))
+    .filter((x): x is string[] => x !== null);
+  if (full.length) {
+    const fullSheet = await out.addSheet(AREAS_FULL_SHEET, AREAS_FULL_HEADERS, { widths: [26, 14, 16, 60, 100] });
+    for (const r of full) await fullSheet.addRow(r);
+  }
   return { rowCount: report.rows.length };
 }
 

@@ -2,6 +2,7 @@ import {
   AREA_NOT_IN_HIERARCHY,
   AREA_NOT_SET,
   areaCell,
+  areasFullRow,
   areaValues,
   buildUserAreaResolver,
   cachedUserAreaResolver,
@@ -177,6 +178,28 @@ describe('user area resolver (ASM · Zone · State · City)', () => {
     expect(resolver('newtenant', []).resolve({ id: 'u-sm', role: 'SALES_STATE_HEAD' }).city).toEqual(['5 cities']);
   });
 
+  it('no / unranked hierarchy level: a SALES_HO / SALES_STATE_HEAD login is still summarised; other roles are not', () => {
+    const f = fixtures();
+    const noLevel = (id: string) => ({ ...su(id, '', 'nsm'), hierarchyLevel: null as unknown as { code: string } });
+    f.salesUsers.push(noLevel('hoX'), noLevel('soX'));
+    f.assignments.push({ salesUserId: 'hoX', outletId: 'o1', partnerId: null }, { salesUserId: 'hoX', outletId: 'o4', partnerId: null });
+    f.assignments.push({ salesUserId: 'soX', outletId: 'o1', partnerId: null }, { salesUserId: 'soX', outletId: 'o4', partnerId: null });
+    const res = buildUserAreaResolver('deoleo', LEVELS, f.salesUsers, f.assignments, f.outlets);
+    expect(res.resolve({ id: 'u-hoX', role: 'SALES_HO' }).city).toEqual(['2 cities']);
+    expect(res.resolve({ id: 'u-hoX', role: 'SALES_STATE_HEAD' }).cityAll).toEqual(['Patna', 'Pune']);
+    expect(res.resolve({ id: 'u-soX', role: 'SALES_SO' }).city).toEqual(['Patna', 'Pune']);
+    // a KNOWN level wins over the role: an ASM-level login with a senior role is not summarised
+    expect(res.resolve({ id: 'u-asm1', role: 'SALES_HO' }).city).toEqual(['Kochi', 'Kollam', 'Patna', 'Pune']);
+  });
+
+  it('"Areas (full)" row only for summarised rows, with the full lists', () => {
+    expect(areasFullRow('Nina', '9000000001', 'SALES HO', { state: ['6 states'], stateAll: ['A', 'B'], city: ['3 cities'], cityAll: ['X', 'Y', 'Z'] }))
+      .toEqual(['Nina', '9000000001', 'SALES HO', 'A, B', 'X, Y, Z']);
+    expect(areasFullRow('Nina', '9', 'SALES HO', { state: ['Goa'], city: ['2 cities'], cityAll: ['X', 'Y'] }))
+      .toEqual(['Nina', '9', 'SALES HO', 'Goa', 'X, Y']);
+    expect(areasFullRow('Ravi', '9', 'SALES SO', { state: ['Goa'], city: ['Panaji'] })).toBeNull();
+  });
+
   it('vacant ASM position above someone → "Vacant (code)" — the vacant territory, NOT the next active manager', () => {
     expect(sales('so2')).toEqual({ asm: ['Vacant (ASM-07)'], zone: [AREA_NOT_SET], state: ['Goa'], city: [AREA_NOT_SET] });
   });
@@ -250,7 +273,8 @@ describe('user area resolver (ASM · Zone · State · City)', () => {
     expect(r.notes[0]).toMatch(/Inactive or vacant reps are ignored/);
     expect(r.notes[1]).toMatch(/outlet master/);
     expect(r.notes[1]).toMatch(/"Group — N outlets"/);
-    expect(r.notes[1]).toMatch(/Excel file lists every value/);
+    expect(r.notes[1]).toMatch(/Excel files list every value \(except the counts for users above the Area Manager level/);
+    expect(r.notes[3]).toMatch(/"Areas \(full\)" sheet/);
     expect(r.notes[2]).toMatch(/"Not set"/);
     expect(r.notes[2]).toMatch(/"Not in sales hierarchy"/);
   });
