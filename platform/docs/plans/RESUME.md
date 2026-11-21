@@ -253,11 +253,10 @@ worker jobs → jobsExecutor grant → API (1 GiB) → frontend. "Pushed" ≠ "d
    and note the backup id (2026-11-15: `1794744368023`).
 3. **Prepare main:** bring `main` to that develop SHA (fast-forward). If a main-only revert is ever pending, it must be
    re-applied explicitly — a merge does not undo a revert.
-4. **Owner dispatches** GitHub Actions → **"Deploy — Production (main)"** → **Run workflow** (branch `main`) → then
-   **Review deployments → Approve** (the run waits at the approval gate — GitHub Environment `production` with required
-   reviewers). To drop the second click (decision pending, owner): repo **Settings → Environments → production →**
-   untick **Required reviewers → Save protection rules**, or remove the `approve` job from
-   `.github/workflows/deploy.yml`. `deploy.yml` is `workflow_dispatch`-only; a
+4. **Owner dispatches** GitHub Actions → **"Deploy — Production (main)"** → **Run workflow** (branch `main`) — that is the ONLY
+   click since 2026-11-21: the owner unticked **Required reviewers** on GitHub Environment `production`, so the
+   `approve` job no longer pauses (it stays in `deploy.yml` as a harmless no-op; tests still gate the deploy).
+   `deploy.yml` is `workflow_dispatch`-only; a
    push to `main` never deploys. ⚠️ **Never "Re-run" an older run** — it redeploys THAT run's old commit (2026-11-19:
    a re-run put `71df01f7` on prod for ~1 h). Before the deploy: pause `voucher-dispersal-drain-prod` and ask that no
    sales file is applied; resume the scheduler after verification.
