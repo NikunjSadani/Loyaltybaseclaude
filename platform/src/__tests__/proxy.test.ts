@@ -620,9 +620,14 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
     mockRefresh.mockResolvedValue(TRANSIENT);
     // Fake ONLY setTimeout (the retry pause); the token hash (crypto.subtle) stays real.
     vi.useFakeTimers({ toFake: ['setTimeout'] });
+    let p: ReturnType<typeof run> | undefined;
     try {
-      const p = run(expiredWithRefresh('/admin', { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate' }));
-      for (let i = 0; i < 50 && mockRefresh.mock.calls.length === 0; i++) {
+      p = run(expiredWithRefresh('/admin', { 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate' }));
+      // Wait on REAL time (Date is not faked) for the first refresh attempt — the token hash uses real
+      // crypto.subtle, which can take many event-loop turns on a slow CI runner (a fixed tick count flaked
+      // on GitHub Actions 2026-11-21 and its dangling retry then broke B4).
+      const deadline = Date.now() + 5_000;
+      while (mockRefresh.mock.calls.length === 0 && Date.now() < deadline) {
         await new Promise((r) => setImmediate(r));
       }
       for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
@@ -645,6 +650,9 @@ describe('proxy — refresh failure handling by request kind + dedupe', () => {
       // cookies untouched
       expect(res.cookies.get('refresh_token')?.value).toBeUndefined();
     } finally {
+      // Never leave the retry pending into the next test (it would add a refresh call there).
+      try { await vi.advanceTimersByTimeAsync(1_000); } catch { /* timers may already be real */ }
+      if (p) await p.catch(() => undefined);
       vi.useRealTimers();
     }
   });
