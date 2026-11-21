@@ -352,7 +352,7 @@ and the Performance trend (`GET /partner/targets/trend`).
 - **Owner decision 2026-11-21 (platform-wide, approved): DEFAULT ON for every client incl. Deoleo and every new client**
   — ON unless `features.requireLocation` is explicitly `false`. Gifsy console → Clients → tenant → **Behaviour flags** →
   "Require location for KYC and visibility capture" is now only the **emergency off** (switching OFF stores an explicit
-  `false`, no confirm; amber note "Emergency off — photos/KYC without location will be saved as Unverifiable").
+  `false`, no confirm; amber note "Emergency off — KYC and visibility photos can then be submitted without a phone location (no location check for them)").
 - Prod data (read-only probe 2026-11-21): **Bajaj prod = explicit `true`** (already ON), **Deoleo = key absent** (and no
   `outletMasterGeo`) → Deoleo goes ON at the deploy of this branch with no data change. Bajaj staging: ON.
 - ON: a sales rep can't start or submit a KYC / visibility capture until location is allowed for the site AND the phone

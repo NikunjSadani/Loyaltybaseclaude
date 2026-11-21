@@ -303,7 +303,7 @@ describe('Partner app tabs (B3)', () => {
     expect(patchSpy.mock.calls[0][0]).toEqual({ features: { requireLocation: false } });
     await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'false'));
     expect(screen.getByTestId('behaviour-flag-requireLocation-note').textContent).toBe(
-      'Emergency off — photos/KYC without location will be saved as Unverifiable',
+      'Emergency off — KYC and visibility photos can then be submitted without a phone location (no location check for them)',
     );
   });
 

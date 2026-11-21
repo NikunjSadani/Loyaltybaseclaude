@@ -90,7 +90,7 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = 
     // Owner 2026-11-21: ON by default for every client (incl. Deoleo + every new client); the switch is only an
     // explicit emergency off.
     defaultOn: true,
-    offNote: 'Emergency off — photos/KYC without location will be saved as Unverifiable',
+    offNote: 'Emergency off — KYC and visibility photos can then be submitted without a phone location (no location check for them)',
   },
 };
 

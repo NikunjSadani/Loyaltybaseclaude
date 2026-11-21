@@ -21,7 +21,7 @@ still pending owner.
 - Defaults: `DEFAULT_CLIENT_CONFIG.features.requireLocation = true`; new-client wizard starts it ON and sends ONLY
   deviations from the defaults (untouched → no key; switched off → explicit `false`).
 - Console: absent key shows ON; switching OFF PATCHes `{ requireLocation: false }` (no confirm) and shows the amber note
-  "Emergency off — photos/KYC without location will be saved as Unverifiable"; switching back ON keeps the confirm.
+  "Emergency off — KYC and visibility photos can then be submitted without a phone location (no location check for them)"; switching back ON keeps the confirm.
   ⚠️ Copy check for the owner: a KYC without location is recorded `UNVERIFIABLE` only on `outletMasterGeo` tenants, and a
   visibility capture only when that tenant's fence is on — on a tenant with neither (Deoleo today) a fix-less
   submission is saved with no location but NOT labelled Unverifiable.

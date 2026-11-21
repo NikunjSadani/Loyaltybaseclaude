@@ -104,7 +104,7 @@ describe('New-client wizard — behaviour flags', () => {
     expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
     expect(sw).toHaveAttribute('aria-checked', 'false');
     expect(screen.getByTestId('wizard-behaviour-flag-requireLocation-off-note').textContent).toBe(
-      'Emergency off — photos/KYC without location will be saved as Unverifiable',
+      'Emergency off — KYC and visibility photos can then be submitted without a phone location (no location check for them)',
     );
     await submitFromFeatures();
     await waitFor(() => expect(postSpy).toHaveBeenCalledTimes(1));
