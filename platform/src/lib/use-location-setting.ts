@@ -1,13 +1,18 @@
 'use client';
 
 /**
- * useLocationSetting — the last-known "Require location" behaviour while the programme settings load / fail
- * (LOCATION-GATE.md, round-3 #4/#5). Pure on-device state (browser storage + one timer); no network.
+ * useLocationSetting — the phone's view of the "Require location" setting while the programme settings load / fail
+ * (LOCATION-GATE.md). DEFAULT ON since 2026-11-21: the phone treats the setting as ON unless it was LOADED as an
+ * explicit `false` (emergency off). Pure on-device state (browser storage + one timer); no network.
  *
- *   • captureHold    — hold the visibility camera ONLY when the last-known value is TRUE and the settings are still
- *                      loading, and never longer than CAPTURE_HOLD_MAX_MS. Unknown (first ever load) and false
- *                      (every Deoleo rep) → never held; the server enforces the rule anyway.
- *   • settingsNote   — show "location may be required" on a settings-load FAILURE, only when last-known is TRUE.
+ *   • gateEnabled     — what to pass to useLocationGate. Loaded OK → the loaded value. Load FAILED → ON (the guide
+ *                       shows up front; a rep never fills the whole KYC only to hit the server refusal). Still loading →
+ *                       ON unless the last-known value (v2 cache, written only from a successful load) is `false`.
+ *   • requireForForm  — what the visibility form is told (CameraField: "a tagged photo without a fix is not kept").
+ *                       `false` ONLY when the loaded setting is explicitly off — never while loading / after a failure.
+ *   • captureHold     — hold the visibility camera while settings load (≤ CAPTURE_HOLD_MAX_MS) unless last-known is
+ *                       `false`.
+ *   • settingsNote    — "location may be required" on ANY settings-load failure.
  *   • Writes the freshly loaded value back (successful loads only).
  */
 import { useEffect, useState } from 'react';
@@ -29,14 +34,17 @@ export function useLocationSetting(requireLocation: boolean, loading: boolean, e
   }, [loading, error, requireLocation]);
 
   useEffect(() => {
-    if (!loading || lastKnown !== true) return;
+    if (!loading || lastKnown === false) return;
     const t = setTimeout(() => setHoldExpired(true), CAPTURE_HOLD_MAX_MS);
     return () => clearTimeout(t);
   }, [loading, lastKnown]);
 
+  const loadedOff = !loading && !error && requireLocation === false;
   return {
     lastKnown,
-    captureHold: loading && lastKnown === true && !holdExpired,
-    settingsNote: !loading && !!error && lastKnown === true,
+    gateEnabled: loading ? lastKnown !== false : !loadedOff,
+    requireForForm: !loadedOff,
+    captureHold: loading && lastKnown !== false && !holdExpired,
+    settingsNote: !loading && !!error,
   };
 }

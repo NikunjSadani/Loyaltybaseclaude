@@ -206,21 +206,26 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       const deoleo = html.slice(html.indexOf('data-tenant="deoleo"'));
       expect(bajaj).toContain('data-section="Location"');
       expect(bajaj).toContain('blocked outside the 200 m fence <strong style="color:#b45309;">2</strong>');
+      // Emergency-off Deoleo with NO activity in the window → no Location section (loaded, but nothing to show).
       expect(deoleo).not.toContain('data-section="Location"');
-      // Loaded ONLY for the switch-on tenant — Deoleo is never queried. (Other auditLog counts — the
-      // Gifsy-wide sign-in security line — are not tenant-scoped and are excluded here.)
+      // Audit 2026-11-21 #4: loaded for EVERY tenant (an emergency off never hides history), each scoped to its own
+      // tenant. (Other auditLog counts — the Gifsy-wide sign-in security line — are not tenant-scoped; excluded.)
       const locCalls = prisma.auditLog.count.mock.calls.filter(
         ([a]: any) => a.where.entityType !== 'SECURITY_EVENT' && a.where.entityType !== 'AUTH_EVENT',
       );
-      expect(locCalls).toHaveLength(1);
-      for (const [arg] of locCalls) {
-        expect(arg.where.entityType).toBe('LOCATION_FENCE_BLOCK');
-        expect(arg.where.metadata).toEqual({ path: ['clientId'], equals: 'bajaj' });
-      }
+      expect(locCalls).toHaveLength(2);
+      expect(locCalls.map(([a]: any) => a.where.metadata.equals).sort()).toEqual(['bajaj', 'deoleo']);
+      for (const [arg] of locCalls) expect(arg.where.entityType).toBe('LOCATION_FENCE_BLOCK');
+      // Audit #7: visibility captures counted from sales reps only (same as the KYC counts).
+      // The Location section's 3 capture counts per tenant (captures / no GPS / poor accuracy) — the Visibility
+      // section's own counts are separate and unchanged.
+      const locVis = prisma.visibilityCaptureSubmission.count.mock.calls.filter(([a]: any) => a.where?.submittedBy);
+      expect(locVis).toHaveLength(6);
+      for (const [arg] of locVis) expect((arg as any).where.submittedBy).toEqual({ is: { clientId: (arg as any).where.clientId } });
       const locKyc = prisma.kycSubmission.count.mock.calls.filter(([a]: any) => a.where?.user?.role);
-      expect(locKyc.length).toBeGreaterThan(0);
+      expect(locKyc).toHaveLength(6); // 3 KYC counts × 2 tenants, each pinned to its own tenant
+      expect([...new Set(locKyc.map(([a]: any) => a.where.user.clientId))].sort()).toEqual(['bajaj', 'deoleo']);
       for (const [arg] of locKyc) {
-        expect((arg as any).where.user.clientId).toBe('bajaj');
         expect((arg as any).where.user.role.in).toEqual(expect.arrayContaining(['SALES_ISR', 'SALES_SO']));
       }
     });

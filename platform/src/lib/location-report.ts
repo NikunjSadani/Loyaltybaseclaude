@@ -28,7 +28,8 @@ export interface LocationTotals extends Omit<LocationRow, 'userId' | 'name' | 'p
 export interface LocationReportPage {
   generatedAt: string
   range: { from: string; to: string; days: number }
-  setting: { requireLocation: boolean; fenceOn: boolean; outletMasterFence: boolean }
+  /** switchedOffSince: ISO time of the console emergency off (null when ON or unknown). */
+  setting: { requireLocation: boolean; switchedOffSince?: string | null; fenceOn: boolean; outletMasterFence: boolean }
   notes: { sources: string; accuracy: string; unverifiable: string; blocked: string; lock: string; region: string }
   filters: { roles: string[]; regions: string[] }
   totals: LocationTotals
@@ -63,6 +64,16 @@ export function locationQuery(f: LocationFilters, extra: Record<string, string> 
   if (f.sort !== 'issues') q.set('sort', f.sort)
   for (const [k, v] of Object.entries(extra)) q.set(k, v)
   return q.toString()
+}
+
+/** Banner for a tenant whose "Require location" is currently switched off (same wording as the API's Excel "About"). */
+export function locationSwitchedOffText(since: string | null | undefined): string {
+  const d = since ? new Date(since) : null
+  const when =
+    d && Number.isFinite(d.getTime())
+      ? ` since ${d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' })}`
+      : ''
+  return `Location is currently switched off for this client (emergency off${when}) — new submissions may have no location.`
 }
 
 /** ms → "2.1 s" (one decimal) or "—". */

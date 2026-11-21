@@ -1230,6 +1230,8 @@ function BehaviourFlagsSection({
   const [error, setError] = useState<string | null>(null);
   // A flag with `confirmOn` meta asks before switching ON (never before switching OFF).
   const [confirmKey, setConfirmKey] = useState<BehaviourFlagKey | null>(null);
+  // The value the open confirm switches TO (ON → confirmOn copy; OFF → confirmOff copy, e.g. requireLocation).
+  const [confirmNext, setConfirmNext] = useState(true);
 
   const save = async (key: BehaviourFlagKey, next: boolean) => {
     if (saving) return;
@@ -1245,7 +1247,9 @@ function BehaviourFlagsSection({
 
   const toggle = async (key: BehaviourFlagKey, next: boolean) => {
     if (saving) return;
-    if (next && BEHAVIOUR_FLAG_META[key].confirmOn) {
+    const meta = BEHAVIOUR_FLAG_META[key];
+    if (next ? meta.confirmOn : meta.confirmOff) {
+      setConfirmNext(next);
       setConfirmKey(key);
       return;
     }
@@ -1285,12 +1289,14 @@ function BehaviourFlagsSection({
       </p>
       <BehaviourFlagConfirm
         flagKey={confirmKey}
+        next={confirmNext}
         tenantLabel={`Tenant: ${config.internalName}`}
+        tenantName={config.internalName}
         busy={saving}
         onCancel={() => setConfirmKey(null)}
-        onConfirm={(key) => {
+        onConfirm={(key, next) => {
           setConfirmKey(null);
-          void save(key, true);
+          void save(key, next);
         }}
       />
     </div>

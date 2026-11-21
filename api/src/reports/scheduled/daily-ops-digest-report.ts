@@ -533,6 +533,10 @@ const kycEmpty = (k: KycSection) =>
   k.gifsy.pending === 0 &&
   k.fieldFastTrackedExcluded === 0;
 
+/** Digest note for an emergency-off tenant (features.requireLocation === false). */
+export const LOCATION_SWITCHED_OFF_NOTE =
+  '"Require location" is currently switched OFF for this client (emergency off) — new KYC and visibility submissions may have no location.';
+
 const note = (text: string, color = MUTED) => `<div style="font-size:12px;color:${color};margin:0 0 6px;">${esc(text)}</div>`;
 
 /** Billing progress block (always rendered when present: an empty month is itself worth saying). */
@@ -766,13 +770,16 @@ function tenantSections(t: TenantDigest): string {
           ['rejected', intIN(v.rejected)],
         ]) + metricLine('Right now', [['pending review', intIN(v.pending), accentIf(v.pending, 'amber')]]),
     ),
-    // Location compliance (LOCATION-GATE.md): loaded (and shown) only for tenants with "Require location" ON.
+    // Location compliance (LOCATION-GATE.md): shown for every tenant with "Require location" ON (the default), and for an
+    // emergency-off tenant whenever the window had activity — with a loud "switched off" note (history never hidden).
     renderSection(
       'Location',
       t.location,
-      (l) => !l.requireLocation,
+      (l) => !l.requireLocation && l.kycs === 0 && l.captures === 0 && l.blockedOutside === 0,
       (l) =>
-        (l.requireLocation ? note('"Require location" is ON — reps cannot start or submit a KYC or visibility capture without a location fix.') : '') +
+        (l.requireLocation
+          ? note('"Require location" is ON — reps cannot start or submit a KYC or visibility capture without a location fix.')
+          : note(LOCATION_SWITCHED_OFF_NOTE, '#b45309')) +
         metricLine('In window', [
           ['KYCs', intIN(l.kycs)],
           ['visibility captures', intIN(l.captures)],

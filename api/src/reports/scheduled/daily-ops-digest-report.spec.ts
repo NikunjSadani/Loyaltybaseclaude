@@ -721,16 +721,20 @@ describe('buildDailyOpsDigest', () => {
     const loc = (o: Partial<{ requireLocation: boolean; kycs: number; captures: number; noGps: number; poorAccuracy: number; blockedOutside: number }> = {}) =>
       ok({ requireLocation: false, kycs: 0, captures: 0, noGps: 0, poorAccuracy: 0, blockedOutside: 0, ...o });
 
-    it('hidden for a tenant with the setting OFF and no captures (Deoleo on a quiet day)', () => {
+    it('hidden for an emergency-off tenant with no activity in the window', () => {
       const t = quietTenant('deoleo', 'Deoleo');
       t.location = loc();
       expect(buildDailyOpsDigest(input([t])).html).not.toContain('data-section="Location"');
     });
 
-    it('setting OFF → hidden even with captures (owner review 2026-11-19: Deoleo email unchanged)', () => {
+    it('AUDIT 2026-11-21 #4: emergency off WITH activity → shown (history never hidden) with the loud "switched OFF" note', () => {
       const t = quietTenant('deoleo', 'Deoleo');
       t.location = loc({ kycs: 12, captures: 3, noGps: 2, poorAccuracy: 4 });
-      expect(buildDailyOpsDigest(input([t])).html).not.toContain('data-section="Location"');
+      const html = buildDailyOpsDigest(input([t])).html;
+      expect(html).toContain('data-section="Location"');
+      expect(html).toContain('is currently switched OFF for this client (emergency off)');
+      expect(html).toMatch(/without GPS <strong style="color:#b45309;">2<\/strong>/);
+      expect(html).not.toContain('&quot;Require location&quot; is ON');
     });
 
     it('setting ON with captures → no GPS / poor accuracy counts in amber', () => {

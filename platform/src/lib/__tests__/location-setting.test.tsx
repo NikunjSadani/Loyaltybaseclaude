@@ -1,6 +1,6 @@
 /**
- * Last-known "Require location" (LOCATION-GATE.md, round-3 #4/#5): camera hold only for last-known-TRUE reps, at most
- * 5 s; settings-failure note only for last-known-TRUE reps; unknown / false (Deoleo) → neither. Plus the server-clock
+ * "Require location" on the phone while settings load / fail (LOCATION-GATE.md; DEFAULT ON since 2026-11-21): unknown
+ * = ON, a failed load = ON + note, only a loaded explicit false turns the gate off; v2 cache. Plus the server-clock
  * skew read from the settings response's Date header (round-3 #3).
  */
 import React from 'react';
@@ -13,47 +13,66 @@ import { useLocationSetting } from '../use-location-setting';
 import { readLastKnownRequireLocation, writeLastKnownRequireLocation } from '../location-setting-cache';
 import { useTenantFeatures } from '../tenant-features';
 
+// lastKnown | gateEnabled | requireForForm | captureHold | settingsNote
 function Probe({ req, loading, error }: { req: boolean; loading: boolean; error?: boolean }) {
   const s = useLocationSetting(req, loading, error);
-  return <p data-testid="s">{`${String(s.lastKnown)}|${s.captureHold}|${s.settingsNote}`}</p>;
+  return <p data-testid="s">{`${String(s.lastKnown)}|${s.gateEnabled}|${s.requireForForm}|${s.captureHold}|${s.settingsNote}`}</p>;
 }
 const text = () => screen.getByTestId('s').textContent;
 
 beforeEach(() => window.localStorage.clear());
 afterEach(() => vi.useRealTimers());
 
+// DEFAULT ON since 2026-11-21 (audit #2): unknown = ON; only a LOADED explicit false turns the phone gate off.
 describe('useLocationSetting', () => {
-  it('unknown (first ever load) → no hold, no note; a successful load is remembered', () => {
+  it('unknown (first ever load) → gate ON + camera held while loading; a successful load is remembered', () => {
     const { rerender } = render(<Probe req loading />);
-    expect(text()).toBe('null|false|false');
+    expect(text()).toBe('null|true|true|true|false');
     rerender(<Probe req={true} loading={false} />);
+    expect(text()).toBe('null|true|true|false|false');
     expect(readLastKnownRequireLocation()).toBe(true);
   });
 
-  it('last-known FALSE (Deoleo) → never held, never a note — even on a settings failure', () => {
+  it('a LOADED explicit false → gate off, form not told requireLocation, remembered as false', () => {
+    const { rerender } = render(<Probe req loading />);
+    rerender(<Probe req={false} loading={false} />);
+    expect(text()).toBe('null|false|false|false|false');
+    expect(readLastKnownRequireLocation()).toBe(false);
+  });
+
+  it('settings load FAILED → gate ON, form told requireLocation, note shown — whatever the last-known value', () => {
     writeLastKnownRequireLocation(false);
     const { rerender } = render(<Probe req={false} loading />);
-    expect(text()).toBe('false|false|false');
     rerender(<Probe req={false} loading={false} error />);
-    expect(text()).toBe('false|false|false');
+    expect(text()).toBe('false|true|true|false|true');
   });
 
-  it('last-known TRUE → held while loading, released after at most 5 s; note on a failure', async () => {
+  it('last-known FALSE (a fresh v2 value) while loading → gate not run yet, but the FORM is still told requireLocation', () => {
+    writeLastKnownRequireLocation(false);
+    render(<Probe req={false} loading />);
+    expect(text()).toBe('false|false|true|false|false');
+  });
+
+  it('a pre-deploy cached "0" under the OLD key is ignored (unknown → ON)', () => {
+    window.localStorage.setItem(`lg:requireLocation:u-rep:${window.location.host}`, '0');
+    render(<Probe req loading />);
+    expect(text()).toBe('null|true|true|true|false');
+  });
+
+  it('camera hold is released after at most 5 s', async () => {
     writeLastKnownRequireLocation(true);
     vi.useFakeTimers();
-    const { rerender } = render(<Probe req={false} loading />);
-    expect(text()).toBe('true|true|false');
+    render(<Probe req loading />);
+    expect(text()).toBe('true|true|true|true|false');
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-    expect(text()).toBe('true|false|false');
-    rerender(<Probe req={false} loading={false} error />);
-    expect(text()).toBe('true|false|true');
+    expect(text()).toBe('true|true|true|false|false');
   });
 
-  it('storage that throws → unknown, never crashes', () => {
+  it('storage that throws → unknown (= ON), never crashes', () => {
     const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
     try {
       render(<Probe req loading />);
-      expect(text()).toBe('null|false|false');
+      expect(text()).toBe('null|true|true|true|false');
     } finally {
       spy.mockRestore();
     }

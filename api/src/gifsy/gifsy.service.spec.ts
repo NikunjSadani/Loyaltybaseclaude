@@ -835,6 +835,25 @@ describe('GifsyService', () => {
       });
     });
 
+    it('AUDIT 2026-11-21 #6: the FIRST requireLocation emergency off records the effective before (true — default ON), not null', async () => {
+      mockPrisma.client.findFirst.mockResolvedValue(bajajRow({ walletModule: true }));
+      mockPrisma.client.update.mockImplementation(async ({ data }) => bajajRow(data.features));
+      mockPrisma.auditLog.create.mockResolvedValue({});
+      await service.updateClient(gifsy, 'bajaj', { features: { requireLocation: false } });
+      const { oldValues, newValues, metadata } = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(oldValues).toEqual({ requireLocation: true });
+      expect(newValues).toEqual({ requireLocation: false });
+      expect(metadata).toMatchObject({ changedKeys: ['requireLocation'], requireLocationBefore: 'default ON (no stored value)' });
+
+      // A later switch with a STORED value records it as stored (no default note).
+      mockPrisma.auditLog.create.mockClear();
+      mockPrisma.client.findFirst.mockResolvedValue(bajajRow({ requireLocation: false }));
+      await service.updateClient(gifsy, 'bajaj', { features: { requireLocation: true } });
+      const second = mockPrisma.auditLog.create.mock.calls[0][0].data;
+      expect(second.oldValues).toEqual({ requireLocation: false });
+      expect(second.metadata).not.toHaveProperty('requireLocationBefore');
+    });
+
     it('AUDIT: generic — a module toggle OFF and a nested partnerApp key are each logged per key', async () => {
       mockPrisma.client.findFirst.mockResolvedValue(bajajRow({ walletModule: true, partnerApp: { showTeam: true } }));
       mockPrisma.client.update.mockImplementation(async ({ data }) => bajajRow(data.features));

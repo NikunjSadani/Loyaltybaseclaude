@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 import { ROLES, type RoleDef } from './e2e/fixtures/roles';
 import { resolveEnv } from './e2e/fixtures/env';
+import { E2E_GEO } from './e2e/fixtures/geo';
 
 // hostHeader (local prod-build) strategy: each role project injects `x-forwarded-host: <role.host>` on
 // every spec request so the FE proxy resolves the tenant from the host — the same way staging does by
@@ -35,6 +36,14 @@ function tenantHeaders(role: RoleDef): Record<string, string> | undefined {
  * Naming: tests are `*.e2e.ts` (vitest is configured to ignore `e2e/**`, so `npm test` won't touch them).
  */
 const BASE_URL = resolveEnv().baseURL;
+
+/**
+ * Location gate (features.requireLocation — DEFAULT ON for every tenant since 2026-11-21; LOCATION-GATE.md): the sales
+ * KYC wizard / visibility capture show the location guide until the site permission is granted AND a fix arrives.
+ * Sales-role projects run with the permission granted and a fixed position (Mumbai) — the Playwright equivalent of
+ * context.grantPermissions(['geolocation']) + context.setGeolocation(...).
+ */
+const SALES_GEO = { permissions: ['geolocation'], geolocation: E2E_GEO };
 
 export default defineConfig({
   testDir: './e2e',
@@ -87,7 +96,8 @@ export default defineConfig({
       name: 'sales',
       testMatch: /sales\/.*\.e2e\.ts/,
       dependencies: ['setup'],
-      use: { ...devices['Desktop Chrome'], storageState: ROLES.sales.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.sales) },
+      // Location gate (DEFAULT ON since 2026-11-21): the sales KYC / visibility pages need location allowed + a fix.
+      use: { ...devices['Desktop Chrome'], ...SALES_GEO, storageState: ROLES.sales.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.sales) },
     },
     {
       name: 'gifsy',
@@ -119,7 +129,7 @@ export default defineConfig({
       name: 'salesManager',
       testMatch: /salesManager\/.*\.e2e\.ts/,
       dependencies: ['setup'],
-      use: { ...devices['Desktop Chrome'], storageState: ROLES.salesManager.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.salesManager) },
+      use: { ...devices['Desktop Chrome'], ...SALES_GEO, storageState: ROLES.salesManager.storageStatePath, extraHTTPHeaders: tenantHeaders(ROLES.salesManager) },
     },
   ],
 });

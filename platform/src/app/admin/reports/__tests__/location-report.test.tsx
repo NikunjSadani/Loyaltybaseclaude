@@ -84,11 +84,24 @@ describe('Location Report page', () => {
     await waitFor(() => expect(jsonCalls().some((u) => u.includes('region=West'))).toBe(true), { timeout: 3000 });
   });
 
-  it('setting OFF is said plainly; empty state when no rep had activity', async () => {
-    fetchMock.mockResolvedValue(ok(report({ setting: { requireLocation: false, fenceOn: false, outletMasterFence: false }, rows: [], totalRows: 0 })));
+  it('emergency off → the report stays available with a loud "switched off" banner (with the date); empty state', async () => {
+    fetchMock.mockResolvedValue(ok(report({
+      setting: { requireLocation: false, switchedOffSince: '2026-11-21T05:00:00.000Z', fenceOn: false, outletMasterFence: false },
+      rows: [], totalRows: 0,
+    })));
     render(<LocationPage />);
     expect(await screen.findByText(/No KYCs, visibility captures or blocked attempts/)).toBeTruthy();
-    expect(screen.getByTestId('location-setting').textContent).toMatch(/Require location is OFF/);
+    expect(screen.getByTestId('location-setting').textContent).toMatch(/Require location is switched OFF/);
+    expect(screen.getByTestId('location-switched-off-banner').textContent).toBe(
+      'Location is currently switched off for this client (emergency off since 21 Nov 2026) — new submissions may have no location.',
+    );
+  });
+
+  it('ON → no switched-off banner', async () => {
+    fetchMock.mockResolvedValue(ok(report()));
+    render(<LocationPage />);
+    await screen.findByText('Asha ISR');
+    expect(screen.queryByTestId('location-switched-off-banner')).toBeNull();
   });
 
   it('error → message + Retry', async () => {
@@ -127,7 +140,7 @@ describe('Reports index', () => {
     expect(el).toBeTruthy();
   });
 
-  it('AUDIT #4: switch OFF (Deoleo) → no Location Report tile (list unchanged)', async () => {
+  it('probe says not available (no tenant scope) → no Location Report tile (list unchanged)', async () => {
     featuresFetch(false);
     render(<ReportsPage />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());

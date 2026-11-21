@@ -494,11 +494,15 @@ function FeaturesStep({
   // A behaviour flag with `confirmOn` meta (allowPayoutWithoutPan, gifsyRejectFastTrack) asks before switching ON — the
   // same dialog as the client page. Switching OFF never asks.
   const [confirmKey, setConfirmKey] = useState<BehaviourFlagKey | null>(null);
+  const [confirmNext, setConfirmNext] = useState(true);
   const setFlag = (key: BehaviourFlagKey, value: boolean) =>
     onChange({ behaviourFlags: { ...form.behaviourFlags, [key]: value } });
+  // confirmOn asks before switching ON; confirmOff (requireLocation — default-ON compliance control) before OFF.
   const flipFlag = (key: BehaviourFlagKey) => {
     const next = !form.behaviourFlags[key];
-    if (next && BEHAVIOUR_FLAG_META[key].confirmOn) {
+    const meta = BEHAVIOUR_FLAG_META[key];
+    if (next ? meta.confirmOn : meta.confirmOff) {
+      setConfirmNext(next);
       setConfirmKey(key);
       return;
     }
@@ -579,11 +583,13 @@ function FeaturesStep({
       </div>
       <BehaviourFlagConfirm
         flagKey={confirmKey}
+        next={confirmNext}
         tenantLabel={`New client: ${form.internalName || form.slug || 'unnamed'}`}
+        tenantName={form.internalName || form.slug || undefined}
         onCancel={() => setConfirmKey(null)}
-        onConfirm={(key) => {
+        onConfirm={(key, next) => {
           setConfirmKey(null);
-          setFlag(key, true);
+          setFlag(key, next);
         }}
       />
     </div>

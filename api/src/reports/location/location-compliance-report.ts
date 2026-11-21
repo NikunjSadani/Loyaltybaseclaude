@@ -23,7 +23,7 @@
 import { ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
-import { FENCE_BLOCK_ENTITY, POOR_ACCURACY_M, isLocationRequired } from '../../common/location-gate.helper';
+import { FENCE_BLOCK_ENTITY, LOCATION_REQUIRED_FEATURE, POOR_ACCURACY_M, isLocationRequired } from '../../common/location-gate.helper';
 import { resolveUsageParams, usageQueryError, USAGE_QUERY_TIMEOUT_MS, USAGE_TIMEOUT_MESSAGE } from '../usage/usage-report';
 import {
   LOCATION_PAGE_SIZE_DEFAULT,
@@ -35,9 +35,8 @@ import {
 export const LOCATION_TIMEOUT_MESSAGE =
   'The location report took too long to build. Please try again, or choose a shorter date range or narrower filters.';
 
-/** Audit #4: the report exists only for programmes with "Require location" ON (Deoleo sees nothing new). */
-export const LOCATION_REPORT_OFF_MESSAGE =
-  'The Location report is available only for programmes with "Require location" switched on (Gifsy console → Behaviour flags).';
+/** Only an unknown tenant is refused (since 2026-11-21 the report is available for every programme, incl. emergency off). */
+export const LOCATION_REPORT_OFF_MESSAGE = 'The Location report is not available for this programme.';
 
 export const SALES_ROLES = ['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR'] as const;
 
@@ -88,7 +87,8 @@ export interface LocationReport {
   generatedAt: string;
   timezone: 'Asia/Kolkata';
   range: { from: string; to: string; days: number };
-  setting: { requireLocation: boolean; fenceOn: boolean; outletMasterFence: boolean };
+  /** switchedOffSince: ISO time of the console emergency off (null when ON or unknown). */
+  setting: { requireLocation: boolean; switchedOffSince: string | null; fenceOn: boolean; outletMasterFence: boolean };
   notes: typeof LOCATION_NOTES;
   filters: { roles: string[]; regions: string[] };
   applied: { role: string | null; region: string | null; sort: LocationSort };
@@ -245,6 +245,32 @@ function visibilityFenceOn(features: Record<string, unknown>, visibilityConfig: 
   return gf?.enabled === true;
 }
 
+/**
+ * When the tenant's current emergency off started: the latest console audit row (ClientFeatures, entityId = slug) that
+ * set requireLocation to false. null when unknown (e.g. written outside the console) or on a failed read (best-effort —
+ * the banner then says "since an unknown date").
+ */
+export async function locationSwitchedOffSince(prisma: Pick<PrismaService, 'auditLog'>, clientId: string): Promise<string | null> {
+  try {
+    const row = await prisma.auditLog.findFirst({
+      where: { entityType: 'ClientFeatures', entityId: clientId, newValues: { path: [LOCATION_REQUIRED_FEATURE], equals: false } },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    return row?.createdAt ? row.createdAt.toISOString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Banner for a tenant whose setting is currently off (report page + Excel "About"). */
+export function locationSwitchedOffBanner(since: string | null): string {
+  const when = since
+    ? ` since ${new Date(since).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' })}`
+    : '';
+  return `Location is currently switched off for this client (emergency off${when}) — new submissions may have no location.`;
+}
+
 /** Build the whole report (every matching rep, sorted). Reads run sequentially (one pooled connection at a time). */
 export async function buildLocationReport(
   prisma: PrismaService,
@@ -256,7 +282,11 @@ export async function buildLocationReport(
 
   const client = await prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
   const features = ((client?.features ?? {}) as Record<string, unknown>) ?? {};
-  if (!client || !isLocationRequired(features)) throw new ForbiddenException(LOCATION_REPORT_OFF_MESSAGE);
+  // Default ON since 2026-11-21 → the report is available for every tenant. An emergency-off tenant keeps it (its
+  // history is never hidden); the setting below drives a loud "switched off" banner. Unknown tenant → 403.
+  if (!client) throw new ForbiddenException(LOCATION_REPORT_OFF_MESSAGE);
+  const requireLocation = isLocationRequired(features);
+  const switchedOffSince = requireLocation ? null : await locationSwitchedOffSince(prisma, clientId);
   const visCfg = await prisma.programSetting.findUnique({
     where: { clientId_settingKey: { clientId, settingKey: 'visibilityConfig' } },
     select: { settingValue: true },
@@ -373,7 +403,8 @@ export async function buildLocationReport(
       days: Math.round((Date.parse(`${p.to}T00:00:00Z`) - Date.parse(`${p.from}T00:00:00Z`)) / 86_400_000) + 1,
     },
     setting: {
-      requireLocation: isLocationRequired(features),
+      requireLocation,
+      switchedOffSince,
       fenceOn,
       outletMasterFence: features.outletMasterGeo === true,
     },

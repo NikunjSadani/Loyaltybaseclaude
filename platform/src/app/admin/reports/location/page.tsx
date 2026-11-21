@@ -27,6 +27,7 @@ import {
   fmtLockSeconds,
   locationQuery,
   rangeProblem,
+  locationSwitchedOffText,
   type LocationFilters,
   type LocationReportPage as Data,
   type LocationSort as Sort,
@@ -154,6 +155,14 @@ export default function LocationReportPage() {
         </div>
       </div>
 
+      {data && !data.setting.requireLocation && (
+        <div role="status" data-testid="location-switched-off-banner"
+          className="flex items-start gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800">
+          <Info className="h-4 w-4 flex-shrink-0 mt-0.5" />
+          <p>{locationSwitchedOffText(data.setting.switchedOffSince)}</p>
+        </div>
+      )}
+
       <div className="flex items-start gap-2 rounded-lg bg-blue-50 border border-blue-100 px-3 py-2 text-xs text-blue-700" data-testid="location-note">
         <Info className="h-4 w-4 flex-shrink-0 mt-0.5" />
         <div className="space-y-1">
@@ -161,7 +170,7 @@ export default function LocationReportPage() {
             {data
               ? data.setting.requireLocation
                 ? <><strong>Require location is ON</strong> for this programme: reps cannot start or submit a KYC or visibility capture without a location fix.</>
-                : <><strong>Require location is OFF</strong> for this programme: captures without a location are still accepted (and counted here).</>
+                : <><strong>Require location is switched OFF</strong> (emergency off): captures without a location are accepted (and counted here).</>
               : 'Loading the programme setting…'}
           </p>
           {data && (
@@ -231,7 +240,7 @@ export default function LocationReportPage() {
             { label: 'No GPS', value: fmtInt(t.noGps), sub: captures ? `${Math.round((t.noGps / captures) * 100)}% of captures` : '—' },
             { label: 'Accuracy worse than 50 m', value: fmtInt(t.poorAccuracy), sub: captures ? `${Math.round((t.poorAccuracy / captures) * 100)}% of captures` : '—' },
             { label: 'Flagged unverifiable', value: fmtInt(t.unverifiable), sub: data!.setting.fenceOn ? 'checked against the outlet' : 'fence off — not checked' },
-            { label: 'Blocked outside fence', value: fmtInt(t.blockedOutside), sub: data!.setting.requireLocation ? 'recorded refusals' : 'recorded only with Require location ON' },
+            { label: 'Blocked outside fence', value: fmtInt(t.blockedOutside), sub: data!.setting.requireLocation ? 'recorded refusals' : 'not recorded while switched off' },
             { label: 'Median accuracy · lock', value: fmtM(t.medianAccuracyM), sub: `KYC lock ${fmtLockSeconds(t.medianLockMs)}` },
           ].map((c) => (
             <Card key={c.label}>

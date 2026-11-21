@@ -15,6 +15,10 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 // explicit emergency off (`requireLocation: false`) at the ONE shared seam, so their flows stay byte-identical.
 // The default-ON / explicit-true paths are covered by the *location-gate* tests.
 vi.mock('@/lib/location-required', () => ({ isLocationRequired: () => false }));
+vi.mock('@/lib/use-location-setting', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/use-location-setting')>()),
+  useLocationSetting: () => ({ lastKnown: false, gateEnabled: false, requireForForm: false, captureHold: false, settingsNote: false }),
+}));
 import type { SalesEligibleOutlet } from '@/lib/visibility-types';
 
 // useTenantFeatures returns a per-test feature value.

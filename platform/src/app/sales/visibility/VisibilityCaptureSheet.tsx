@@ -78,13 +78,11 @@ export function VisibilityCaptureSheet({
   // LOCATION GATE (features.requireLocation; docs/plans/LOCATION-GATE.md). DEFAULT ON for every tenant (owner
   // 2026-11-21); explicit false (console emergency off) → the hook does nothing. ON → the capture form stays hidden
   // behind the location guide until location is allowed AND a fix arrives; submit re-checks first. The form stays
-  // MOUNTED while hidden, so photos already taken are kept. A settings-load failure keeps the gate open on the phone
-  // (features are then only defaults; the server enforces the real setting).
-  const locationGate = useLocationGate(features.requireLocation && !featuresLoading && !featuresError, { serverSkewMs, recheckClock: refetchClock });
-  // Round-3 #4/#5: last-known setting (browser storage) → hold the camera only for reps whose programme required
-  // location last time, at most 5 s while settings load; a "location may be required" note on a settings failure for
-  // the same reps. Deoleo reps (last-known false) see neither; unknown (first ever load) → no hold.
+  // MOUNTED while hidden, so photos already taken are kept. OFF only when the setting LOADED as an explicit false: a
+  // settings-load failure → ON + "location may be required" note; while loading → ON (camera held ≤ 5 s) unless the
+  // last-known freshly-loaded value is false. The form is told requireLocation unless the LOADED value is off.
   const locationSetting = useLocationSetting(features.requireLocation, featuresLoading, featuresError);
+  const locationGate = useLocationGate(locationSetting.gateEnabled, { serverSkewMs, recheckClock: refetchClock });
   // PRE-WARM: start the high-accuracy GPS watch as soon as the sheet opens (geo-fence tenants
   // only) so a precise fix is usually already in hand when the rep captures a photo.
   const gpsWatch = usePreciseGpsPreWarm(preciseGps);
@@ -294,7 +292,7 @@ export function VisibilityCaptureSheet({
                 preciseGps={preciseGps}
                 gpsWatch={gpsWatch}
                 // Location gate: a photo without a fix is not kept (requireLocation tenants only).
-                requireLocation={locationGate.enabled}
+                requireLocation={locationSetting.requireForForm}
                 // While the guide covers the form, live cameras are closed (no hidden stream); photos already taken stay.
                 cameraPaused={locationGate.blocking}
                 // Shutter held only for last-known "require location" reps, ≤ 5 s, while settings load (round-3 #4).

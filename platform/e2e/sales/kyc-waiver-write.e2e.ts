@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { requestAs } from '../helpers/write';
+import { e2eBoardPhotoGeo } from '../fixtures/geo';
 
 /**
  * SALES_SO KYC address-proof name-mismatch WAIVER (Deoleo-only) — write-persistence spec.
@@ -31,7 +32,8 @@ import { requestAs } from '../helpers/write';
  *   Owner Photo and (on Address) Store Board Photo — are CAMERA captures via
  *   `navigator.mediaDevices.getUserMedia`, and the Address "Continue" also requires a
  *   captured geolocation. The go-live harness launches `devices['Desktop Chrome']` with
- *   NO fake-media / fake-geo flags (playwright.config.ts), and every document write goes
+ *   NO fake-media flags (geolocation IS granted + fixed for the sales projects since the 2026-11-21
+ *   location-gate default — playwright.config.ts / e2e/fixtures/geo.ts), and every document write goes
  *   to a live GCS bucket that is unavailable in CI — the same reason
  *   `kyc-create-write.e2e.ts` does not drive the multi-step form to completion. So the
  *   interactive checkbox→panel-hidden→Continue-enabled assertions cannot run headlessly
@@ -131,6 +133,9 @@ test.describe('@sales kyc address-proof name-mismatch waiver (Deoleo-only) — w
         partnerClass: outlet.type ?? 'SSS',
         addressNameMismatch: true,
         documents: [],
+        // Location gate (DEFAULT ON since 2026-11-21): a sales rep's KYC needs a fresh board-photo fix.
+        boardPhotoGeo: e2eBoardPhotoGeo(),
+        clientNow: new Date().toISOString(),
       }),
     });
 

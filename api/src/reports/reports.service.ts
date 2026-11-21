@@ -372,12 +372,15 @@ export class ReportsService {
    * unverifiable, blocked outside the fence, medians. Built by the shared buildLocationReport (also behind the
    * 'location-compliance' Excel kind). Tenant = the caller's JWT clientId, exactly like the Usage report.
    */
-  /** Whether the Location report is available for the caller's tenant (isLocationRequired — default ON, off only on explicit false). */
-  async locationComplianceEnabled(user: JwtPayload): Promise<{ enabled: boolean }> {
+  /**
+   * Whether the Location report is available for the caller's tenant: every existing tenant since 2026-11-21 (default
+   * ON; an emergency-off tenant keeps its history, with a "switched off" banner — `requireLocation` tells the tile).
+   */
+  async locationComplianceEnabled(user: JwtPayload): Promise<{ enabled: boolean; requireLocation: boolean }> {
     const clientId = (user.clientId ?? '').trim();
-    if (!clientId) return { enabled: false };
+    if (!clientId) return { enabled: false, requireLocation: false };
     const c = await this.prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
-    return { enabled: !!c && isLocationRequired(c.features) };
+    return { enabled: !!c, requireLocation: !!c && isLocationRequired(c.features) };
   }
 
   async locationCompliance(user: JwtPayload, q: LocationComplianceQueryDto): Promise<ReportResult> {

@@ -525,9 +525,9 @@ export class ScheduledReportsService {
         messages: await section('messages', c, () => this.messages(c, window)),
       };
       if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window, t.visibilityPhoto, nowMs));
-      // Only for tenants with "Require location" ON (owner review 2026-11-19: Deoleo's email stays unchanged; a
-      // switch-off tenant never loads it, so it can never degrade their section list).
-      if (t.requireLocation) digest.location = await section('location', c, () => this.location(c, window, t.requireLocation));
+      // Every tenant (DEFAULT ON since 2026-11-21). An emergency-off tenant still loads it so its location history
+      // is not hidden; the renderer shows it for them only when there was activity, with a "switched off" note.
+      digest.location = await section('location', c, () => this.location(c, window, t.requireLocation));
       if (t.salesImport) {
         digest.salesImport = await section('salesImport', c, () => this.salesImport(c, window, nowMs));
         digest.billing = await section('billing', c, () => this.billing(c, nowMs));
@@ -932,7 +932,8 @@ export class ScheduledReportsService {
     const kycPoor = await this.prisma.kycSubmission.count({
       where: { ...kycWhere, boardPhotoLat: { not: null }, boardPhotoLng: { not: null }, boardPhotoGeoAccuracy: { gt: POOR_ACCURACY_M } },
     });
-    const visWhere = { clientId, createdAt: inWindow };
+    // Sales-rep submissions only (matches the KYC counts and the Location Report's rep join).
+    const visWhere = { clientId, createdAt: inWindow, submittedBy: { is: { clientId } } };
     const captures = await this.prisma.visibilityCaptureSubmission.count({ where: visWhere });
     const visNoGps = await this.prisma.visibilityCaptureSubmission.count({
       where: { ...visWhere, OR: [{ captureLat: null }, { captureLng: null }] },
