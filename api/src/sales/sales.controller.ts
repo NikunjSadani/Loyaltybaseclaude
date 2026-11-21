@@ -1,5 +1,6 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { SalesService } from './sales.service';
+import { SalesBannersService } from './sales-banners.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -17,7 +18,10 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 @Controller('sales')
 @Roles('SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR')
 export class SalesController {
-  constructor(private readonly sales: SalesService) {}
+  constructor(
+    private readonly sales: SalesService,
+    private readonly banners: SalesBannersService,
+  ) {}
 
   @Get('team')
   @RequirePermission('sales_org:read')
@@ -49,6 +53,13 @@ export class SalesController {
   @Get('me')
   getMe(@CurrentUser() user: JwtPayload) {
     return this.sales.getMe(user);
+  }
+
+  // Strip banners for the sales dashboard (owner 2026-11-21): active, in-date, showInSalesApp banners of the
+  // caller's own tenant. Like `me`, no @RequirePermission — every sales role may read the banners meant for them.
+  @Get('banners')
+  getBanners(@CurrentUser() user: JwtPayload) {
+    return this.banners.getBanners(user);
   }
 
   // Real target vs achievement for the caller's assigned outlets (dashboard card + chart).

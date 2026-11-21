@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   BG_OPTIONS, getBgStyle, toEmbedUrl,
   fetchBanners, updateBanners, newBanner, getActiveBannersFromList,
-  newPopup,
+  newPopup, safeCtaUrl, isValidCtaInput, CTA_URL_ERROR,
   type Banner, type Popup, type BannerAudience, type PopupFrequency,
 } from '@/lib/banner';
 import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
@@ -162,7 +162,9 @@ function BannerForm({ initial, onSave, onCancel, audienceLabel }: { initial: Ban
             </div>
             <div>
               <label className={labelCls}>Button Link</label>
-              <input className={inputCls} placeholder="https://..." value={form.ctaUrl} onChange={(e) => set('ctaUrl', e.target.value)} />
+              <input className={inputCls} placeholder="https://..." value={form.ctaUrl} onChange={(e) => set('ctaUrl', e.target.value)}
+                aria-invalid={!isValidCtaInput(form.ctaUrl)} aria-describedby="banner-cta-error" />
+              {!isValidCtaInput(form.ctaUrl) && <p id="banner-cta-error" role="alert" className="text-xs text-red-600 mt-1">{CTA_URL_ERROR}</p>}
             </div>
           </div>
           <div>
@@ -247,8 +249,8 @@ function BannerForm({ initial, onSave, onCancel, audienceLabel }: { initial: Ban
 
         <div className="flex gap-3 pt-2">
           <Button variant="outline" className="flex-1" onClick={onCancel}><X className="h-4 w-4 mr-1" />Cancel</Button>
-          <Button variant="primary" className="flex-1" onClick={() => onSave({ ...form, updatedAt: new Date().toISOString() })}
-            disabled={form.type === 'text' ? !form.title : !form.videoUrl}>
+          <Button variant="primary" className="flex-1" onClick={() => onSave({ ...form, ctaUrl: form.ctaUrl.trim(), updatedAt: new Date().toISOString() })}
+            disabled={(form.type === 'text' ? !form.title : !form.videoUrl) || !isValidCtaInput(form.ctaUrl)}>
             <Save className="h-4 w-4 mr-1" />Save
           </Button>
         </div>
@@ -322,7 +324,9 @@ function PopupForm({ initial, onSave, onCancel, audienceLabel }: { initial: Popu
           </div>
           <div>
             <label className={labelCls}>Button Link</label>
-            <input className={inputCls} placeholder="https://..." value={form.ctaUrl} onChange={(e) => set('ctaUrl', e.target.value)} />
+            <input className={inputCls} placeholder="https://..." value={form.ctaUrl} onChange={(e) => set('ctaUrl', e.target.value)}
+              aria-invalid={!isValidCtaInput(form.ctaUrl)} aria-describedby="popup-cta-error" />
+            {!isValidCtaInput(form.ctaUrl) && <p id="popup-cta-error" role="alert" className="text-xs text-red-600 mt-1">{CTA_URL_ERROR}</p>}
           </div>
         </div>
 
@@ -347,8 +351,8 @@ function PopupForm({ initial, onSave, onCancel, audienceLabel }: { initial: Popu
 
         <div className="flex gap-3 pt-2">
           <Button variant="outline" className="flex-1" onClick={onCancel}><X className="h-4 w-4 mr-1" />Cancel</Button>
-          <Button variant="primary" className="flex-1" onClick={() => onSave({ ...form, updatedAt: new Date().toISOString() })}
-            disabled={form.type === 'text' ? !form.title : form.type === 'image' ? !form.imageUrl : !form.videoUrl}>
+          <Button variant="primary" className="flex-1" onClick={() => onSave({ ...form, ctaUrl: form.ctaUrl.trim(), updatedAt: new Date().toISOString() })}
+            disabled={(form.type === 'text' ? !form.title : form.type === 'image' ? !form.imageUrl : !form.videoUrl) || !isValidCtaInput(form.ctaUrl)}>
             <Save className="h-4 w-4 mr-1" />Save
           </Button>
         </div>
@@ -408,8 +412,8 @@ function ItemRow<T extends { id: string; active: boolean; type: string; title: s
           {item.active ? <ToggleRight className="h-5 w-5" /> : <ToggleLeft className="h-5 w-5" />}
         </button>
         <button onClick={onEdit} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors"><Pencil className="h-4 w-4" /></button>
-        {item.ctaUrl && (
-          <a href={item.ctaUrl} target="_blank" rel="noopener noreferrer" className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"><ExternalLink className="h-4 w-4" /></a>
+        {safeCtaUrl(item.ctaUrl) && (
+          <a href={safeCtaUrl(item.ctaUrl)!} target="_blank" rel="noopener noreferrer" className="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"><ExternalLink className="h-4 w-4" /></a>
         )}
         <button onClick={onDelete} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"><Trash2 className="h-4 w-4" /></button>
       </div>
@@ -431,15 +435,17 @@ export default function BannersPage() {
   const { overrides: outletTypeOverrides } = useOutletTypeLabels();
   const audienceLabel = makeAudienceLabel(outletTypeOverrides);
 
-  useEffect(() => {
-    fetchBanners().then(({ banners: b, popups: p }) => {
-      setBanners(b);
-      setPopups(p);
-    });
-  }, []);
+  // A refused / failed save is said out loud and the screen reloads the server's copy (never a silent "saved").
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const reload = () => fetchBanners().then(({ banners: b, popups: p }) => { setBanners(b); setPopups(p); });
+  useEffect(() => { reload(); }, []);
+  const save = (config: { banners: Banner[]; popups: Popup[] }) => {
+    setSaveError(null);
+    updateBanners(config).then((r) => { if (!r.ok) { setSaveError(r.message ?? 'Could not save.'); reload(); } });
+  };
 
   // Banner handlers
-  const persistBanners = (b: Banner[]) => { setBanners(b); updateBanners({ banners: b, popups }); };
+  const persistBanners = (b: Banner[]) => { setBanners(b); save({ banners: b, popups }); };
   const saveBanner = (b: Banner) => {
     persistBanners(banners.find((x) => x.id === b.id) ? banners.map((x) => x.id === b.id ? b : x) : [...banners, b]);
     setEditingBanner(null); setCreatingBanner(false);
@@ -449,7 +455,7 @@ export default function BannersPage() {
   const deleteBanner = (id: string) => persistBanners(banners.filter((b) => b.id !== id));
 
   // Popup handlers
-  const persistPopups = (p: Popup[]) => { setPopups(p); updateBanners({ banners, popups: p }); };
+  const persistPopups = (p: Popup[]) => { setPopups(p); save({ banners, popups: p }); };
   const savePopup = (p: Popup) => {
     persistPopups(popups.find((x) => x.id === p.id) ? popups.map((x) => x.id === p.id ? p : x) : [...popups, p]);
     setEditingPopup(null); setCreatingPopup(false);
@@ -478,6 +484,12 @@ export default function BannersPage() {
           </Button>
         )}
       </div>
+
+      {saveError && (
+        <div role="alert" data-testid="banner-save-error" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          Not saved: {saveError}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 bg-gray-100 rounded-xl p-1 w-fit">

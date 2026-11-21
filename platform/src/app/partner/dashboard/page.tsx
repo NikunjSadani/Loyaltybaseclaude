@@ -13,7 +13,7 @@ import { AchievementChart, type ChartView } from '@/components/charts/achievemen
 import { buildChartSeries, type TrendPoint } from '@/lib/target-trend';
 import {
   getActiveBannersFromList, saveBanners, savePopups, loadBanners, fetchBanners,
-  getBgStyle, toEmbedUrl,
+  getBgStyle, toEmbedUrl, safeCtaUrl,
   getActivePopup, shouldShowPopup, markPopupSeen,
   type Banner, type Popup,
 } from '@/lib/banner';
@@ -1335,8 +1335,8 @@ export default function PartnerDashboard() {
                 )}
                 {banner.ctaLabel && (
                   <a
-                    href={banner.ctaUrl || '#'}
-                    target={banner.ctaUrl ? '_blank' : undefined}
+                    href={safeCtaUrl(banner.ctaUrl) ?? '#'}
+                    target={safeCtaUrl(banner.ctaUrl) ? '_blank' : undefined}
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 !mt-3 text-[12px] font-semibold bg-white text-gray-900 rounded-full px-4 py-1.5 hover:bg-white/90 active:scale-[0.97] transition-all shadow-sm"
                   >
@@ -1409,7 +1409,7 @@ export default function PartnerDashboard() {
             )}
             <div className="p-4 flex flex-col gap-2">
               {popup.ctaLabel && (
-                <a href={popup.ctaUrl || '#'} target={popup.ctaUrl ? '_blank' : undefined}
+                <a href={safeCtaUrl(popup.ctaUrl) ?? '#'} target={safeCtaUrl(popup.ctaUrl) ? '_blank' : undefined}
                   rel="noopener noreferrer"
                   onClick={() => { markPopupSeen(popup.id); setPopup(null); }}
                   className="block w-full py-2.5 bg-[var(--brand-primary)] text-white rounded-xl text-sm font-semibold text-center hover:bg-[var(--brand-primary-dark)] transition-colors">

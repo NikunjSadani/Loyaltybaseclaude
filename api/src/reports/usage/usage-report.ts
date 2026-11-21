@@ -79,6 +79,10 @@ export interface UsageRow {
   zone: string[];
   state: string[];
   city: string[];
+  /** Above-ASM rows only (owner 2026-11-21): city / state were summarised to "<N> cities" / "<N> states"; these hold
+   *  the full lists for the page tooltip. Absent otherwise. */
+  cityAll?: string[];
+  stateAll?: string[];
   daysActive: number;
   /** Days with duration/medium tracking (visits > 0) — 0 for days before the feature shipped. */
   trackedDays: number;
@@ -450,6 +454,8 @@ export async function buildUsageReport(
       zone: where.zone,
       state: where.state,
       city: where.city,
+      ...(where.cityAll ? { cityAll: where.cityAll } : {}),
+      ...(where.stateAll ? { stateAll: where.stateAll } : {}),
       daysActive: num(a?.daysActive),
       trackedDays,
       visits: num(a?.visits),

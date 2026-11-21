@@ -22,6 +22,8 @@ export interface RemarksEmailData {
   askedAt: Date;
   /** The client admin who was asked. */
   askedAdminName: string;
+  /** The client's display name (branding.displayName → internalName) — the shared copy's neutral addressee. */
+  clientName?: string;
   /** True when the email goes to the client's ticket remarks inbox (not the admin personally). */
   toInbox: boolean;
   /** True when the client's CC list is copied on this email (2026-11-21). */
@@ -130,22 +132,24 @@ export function renderRemarksEmail(d: RemarksEmailData): { subject: string; html
   const subject = remarksEmailSubject(d);
   const blocks: string[] = [];
 
-  // Shared readers (the inbox / CC list) may have no portal account — they are told who was asked and to
-  // ask that person to reply. The plain "chosen admin, no CC" email (every tenant's default) is unchanged.
+  // Shared copy (inbox To / a CC list / CC-only): ONE neutral wording for every recipient, To and Cc alike — it never
+  // names a person to "ask" (that reads oddly to the very admin it names) and has no "Asked:" / "copied" lines
+  // (owner 2026-11-21). The plain "chosen admin, no CC" email (every tenant's default) is unchanged.
   const shared = d.toInbox || !!d.hasCc || !!d.ccOnly;
   const asked = d.askedAdminName?.trim() || 'your team';
-  blocks.push(`<tr><td style="padding:0 0 10px;${FONT}">${para(d.toInbox || d.ccOnly ? 'Hello,' : `Hi ${d.askedAdminName},`)}</td></tr>`);
+  const client = d.clientName?.trim() || 'your team';
+  blocks.push(`<tr><td style="padding:0 0 10px;${FONT}">${para(shared ? 'Hello,' : `Hi ${d.askedAdminName},`)}</td></tr>`);
 
   // 1. THE ASK — highlighted
-  const askMeta = [`Asked on ${istDateTime(d.askedAt)}`, ...(shared ? [`Asked: ${asked}`] : [])].join(' · ');
+  // Owner 2026-11-21: no "Asked: <name>" meta line and no "you're copied for information" line.
+  const askMeta = `Asked on ${istDateTime(d.askedAt)}`;
   const sharedLines: string[] = [];
   if (d.ccOnly) sharedLines.push(`Sent to your programme's ticket remarks CC list because ${asked} has no email address on file.`);
   else if (d.toInbox) sharedLines.push("Sent to your programme's ticket remarks inbox.");
-  if (d.hasCc) sharedLines.push("If you received this as a Cc, you're copied for information.");
-  if (shared) sharedLines.push(`Ask ${asked} (or another client admin) to reply in the portal.`);
+  if (shared) sharedLines.push(`This ticket needs remarks from ${client}. Please reply in the portal (sign in as a client admin).`);
   blocks.push(
     `<tr><td style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:12px 14px;${FONT}" data-block="ask">`
-    + para(`${d.askerName} (Gifsy support) needs ${shared ? `remarks from ${asked}` : 'your remarks'}:`, 'font-weight:bold;padding-bottom:6px')
+    + para(`${d.askerName} (Gifsy support) needs ${shared ? 'remarks on this ticket' : 'your remarks'}:`, 'font-weight:bold;padding-bottom:6px')
     + para(maskContactDetails(d.note), 'padding-bottom:6px')
     + `<p style="margin:0;font-size:12px;color:#6b7280;${FONT}">${e(askMeta)}</p>`
     + (sharedLines.length
@@ -167,7 +171,7 @@ export function renderRemarksEmail(d: RemarksEmailData): { subject: string; html
     ['Number', d.ticket.number],
     ['Category', CATEGORY_LABEL[d.ticket.category] ?? d.ticket.category],
     ['Priority', PRIORITY_LABEL[d.ticket.priority] ?? d.ticket.priority],
-    ['Status', shared ? `Awaiting remarks from ${asked}` : 'Awaiting your remarks'],
+    ['Status', shared ? `Awaiting remarks from ${client}` : 'Awaiting your remarks'],
     ['Raised on', `${istDate(d.ticket.createdAt)} (${age(d.ticket.createdAt, d.now)})`],
   ])).replace('<tr>', '<tr data-block="ticket">'));
 

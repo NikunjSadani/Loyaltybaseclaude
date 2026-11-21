@@ -45,7 +45,15 @@ import { tenantInstallWhere } from '../../../push/pwa-adoption.service';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxCell, XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { parseQueryDto } from './kind-support';
-import { areaCell, loadUserAreaResolver, type AreaPrisma, type UserAreaResolver } from '../../../reports/area/user-area';
+import {
+  AREAS_FULL_HEADERS,
+  AREAS_FULL_SHEET,
+  areaCell,
+  areasFullRow,
+  loadUserAreaResolver,
+  type AreaPrisma,
+  type UserAreaResolver,
+} from '../../../reports/area/user-area';
 
 export interface InstalledUsersParams {
   roleGroup: InstalledUsersRoleGroup | null;
@@ -182,7 +190,7 @@ async function buildRows(
   ctx: ExportRunContext,
   clientId: string,
   p: InstalledUsersParams,
-): Promise<{ rows: XlsxCell[][]; area: UserAreaResolver | null }> {
+): Promise<{ rows: XlsxCell[][]; fullAreas: string[][]; area: UserAreaResolver | null }> {
   const { prisma } = ctx;
   // ── 1. One row per installed user: first install + last seen (tenant-pinned, shared population). ──
   const groups = await prisma.pwaInstall.groupBy({
@@ -197,7 +205,7 @@ async function buildRows(
     .filter((g): g is { userId: string; first: Date; last: Date | null } => !!g.first)
     .filter((g) => !since || g.first.getTime() >= since.getTime())
     .sort((a, b) => b.first.getTime() - a.first.getTime() || a.userId.localeCompare(b.userId));
-  if (!ordered.length) return { rows: [], area: null };
+  if (!ordered.length) return { rows: [], fullAreas: [], area: null };
 
   // Area columns (ASM / Zone / State / City): the tenant's hierarchy + outlet geography, read ONCE (4 queries)
   // whatever the row count — see reports/area/user-area.ts.
@@ -218,6 +226,7 @@ async function buildRows(
 
   const roleFilter = p.roleGroup ? { role: { in: [...ROLE_GROUP_ROLES[p.roleGroup]] } } : {};
   const rows: XlsxCell[][] = [];
+  const fullAreas: string[][] = []; // above-ASM rows' full State / City lists ("Areas (full)" sheet)
   for (let i = 0; i < ordered.length; i += INSTALLED_USERS_CHUNK) {
     const chunk = ordered.slice(i, i + INSTALLED_USERS_CHUNK);
     const ids = chunk.map((c) => c.userId);
@@ -260,12 +269,16 @@ async function buildRows(
       const group = roleGroupOf(u.role);
       const outlet = u.channelPartner?.outlets[0];
       const a = area.resolve({ id: u.id, role: u.role });
+      const phone = normalizePhoneLast10(u.phone) ?? u.phone ?? '';
+      const role = roleLabel(clientId, u, typeDisplay);
+      const full = areasFullRow(u.name ?? '', phone, role, a);
+      if (full) fullAreas.push(full);
       rows.push([
         u.name ?? '',
-        normalizePhoneLast10(u.phone) ?? u.phone ?? '',
-        roleLabel(clientId, u, typeDisplay),
+        phone,
+        role,
         group ? GROUP_LABEL[group] : 'Other',
-        areaCell(a.asm), // full lists — an Excel cell holds them; nothing is cut
+        areaCell(a.asm), // full lists (above-ASM City / State = counts; full lists on the "Areas (full)" sheet)
         areaCell(a.zone),
         areaCell(a.state),
         areaCell(a.city),
@@ -279,14 +292,14 @@ async function buildRows(
       ]);
     }
   }
-  return { rows, area };
+  return { rows, fullAreas, area };
 }
 
 async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
   const clientId = requireTenant(ctx.user);
 
   // 1. Build every row in memory — nothing has been written to the response yet.
-  const { rows, area } = await buildRows(ctx, clientId, p);
+  const { rows, fullAreas, area } = await buildRows(ctx, clientId, p);
 
   // 2. Nobody matched → an honest "0 users" answer instead of an empty file (no personal data → no audit row).
   if (!rows.length || !area) throw new NotFoundException(INSTALLED_USERS_NONE_MESSAGE);
@@ -322,6 +335,13 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
   await about.addRow([area.asmHeader, asmNote]);
   await about.addRow(['Zone / State / City', geoNote]);
   await about.addRow(['Not set / Not in hierarchy', blankNote]);
+  await about.addRow(['"N cities" / "N states"', area.notes[3] ?? '']);
+
+  // 6. Full State / City lists of the rows summarised above (only when there are any; not counted).
+  if (fullAreas.length) {
+    const fullSheet = await out.addSheet(AREAS_FULL_SHEET, AREAS_FULL_HEADERS, { widths: [26, 14, 16, 60, 100] });
+    for (const r of fullAreas) await fullSheet.addRow(r);
+  }
   return { rowCount: rows.length };
 }
 

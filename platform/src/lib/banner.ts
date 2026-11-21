@@ -1,4 +1,5 @@
 ﻿import type { CSSProperties } from 'react';
+import { getCached, invalidateCached } from '@/lib/session-cache';
 
 export type BannerType  = 'text' | 'video';
 export type PopupType   = 'text' | 'video' | 'image';
@@ -191,22 +192,101 @@ export async function fetchBannersResult(): Promise<{ banners: Banner[]; popups:
 /**
  * Persist the full banner + popup list to the server.
  */
-export async function updateBanners(config: { banners: Banner[]; popups: Popup[] }): Promise<void> {
-  await fetch('/api/admin/banner-config', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', ...authHeader() },
-    body: JSON.stringify(config),
-  });
+export async function updateBanners(config: { banners: Banner[]; popups: Popup[] }): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const res = await fetch('/api/admin/banner-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeader() },
+      body: JSON.stringify(config),
+    });
+    if (res.ok) return { ok: true };
+    let message = `Could not save (error ${res.status}).`;
+    try {
+      const j = await res.json();
+      const m = j?.error?.message ?? j?.message;
+      if (typeof m === 'string' && m.trim()) message = m;
+      else if (Array.isArray(m) && m.length) message = m.join('; ');
+    } catch { /* keep the generic message */ }
+    return { ok: false, message };
+  } catch {
+    return { ok: false, message: 'Could not save — check your connection and try again.' };
+  } finally {
+    // Any /api write already clears the session cache (lib/session-cache.ts); this names the dependency explicitly.
+    invalidateCached(SALES_BANNERS_KEY);
+  }
+}
+
+// ── CTA links (audit fix 2026-11-21) ─────────────────────────────────────────
+
+/** The link to render for a CTA, or null when it is not an absolute http(s) URL (javascript:, data:, relative …).
+ *  Mirrors the API's save-time check (admin-programs/banner-config.service.ts isAllowedCtaUrl). */
+export function safeCtaUrl(url: string | null | undefined): string | null {
+  const v = (url ?? '').trim();
+  if (!v || /\s/.test(v)) return null;
+  try {
+    const u = new URL(v);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && u.hostname ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Form check: blank or http(s). The inline error text shown under the Button Link field. */
+export const CTA_URL_ERROR = 'Must start with http:// or https:// (or leave blank).';
+export function isValidCtaInput(url: string | null | undefined): boolean {
+  return !(url ?? '').trim() || safeCtaUrl(url) !== null;
+}
+
+// ── Sales app read path (owner 2026-11-21) ───────────────────────────────────
+
+/** Session-cache key + TTL of the sales banners read (one request per minute at most, across screens). */
+export const SALES_BANNERS_KEY = 'sales:banners';
+export const SALES_BANNERS_TTL_MS = 60_000;
+export const SALES_BANNERS_ENDPOINT = '/api/sales/banners';
+
+/**
+ * GET /api/sales/banners → the caller tenant's active, in-date, showInSalesApp banners (server-filtered; every
+ * partner audience included — a rep covers every outlet type). Through the session cache (60 s TTL, cleared on any
+ * write incl. a banner-config save). No banners → `{ banners: [], ok: true }`. A 403 / 404 is a definite "none for
+ * you" (ok, empty, cached); any other failure is not ok and never cached. Never throws.
+ */
+export function fetchSalesBannersResult(): Promise<{ banners: Banner[]; ok: boolean }> {
+  return getCached(
+    SALES_BANNERS_KEY,
+    async () => {
+      try {
+        const res = await fetch(SALES_BANNERS_ENDPOINT, { headers: { ...authHeader() } });
+        if (!res.ok) return { banners: [] as Banner[], ok: res.status === 403 || res.status === 404 };
+        const json = await res.json();
+        const list = json?.data?.banners;
+        return { banners: (Array.isArray(list) ? list : []).map(toSalesBanner), ok: true };
+      } catch {
+        return { banners: [] as Banner[], ok: false };
+      }
+    },
+    { ttlMs: SALES_BANNERS_TTL_MS, shouldCache: (r) => r.ok },
+  );
+}
+
+/** The server returns display fields only; the sales list is by definition active + showInSalesApp. */
+function toSalesBanner(b: Partial<Banner>): Banner {
+  return {
+    id: String(b.id ?? ''), active: true, type: b.type === 'video' ? 'video' : 'text',
+    title: b.title ?? '', body: b.body ?? '', ctaLabel: b.ctaLabel ?? '', ctaUrl: b.ctaUrl ?? '',
+    videoUrl: b.videoUrl ?? '', bgColor: b.bgColor ?? '', audience: 'ALL', priority: b.priority ?? 0,
+    startDate: b.startDate ?? '', endDate: b.endDate ?? '', showInSalesApp: true, updatedAt: '',
+  };
 }
 
 /**
  * Returns active, in-schedule banners that are targeted at the sales team,
  * sorted by priority ascending (0 = highest priority).
  *
- * Scheduling rules (both bounds inclusive, empty string = no bound).
+ * Scheduling rules (both bounds inclusive, empty string = no bound, IST day).
  */
 export function getActiveSalesBanners(banners: Banner[]): Banner[] {
-  const today = new Date().toISOString().slice(0, 10);
+  // IST calendar day — the same day the API's sales filter uses (api/src/sales/sales-banners.service.ts).
+  const today = new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
   return banners
     .filter((b) => {
       if (!b.active)          return false;

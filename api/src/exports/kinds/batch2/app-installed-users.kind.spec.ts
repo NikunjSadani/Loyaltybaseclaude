@@ -285,7 +285,8 @@ describe('app-installed-users export kind', () => {
     const { buffer } = await renderKind(APP_INSTALLED_USERS_KIND, ctxFor(CLIENT, prisma), { roleGroup: null, since: null });
     const about = readBook(buffer).sheets[INSTALLED_USERS_ABOUT_SHEET].aoa;
     expect(about[0][0]).toBe('About this report');
-    expect(about.slice(1).map((r) => r[0])).toEqual(['ASM', 'Zone / State / City', 'Not set / Not in hierarchy']);
+    expect(about.slice(1).map((r) => r[0])).toEqual(['ASM', 'Zone / State / City', 'Not set / Not in hierarchy', '"N cities" / "N states"']);
+    expect(String(about[4][1])).toMatch(/City shows "<N> cities"/);
     expect(String(about[1][1])).toMatch(/above the ASM level show "Above ASM level"/);
     expect(String(about[3][1])).toMatch(/Not in sales hierarchy/);
   }, XLSX_TIMEOUT);
@@ -356,7 +357,7 @@ describe('app-installed-users export kind', () => {
       spyWriter(events),
     );
     expect(res.rowCount).toBe(1);
-    expect(events).toEqual(['audit', 'addSheet', 'row', 'addSheet', 'row', 'row', 'row']); // data sheet, then "About"
+    expect(events).toEqual(['audit', 'addSheet', 'row', 'addSheet', 'row', 'row', 'row', 'row']); // data sheet, then "About"
     expect(prisma.auditLog.create).toHaveBeenCalledTimes(1);
     expect(prisma.auditLog.create).toHaveBeenCalledWith({
       data: {

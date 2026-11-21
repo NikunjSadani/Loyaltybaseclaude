@@ -141,6 +141,22 @@ describe('Usage Report page', () => {
     expect(within(cell).getByRole('button', { name: 'show less' }).getAttribute('aria-expanded')).toBe('true');
   });
 
+  it('above-ASM row: "<N> cities" / "<N> states" cell, full list only in the tooltip (no "+N more")', async () => {
+    const all = ['Agra', 'Delhi', 'Noida']
+    const states = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6']
+    fetchMock.mockResolvedValue(ok(report({
+      rows: [row({ name: 'Nina NSM', role: 'SALES_HO', asm: ['Above ASM level'], state: ['6 states'], stateAll: states, city: ['3 cities'], cityAll: all })],
+    })));
+    render(<UsagePage />);
+    await screen.findByText('Nina NSM');
+    const cells = within(screen.getByText('Nina NSM').closest('tr')!).getAllByRole('cell');
+    expect(cells[5].textContent).toBe('3 cities');
+    expect(cells[5].getAttribute('title')).toBe('Agra, Delhi, Noida');
+    expect(cells[4].textContent).toBe('6 states');
+    expect(cells[4].getAttribute('title')).toBe('S1, S2, S3, S4, S5, S6');
+    expect(within(cells[5]).queryByRole('button')).toBeNull();
+  });
+
   it('no tracked data yet → says so instead of a date', async () => {
     fetchMock.mockResolvedValue(ok(report({ trackingStartedOn: null })));
     render(<UsagePage />);

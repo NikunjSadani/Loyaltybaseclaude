@@ -897,6 +897,16 @@ export class TicketsService {
       messages: [],
     };
 
+    // CLIENT NAME — the shared copy's neutral addressee ("needs remarks from <client>"); falls back to "your team".
+    try {
+      const c = await this.prisma.client.findFirst({ where: { id: ticket.clientId }, select: { internalName: true, branding: true } });
+      const display = (c?.branding as { displayName?: unknown } | null)?.displayName;
+      const name = (typeof display === 'string' && display.trim()) || (c?.internalName ?? '').trim();
+      if (name) data.clientName = name;
+    } catch (e) {
+      this.logger.warn(`[tickets] remarks email client name for ${ticket.id} unavailable: ${e}`);
+    }
+
     // RAISED BY (+ a salesperson's first ACTIVE manager up the chain) and OUTLET.
     let partnerId: string | null = null;
     let outletId: string | null = null;
@@ -1090,7 +1100,7 @@ export class TicketsService {
         // The admin's own address is never also copied.
         if (own) cc = cc.filter((x) => x !== own.toLowerCase());
         // Owner 2026-11-21: no admin email but a CC list → the CC list receives it (as To). Body worded
-        // like the inbox case ("Hello," + "Asked: <name>") since it is not addressed to the admin.
+        // like the inbox case ("Hello," + "needs remarks from <client>") since it is not addressed to the admin.
         if (!own && cc.length) {
           toList = cc;
           cc = [];

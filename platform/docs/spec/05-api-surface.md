@@ -165,6 +165,7 @@ tenant-scoped via `clientId`.
 | GET·PUT | `/admin/banner-config` | Banner config | admin |
 | GET·POST·DELETE | `/admin/banners` | Banners | admin |
 | GET | `/partner/banners` | Partner-app banners | partner |
+| GET | `/sales/banners` | Sales-app strip banners (active, in-date, `showInSalesApp`; own tenant) | SALES_* |
 | GET | `/leaderboard` · `/sales/leaderboard` | Rankings | scoped |
 
 ## 15 · Reporting & Analytics

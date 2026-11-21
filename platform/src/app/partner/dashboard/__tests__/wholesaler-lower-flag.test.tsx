@@ -38,6 +38,7 @@ vi.mock('@/lib/banner', () => ({
   shouldShowPopup:          () => false,
   markPopupSeen:            () => undefined,
   getBgStyle:               () => ({}),
+  safeCtaUrl: (u?: string) => (u && /^https?:\/\//.test(u) ? u : null),
   toEmbedUrl:               (u: string) => u,
 }));
 
