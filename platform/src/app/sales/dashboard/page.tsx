@@ -1,7 +1,8 @@
 ﻿'use client';
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import Link from 'next/link';
+import Link from '@/components/navigation/no-prefetch-link';
+import { useRouter } from 'next/navigation';
 import {
   FileCheck, XCircle, Plus, Search,
   ChevronRight, Clock, MapPin, TrendingUp, Target,
@@ -17,8 +18,9 @@ import { type SalesRole, getRole, canEnroll, hasTeamView } from '@/lib/sales-rol
 import { classifyPaceGap, buildCasesToGoMsg, fmtKpiNum, remainingOf } from '@/lib/pace';
 import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { getGifsySettings } from '@/lib/gifsy-settings';
-import { fetchTaskConfig, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
-import { fetchBanners, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
+import { fetchTaskConfigResult, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
+import { fetchBannersResult, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
+import { swr, peekCached, invalidateCached, DASHBOARD_REUSE_MS, DASH_PREFIX } from '@/lib/session-cache';
 import { schemeApi } from '@/lib/schemes';
 import type { EligibleScheme } from '@/lib/scheme-types';
 import { fetchOutletVisibilityStatuses, VISIBILITY_ELIGIBLE_OUTLET_TYPES, VISIBILITY_STATUS_LOAD_ERROR } from '@/lib/visibility-upload';
@@ -273,9 +275,19 @@ function VisibilitySummaryCard({ counts }: { counts: VisibilitySummaryCounts }) 
   );
 }
 
+/** Plain names for the dashboard parts in the "couldn't load" notice. */
+const CORE_PART_LABEL: Record<string, string> = {
+  taskConfig: 'task settings',
+  outlets: 'your outlets',
+  kyc: 'KYC submissions',
+};
+
 /* ─── Page ───────────────────────────────────────────────────────────────────── */
 
 export default function SalesDashboard() {
+  // Client-side navigation for the search results (was window.location.href — a FULL page reload that re-ran every
+  // bootstrap request and dropped the read cache).
+  const router = useRouter();
   const [outlets,      setOutlets]      = useState<OutletRow[]>([]);
   const [kycSubs,      setKycSubs]      = useState<KycSubRow[]>([]);
   const [visibilityItems, setVisibilityItems] = useState<TaskItem[]>([]);
@@ -289,6 +301,9 @@ export default function SalesDashboard() {
   const [role,          setRoleState]     = useState<SalesRole>('SO');
   const [taskConfig,    setTaskConfig]    = useState<TaskConfig | null>(null);
   const [salesBanners,  setSalesBanners]  = useState<Banner[]>([]);
+  // Dashboard parts that failed with no previous good value to keep (audit fix 3) + a Retry trigger.
+  const [coreErrors, setCoreErrors] = useState<string[]>([]);
+  const [coreRetry, setCoreRetry] = useState(0);
   const [schemes, setSchemes] = useState<EligibleScheme[]>([]);
   // Per-rep Visibility summary (current window), computed from the same getSalesEligible
   // call that feeds the Tasks "Visibility" count — rendered (Bajaj only) as its own card.
@@ -317,53 +332,111 @@ export default function SalesDashboard() {
   // Selected outlet type: 'SSS' (RLP, default) | 'WHOLESALER' (BSC). Only meaningful when shown.
   const [outletType, setOutletType] = useState<'SSS' | 'WHOLESALER'>('SSS');
 
+  // Request-volume work (2026-11-21): every dashboard read goes through `swr` (lib/session-cache.ts) — on a return
+  // within DASHBOARD_REUSE_MS (2 min) the last answers are shown with NO request; older → shown at once AND
+  // refreshed in the background. Any API write (KYC submit, capture, redemption, approval, …) clears them, so the
+  // dashboard after a write is always fresh. A failed background refresh keeps the cached figures.
   useEffect(() => {
     setRoleState(getRole());
+    let cancelled = false;
 
     // Real eligible schemes (roster-based §13.4; no localStorage demo data here).
-    void schemeApi.listSalesEligible()
-      .then((r) => setSchemes(r.success ? (r.data.schemes ?? []) : []))
-      .catch(() => setSchemes([]));
+    const schemesKey = `${DASH_PREFIX}schemes`;
+    const hadSchemes = peekCached(schemesKey) !== undefined;
+    swr(schemesKey, () => schemeApi.listSalesEligible(), {
+      maxAgeMs: DASHBOARD_REUSE_MS,
+      shouldCache: (r) => r.success,
+      onValue: (r) => {
+        if (cancelled) return;
+        if (r.success) setSchemes(r.data.schemes ?? []);
+        else if (!hadSchemes) setSchemes([]);
+      },
+    })?.catch(() => { if (!cancelled && !hadSchemes) setSchemes([]); });
 
     // NOTE: /api/sales/targets is intentionally NOT fetched here. It has a SINGLE owner — the
     // effect below, keyed on [outletTypeLabels.loading, showToggle, outletType] — so the toggle's
     // outlet-type scope can never be clobbered by a late-resolving unscoped mount request (audit
     // Finding 1). Deoleo/non-toggle tenants still issue exactly ONE no-param request there.
-    Promise.all([
-      fetchTaskConfig(),
-      fetchBanners(),
-      fetch('/api/sales/outlets').then((r) => r.json()),
-      fetch('/api/kyc').then((r) => r.json()).catch(() => null),
-    ]).then(([config, { banners }, outletResult, kycResult]) => {
-      setTaskConfig(config);
-      setSalesBanners(getActiveSalesBanners(banners));
-      if (outletResult.success) {
-        setOutlets((outletResult.data.outlets ?? []).map((o: any) => ({
-          id:             o.id,
-          kycId:          o.kycId ?? '',
-          kycFiledViaOutletCode: o.kycFiledViaOutletCode ?? undefined,
-          outletCode:     o.outletCode ?? '',
-          name:           o.name,
-          mobile:         o.mobile,
-          location:       o.location ?? o.city ?? '',
-          type:           (o.type ?? 'SSS') as OutletType,
-          kycStatus:      (o.kycStatus ?? 'NOT_STARTED') as KYCStatus,
-          kycSubmittedAt: o.kycSubmittedAt,
-        })));
-      }
+    // ⚠️ Banners: /api/partner/banners is @Roles(SSS, WHOLESALER, SUB_STOCKIST) on the API, so this read is a 403 for
+    // every sales user and sales banners have never rendered (fetchBannersResult → empty). Making them show needs a
+    // sales-readable endpoint — an OWNER decision (banners already ticked "showInSalesApp" would start appearing).
+    // Until then the call stays as-is but rides the 2-min dashboard reuse below, so it repeats far less often.
+    //
+    // Each part is cached ONLY when it succeeded (audit fix 3). A failed part keeps its previous good value (cached
+    // or already on screen); with nothing to keep it is flagged in `coreErrors` → the Tasks card says which figures
+    // could not load and offers Retry — never a silent 0.
+    const parts = {
+      taskConfig: () => fetchTaskConfigResult(),
+      banners:    () => fetchBannersResult(),
+      outlets:    () => fetch('/api/sales/outlets').then((r) => r.json()).catch(() => null),
+      kyc:        () => fetch('/api/kyc').then((r) => r.json()).catch(() => null),
+    } as const;
+    type PartName = keyof typeof parts;
+    const okOf: Record<PartName, (v: any) => boolean> = {
+      taskConfig: (v) => v?.ok === true,
+      banners:    (v) => v?.ok === true,
+      outlets:    (v) => v?.success === true,
+      kyc:        (v) => v?.success === true,
+    };
+    const apply: Record<PartName, (v: any) => void> = {
+      taskConfig: (v) => setTaskConfig(v.config),
+      banners:    (v) => setSalesBanners(getActiveSalesBanners(v.banners)),
+      outlets:    (v) => setOutlets((v.data?.outlets ?? []).map((o: any) => ({
+        id:             o.id,
+        kycId:          o.kycId ?? '',
+        kycFiledViaOutletCode: o.kycFiledViaOutletCode ?? undefined,
+        outletCode:     o.outletCode ?? '',
+        name:           o.name,
+        mobile:         o.mobile,
+        location:       o.location ?? o.city ?? '',
+        type:           (o.type ?? 'SSS') as OutletType,
+        kycStatus:      (o.kycStatus ?? 'NOT_STARTED') as KYCStatus,
+        kycSubmittedAt: o.kycSubmittedAt,
+      }))),
       // Approval/Rejected counts derive from SUBMISSIONS (shared with the Tasks
       // page via buildKycSubRows) so the two views can never disagree.
-      setKycSubs(buildKycSubRows(kycResult));
-      setLoading(false);
-    }).catch(() => setLoading(false));
-  }, []);
+      kyc:        (v) => setKycSubs(buildKycSubRows(v)),
+    };
+    const names = Object.keys(parts) as PartName[];
+    let pending = names.length;
+    const settle = () => { pending -= 1; if (pending === 0 && !cancelled) setLoading(false); };
+    setCoreErrors([]);
+    for (const name of names) {
+      const key = `${DASH_PREFIX}${name}`;
+      let settled = false;
+      const done = () => { if (!settled) { settled = true; settle(); } };
+      const hadValue = peekCached(key) !== undefined;
+      const fail = () => {
+        if (cancelled) return;
+        // Nothing good to keep → say so (banners just stay hidden; they are not a figure).
+        if (!hadValue && name !== 'banners') setCoreErrors((prev) => (prev.includes(name) ? prev : [...prev, name]));
+      };
+      swr<any>(key, parts[name], {
+        maxAgeMs: DASHBOARD_REUSE_MS,
+        shouldCache: okOf[name],
+        onValue: (v) => {
+          if (cancelled) return;
+          if (okOf[name](v)) apply[name](v);
+          else fail();
+          done();
+        },
+      })?.catch(() => { fail(); done(); });
+    }
+    return () => { cancelled = true; };
+  }, [coreRetry]);
 
   useEffect(() => {
+    // Another tab changed the stored role → re-read it and refresh the eligible schemes THROUGH the dashboard cache
+    // (audit fix 6): the stale entry is dropped and the fresh answer is stored for the next return.
     const onStorage = () => {
       setRoleState(getRole());
-      void schemeApi.listSalesEligible()
-        .then((r) => setSchemes(r.success ? (r.data.schemes ?? []) : []))
-        .catch(() => setSchemes([]));
+      const schemesKey = `${DASH_PREFIX}schemes`;
+      invalidateCached(schemesKey);
+      swr(schemesKey, () => schemeApi.listSalesEligible(), {
+        maxAgeMs: DASHBOARD_REUSE_MS,
+        shouldCache: (r) => r.success,
+        onValue: (r) => setSchemes(r.success ? (r.data.schemes ?? []) : []),
+      })?.catch(() => setSchemes([]));
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -386,14 +459,19 @@ export default function SalesDashboard() {
     // AMOUNT_UPLOAD keeps the OutletVisibilityRecord path and stays field-role only.
     // Shared builders keep this count identical to the Tasks page.
     if (captureMode === 'PHOTO_APPROVAL') {
-      visibilityApi.getSalesEligible()
-        .then((r) => {
+      const visKey = `${DASH_PREFIX}visibility-eligible`;
+      const hadVis = peekCached(visKey) !== undefined;
+      swr(visKey, () => visibilityApi.getSalesEligible(), {
+        maxAgeMs: DASHBOARD_REUSE_MS,
+        shouldCache: (r) => r.success,
+        onValue: (r) => {
           if (cancelled) return;
+          if (!r.success && hadVis) return; // a failed background refresh keeps the cached figures
           setVisibilityItems(buildPhotoCaptureTaskItems(r.success ? r.data : null));
           // Aggregate the same eligible outlets into the 5-status summary (Bajaj card).
           setVisibilitySummary(r.success ? summarizeVisibilityCaptures(r.data.outlets ?? []) : null);
-        })
-        .catch(() => { if (!cancelled) { setVisibilityItems([]); setVisibilitySummary(null); } });
+        },
+      })?.catch(() => { if (!cancelled && !hadVis) { setVisibilityItems([]); setVisibilitySummary(null); } });
       return () => { cancelled = true; };
     }
     // AMOUNT_UPLOAD has no per-photo status model → no 5-status summary.
@@ -404,14 +482,19 @@ export default function SalesDashboard() {
     if (codes.length === 0) { setVisibilityItems([]); return; }
     // The visibility month is the IST calendar month (the UTC month is still the previous one 00:00–05:30 IST on the 1st).
     const month = istMonthKey(new Date());
-    fetchOutletVisibilityStatuses(codes, month)
-      .then((map) => {
+    const statusKey = `${DASH_PREFIX}visibility-status:${month}:${codes.join(',')}`;
+    const hadStatus = peekCached(statusKey) !== undefined;
+    swr(statusKey, () => fetchOutletVisibilityStatuses(codes, month), {
+      maxAgeMs: DASHBOARD_REUSE_MS,
+      shouldCache: (map) => map !== null,
+      onValue: (map) => {
         if (cancelled) return;
+        if (map === null && hadStatus) return; // a failed background refresh keeps the cached figures
         // null = could not load → no fake "capture pending" tasks; say so instead.
         setVisibilityLoadError(map === null);
         setVisibilityItems(map === null ? [] : buildVisibilityTaskItems(eligible, map, visibilityEnabled));
-      })
-      .catch(() => { if (!cancelled) { setVisibilityItems([]); setVisibilityLoadError(true); } });
+      },
+    })?.catch(() => { if (!cancelled && !hadStatus) { setVisibilityItems([]); setVisibilityLoadError(true); } });
     return () => { cancelled = true; };
   }, [outlets, role]);
 
@@ -429,10 +512,11 @@ export default function SalesDashboard() {
     const url = showToggle
       ? `/api/sales/targets?outletType=${encodeURIComponent(outletType)}`
       : '/api/sales/targets';
-    fetch(url)
-      .then((r) => r.json())
-      .catch(() => null)
-      .then((res) => { if (!cancelled && res?.success) setSalesTargets(res.data as SalesTargets); });
+    swr<{ success?: boolean; data?: unknown } | null>(`${DASH_PREFIX}${url}`, () => fetch(url).then((r) => r.json()).catch(() => null), {
+      maxAgeMs: DASHBOARD_REUSE_MS,
+      shouldCache: (res) => res?.success === true,
+      onValue: (res) => { if (!cancelled && res?.success) setSalesTargets(res.data as SalesTargets); },
+    });
     return () => { cancelled = true; };
   }, [featuresLoading, showToggle, outletType]);
 
@@ -444,9 +528,13 @@ export default function SalesDashboard() {
     if (!isBajaj && !ot) { setTrendData(null); return; }
     if (trendKpi === '' && trendProgram === '' && !ot) { setTrendData(null); return; }
     let cancelled = false;
-    fetchTargetTrend(trendKpi || undefined, trendProgram || undefined, undefined, ot)
-      .then((r) => { if (!cancelled) setTrendData(r); })
-      .catch(() => { if (!cancelled) setTrendData(null); });
+    const trendKey = `${DASH_PREFIX}trend:${trendKpi}|${trendProgram}|${ot ?? ''}`;
+    const hadTrend = peekCached(trendKey) !== undefined;
+    swr(trendKey, () => fetchTargetTrend(trendKpi || undefined, trendProgram || undefined, undefined, ot), {
+      maxAgeMs: DASHBOARD_REUSE_MS,
+      shouldCache: (r) => r !== null,
+      onValue: (r) => { if (!cancelled && (r !== null || !hadTrend)) setTrendData(r); },
+    })?.catch(() => { if (!cancelled && !hadTrend) setTrendData(null); });
     return () => { cancelled = true; };
   }, [isBajaj, showToggle, outletType, trendKpi, trendProgram]);
 
@@ -710,9 +798,9 @@ export default function SalesDashboard() {
                   const only = searchResults[0];
                   // No submission yet → start wizard (else the empty kycId yields a
                   // dead /sales/kyc/ → "KYC not found").
-                  window.location.href = kycTaskHrefFor(only);
+                  router.push(kycTaskHrefFor(only));
                 } else {
-                  window.location.href = `/sales/outlets?q=${encodeURIComponent(search.trim())}`;
+                  router.push(`/sales/outlets?q=${encodeURIComponent(search.trim())}`);
                 }
               }
             }}
@@ -732,7 +820,7 @@ export default function SalesDashboard() {
                     setSearchOpen(false);
                     setSearch('');
                     // No submission yet → start wizard (else empty kycId → dead route).
-                    window.location.href = kycTaskHrefFor(o);
+                    router.push(kycTaskHrefFor(o));
                   }}
                   className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-gray-50 text-left transition-colors border-b border-gray-50 last:border-0"
                 >
@@ -755,7 +843,7 @@ export default function SalesDashboard() {
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
                   setSearchOpen(false);
-                  window.location.href = `/sales/outlets?q=${encodeURIComponent(search.trim())}`;
+                  router.push(`/sales/outlets?q=${encodeURIComponent(search.trim())}`);
                 }}
                 className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-[var(--brand-primary)] hover:bg-[var(--brand-primary)]/5 transition-colors border-t border-gray-100"
               >
@@ -903,6 +991,16 @@ export default function SalesDashboard() {
               </div>
             </CardHeader>
             <CardContent className="pt-0 pb-1">
+              {coreErrors.length > 0 && (
+                <div role="alert" data-testid="dashboard-core-error" className="mb-2 flex items-center justify-between gap-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                  <span>
+                    Couldn&apos;t load {coreErrors.map((e) => CORE_PART_LABEL[e] ?? e).join(', ')} — task counts may be incomplete.
+                  </span>
+                  <button type="button" onClick={() => setCoreRetry((n) => n + 1)} className="shrink-0 font-semibold underline">
+                    Retry
+                  </button>
+                </div>
+              )}
               {visibilityLoadError && (
                 <p role="alert" data-testid="visibility-status-error" className="mb-2 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
                   Visibility tasks: {VISIBILITY_STATUS_LOAD_ERROR}

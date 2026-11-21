@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { usePrefetchOnce } from '@/lib/navigation/prefetch-once';
 import { cn } from '@/lib/utils';
 import type { LucideIcon } from 'lucide-react';
 
@@ -17,6 +18,9 @@ interface NavBottomProps {
 
 export function NavBottom({ items }: NavBottomProps) {
   const pathname = usePathname();
+  // Request-volume work (2026-11-21): the tabs are prefetched ONCE per session (not by <Link> after every
+  // navigation — see components/navigation/no-prefetch-link.tsx). The current tab is skipped (already loaded).
+  usePrefetchOnce(items.map((i) => i.href).filter((h) => h !== pathname));
 
   return (
     <nav
@@ -32,6 +36,7 @@ export function NavBottom({ items }: NavBottomProps) {
             <Link
               key={item.href}
               href={item.href}
+              prefetch={false}
               className={cn(
                 'flex-1 flex flex-col items-center gap-1 py-2.5 px-1 transition-colors',
                 isActive ? 'text-[var(--brand-primary)]' : 'text-gray-400 hover:text-gray-600',

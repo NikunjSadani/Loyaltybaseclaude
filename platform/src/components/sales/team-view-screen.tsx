@@ -19,7 +19,7 @@
  */
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import Link from 'next/link';
+import Link, { LinkPendingHint } from '@/components/navigation/no-prefetch-link';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { ArrowLeft, Users, MapPin, FileCheck, AlertTriangle, TrendingUp, ChevronRight } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
@@ -117,7 +117,8 @@ function MemberMeta({
 function MemberRow({ m, href }: { m: TeamViewMember; href: string }) {
   const meta = [m.roleLabel, m.employeeCode, m.mobile].filter(Boolean).join(' · ');
   return (
-    <Link href={href} className="flex items-center gap-3 py-3.5 px-3 hover:bg-gray-50 transition-colors active:scale-[0.99]">
+    <Link href={href} className="relative flex items-center gap-3 py-3.5 px-3 hover:bg-gray-50 transition-colors active:scale-[0.99]">
+      <LinkPendingHint />
       <div className="flex-1 min-w-0">
         <MemberHeader name={m.name} pct={m.achievedPct} meta={meta} />
         <MemberMeta
@@ -139,7 +140,8 @@ function MemberCard({
 }: { m: OverviewMember; href: string; kpis: OverviewResponse['kpis'] }) {
   const meta = [m.roleLabel, m.employeeCode, m.mobile].filter(Boolean).join(' · ');
   return (
-    <Link href={href} className="block rounded-xl border border-gray-100 bg-white p-3 hover:bg-gray-50 transition-colors active:scale-[0.99]">
+    <Link href={href} className="relative block rounded-xl border border-gray-100 bg-white p-3 hover:bg-gray-50 transition-colors active:scale-[0.99]">
+      <LinkPendingHint />
       <div className="flex items-center gap-3">
         <div className="flex-1 min-w-0">
           <MemberHeader name={m.name} pct={m.score} meta={meta} />

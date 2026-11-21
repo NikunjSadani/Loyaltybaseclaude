@@ -20,6 +20,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { authHeader } from '@/lib/api-client';
+import { getSalesMe, SALES_ME_URL } from '@/lib/cached-reads';
 import type { FeatureFlags } from '@/lib/platform/client-config';
 import { DEFAULT_CLIENT_CONFIG } from '@/lib/platform/default-client-config';
 
@@ -140,11 +141,16 @@ export function useTenantFeatures(endpoint: string, opts: { clock?: boolean } = 
   useEffect(() => {
     let cancelled = false;
     let serverSkewMs: number | null = null;
-    fetch(endpoint, { headers: { ...authHeader() } })
-      .then((r) => {
-        serverSkewMs = clock ? serverSkewFromResponse(r) : null;
-        return r.ok ? r.json() : null;
-      })
+    // /api/sales/me without the clock read is session-cached (lib/cached-reads.ts; shared with the sales layout).
+    // The location-gate pages (`clock`) still make their own request: they need THIS response's Date header.
+    const load: Promise<{ data?: { features?: unknown } } | null> =
+      !clock && endpoint === SALES_ME_URL
+        ? (getSalesMe<{ features?: unknown }>() as Promise<{ data?: { features?: unknown } } | null>)
+        : fetch(endpoint, { headers: { ...authHeader() } }).then((r) => {
+            serverSkewMs = clock ? serverSkewFromResponse(r) : null;
+            return r.ok ? r.json() : null;
+          });
+    load
       .then((res) => {
         if (cancelled) return;
         setState({ features: normalizeFeatures(res?.data?.features), loading: false, error: !res, serverSkewMs });

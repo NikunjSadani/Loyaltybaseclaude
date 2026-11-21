@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api-client';
+import { getCached } from '@/lib/session-cache';
 
 /** A single feed item, exactly as the backend returns it. */
 export interface NotificationItem {
@@ -41,6 +42,11 @@ interface FeedPage {
 
 /** How often the unread badge re-polls, in ms. */
 export const UNREAD_POLL_MS = 60_000;
+/** A mount / tab-shown refresh within this window of the last count reuses it (request-volume work, 2026-11-21):
+ *  a remounted bell, or a tab that flips hidden→visible (camera capture, app switch), no longer re-asks at once.
+ *  The 60 s poll itself always asks. Any API write (e.g. mark-read) clears it — lib/session-cache.ts. */
+export const UNREAD_MIN_GAP_MS = 30_000;
+const UNREAD_KEY = 'notifications:unread-count';
 /** Page size for the feed list. */
 export const FEED_PAGE_SIZE = 25;
 
@@ -108,8 +114,13 @@ export function useNotifications(): UseNotifications {
      (X-Background: 1) so a tab left open never counts as someone using the app.
      The poll PAUSES while the tab is hidden and refreshes once when it is shown
      again. */
-  const refreshCount = useCallback(async () => {
-    const res = await api.get<{ count: number }>('/api/notifications/unread-count', { background: true });
+  const refreshCount = useCallback(async (minGapMs: number = UNREAD_MIN_GAP_MS) => {
+    // De-duplicated across bell instances: one in-flight request, and a count younger than minGapMs is reused.
+    const res = await getCached(
+      UNREAD_KEY,
+      () => api.get<{ count: number }>('/api/notifications/unread-count', { background: true }),
+      { ttlMs: minGapMs, shouldCache: (r) => r.success },
+    );
     // Skip the write if a mark-read/mark-all POST is in flight: its optimistic
     // decrement is authoritative until it resolves, and a stale poll value must
     // not transiently bump the badge back up.
@@ -123,7 +134,7 @@ export function useNotifications(): UseNotifications {
     let id: ReturnType<typeof setInterval> | null = null;
     const start = () => {
       if (id !== null) return;
-      id = setInterval(() => { if (!hidden()) void refreshCount(); }, UNREAD_POLL_MS);
+      id = setInterval(() => { if (!hidden()) void refreshCount(0); }, UNREAD_POLL_MS);
     };
     const stop = () => {
       if (id !== null) clearInterval(id);

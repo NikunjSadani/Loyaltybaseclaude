@@ -30,6 +30,8 @@ vi.mock('@/lib/partner-identity', () => ({
   usePartnerIdentity: () => ({}),
   announceActivePartnerChanged: vi.fn(),
   rememberActiveOutletDisplay: (o: unknown) => rememberMock(o),
+  // The real helper = setActivePartner + clear the read cache; delegate to the server-action mock.
+  switchActivePartner: (id: string | null) => setActivePartnerMock(id),
 }));
 vi.mock('@/lib/platform/client-config-context', () => ({ useClientConfig: () => ({ branding: {} }) }));
 vi.mock('@/lib/auth-client', () => ({ logout: vi.fn(), PORTAL_ROLES: { partner: [] } }));

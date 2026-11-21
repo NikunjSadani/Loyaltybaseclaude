@@ -38,6 +38,8 @@ interface Outlet {
   kycFiledViaOutletCode?: string;
   outletCode: string;  // matches Outlet.outletCode in DB (used for target + visibility lookup)
   name:       string;
+  /** Raw /api/sales/outlets field — matched by the `?q=` search (the dashboard search matches name OR mobile). */
+  mobile?:    string;
   location:   string;
   beat:       string;
   district:   string;
@@ -186,6 +188,15 @@ export default function SalesOutletsPage() {
   const [beatFilter, setBeatFilter] = useState<string>('ALL');
   const [programFilter, setProgramFilter] = useState<string>('ALL');
   const [memberFilter, setMemberFilter] = useState<string>('');
+  // `?q=` from the dashboard's "see all results" — the same name-or-mobile match as the dashboard search.
+  const [query, setQuery] = useState('');
+  useEffect(() => {
+    try {
+      setQuery((new URLSearchParams(window.location.search).get('q') ?? '').trim());
+    } catch {
+      setQuery('');
+    }
+  }, []);
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [role,       setRoleState]  = useState<SalesRole>('SO');
 
@@ -353,8 +364,13 @@ export default function SalesOutletsPage() {
     const matchesProgram = programFilter === 'ALL' || o.programName === programFilter;
     const matchesMember = !selectedMemberUserIds
       || (!!o.assignedUserId && selectedMemberUserIds.has(o.assignedUserId));
-    return matchesType && matchesBeat && matchesProgram && matchesMember;
-  }), [outlets, typeFilter, beatFilter, programFilter, selectedMemberUserIds]);
+    const q = query.toLowerCase();
+    const matchesQuery = !q
+      || (o.name ?? '').toLowerCase().includes(q)
+      || (o.mobile ?? '').includes(q)
+      || (o.outletCode ?? '').toLowerCase().includes(q);
+    return matchesType && matchesBeat && matchesProgram && matchesMember && matchesQuery;
+  }), [outlets, typeFilter, beatFilter, programFilter, selectedMemberUserIds, query]);
 
   // Owner-specified outlet order (2026-07-03): Approved → Re-KYC → Rejected →
   // Pending → Not Interested (see kycOrderRank). Within Approved, worst performer
@@ -452,6 +468,23 @@ export default function SalesOutletsPage() {
           ))}
         </div>
       </div>
+
+      {/* Search from the dashboard (?q=) — shown as a removable chip so the narrowed list is never a mystery. */}
+      {query && (
+        <div className="flex items-center gap-2" data-testid="outlets-query-chip">
+          <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold border border-[var(--brand-primary)] text-[var(--brand-primary)] rounded-full pl-2.5 pr-1 py-0.5 bg-white">
+            Search: “{query}”
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => { setQuery(''); try { window.history.replaceState(null, '', '/sales/outlets'); } catch { /* cosmetic */ } }}
+              className="rounded-full px-1.5 hover:bg-gray-100"
+            >
+              ✕
+            </button>
+          </span>
+        </div>
+      )}
 
       {/* Row 2: filter strip — wraps so every filter stays visible on a narrow phone */}
       <div className="flex flex-wrap items-center gap-2">
@@ -706,7 +739,7 @@ export default function SalesOutletsPage() {
               <AlertTriangle className="h-7 w-7 text-gray-300" />
               <p className="text-sm text-gray-400">No outlets match the selected filters</p>
               <button
-                onClick={() => { setTypeFilter('ALL'); setBeatFilter('ALL'); setProgramFilter('ALL'); setMemberFilter(''); }}
+                onClick={() => { setTypeFilter('ALL'); setBeatFilter('ALL'); setProgramFilter('ALL'); setMemberFilter(''); setQuery(''); }}
                 className="text-xs text-[var(--brand-primary)] font-semibold hover:underline mt-1"
               >
                 Clear all filters

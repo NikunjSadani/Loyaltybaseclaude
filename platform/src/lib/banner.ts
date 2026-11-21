@@ -163,18 +163,28 @@ function authHeader(): Record<string, string> {
  * Returns `{ banners: [], popups: [] }` on any error so the UI degrades gracefully.
  */
 export async function fetchBanners(): Promise<{ banners: Banner[]; popups: Popup[] }> {
+  const { banners, popups } = await fetchBannersResult();
+  return { banners, popups };
+}
+
+/**
+ * Same read with `ok` for callers that cache. A 403 is a DEFINITE answer (the caller's role may not read banners —
+ * today every sales role, see the sales dashboard note) → ok with no banners; any other failure is not ok.
+ */
+export async function fetchBannersResult(): Promise<{ banners: Banner[]; popups: Popup[]; ok: boolean }> {
   try {
     const res = await fetch('/api/partner/banners', {
       headers: { ...authHeader() },
     });
-    if (!res.ok) return { banners: [], popups: [] };
+    if (!res.ok) return { banners: [], popups: [], ok: res.status === 403 };
     const json = await res.json();
     return {
       banners: json.data?.banners ?? [],
       popups:  json.data?.popups  ?? [],
+      ok: true,
     };
   } catch {
-    return { banners: [], popups: [] };
+    return { banners: [], popups: [], ok: false };
   }
 }
 

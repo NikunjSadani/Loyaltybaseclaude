@@ -1,6 +1,7 @@
 /// <reference types="vitest/globals" />
 import '@testing-library/jest-dom';
 import { configure } from '@testing-library/react';
+import { __resetSessionCacheForTests } from '@/lib/session-cache';
 
 // Flaky-test sweep 2026-11-15 — suite-wide defaults so a test's correctness never depends on runner speed:
 //  * findBy* / waitFor default timeout 1 s -> 15 s. A passing test resolves as soon as the element
@@ -13,6 +14,12 @@ configure({ asyncUtilTimeout: 15_000 });
 //    frozen timers and fail for an unrelated reason. Restoring after EVERY test makes that impossible.
 afterEach(() => {
   vi.useRealTimers();
+});
+
+//  * The client read cache (lib/session-cache.ts) is module state — start every test empty so one test's mocked
+//    /api/sales/me (etc.) can never be served to the next test.
+beforeEach(() => {
+  __resetSessionCacheForTests();
 });
 
 // Stub browser APIs not available in jsdom

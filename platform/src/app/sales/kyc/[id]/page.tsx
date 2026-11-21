@@ -1,7 +1,8 @@
 'use client';
 
 import { use, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
-import Link from 'next/link';
+import Link from '@/components/navigation/no-prefetch-link';
+import { OutletDetailSkeleton } from '@/components/sales/outlet-detail-skeleton';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft, Building2, Phone, MapPin, User, Users,
@@ -1472,11 +1473,8 @@ export default function SalesKYCDetailPage({ params }: { params: Promise<{ id: s
   }, [kyc?.willLeaveGroup]);
 
   if (loadingKyc) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <span className="text-sm text-gray-400">Loading…</span>
-      </div>
-    );
+    // Same skeleton as ./loading.tsx — one continuous loading state from tap to content.
+    return <OutletDetailSkeleton />;
   }
 
   if (!kyc) {

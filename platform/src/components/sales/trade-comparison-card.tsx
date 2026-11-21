@@ -21,6 +21,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { fetchTradeComparison, type TradeComparisonResult, type TradeComparisonBucket, type TradeComparisonKpi } from '@/lib/sales-trade-comparison';
 import { fetchTeamView } from '@/lib/sales-team';
+import { swr, peekCached, DASHBOARD_REUSE_MS, DASH_PREFIX } from '@/lib/session-cache';
 import { formatInrCompact, formatCompact, isInrUnit } from '@/lib/format-inr';
 
 interface MemberOption { id: string; name: string; roleLabel: string }
@@ -99,13 +100,16 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
   // Filter options — one team-view call, auth-scoped to the caller's subtree.
   useEffect(() => {
     let cancelled = false;
-    fetchTeamView({})
-      .then((r) => {
+    // Reused for DASHBOARD_REUSE_MS on a return to the dashboard (lib/session-cache.ts — any write clears it).
+    swr(`${DASH_PREFIX}team-view`, () => fetchTeamView({}), {
+      maxAgeMs: DASHBOARD_REUSE_MS,
+      shouldCache: (r) => r.success,
+      onValue: (r) => {
         if (cancelled || !r.success) return;
         setProgramOptions(r.data.filterOptions.programs ?? []);
         setMemberOptions((r.data.members ?? []).map((m) => ({ id: m.id, name: m.name, roleLabel: m.roleLabel })));
-      })
-      .catch(() => { /* leave option lists empty — the dropdowns simply show "All" */ });
+      },
+    })?.catch(() => { /* leave option lists empty — the dropdowns simply show "All" */ });
     return () => { cancelled = true; };
   }, []);
 
@@ -115,16 +119,27 @@ export function TradeComparisonCard({ outletType }: { outletType: string }) {
   // errors must NOT leave RLP figures on screen under a "BSC" header).
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(false);
-    setData(null);
-    fetchTradeComparison(outletType, program || undefined, memberId || undefined, kpi || undefined)
-      .then((r) => {
+    // Keyed by the EXACT filter set, so a cached answer is always this outletType/program/member/KPI's own numbers.
+    // Not cached for this filter → clear + load as before (never keep the previous outlet type's figures).
+    // Cached → shown at once; refreshed in the background only when older than DASHBOARD_REUSE_MS, and a failed
+    // background refresh keeps the (correctly-keyed) cached figures.
+    const key = `${DASH_PREFIX}trade:${outletType}|${program}|${memberId}|${kpi}`;
+    const hadCache = peekCached(key) !== undefined;
+    if (!hadCache) {
+      setLoading(true);
+      setError(false);
+      setData(null);
+    }
+    swr(key, () => fetchTradeComparison(outletType, program || undefined, memberId || undefined, kpi || undefined), {
+      maxAgeMs: DASHBOARD_REUSE_MS,
+      shouldCache: (r) => r !== null,
+      onValue: (r) => {
         if (cancelled) return;
-        if (r) { setData(r); setKpiOptions(r.kpis ?? []); } else setError(true);
-      })
-      .catch(() => { if (!cancelled) setError(true); })
-      .finally(() => { if (!cancelled) setLoading(false); });
+        if (r) { setData(r); setKpiOptions(r.kpis ?? []); setError(false); }
+        else if (!hadCache) setError(true);
+        setLoading(false);
+      },
+    })?.catch(() => { if (!cancelled) { if (!hadCache) setError(true); setLoading(false); } });
     return () => { cancelled = true; };
   }, [outletType, program, memberId, kpi]);
 

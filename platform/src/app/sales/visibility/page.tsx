@@ -19,7 +19,7 @@
  */
 
 import React, { Suspense, useEffect, useMemo, useState } from 'react';
-import Link from 'next/link';
+import Link from '@/components/navigation/no-prefetch-link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ArrowLeft, Camera, CheckCircle, Clock, Eye, AlertTriangle, XCircle, Loader2, Search,

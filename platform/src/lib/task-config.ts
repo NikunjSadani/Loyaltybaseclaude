@@ -42,21 +42,29 @@ export function invalidateTaskConfigCache(): void {
 
 /** Fetch the current task config from the API. Falls back to default on error. */
 export async function fetchTaskConfig(): Promise<TaskConfig> {
+  return (await fetchTaskConfigResult()).config;
+}
+
+/**
+ * Same read, but says whether it really came from the server (`ok`) — a caller that caches must never cache the
+ * DEFAULT_TASK_CONFIG fallback of a failed request as if it were the tenant's config.
+ */
+export async function fetchTaskConfigResult(): Promise<{ config: TaskConfig; ok: boolean }> {
   // Return cached value if still fresh
   if (_taskConfigCache && Date.now() - _taskConfigCache.ts < TASK_CONFIG_TTL_MS) {
-    return _taskConfigCache.data;
+    return { config: _taskConfigCache.data, ok: true };
   }
   try {
     const res = await fetch('/api/admin/task-config', {
       headers: { ...authHeader() },
     });
-    if (!res.ok) return DEFAULT_TASK_CONFIG;
+    if (!res.ok) return { config: DEFAULT_TASK_CONFIG, ok: false };
     const json  = await res.json();
     const data: TaskConfig = json.data?.config ?? DEFAULT_TASK_CONFIG;
     _taskConfigCache = { data, ts: Date.now() };
-    return data;
+    return { config: data, ok: true };
   } catch {
-    return DEFAULT_TASK_CONFIG;
+    return { config: DEFAULT_TASK_CONFIG, ok: false };
   }
 }
 

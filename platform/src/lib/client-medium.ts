@@ -15,6 +15,8 @@
  * Never throws and never changes a request beyond adding the header: any failure falls through to the original fetch.
  */
 
+import { isWriteMethod, methodOf, noteApiMutation } from '@/lib/session-cache';
+
 export type ClientMedium = 'app' | 'browser';
 
 export const CLIENT_MEDIUM_HEADER = 'X-Client-Medium';
@@ -106,12 +108,22 @@ export function installClientMediumHeader(): void {
     const original = window.fetch.bind(window);
     const patched: typeof window.fetch = (input, init) => {
       let nextInit = init;
+      let write = false;
       try {
         nextInit = withClientMedium(input, init);
+        // Request-volume work (2026-11-21): any same-origin /api WRITE clears the client read cache
+        // (lib/session-cache.ts) when it starts AND when it settles, so a KYC submit / capture / redemption /
+        // approval / settings save is followed by fresh reads — never a cached pre-write answer.
+        write = isSameOriginApi(input) && isWriteMethod(methodOf(input, init));
+        if (write) noteApiMutation('POST');
       } catch {
         nextInit = init; // tagging must never break a request
       }
-      return original(input, nextInit);
+      const res = original(input, nextInit);
+      if (!write) return res;
+      return res.finally(() => {
+        try { noteApiMutation('POST'); } catch { /* never break a request */ }
+      });
     };
     window.fetch = patched;
   } catch {

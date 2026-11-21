@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, use } from 'react';
-import Link from 'next/link';
+import Link from '@/components/navigation/no-prefetch-link';
 import { ArrowLeft, AlertTriangle } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { buildStatementDoc, type StatementApiResponse } from '@/lib/wallet-statement/statement-model';
