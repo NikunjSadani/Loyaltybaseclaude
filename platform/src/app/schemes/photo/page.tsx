@@ -7,13 +7,16 @@
  * A signed-in page that renders for ANY signed-in role (see lib/scheme-photo-link.ts): a signed-out click is sent to
  * sign-in with `next` and lands back here; a role without scheme access, or an account of another programme, reads
  * "You don't have access". The bytes come from the role-gated `/api/schemes/media/file?key=` (tenant pinned from the
- * key's folder). Images are shown full-width, PDFs in an embedded frame, both with Download.
+ * key's folder). Images are shown full-width; PDFs get an "Open PDF" button (embedded too on desktop); both with Download.
  */
 import SignedInMediaViewer, { type MediaViewerConfig } from '@/components/media/SignedInMediaViewer';
 import { isSchemeFileKey, schemePhotoMediaUrl } from '@/lib/scheme-photo-link';
 
-function configFor(key: string): MediaViewerConfig {
-  const noun = key && isSchemeFileKey(key) ? 'file' : 'photo';
+/** Wording from the served content type once known (image → photo, anything else → file); before that, the key. */
+function configFor(key: string, contentType: string | null): MediaViewerConfig {
+  const noun = contentType
+    ? (contentType.startsWith('image/') ? 'photo' : 'file')
+    : key && isSchemeFileKey(key) ? 'file' : 'photo';
   return {
     heading: noun === 'file' ? 'Scheme file' : 'Scheme photo',
     noun,

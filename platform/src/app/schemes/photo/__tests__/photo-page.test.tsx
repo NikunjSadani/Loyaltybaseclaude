@@ -48,15 +48,41 @@ describe('Scheme photo viewer page', () => {
     expect(screen.getByRole('heading').textContent).toBe('Scheme photo');
   });
 
-  it('a PDF is shown in an embedded frame (not an <img>) with Download, worded as a "file"', async () => {
+  function stubWidth(desktop: boolean) {
+    vi.stubGlobal('matchMedia', vi.fn((q: string) => ({ matches: desktop, media: q, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    Object.defineProperty(window, 'matchMedia', { configurable: true, value: (globalThis as { matchMedia: unknown }).matchMedia });
+  }
+
+  it('PDF on a PHONE: an "Open PDF" button + Download, NO frame (a blob: frame is blank on Android / iOS)', async () => {
+    stubWidth(false);
     search = new URLSearchParams({ key: PDF_KEY });
     stubFetch(200, 'application/pdf');
     const { container } = render(<SchemePhotoPage />);
-    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull());
-    expect(container.querySelector('iframe')!.getAttribute('src')).toBe('blob:media-1');
+    const open = await screen.findByRole('link', { name: /open pdf/i });
+    expect(open.getAttribute('href')).toBe('blob:media-1');
+    expect(open.getAttribute('target')).toBe('_blank');
+    expect(container.querySelector('iframe')).toBeNull();
     expect(container.querySelector('img')).toBeNull();
     expect(screen.getByRole('heading').textContent).toBe('Scheme file');
     expect(screen.getByRole('link', { name: /download/i }).getAttribute('download')).toBe('0b7c-gst_certificate.pdf');
+  });
+
+  it('PDF on a DESKTOP: the "Open PDF" button AND an embedded frame', async () => {
+    stubWidth(true);
+    search = new URLSearchParams({ key: PDF_KEY });
+    stubFetch(200, 'application/pdf');
+    const { container } = render(<SchemePhotoPage />);
+    await screen.findByRole('link', { name: /open pdf/i });
+    await waitFor(() => expect(container.querySelector('iframe')?.getAttribute('src')).toBe('blob:media-1'));
+  });
+
+  it('wording follows the SERVED content type: a PDF behind a ".jpg" key reads "Scheme file" once loaded', async () => {
+    stubWidth(false);
+    search = new URLSearchParams({ key: KEY });
+    stubFetch(200, 'application/pdf');
+    render(<SchemePhotoPage />);
+    await screen.findByRole('link', { name: /open pdf/i });
+    expect(screen.getByRole('heading').textContent).toBe('Scheme file');
   });
 
   it('403 (another programme, or a role without scheme access) → "You don\'t have access"', async () => {

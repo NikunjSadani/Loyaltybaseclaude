@@ -78,7 +78,10 @@ describe('renderExportValue (pure)', () => {
     expect(renderExportValue(field({ id: 't', type: 'TEXT' }), ` ${k} `, link)).toEqual(link(k));
     expect(renderExportValue(field({ id: 't', type: 'TEXT' }), { key: k, geo: { lat: 1, lng: 2 } }, link)).toEqual(link(k));
     expect(renderExportValue(field({ id: 'm', type: 'MULTI_SELECT' }), [k], link)).toEqual(link(k));
-    expect(renderExportValue(field({ id: 'm', type: 'MULTI_SELECT' }), [k, 'A'], link)).toBe('(file), A');
+    // Several items in one cell: every file's address, one per line — never hidden.
+    expect(renderExportValue(field({ id: 'm', type: 'MULTI_SELECT' }), [k, 'A'], link)).toBe(`/link/${k}\nA`);
+    // Only the FULL key shape counts — a look-alike stays text.
+    expect(renderExportValue(field({ id: 't', type: 'TEXT' }), 'scheme-media/deoleo/a b.jpg', link)).toBe('scheme-media/deoleo/a b.jpg');
   });
 
   it('treats SIGNATURE (a net-new media type) as media', () => {
@@ -354,6 +357,25 @@ describe('buildEnrollmentExportRows (pure)', () => {
     expect(rows[0]['Region']).toBe('West');
     expect(columns.filter((c) => c.name === 'Beat')).toHaveLength(1);
     expect(columns.some((c) => c.name === 'Beat (Excel)')).toBe(false);
+  });
+
+  it('a multi-file value → one link per file in adjacent "<col> – file N" columns (legend included), nothing hidden', () => {
+    const k1 = 'scheme-media/deoleo/2026-09/a-1.jpg';
+    const k2 = 'scheme-media/deoleo/2026-09/a-2.jpg';
+    const k3 = 'scheme-media/deoleo/2026-09/a-3.pdf';
+    const roster: ExportRosterRow[] = [
+      row({ outletRef: 'A', enrollment: enrolled({ formValues: { f_photo: [k1, k2, k3] } }) }),
+      row({ outletRef: 'B', enrollment: enrolled({ formValues: { f_photo: [k1] } }) }),
+      row({ outletRef: 'C' }),
+    ];
+    const { rows, columns } = buildEnrollmentExportRows(roster, fields, link);
+    expect(rows[0]['Photo']).toEqual(link(k1));
+    expect(rows[0]['Photo – file 2']).toEqual(link(k2));
+    expect(rows[0]['Photo – file 3']).toEqual(link(k3));
+    expect(rows[1]).toMatchObject({ Photo: link(k1), 'Photo – file 2': '', 'Photo – file 3': '' });
+    expect(Object.keys(rows[2])).toEqual(Object.keys(rows[0]));
+    const names = columns.map((c) => c.name);
+    expect(names.slice(names.indexOf('Photo'))).toEqual(['Photo', 'Photo – file 2', 'Photo – file 3']);
   });
 
   it('an uploaded Excel cell holding a scheme-media key is linked, never written as text', () => {

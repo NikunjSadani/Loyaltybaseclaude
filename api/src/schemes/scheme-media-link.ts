@@ -22,6 +22,25 @@ import { pickTenantDomain, tenantPortalLink } from '../tickets/ticket-link';
 
 export const SCHEME_MEDIA_PREFIX = 'scheme-media/';
 
+/**
+ * The FULL stored-key shape written by the upload endpoint (StorageService.generateKey):
+ * `scheme-media/<clientId>/<YYYY-MM>/<file name>` — no spaces, no further "/", no backslash. Anything else is
+ * not a scheme media key (never linked, never served).
+ */
+export const SCHEME_MEDIA_KEY_RE = /^scheme-media\/[A-Za-z0-9_-]+\/\d{4}-(0[1-9]|1[0-2])\/[^/\s\\]+$/;
+
+export function isSchemeMediaKey(key: unknown): key is string {
+  return typeof key === 'string' && SCHEME_MEDIA_KEY_RE.test(key) && !key.split('/').some((s) => s === '.' || s === '..');
+}
+
+/** The tenant segment + the UTC month start (the upload month) of a valid key, else null. */
+export function schemeMediaKeyParts(key: string): { clientId: string; monthStart: Date } | null {
+  if (!isSchemeMediaKey(key)) return null;
+  const [, clientId, ym] = key.split('/');
+  const [y, m] = ym.split('-').map(Number);
+  return { clientId, monthStart: new Date(Date.UTC(y, m - 1, 1)) };
+}
+
 /** Mutable so a spec can lower it (mirrors VISIBILITY_LINK_LIMIT). */
 export const SCHEME_LINK_LIMIT = { perSheet: 60_000 };
 
@@ -39,12 +58,21 @@ export function schemeMediaKeyOf(value: unknown): string {
         ? (value as { key: string }).key
         : '';
   const t = k.trim();
-  return t.startsWith(SCHEME_MEDIA_PREFIX) ? t : '';
+  return isSchemeMediaKey(t) ? t : '';
 }
 
-/** "Open photo" for an image key, "Open file" for a PDF / any non-image key. */
+/** The scheme-media keys of an ARRAY value (multi-file), in order; [] when it holds none. */
+export function schemeMediaKeysOfArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(schemeMediaKeyOf).filter(Boolean) : [];
+}
+
+/**
+ * "Open photo" for an image key, "Open file" for a PDF / any non-image key. Since 2026-11-21 the upload endpoint
+ * writes the key's extension from the SNIFFED content type (not the client's file name), so for new uploads the
+ * extension IS the stored type; older keys fall back to their original file name's extension.
+ */
 export function schemeMediaLinkText(key: string): 'Open photo' | 'Open file' {
-  return /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(key.trim()) ? 'Open photo' : 'Open file';
+  return /\.(jpe?g|png|webp|gif|heic|heif|bmp|tiff?)$/i.test(key.trim()) ? 'Open photo' : 'Open file';
 }
 
 /** Renders one stored media key as an export cell ("Open photo"/"Open file" hyperlink, or the URL past the cap). */
@@ -52,16 +80,26 @@ export type MediaCell = (mediaKey: string) => HyperlinkCell | string;
 
 /**
  * A value that carries a stored scheme-media key must never surface as text (e.g. a legacy UPI_QR_SCAN value from
- * before 2026-09-14, when that type uploaded an image; or an uploaded Excel cell). Arrays: a single media item → its
- * link; several → each media item reads "(file)" — a cell holds one link only, and no form field stores more than one.
+ * before 2026-09-14, when that type uploaded an image; or an uploaded Excel cell). A single key → its link. An array
+ * of several (one cell can hold ONE hyperlink) → every file's full viewer address, one per line — nothing hidden.
+ * (The enrollment export splits a multi-file FORM field into "<col> 1 / 2 …" link columns instead.)
  */
 export function mediaSafe(value: unknown, mediaCell: MediaCell): unknown {
   const key = schemeMediaKeyOf(value);
   if (key) return mediaCell(key);
   if (Array.isArray(value)) {
-    const keys = value.map(schemeMediaKeyOf).filter(Boolean);
+    const keys = schemeMediaKeysOfArray(value);
     if (keys.length === 1 && value.length === 1) return mediaCell(keys[0]);
-    if (keys.length > 0) return value.map((v) => (schemeMediaKeyOf(v) ? '(file)' : String(v))).join(', ');
+    if (keys.length > 0) {
+      return value
+        .map((v) => {
+          const k = schemeMediaKeyOf(v);
+          if (!k) return String(v);
+          const c = mediaCell(k);
+          return typeof c === 'string' ? c : c.target;
+        })
+        .join('\n');
+    }
   }
   return value;
 }
@@ -145,7 +183,7 @@ export function schemeMediaAboutRows(w: SchemeMediaLinkWriter, sheet: string): A
   const rows: Array<{ Item: string; Details: string }> = [
     {
       Item: 'PHOTO / FILE LINKS',
-      Details: `Each "Open photo" / "Open file" link in the ${sheet} sheet opens that photo or document in the portal${w.host ? ` (${w.host})` : ''}. You must be signed in with an account of this programme that may view scheme data; if you are not signed in, the portal asks you to sign in and then opens it. The links do not expire, and they never work for anyone outside the programme.`,
+      Details: `Each "Open photo" / "Open file" link in the ${sheet} sheet opens that photo or document in the portal${w.host ? ` (${w.host})` : ''}. It works for anyone signed in with access to this client's scheme data — the client's admins, the sales team for the outlets in their own team, and Gifsy admins; if you are not signed in, the portal asks you to sign in and then opens it. Anyone else sees "You don't have access". The links do not expire.`,
     },
   ];
   if (w.note) rows.push({ Item: 'Link address', Details: w.note });

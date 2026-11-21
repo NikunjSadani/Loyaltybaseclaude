@@ -31,7 +31,19 @@ export function schemePhotoMediaUrl(key: string): string {
   return `/api/schemes/media/file?key=${encodeURIComponent(key)}`;
 }
 
-/** A key that is (by its name) a PDF / non-image file — the page then says "file" instead of "photo". */
+/** A key that is (by its name) a PDF / non-image file — the page then says "file" instead of "photo" until loaded. */
 export function isSchemeFileKey(key: string): boolean {
-  return !/\.(jpe?g|png|webp|gif|heic|heif)$/i.test(key.trim());
+  return !/\.(jpe?g|png|webp|gif|heic|heif|bmp|tiff?)$/i.test(key.trim());
+}
+
+/** The FULL stored scheme-media key shape (mirrors api scheme-media-link SCHEME_MEDIA_KEY_RE). */
+export const SCHEME_MEDIA_KEY_RE = /^scheme-media\/[A-Za-z0-9_-]+\/\d{4}-(0[1-9]|1[0-2])\/[^/\s\\]+$/;
+
+export function isSchemeMediaKey(v: unknown): v is string {
+  return typeof v === 'string' && SCHEME_MEDIA_KEY_RE.test(v.trim()) && !v.split('/').some((s) => s === '.' || s === '..');
+}
+
+/** In-app path of the scheme media viewer page for a key. */
+export function schemePhotoPagePath(key: string): string {
+  return `${SCHEME_PHOTO_PATH}?key=${encodeURIComponent(key.trim())}`;
 }

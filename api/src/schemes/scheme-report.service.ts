@@ -10,7 +10,14 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import { EnrollmentFormSchema, FormField, readMediaValue } from './enrollment-form.helper';
-import { loadSchemeMediaLinkWriter, mediaSafe, schemeMediaAboutRows, schemeMediaKeyOf, type MediaCell } from './scheme-media-link';
+import {
+  loadSchemeMediaLinkWriter,
+  mediaSafe,
+  schemeMediaAboutRows,
+  schemeMediaKeyOf,
+  schemeMediaKeysOfArray,
+  type MediaCell,
+} from './scheme-media-link';
 import {
   AudienceFilter,
   buildOutletWhereFromFilter,
@@ -277,6 +284,27 @@ export function buildEnrollmentExportRows(
   }
   const geoColFor = (fieldId: string): string => geoNameFor.get(fieldId) as string;
 
+  // Multi-file values (an ARRAY of stored keys on any row): one link per file — file 1 in the
+  // field's own column, files 2..N in adjacent "<col> – file N" columns (one hyperlink per cell;
+  // nothing is hidden). Only fields that actually hold >1 file on some row get the extra columns.
+  const extraFileCols = new Map<string, string[]>();
+  for (const f of fields) {
+    let max = 0;
+    for (const r of roster) {
+      const v = (r.enrollment?.formValues as Record<string, unknown> | undefined)?.[f.id];
+      max = Math.max(max, schemeMediaKeysOfArray(v).length);
+    }
+    if (max < 2) continue;
+    const names: string[] = [];
+    for (let i = 2; i <= max; i++) {
+      let name = `${columnFor.get(f.id) as string} – file ${i}`;
+      while (geoTaken.has(name)) name = `${name} (2)`;
+      geoTaken.add(name);
+      names.push(name);
+    }
+    extraFileCols.set(f.id, names);
+  }
+
   // The reserved (non-Excel) headers: base identity, master attrs, status (all defined
   // above), and every form-field column. An uploaded Excel header colliding with any of
   // these is suffixed ` (Excel)` rather than dropped (RESERVED-collision trap) so the
@@ -289,6 +317,7 @@ export function buildEnrollmentExportRows(
     // The per-photo geotag companion headers are reserved too, so an uploaded Excel
     // column sharing a "<col> (Geo)" header is de-collided rather than overwriting it.
     ...[...mediaGeoFields].map(geoColFor),
+    ...[...extraFileCols.values()].flat(),
   ]);
   // Case-INSENSITIVE view of the reserved headers: an uploaded Excel column that differs
   // from a reserved header only in letter-case (e.g. "status" vs the built-in "Status")
@@ -407,7 +436,16 @@ export function buildEnrollmentExportRows(
       // back to it would render a bogus link pointing at a non-key. Media fields therefore
       // use the captured value ONLY (empty cell when not captured), never the prefill.
       const effective = MEDIA_FIELD_TYPES.has(f.type) ? captured : captured ?? prefill;
-      row[columnFor.get(f.id) as string] = renderExportValue(f, effective, mediaCell);
+      const extra = extraFileCols.get(f.id);
+      const fileKeys = extra ? schemeMediaKeysOfArray(captured) : [];
+      if (extra && fileKeys.length > 0) {
+        // One link per file: file 1 here, the rest in the adjacent columns ('' where this row has fewer).
+        row[columnFor.get(f.id) as string] = mediaCell(fileKeys[0]);
+        extra.forEach((name, i) => { row[name] = fileKeys[i + 1] ? mediaCell(fileKeys[i + 1]) : ''; });
+      } else {
+        row[columnFor.get(f.id) as string] = renderExportValue(f, effective, mediaCell);
+        if (extra) for (const name of extra) row[name] = '';
+      }
       // Companion per-photo geotag cell (media fields that carry geo on any row). Reads the
       // CAPTURED value only — a bare-string key (no geo) yields an empty cell.
       if (mediaGeoFields.has(f.id)) {
@@ -442,9 +480,13 @@ export function buildEnrollmentExportRows(
           ? 'Captured on the enrollment form — a clickable "Open photo" / "Open file" link (sign-in needed; see About)'
           : 'Captured on the enrollment form',
       };
+      const files = (extraFileCols.get(f.id) ?? []).map((name) => ({
+        name,
+        source: 'Captured on the enrollment form — the next file of this field (a clickable link; see About)',
+      }));
       return mediaGeoFields.has(f.id)
-        ? [base, { name: geoColFor(f.id), source: 'Per-photo GPS captured at photo time' }]
-        : [base];
+        ? [base, ...files, { name: geoColFor(f.id), source: 'Per-photo GPS captured at photo time' }]
+        : [base, ...files];
     }),
   ];
 

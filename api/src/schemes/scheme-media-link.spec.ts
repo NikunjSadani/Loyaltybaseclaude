@@ -12,11 +12,13 @@ import {
   mediaSafe,
   SCHEME_LINK_LIMIT,
   schemeMediaKeyOf,
+  schemeMediaKeyParts,
+  schemeMediaKeysOfArray,
   schemeMediaLinkText,
   schemeMediaPath,
 } from './scheme-media-link';
 
-const KEY = 'scheme-media/deoleo/2026-09/0b7c9f2e-shop front.jpg';
+const KEY = 'scheme-media/deoleo/2026-09/0b7c9f2e-shop_front.jpg';
 
 describe('scheme-media-link', () => {
   afterEach(() => {
@@ -40,6 +42,14 @@ describe('scheme-media-link', () => {
     expect(schemeMediaKeyOf('visibility-media/x.jpg')).toBe('');
     expect(schemeMediaKeyOf({ lat: 1 })).toBe('');
     expect(schemeMediaKeyOf([KEY])).toBe('');
+    // FULL pattern only: tenant / YYYY-MM / one file name, no spaces, no extra segments, no traversal.
+    for (const bad of [
+      'scheme-media/deoleo/a.jpg', 'scheme-media/deoleo/2026-13/a.jpg', 'scheme-media/deoleo/2026-09/a b.jpg',
+      'scheme-media/deoleo/2026-09/x/a.jpg', 'scheme-media/../2026-09/a.jpg', 'scheme-media/deoleo/2026-09/..',
+      'scheme-media/deoleo/2026-09/a\\b.jpg', 'xscheme-media/deoleo/2026-09/a.jpg',
+    ]) expect({ bad, k: schemeMediaKeyOf(bad) }).toEqual({ bad, k: '' });
+    expect(schemeMediaKeyParts(KEY)).toEqual({ clientId: 'deoleo', monthStart: new Date(Date.UTC(2026, 8, 1)) });
+    expect(schemeMediaKeysOfArray([KEY, 'x', { key: KEY }])).toEqual([KEY, KEY]);
   });
 
   it('production link = https://<primary domain>/schemes/photo?key=…; a staging-looking primary falls back to <slug>.gifsy.in with a note', () => {
@@ -72,7 +82,7 @@ describe('scheme-media-link', () => {
     expect(mediaSafe(KEY, cell)).toEqual(cell(KEY));
     expect(mediaSafe('North', cell)).toBe('North');
     expect(mediaSafe(42, cell)).toBe(42);
-    expect(mediaSafe([KEY, KEY], cell)).toBe('(file), (file)');
+    expect(mediaSafe([KEY, 'North'], cell)).toBe(`${KEY}\nNorth`); // every file's address, one per line
   });
 
   it('GET /v1/schemes/media/file: static path, same roles + schemes:read as the in-app stream', () => {

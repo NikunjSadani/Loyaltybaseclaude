@@ -9,11 +9,15 @@
  * `next` (return-to.ts brings every role back here). The bytes come from a role-gated, tenant-pinned media endpoint
  * (`mediaUrl(key)`); this page only maps its answer to plain words: 403 → "You don't have access", 404 → "not found",
  * 401 → "session ended" (Reload). An image the browser cannot render (e.g. HEIC) → "can't be displayed" + Download;
- * a PDF is shown in an embedded frame with Download.
+ * a PDF ALWAYS gets an "Open PDF" button (a blob: frame is blank on Android / iOS) and is embedded in a frame only on
+ * a desktop-width screen — never a blank frame on a phone.
  */
 import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { Download, ImageOff, Loader2, Lock } from 'lucide-react';
+import { Download, ExternalLink, FileText, ImageOff, Loader2, Lock } from 'lucide-react';
+
+/** Desktop width at which a PDF is also embedded in a frame (mobile browsers render a blob: PDF frame blank). */
+export const PDF_EMBED_MIN_WIDTH = '(min-width: 1024px)';
 
 export interface MediaViewerConfig {
   /** Page heading, e.g. "Visibility photo". */
@@ -30,7 +34,7 @@ export interface MediaViewerConfig {
 
 type State =
   | { kind: 'loading' }
-  | { kind: 'ready'; url: string; fileName: string; isPdf: boolean }
+  | { kind: 'ready'; url: string; fileName: string; isPdf: boolean; contentType: string }
   | { kind: 'error'; title: string; detail: string; icon: 'lock' | 'missing'; action?: 'reload' | 'retry' };
 
 const EXT: Record<string, string> = {
@@ -65,16 +69,34 @@ function errorFor(status: number, cfg: MediaViewerConfig): State {
   return { kind: 'error', icon: 'missing', title: `The ${n} could not be loaded`, detail: 'Please try again in a moment.', action: 'retry' };
 }
 
-/** A fixed config, or one derived from the key (e.g. "file" wording for a PDF key). */
-export type MediaViewerConfigInput = MediaViewerConfig | ((key: string) => MediaViewerConfig);
+/**
+ * A fixed config, or one derived from the key and — once loaded — the response's content type (so the heading says
+ * "file" for a PDF even when its key has no / a wrong extension; before loading, only the key is known).
+ */
+export type MediaViewerConfigInput = MediaViewerConfig | ((key: string, contentType: string | null) => MediaViewerConfig);
+
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia(query);
+    const update = () => setMatches(mq.matches);
+    update();
+    mq.addEventListener?.('change', update);
+    return () => mq.removeEventListener?.('change', update);
+  }, [query]);
+  return matches;
+}
 
 function Viewer({ config }: { config: MediaViewerConfigInput }) {
   const params = useSearchParams();
   const key = (params.get('key') ?? '').trim();
-  const cfg = typeof config === 'function' ? config(key) : config;
   const [state, setState] = useState<State>({ kind: 'loading' });
   const [attempt, setAttempt] = useState(0);
   const [cantDisplay, setCantDisplay] = useState(false);
+  const wide = useMediaQuery(PDF_EMBED_MIN_WIDTH);
+  const cfgFor = (ct: string | null) => (typeof config === 'function' ? config(key, ct) : config);
+  const cfg = cfgFor(state.kind === 'ready' ? state.contentType : null);
   const { mediaUrl, noun } = cfg;
 
   useEffect(() => {
@@ -100,8 +122,9 @@ function Viewer({ config }: { config: MediaViewerConfigInput }) {
         setState({
           kind: 'ready',
           url: objectUrl,
-          fileName: mediaFileNameFor(key, contentType, noun),
+          fileName: mediaFileNameFor(key, contentType, cfgFor(contentType).noun),
           isPdf: contentType.startsWith('application/pdf'),
+          contentType,
         });
       } catch {
         if (!cancelled) setState(errorFor(0, cfg));
@@ -140,8 +163,26 @@ function Viewer({ config }: { config: MediaViewerConfigInput }) {
         )}
 
         {state.kind === 'ready' && state.isPdf && (
-          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
-            <iframe src={state.url} title={cfg.alt} className="block h-[80vh] w-full" />
+          <div className="space-y-3">
+            <div className="flex flex-col items-center gap-3 rounded-xl border border-gray-200 bg-white px-6 py-8 text-center">
+              <FileText className="h-8 w-8 text-gray-300" aria-hidden="true" />
+              <p className="text-sm font-semibold text-gray-900">PDF document</p>
+              <a
+                href={state.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-lg border border-[var(--brand-primary)] px-4 py-2 text-sm font-medium text-[var(--brand-primary)] hover:bg-gray-50"
+              >
+                <ExternalLink className="h-4 w-4" aria-hidden="true" />
+                Open PDF
+              </a>
+              <p className="text-xs text-gray-500">If it does not open on your phone, use Download.</p>
+            </div>
+            {wide && (
+              <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+                <iframe src={state.url} title={cfg.alt} className="block h-[80vh] w-full" />
+              </div>
+            )}
           </div>
         )}
 
