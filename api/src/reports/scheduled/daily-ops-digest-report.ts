@@ -290,6 +290,8 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
         h.waitingNeedsApplyNow,
       );
     }
+    const amb = h.waitingByState?.AMBIGUOUS_OUTLET ?? 0;
+    if (amb > 0) push(`${plural(amb, 'held opening balance', 'held opening balances')} blocked: the outlet code matches more than one outlet — fix the outlet codes`, amb);
   }
   return out;
 }
@@ -557,11 +559,23 @@ const note = (text: string, color = MUTED) => `<div style="font-size:12px;color:
 
 /** The owner's one-line held-opening-balance summary (exact wording, 2026-11-21). */
 export function heldBalancesLine(h: HeldBalancesSection): string {
+  const since = h.windowLabel ? `since the last report (${h.windowLabel.replace(' → ', ' – ')})` : 'since the last report';
+  const w = h.waitingByState;
+  const parts = w
+    ? [
+        w.NOT_ON_PORTAL ? `${intIN(w.NOT_ON_PORTAL)} not on portal` : null,
+        w.AWAITING_KYC ? `${intIN(w.AWAITING_KYC)} on portal awaiting first KYC` : null,
+        w.WALLET_EMPTY ? `${intIN(w.WALLET_EMPTY)} wallet empty — applying` : null,
+        w.NEEDS_APPLY_NOW ? `${intIN(w.NEEDS_APPLY_NOW)} wallet has activity — needs Apply now` : null,
+        w.AMBIGUOUS_OUTLET ? `${intIN(w.AMBIGUOUS_OUTLET)} outlet code matches more than one outlet` : null,
+        h.retrying ? `${intIN(h.retrying)} retrying after a temporary error` : null,
+      ].filter(Boolean)
+    : [];
   return (
-    `Held opening balances: ${intIN(h.appliedInWindow)} applied today (${intIN(h.appliedInWindowPoints)} pts), ` +
-    `${intIN(h.waiting)} still waiting (${intIN(h.waitingPoints)} pts), ${intIN(h.failed)} failed` +
+    `Held opening balances: ${intIN(h.appliedInWindow)} applied ${since} (${intIN(h.appliedInWindowPoints)} pts), ` +
+    `${intIN(h.waiting)} still waiting (${intIN(h.waitingPoints)} pts)${parts.length ? ` [${parts.join('; ')}]` : ''}, ` +
+    `${intIN(h.failed)} failed` +
     (h.failed > 0 ? ` (${intIN(h.failedPoints)} pts)` : '') +
-    (h.waitingNeedsApplyNow > 0 ? ` — ${intIN(h.waitingNeedsApplyNow)} of the waiting need a Gifsy "Apply now"` : '') +
     '.'
   );
 }

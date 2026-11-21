@@ -5,9 +5,11 @@
  *   DRY RUN (default — reads only, prints the per-row plan + totals):
  *     EXPECTED_DB=gifsy_staging TENANT=bajaj SOURCE=vendor-earnburn-2026-11-11 \
  *       MANIFEST=gs://gifsy-platform-files/migrations/bajaj-held-opening-balances-2026-11-11.json \
- *       [EXPECTED_ROWS=40] [EXPECTED_TOTAL=122844] node dist/wallet/held-opening-balances/held-balances-load.main.js
+ *       [EXPECTED_ROWS=40] [EXPECTED_TOTAL=122843] node dist/wallet/held-opening-balances/held-balances-load.main.js
  *   APPLY (inserts PENDING held rows only — never a wallet write):
- *     … HELD_APPLY=true HELD_CONFIRM="APPLY gifsy_staging" [CREATED_BY=<gifsy user id or name>] node …
+ *     … EXPECTED_ROWS=40 EXPECTED_TOTAL=122843 AS_OF=2026-11-11 HELD_APPLY=true HELD_CONFIRM="APPLY gifsy_staging" \
+ *       [SUPERSEDE=true] [CREATED_BY=<gifsy user id or name>] node …
+ *   (EXPECTED_ROWS, EXPECTED_TOTAL and AS_OF are REQUIRED for APPLY.)
  *
  * MANIFEST = a local path or gs://bucket/object. Exit codes: 0 ok · 1 crash · 2 guard refused · 3 manifest invalid
  * (nothing written). Runbook: platform/docs/plans/CLIENT-MIGRATION-PLAYBOOK.md §"Existing points programme".
@@ -30,6 +32,8 @@ export function heldLoadConfigFromEnv(env: NodeJS.ProcessEnv): HeldLoadConfig {
     expectedRows: int(env.EXPECTED_ROWS),
     expectedTotal: int(env.EXPECTED_TOTAL),
     createdBy: env.CREATED_BY?.trim() || undefined,
+    asOf: env.AS_OF?.trim() || undefined,
+    supersede: env.SUPERSEDE === 'true',
   };
 }
 

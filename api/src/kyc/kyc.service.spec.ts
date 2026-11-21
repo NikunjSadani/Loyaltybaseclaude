@@ -5666,20 +5666,25 @@ describe('KycService', () => {
       );
     });
 
-    it('HELD OPENING BALANCES: approval runs the held-balance hook in the SAME tx, after the wallet exists, for the partner + its tenant', async () => {
+    it('HELD OPENING BALANCES: applied AFTER the approval commits (own transaction), never inside it; a failure never fails the approval', async () => {
       seedApproveHappyPath();
       const order: string[] = [];
-      mockTx.wallet.create.mockReset().mockImplementationOnce(async () => { order.push('wallet.create'); return { id: 'w1' }; });
       mockTx.channelPartner.findUniqueOrThrow.mockResolvedValue({ clientId: 'bajaj' });
-      const spy = jest.spyOn(heldApply, 'applyHeldOpeningBalancesForPartner').mockImplementation(async (tx) => {
+      const realTx = mockPrisma.$transaction.getMockImplementation()!;
+      mockPrisma.$transaction.mockImplementationOnce(async (cb: any) => {
+        const r = await realTx(cb);
+        order.push('approval-committed');
+        return r;
+      });
+      const spy = jest.spyOn(heldApply, 'runHeldForPartner').mockImplementation(async (db) => {
         order.push('held');
-        expect(tx).toBe(mockTx);
-        return [];
+        expect(db).toBe(mockPrisma); // its own transactions on the base client — never the approval's tx
+        throw new Error('held exploded');
       });
       try {
-        await service.approve(gifsy, 's1');
-        expect(spy).toHaveBeenCalledWith(mockTx, expect.objectContaining({ partnerId: 'p1', clientId: 'bajaj', trigger: 'KYC_APPROVAL', actorId: gifsy.sub }));
-        expect(order).toEqual(['wallet.create', 'held']);
+        await expect(service.approve(gifsy, 's1')).resolves.toEqual({ message: 'KYC approved successfully' });
+        expect(spy).toHaveBeenCalledWith(mockPrisma, expect.objectContaining({ partnerId: 'p1', clientId: 'bajaj', trigger: 'KYC_APPROVAL', actorId: gifsy.sub }));
+        expect(order).toEqual(['approval-committed', 'held']);
       } finally {
         spy.mockRestore();
       }

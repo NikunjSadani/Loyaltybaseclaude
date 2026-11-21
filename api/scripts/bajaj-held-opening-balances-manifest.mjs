@@ -16,6 +16,9 @@
  *    Earn_<month> at the 1st of the month, Burn_<month> at the month end (November → 11 Nov 2026, when the vendor
  *    stopped redemptions), same rounding rule;
  *  - TARGET (every outlet): the vendor's own 11-Nov closing (File 2 ClosingPoints) ROUNDED to whole points.
+ *  - EXCLUDED, printed + counted + written to <out>.excluded.json (never silent): File-1 outlets with a File-1
+ *    closing that are ABSENT from File 2 — "excluded — owner decision 2026-11-21: 11-Nov report is final"; and File-1
+ *    balances whose File-2 closing is 0 (the vendor's later figure wins).
  *
  * Usage (paths are arguments — nothing client-specific is hard-coded):
  *   node api/scripts/bajaj-held-opening-balances-manifest.mjs \
@@ -43,6 +46,8 @@ const die = (msg) => { console.error(`ABORT: ${msg}`); process.exit(4); };
 
 const num = (v) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
 const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
+// Same normalisation as the platform (held-balance-facts.normOutletCode): trim, upper-case, no internal spaces.
+const normCode = (s) => String(s).trim().toUpperCase().replace(/\s+/g, '');
 const r2 = (n) => Math.round(n);
 const inr = (n) => Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
@@ -159,8 +164,22 @@ for (const q of b.slice(1)) {
   }
   st.held++; st.events += res.ev.length; r ? st.fromFile1++ : st.fromFile2Only++;
   rawHeld += raw; roundedHeld += res.vendorClose;
-  out.push({ outletCode: code, closingPoints: res.vendorClose, events: res.ev, vendorClosingRaw: raw, outletName: norm(q[F2.name]), origin: r ? 'FILE1+FILE2' : 'FILE2_ONLY', ...(res.recovery ? { recovery: res.recovery } : {}) });
+  out.push({ outletCode: normCode(code), closingPoints: res.vendorClose, events: res.ev, vendorClosingRaw: raw, outletName: norm(q[F2.name]), origin: r ? 'FILE1+FILE2' : 'FILE2_ONLY', ...(res.recovery ? { recovery: res.recovery } : {}) });
 }
+// ── File-1 balances NOT carried (owner decision 2026-11-21: the 11-Nov report is final) — listed, never silent ──
+const F2CODES = new Map();
+for (const q of b.slice(1)) { const c = norm(q[F2.code]); if (c) F2CODES.set(c, num(q[F2.closing])); }
+const excluded = [];
+const zeroInFile2 = [];
+for (const [code, r] of A) {
+  if (IMPORTED.has(code)) continue;
+  const f1Close = num(r[102]);
+  if (f1Close === 0) continue;
+  if (!F2CODES.has(code)) excluded.push({ outletCode: normCode(code), file1Closing: f1Close, reason: 'excluded — owner decision 2026-11-21: 11-Nov report is final (outlet absent from the 11-Nov report)' });
+  else if (F2CODES.get(code) === 0) zeroInFile2.push({ outletCode: normCode(code), file1Closing: f1Close, reason: 'File 2 (11-Nov) closing is 0 — the vendor\'s later figure wins' });
+}
+const excludedPts = Math.round(excluded.reduce((s, e) => s + e.file1Closing, 0) * 100) / 100;
+fs.writeFileSync(`${args.out}.excluded.json`, JSON.stringify({ excluded, zeroInFile2 }, null, 0));
 if (args['expect-outlets'] && Number(args['expect-outlets']) !== out.length) die(`expected ${args['expect-outlets']} outlets, built ${out.length}`);
 out.sort((x, y) => (x.outletCode < y.outletCode ? -1 : 1));
 fs.writeFileSync(args.out, JSON.stringify(out, null, 0));
@@ -171,4 +190,6 @@ console.log(JSON.stringify(st));
 console.log(`held outlets: ${out.length} | Σ vendor closing (raw) ${inr(round2(rawHeld))} | Σ held rounded per outlet ${inr(roundedHeld)} | rounding ${inr(round2(rawHeld - roundedHeld))}`);
 console.log(`reconciliation: vendor total (File 2) ${inr(round2(rawAll))} = imported raw ${inr(round2(rawImported))} (${IMPORTED.size} wallets, rounded ${inr(importedRounded)}) + held raw ${inr(round2(rawHeld))} (${out.length}) + zero-balance ${st.zeroNotImported} outlets`);
 console.log(`  rounded: imported ${inr(importedRounded)} + held ${inr(roundedHeld)} = ${inr(importedRounded + roundedHeld)}; vendor − rounded = ${inr(round2(rawAll - importedRounded - roundedHeld))} (rounding)`);
+console.log(`EXCLUDED — owner decision 2026-11-21 (11-Nov report is final): ${excluded.length} File-1 outlets absent from File 2 with a File-1 closing, Σ ${inr(excludedPts)} pts — listed in ${args.out}.excluded.json`);
+console.log(`not carried — File 2 closing 0 (vendor's later figure wins): ${zeroInFile2.length} outlets with a non-zero File-1 closing`);
 console.log(`wrote ${args.out}`);

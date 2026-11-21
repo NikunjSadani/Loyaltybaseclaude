@@ -332,10 +332,16 @@ export interface HeldBalancesSection {
   appliedInWindowPoints: number;
   waiting: number;
   waitingPoints: number;
+  /** of `waiting`, by what each row waits for (no silent waits) */
+  waitingByState?: { NOT_ON_PORTAL: number; AWAITING_KYC: number; WALLET_EMPTY: number; NEEDS_APPLY_NOW: number; AMBIGUOUS_OUTLET: number };
   /** of `waiting`: the outlet already has a wallet with activity → needs a Gifsy "Apply now" */
   waitingNeedsApplyNow: number;
+  /** of `waiting`: the last automatic attempt hit a temporary error (being retried) */
+  retrying?: number;
   failed: number;
   failedPoints: number;
+  /** the digest window label — the line says "since the last report (<window>)", never "today" */
+  windowLabel?: string;
 }
 
 export interface TenantDigest {

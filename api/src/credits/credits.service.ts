@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { applyHeldOpeningBalancesForPartner } from '../wallet/held-opening-balances/held-balance-apply';
+import { prepareHeldBeforeCredit } from '../wallet/held-opening-balances/held-balance-apply';
 import { CreditEntryStatus, Prisma, TdsMethodology, TdsSection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
@@ -1629,6 +1629,29 @@ export class CreditsService {
     // sum per partner so a partner credited under several fields gets one push.
     const creditedByPartner = new Map<string, number>();
 
+    // HELD OPENING BALANCES (client migration; fix round 2026-11-21): BEFORE this confirm's transaction, a held vendor
+    // balance for a target outlet whose wallet is missing or still EMPTY is applied in its OWN transaction (the wallet
+    // is created first if needed) — so the dated history always sits UNDER this credit, and a held-balance problem can
+    // never fail or slow the confirm (it marks the row FAILED, loudly). Dormant (one indexed count) for every tenant
+    // without PENDING held rows. A failure here never blocks crediting.
+    if (pointsRows.length > 0) {
+      try {
+        await prepareHeldBeforeCredit(this.prisma, {
+          clientId: user.clientId,
+          outletCodes: [...new Set(pointsRows.map((r) => r.outletId))],
+          actorId: user.sub,
+          ensureWallet: async (partnerId) => {
+            await this.prisma.$transaction(async (tx) => {
+              const accountId = await ensureOutletAccount(tx, partnerId);
+              await tx.wallet.upsert({ where: { partnerId }, create: { partnerId, accountId }, update: {} });
+            });
+          },
+        });
+      } catch (e) {
+        this.logger.warn(`[held-opening-balances] pre-confirm apply skipped (the sweep retries): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
     const updated = await this.prisma.$transaction(async (tx) => {
       if (pointsRows.length > 0) {
@@ -1730,17 +1753,13 @@ export class CreditsService {
       // naturally in the wallet aggregate via successive creditEarn calls.
       // We skip rather than throw if no outlet/partner/wallet exists, so a bad row
       // cannot abort the whole confirm.
-      // HELD OPENING BALANCES (client migration, owner 2026-11-21): a wallet born here (pre-KYC credit) gets its held
-      // vendor passbook posted BEFORE this batch credits it (so the dated history sits under the new credit). Gated
-      // once per confirm on the tenant having any PENDING row → dormant for every other tenant (Deoleo).
-      const heldPending =
-        pointsRows.length > 0 ? await tx.heldOpeningBalance.count({ where: { clientId: user.clientId, status: 'PENDING' } }) : 0;
       for (const r of pointsRows) {
         // Resolve outletCode → partnerId (tenant-scoped). A row that cannot resolve
         // to a partner is skipped WITH a reason (surfaced to the admin), never dropped
         // silently.
         const outlet = await tx.outlet.findFirst({
-          where: { outletCode: r.outletId, clientId: user.clientId },
+          // deletedAt: null — a soft-deleted outlet never receives credits (same rule as the held-balance lookup).
+          where: { outletCode: r.outletId, clientId: user.clientId, deletedAt: null },
           select: { partnerId: true },
         });
         if (!outlet) {
@@ -1778,15 +1797,6 @@ export class CreditsService {
           create: { partnerId: outlet.partnerId, accountId: walletAccountId },
           update: {},
         });
-        if (heldPending > 0) {
-          await applyHeldOpeningBalancesForPartner(tx, {
-            partnerId: outlet.partnerId,
-            clientId: user.clientId,
-            trigger: 'CREDIT_CONFIRM',
-            actorId: user.sub,
-            readMode: (c, db) => this.tenantSettings.getReversalEngineModeUncached(c, db),
-          });
-        }
 
         // r.amount is whole points for POINTS rows.
         await this.walletService.creditEarn(

@@ -96,8 +96,6 @@ const mockTx = {
   outlet: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   channelPartner: { findMany: jest.fn().mockResolvedValue([]) },
   wallet: { findFirst: jest.fn(), upsert: jest.fn().mockResolvedValue({ id: 'w1' }) },
-  // HELD OPENING BALANCES gate in confirmBatch (no PENDING rows on these fixtures → dormant).
-  heldOpeningBalance: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
   // Visibility-payout TDS read + write targets (atomic with the download / confirm).
   tdsDeductionEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   tdsRecoveryEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
@@ -136,6 +134,8 @@ const mockPrisma = {
   programSetting: { findUnique: jest.fn().mockResolvedValue(null) },
   // WP5: listReversals attaches engine PAYOUT allocations — none on a LEGACY tenant.
   payoutReversalAllocation: { findMany: jest.fn().mockResolvedValue([]) },
+  // HELD OPENING BALANCES pre-confirm step: no PENDING rows on these fixtures → dormant (one count).
+  heldOpeningBalance: { count: jest.fn().mockResolvedValue(0) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
@@ -668,35 +668,35 @@ describe('CreditsService', () => {
       expect(mockWalletService.creditEarn).toHaveBeenCalledTimes(1);
     });
 
-    it('HELD OPENING BALANCES: a wallet born at confirm gets its held passbook BEFORE the batch credit (only when the tenant has PENDING rows)', async () => {
-      const batch = {
+    it('HELD OPENING BALANCES: the pre-step runs BEFORE the confirm transaction (history under the credit); its failure never blocks crediting', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
         id: 'b1', status: 'PENDING_CONFIRM', period: '2026-05', uploadedBy: 'admin1', totalOutlets: 1, totalPoints: 50,
         totalPayoutPaise: BigInt(0),
         rows: [{ outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' }],
-      };
-      mockPrisma.creditBatch.findFirst.mockResolvedValue(batch);
+      });
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
       const order: string[] = [];
-      const spy = jest.spyOn(heldApply, 'applyHeldOpeningBalancesForPartner').mockImplementation(async () => {
-        order.push('held');
-        return [];
+      const realTx = mockPrisma.$transaction.getMockImplementation()!;
+      mockPrisma.$transaction.mockImplementation(async (cb: any, o?: any) => {
+        order.push('confirm-tx');
+        return realTx(cb, o);
       });
-      mockWalletService.creditEarn.mockImplementation(async () => {
-        order.push('creditEarn');
-        return { transactionId: 't', newRedeemable: 50, ledgerId: 'l' };
+      const spy = jest.spyOn(heldApply, 'prepareHeldBeforeCredit').mockImplementation(async (db, a) => {
+        order.push('held-pre-step');
+        expect(db).toBe(mockPrisma);
+        expect(a).toEqual(expect.objectContaining({ clientId: admin.clientId, outletCodes: ['O1'] }));
+        throw new Error('held exploded');
       });
       try {
-        mockTx.heldOpeningBalance.count.mockResolvedValueOnce(0);
-        await service.confirmBatch(admin, 'b1');
-        expect(spy).not.toHaveBeenCalled(); // dormant: no PENDING rows for the tenant
-        order.length = 0;
-        mockPrisma.creditBatch.findFirst.mockResolvedValue({ ...batch });
-        mockTx.heldOpeningBalance.count.mockResolvedValueOnce(3);
-        await service.confirmBatch(admin, 'b1');
-        expect(spy).toHaveBeenCalledWith(mockTx, expect.objectContaining({ partnerId: 'p1', clientId: admin.clientId, trigger: 'CREDIT_CONFIRM' }));
-        expect(order).toEqual(['held', 'creditEarn']);
+        const res = await service.confirmBatch(admin, 'b1');
+        expect(res.pointsCredited).toBe(1);
+        expect(order[0]).toBe('held-pre-step');
+        expect(order).toContain('confirm-tx');
+        // soft-deleted outlets never receive credits
+        expect(mockTx.outlet.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ deletedAt: null }) }));
       } finally {
         spy.mockRestore();
+        mockPrisma.$transaction.mockImplementation(realTx);
       }
     });
 

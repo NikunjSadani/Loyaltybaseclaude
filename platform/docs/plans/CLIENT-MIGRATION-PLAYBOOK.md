@@ -35,31 +35,41 @@ platform exactly, together with an honest history.
 
 ### 2. Outlets not on the portal yet, or without a wallet → held opening balances (never dropped)
 An outlet whose balance cannot be posted at import time (not enrolled yet, KYC not approved, no wallet) gets a
-**held opening balance**: table `held_opening_balances` (one row per tenant × outlet × source) with the closing and
-the full dated passbook, status `PENDING`. Owner-approved 2026-11-21 as a platform-wide mechanism, dormant for any
-tenant without rows.
-- **Automatic apply** — when the outlet's wallet is created (KYC approval, or a pre-KYC credit confirm that creates
-  the wallet) and the wallet is still empty, the passbook is posted **in the same transaction**, verified
-  (balance = closing, counters, row counts, FIFO lots) and the row becomes `APPLIED`. On a V2 tenant (or one whose
-  wallets were already backfilled) the wallet is sequenced right away by the backfill's own planner
-  (`backfillStatus = DONE`, so the V2 switch guard counts it). Any problem rolls back to a savepoint — nothing
-  partial — and the row becomes `FAILED` with the reason; Gifsy admins get a bell. The KYC approval itself is never
-  blocked.
-- **Wallet already has activity** (e.g. approved before the rows were loaded) → the row stays `PENDING` and needs an
-  explicit **Gifsy → Held Balances → Apply now** (GIFSY_ADMIN, audited, confirm dialog shows balance before → after).
-  An empty wallet gets the full passbook; an active wallet gets ONE opening-balance adjustment of the closing
-  (dated today; the vendor history stays on the held record). A negative closing larger than the wallet's balance
-  is refused (resolve with the client). Two held rows for one owner (would pool into one wallet) → both `FAILED`.
+**held opening balance**: table `held_opening_balances` with the closing, the full dated passbook and the closing's
+as-of date, status `PENDING`. Owner-approved 2026-11-21 as a platform-wide mechanism, dormant for any tenant without
+rows. Outlet codes are normalised on both sides (trim, upper-case, no internal spaces — leading zeros kept); an
+exact-code non-match shows as "Not on portal". The **database allows ONE live (PENDING / FAILED / APPLIED) row per
+outlet** — a reload or a double Apply now can never post twice.
+- **Automatic apply — never inside the business transaction.** Each row is applied in its OWN transaction:
+  right after a KYC approval commits; BEFORE a credit confirm lands on the outlet (the wallet is created first if
+  needed, so the dated history always sits under the new credit — history is never back-dated under credits that
+  already landed); and by a sweep every ~10 minutes (any PENDING row whose wallet exists and is empty). The wallet
+  must still be empty; the passbook is posted, verified (balance = closing, counters, row counts, FIFO lots) and the
+  wallet is **sequenced for the V2 engine** by the backfill's own planner (`backfillStatus = DONE`). Any problem rolls
+  the whole transaction back — nothing partial. A deterministic problem (passbook doesn't tie out, sequencing
+  BLOCKED, two rows would pool into one wallet, the wallet already received a held balance) → `FAILED` with the
+  reason + a bell to Gifsy admins; a temporary DB error → stays `PENDING` with the error shown, retried by the sweep,
+  `FAILED` after 5 attempts. A KYC approval or credit confirm is never failed or slowed by it.
+- **Every waiting row has an explicit state** (console + digest): Not on portal (no outlet with this code) · On
+  portal — awaiting first KYC · Wallet exists and empty — will apply now / applying · Wallet has activity — needs
+  Apply now · Failed — <reason>.
+- **Wallet already has activity** → explicit **Gifsy → Held Balances → Apply now** (GIFSY_ADMIN, audited, confirm
+  dialog shows balance before → after): ONE opening-balance adjustment of the closing, shown to the retailer as
+  "Opening balance from previous programme (as of <date>)" (the dated vendor history stays on the held record). The
+  wallet must already be sequenced for V2; a negative closing larger than the wallet's balance is refused.
 - **Cancel** (audited, reason required) for a row that must never be posted (outlet closed, client instruction).
-- **Loud reporting**: the Daily Ops Digest shows, for every tenant with rows,
-  "Held opening balances: N applied today (pts), M still waiting (pts), K failed"; FAILED rows and rows waiting for
-  an Apply now are attention items.
+- **Loud reporting**: the Daily Ops Digest shows, for every tenant with rows, "Held opening balances: N applied since
+  the last report (<window> IST) (pts), M still waiting (pts) [by state], K failed"; FAILED rows, rows needing Apply
+  now and ambiguous outlet codes are attention items.
 - **Loading rows** — job `dist/wallet/held-opening-balances/held-balances-load.main.js` (dry run by default):
-  `EXPECTED_DB=<db> TENANT=<clientId> SOURCE=<e.g. vendor-earnburn-2026-11-11> MANIFEST=<path | gs://…>
-  [EXPECTED_ROWS=n] [EXPECTED_TOTAL=pts]`; apply with `HELD_APPLY=true HELD_CONFIRM="APPLY <db>"`. Manifest =
-  `[{ outletCode, closingPoints, events }]`. Any invalid passbook refuses the whole load; an outlet whose wallet
-  already carries a vendor passbook is refused (would double); re-runs are idempotent. The plan lists every row:
-  INSERT · INSERT_APPLY_NOW · ALREADY_LOADED · REFUSED_IMPORTED · INVALID.
+  `EXPECTED_DB=<db> TENANT=<clientId> SOURCE=<e.g. vendor-earnburn-2026-11-11> MANIFEST=<path | gs://…>`; APPLY
+  needs `HELD_APPLY=true HELD_CONFIRM="APPLY <db>" EXPECTED_ROWS=n EXPECTED_TOTAL=pts AS_OF=YYYY-MM-DD` (the totals are
+  checked against the closings AND, independently, Σ of the event deltas). Manifest = `[{ outletCode, closingPoints,
+  events }]`. The plan lists every row: INSERT · INSERT_APPLY_NOW · SUPERSEDE · ALREADY_LOADED · REFUSED_EXISTING ·
+  REFUSED_IMPORTED · INVALID; any refused / invalid row refuses the whole load. A second row for an outlet that
+  already has a live held row is refused unless `SUPERSEDE=true` (cancels the old PENDING / FAILED row in the same
+  transaction; an APPLIED row is never superseded). An outlet whose wallet already carries a vendor balance
+  (`:tl:` / `:held-open:` / bulk `:opening-*` lots) is refused.
 
 ### 3. Reconciliation table (fill in for every migration)
 
@@ -72,6 +82,8 @@ tenant without rows.
 | Explicitly excluded (owner decision, listed) | n₄ | D | decision log |
 | Rounding (imported rounded − imported raw) | — | R | builder output |
 | **Check** | | **A = B + C + D − R** | must hold to the paisa |
+| Held rounding (held raw → posted, rounded per outlet) | n₂ | C → C' | builder output |
+| Not carried: other vendor files' balances absent from the target file (owner decision, listed) | n₅ | E | builder `.excluded.json` |
 
 ### 4. Verification steps
 1. Builder prints its totals; they match the vendor file's own totals (and its internal checks: per-period burn
@@ -93,14 +105,17 @@ tenant without rows.
 | Zero-balance outlets | 465 | 0 |
 | Rounding of the imported wallets | — | 12.01 |
 | **Check:** 67,27,723 + 1,22,845.47 − 12.01 | | **68,50,556.46** ✓ |
+| Held rounding: raw 1,22,845.47 → posted (rounded per outlet) | 40 | 1,22,843 (−2.47) |
+| Not carried — File-1 outlets absent from the 11-Nov report (owner decision 2026-11-21: the 11-Nov report is final) | 293 | 2,22,995.55 |
+| Not carried — File-1 balance but 11-Nov closing 0 (the vendor's later figure wins) | 17 | 0 |
 
 The 40 held rows round per outlet to **1,22,843 pts** (rounding 2.47; 28 outlets with File 1 history, 12 with only
 the FY26-27 report — carry-forward + monthly earn/burn; 348 events; 1 history dips below 0 mid-way; no negative
 closing). Builder: `api/scripts/bajaj-held-opening-balances-manifest.mjs` (args: File 1, File 2, the 2,281 import
 manifest, output path; `--expect-outlets 40`). Load: `TENANT=bajaj SOURCE=vendor-earnburn-2026-11-11
-EXPECTED_ROWS=40 EXPECTED_TOTAL=122843`. **Not loaded yet** — needs the owner's go (prod write).
+EXPECTED_ROWS=40 EXPECTED_TOTAL=122843 AS_OF=2026-11-11`. **Not loaded yet** — needs the owner's go (prod write).
 
-⚠️ **Open owner decision (Bajaj):** 293 outlets of vendor File 1 (history to 31 Oct 2026) that are not on prod carry
-a File-1 closing (Σ 2,22,995.55 pts) but do **not appear in File 2** (the vendor's 11-Nov report), so there is no
-11-Nov closing to honour; they are not held. 17 more appear in File 2 with a 0 closing (the vendor's later figure
-wins). Generic lesson: always reconcile EVERY vendor file against the target file, not just the target file.
+**Owner decision 2026-11-21 (Bajaj):** the 293 File-1 outlets not on prod whose File-1 closing (Σ 2,22,995.55 pts)
+has no line in File 2 (the vendor's 11-Nov report) are **IGNORED — the 11-Nov report is final**; the builder prints,
+counts and lists them (`<out>.excluded.json`) as "excluded — owner decision 2026-11-21". Generic lesson: always
+reconcile EVERY vendor file against the target file, and record each exclusion as an owner decision.

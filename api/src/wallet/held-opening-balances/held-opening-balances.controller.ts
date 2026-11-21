@@ -32,6 +32,12 @@ export class HeldOpeningBalancesController {
     return this.held.list(user, { clientId, status, q, page, pageSize });
   }
 
+  /** Run the automatic sweep now (applies every waiting row whose wallet exists and is empty; all tenants). */
+  @Post('sweep')
+  sweep() {
+    return this.held.sweepNow();
+  }
+
   @Get(':id/preview')
   preview(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Query('clientId') clientId?: string) {
     return this.held.preview(user, id, clientId);

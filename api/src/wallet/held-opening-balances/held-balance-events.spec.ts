@@ -1,5 +1,5 @@
 import { planHeldPassbook, totalsOf } from './held-balance-events';
-import { SAMPLE_EVENTS } from './held-harness.test-spec';
+import { SAMPLE_EVENTS } from './held-fixtures.test-spec';
 
 describe('planHeldPassbook — the bulk Earn & Burn import posting plan, reproduced', () => {
   it('orders by date then EARN<ADJUST<REDEEM<EXPIRE, dates each row day+seq seconds, chains balances from 0', () => {

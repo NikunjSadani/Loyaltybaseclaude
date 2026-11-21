@@ -1611,16 +1611,20 @@ model PointsLedger {
 /// HELD OPENING BALANCES (client migration — owner-approved 2026-11-21, platform-wide, dormant unless rows exist).
 /// A migrating client's vendor closing balance for an outlet that is NOT on the portal yet / has no wallet yet,
 /// with its dated passbook (`events`, the exact shape the bulk Earn & Burn import posts). Posted into the outlet's
-/// wallet when that wallet is first created (KYC approval / pre-KYC credit confirm) in the SAME transaction —
-/// or by an explicit, audited Gifsy "Apply now" when the wallet already exists. Never dropped, never silently
+/// EMPTY wallet in its OWN transaction (right after KYC approval commits, before a credit confirm lands, or by the
+/// sweep), V2-sequenced — or by an explicit, audited Gifsy "Apply now" when the wallet has activity. Never dropped, never silently
 /// skipped: FAILED carries its reason (digest + bell), CANCELLED its reason. See
 /// platform/docs/plans/CLIENT-MIGRATION-PLAYBOOK.md §"Existing points programme: opening balances".
 model HeldOpeningBalance {
   id              String                   @id @default(cuid())
   clientId        String
   outletCode      String
-  /// Provenance of the figures, e.g. 'vendor-earnburn-2026-11-11' (one row per outlet per source).
+  /// NORMALISED outlet code (trim, upper-case, internal whitespace removed; leading zeros KEPT) — the same
+  /// normalisation is applied to outlets.outletCode when matching (held-balance-facts.normOutletCode).
+  /// Provenance of the figures, e.g. 'vendor-earnburn-2026-11-11' (internal — never shown to retailers).
   source          String
+  /// The vendor closing's as-of date (e.g. 2026-11-11) — used in the retailer-facing adjustment wording.
+  asOfDate        DateTime?                @db.Date
   /// Vendor closing balance, rounded to whole points (may be negative — vendor sales returns).
   closingPoints   Int
   /// [{ d:'YYYY-MM-DD', t:'EARN'|'ADJUST'|'REDEEM'|'EXPIRE', p:<signed int>, l:<label> }] — Σp == closingPoints.
@@ -1636,6 +1640,10 @@ model HeldOpeningBalance {
   appliedBy       String?
   /// V2 movement sequencing outcome: SEQUENCED | LEGACY_UNSEQUENCED (backfill will sequence) | BLOCKED: <reason> | ENGINE (adjustment).
   sequencing      String?
+  /// Transient (non-deterministic) apply errors are retried by the sweep; after HELD_MAX_ATTEMPTS → FAILED.
+  attempts        Int                      @default(0)
+  lastAttemptAt   DateTime?
+  lastError       String?
   failureReason   String?
   failedAt        DateTime?
   cancelledAt     DateTime?
@@ -1645,9 +1653,13 @@ model HeldOpeningBalance {
   createdBy       String?
   updatedAt       DateTime                 @updatedAt
 
+  // + partial unique index held_opening_balances_one_live_per_outlet (clientId, outletCode) WHERE status IN
+  //   ('PENDING','FAILED','APPLIED') — migration 20261121100000 (Prisma can't express partial indexes): ONE live
+  //   held balance per outlet, enforced by the database (no double posting via reloads / Apply now).
   @@unique([clientId, outletCode, source])
   @@index([clientId, status])
   @@index([clientId, outletCode])
+  @@index([status, lastAttemptAt])
   @@map("held_opening_balances")
 }
 

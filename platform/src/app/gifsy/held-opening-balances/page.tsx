@@ -32,7 +32,18 @@ interface HeldRow {
   failureReason: string | null;
   cancelReason: string | null;
   createdAt: string;
+  state: HeldState;
+  stateLabel: string;
+  nextStep: string | null;
+  attempts: number;
+  lastError: string | null;
+  asOfDate: string | null;
 }
+
+type HeldState =
+  | 'NOT_ON_PORTAL' | 'AWAITING_KYC' | 'WALLET_EMPTY' | 'NEEDS_APPLY_NOW' | 'AMBIGUOUS_OUTLET'
+  | 'FAILED' | 'APPLIED' | 'CANCELLED';
+type PendingState = 'NOT_ON_PORTAL' | 'AWAITING_KYC' | 'WALLET_EMPTY' | 'NEEDS_APPLY_NOW' | 'AMBIGUOUS_OUTLET';
 
 interface Bucket { count: number; points: number }
 
@@ -42,8 +53,19 @@ interface ListPayload {
   page: number;
   pageSize: number;
   totals: Record<HeldStatus, Bucket>;
+  pendingByState?: Partial<Record<PendingState, Bucket>>;
   rows: HeldRow[];
 }
+
+interface SweepResult { processed: number; applied: number; failed: number; retrying: number }
+
+const PENDING_STATES: { key: PendingState; label: string; warn: boolean }[] = [
+  { key: 'NOT_ON_PORTAL',    label: 'Not on portal',       warn: false },
+  { key: 'AWAITING_KYC',     label: 'Awaiting KYC',        warn: false },
+  { key: 'WALLET_EMPTY',     label: 'Wallet empty',        warn: false },
+  { key: 'NEEDS_APPLY_NOW',  label: 'Needs Apply now',     warn: true  },
+  { key: 'AMBIGUOUS_OUTLET', label: 'Ambiguous outlet',    warn: true  },
+];
 
 interface Preview {
   id: string;
@@ -65,6 +87,7 @@ interface ApplyResult {
   balanceBefore: number | null;
   balanceAfter: number | null;
   failureReason: string | null;
+  applyMode?: ApplyMode | null;
 }
 
 interface ClientOption { slug: string; internalName: string; status: string }
@@ -99,10 +122,10 @@ function fmtDateIst(iso: string | null): string {
   });
 }
 
-function modeText(mode: ApplyMode | null, points: number): string {
+function modeText(mode: ApplyMode | null, points: number, asOfDate: string | null): string {
   if (mode === 'FULL_PASSBOOK') return 'Post the full dated vendor passbook (wallet is empty)';
   if (mode === 'OPENING_ADJUSTMENT') {
-    return `Wallet already has activity — post ONE opening-balance adjustment of ${fmtPts(points)} pts today; the dated vendor history stays on this record`;
+    return `Wallet already has activity — posts ONE opening-balance adjustment of ${fmtPts(points)} pts today, shown to the retailer as “Opening balance from previous programme (as of ${fmtDateIst(asOfDate)})”; the dated vendor history stays on this record.`;
   }
   return '—';
 }
@@ -167,6 +190,31 @@ export default function GifsyHeldOpeningBalancesPage() {
   const [previewingId, setPreviewingId] = useState<string | null>(null);
   const [applyTarget, setApplyTarget] = useState<{ row: HeldRow; preview: Preview } | null>(null);
   const [cancelTarget, setCancelTarget] = useState<HeldRow | null>(null);
+  const [sweeping, setSweeping] = useState(false);
+  const sweepInFlight = useRef(false);
+
+  async function runSweep() {
+    if (sweepInFlight.current) return;
+    sweepInFlight.current = true;
+    setSweeping(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.post<SweepResult>('/api/admin/held-opening-balances/sweep', undefined);
+      if (res.success) {
+        const r = res.data ?? { processed: 0, applied: 0, failed: 0, retrying: 0 };
+        setNotice(
+          `Sweep finished — processed ${fmtPts(r.processed)}, applied ${fmtPts(r.applied)}, failed ${fmtPts(r.failed)}, retrying ${fmtPts(r.retrying)}.`,
+        );
+        void load();
+      } else {
+        setError(`Sweep failed: ${res.error}`);
+      }
+    } finally {
+      sweepInFlight.current = false;
+      setSweeping(false);
+    }
+  }
 
   useEffect(() => {
     if (!ready || !isOwner) return;
@@ -242,10 +290,22 @@ export default function GifsyHeldOpeningBalancesPage() {
             <Hourglass className="w-5 h-5 text-white/60" />Held opening balances
           </h1>
           <p className="text-sm text-white/50 mt-0.5">
-            Vendor closing balances for outlets that had no wallet at migration. Each is posted
-            automatically when the outlet&apos;s wallet is created (KYC approval).
+            Vendor closing balances for outlets that had no wallet at migration. They are posted
+            automatically after KYC approval, before a credit confirm lands on the outlet, and by an
+            automatic sweep every ~10 minutes. This page is for the rest.
           </p>
         </div>
+        <div className="flex flex-col sm:flex-row sm:items-end gap-3 w-full sm:w-auto">
+        <button
+          type="button"
+          onClick={() => { void runSweep(); }}
+          disabled={sweeping}
+          data-testid="run-sweep"
+          className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm border border-white/15 text-white/70 rounded-lg hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {sweeping && <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />}
+          Run sweep now
+        </button>
         <div className="w-full sm:w-64">
           <label htmlFor="held-client" className="block text-xs font-medium text-white/50 mb-1.5">Client</label>
           <select
@@ -262,6 +322,7 @@ export default function GifsyHeldOpeningBalancesPage() {
               <option key={c.slug} value={c.slug}>{c.internalName} ({c.slug})</option>
             ))}
           </select>
+        </div>
         </div>
       </div>
 
@@ -295,6 +356,23 @@ export default function GifsyHeldOpeningBalancesPage() {
                   <p className={`text-xs ${red ? 'text-red-300' : 'text-white/50'}`}>{STATUS_LABEL[s]}</p>
                   <p className={`text-lg font-bold ${red ? 'text-red-300' : 'text-white'}`}>{fmtPts(b.count)}</p>
                   <p className={`text-xs truncate ${red ? 'text-red-300/80' : 'text-white/40'}`}>{fmtPts(b.points)} pts</p>
+                  {s === 'PENDING' && data?.pendingByState && (
+                    <ul className="mt-2 space-y-0.5" data-testid="pending-breakdown">
+                      {PENDING_STATES.filter((p) => (data.pendingByState?.[p.key]?.count ?? 0) > 0).map((p) => {
+                        const pb = data.pendingByState![p.key]!;
+                        return (
+                          <li
+                            key={p.key}
+                            data-testid={`pending-${p.key}`}
+                            className={`text-[11px] flex justify-between gap-2 ${p.warn ? 'text-amber-300' : 'text-white/50'}`}
+                          >
+                            <span className="truncate">{p.label}</span>
+                            <span className="font-mono shrink-0">{fmtPts(pb.count)} · {fmtPts(pb.points)} pts</span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
                 </div>
               );
             })}
@@ -371,7 +449,7 @@ export default function GifsyHeldOpeningBalancesPage() {
                         <td className="px-4 py-3 font-mono text-white">{r.outletCode}</td>
                         <td className="px-4 py-3"><OutletName row={r} /></td>
                         <td className="px-4 py-3 text-right font-mono text-white">{fmtPts(r.closingPoints)}</td>
-                        <td className="px-4 py-3"><StatusBadge status={r.status} /></td>
+                        <td className="px-4 py-3 max-w-xs"><StatusBadge status={r.status} /><StateInfo row={r} /></td>
                         <td className="px-4 py-3 text-white/60 whitespace-nowrap">{fmtDateIst(r.appliedAt)}</td>
                         <td className="px-4 py-3 max-w-xs"><Reason row={r} /></td>
                         <td className="px-4 py-3">
@@ -394,6 +472,7 @@ export default function GifsyHeldOpeningBalancesPage() {
                       </div>
                       <StatusBadge status={r.status} />
                     </div>
+                    <StateInfo row={r} />
                     <div className="flex justify-between gap-3 text-sm">
                       <span className="text-white/40">Points</span>
                       <span className="font-mono text-white">{fmtPts(r.closingPoints)}</span>
@@ -486,6 +565,21 @@ function StatusBadge({ status }: { status: HeldStatus }) {
   );
 }
 
+/** Server-provided state text, verbatim — no client-side guessing. */
+function StateInfo({ row }: { row: HeldRow }) {
+  return (
+    <div className="mt-1 space-y-0.5 min-w-0" data-testid={`state-${row.id}`}>
+      {row.stateLabel && <p className="text-xs text-white/80 break-words">{row.stateLabel}</p>}
+      {row.nextStep && <p className="text-[11px] text-white/40 break-words">{row.nextStep}</p>}
+      {row.status === 'PENDING' && row.lastError && (
+        <p className="text-[11px] text-amber-300 break-words" data-testid={`retrying-${row.id}`}>
+          Retrying after a temporary error: {row.lastError} (attempt {row.attempts})
+        </p>
+      )}
+    </div>
+  );
+}
+
 function OutletName({ row }: { row: HeldRow }) {
   if (!row.outletExists) return <span className="text-white/40 italic text-sm">Not on the portal yet</span>;
   return <span className="text-white/80 text-sm break-words">{row.outletName ?? '—'}</span>;
@@ -511,7 +605,7 @@ function RowActions({
   if (!canAct(row)) return null;
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {row.hasWallet ? (
+      {row.hasWallet && (
         <button
           type="button"
           onClick={() => onApply(row)}
@@ -522,10 +616,6 @@ function RowActions({
           {previewingId === row.id && <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />}
           Apply now
         </button>
-      ) : (
-        row.status === 'PENDING' && (
-          <span className="text-xs text-white/40">Waits for KYC approval — applied automatically</span>
-        )
       )}
       <button
         type="button"
@@ -593,31 +683,45 @@ function ApplyDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [failedReason, setFailedReason] = useState<string | null>(null);
+  const [retryReason, setRetryReason] = useState<string | null>(null);
+  const inFlight = useRef(false);
 
   async function confirm() {
-    if (submitting) return;
+    if (inFlight.current) return; // synchronous double-click guard (state update lags a render)
+    inFlight.current = true;
     setSubmitting(true);
     setError(null);
     setFailedReason(null);
-    const body = reason.trim() ? { reason: reason.trim() } : {};
-    const res = await api.post<ApplyResult>(
-      `/api/admin/held-opening-balances/${encodeURIComponent(row.id)}/apply?clientId=${encodeURIComponent(clientId)}`,
-      body,
-    );
-    setSubmitting(false);
-    if (!res.success) { setError(res.error || 'Apply failed'); return; }
-    if (res.data?.status === 'APPLIED') {
-      onApplied(
-        `Applied ${fmtPts(preview.closingPoints)} pts to ${row.outletCode} — balance ${fmtPts(res.data.balanceBefore)} → ${fmtPts(res.data.balanceAfter)}.`,
+    setRetryReason(null);
+    try {
+      const body = reason.trim() ? { reason: reason.trim() } : {};
+      const res = await api.post<ApplyResult>(
+        `/api/admin/held-opening-balances/${encodeURIComponent(row.id)}/apply?clientId=${encodeURIComponent(clientId)}`,
+        body,
       );
-      return;
+      if (!res.success) { setError(res.error || 'Apply failed'); return; }
+      if (res.data?.status === 'APPLIED') {
+        onApplied(
+          `Applied ${fmtPts(preview.closingPoints)} pts to ${row.outletCode} — balance ${fmtPts(res.data.balanceBefore)} → ${fmtPts(res.data.balanceAfter)}.`,
+        );
+        return;
+      }
+      if (res.data?.status === 'PENDING') {
+        // Temporary error — the row stays PENDING and will be retried. NOT a success.
+        setRetryReason(res.data.failureReason || 'Temporary error — the balance was not posted yet; it will be retried.');
+        onFailedResult();
+        return;
+      }
+      // FAILED, or any unexpected status, is NOT a success — say so loudly.
+      setFailedReason(
+        res.data?.failureReason
+          || `The apply did not complete (status ${res.data?.status ?? 'unknown'}).`,
+      );
+      onFailedResult();
+    } finally {
+      inFlight.current = false;
+      setSubmitting(false);
     }
-    // Anything other than APPLIED (FAILED, or an unexpected status) is NOT a success — say so loudly.
-    setFailedReason(
-      res.data?.failureReason
-        || `The apply did not complete (status ${res.data?.status ?? 'unknown'}).`,
-    );
-    onFailedResult();
   }
 
   return (
@@ -636,7 +740,7 @@ function ApplyDialog({
           </div>
           <div>
             <dt className="text-gray-500">What will happen</dt>
-            <dd className="text-gray-900 mt-0.5" data-testid="apply-mode">{modeText(preview.mode, preview.closingPoints)}</dd>
+            <dd className="text-gray-900 mt-0.5" data-testid="apply-mode">{modeText(preview.mode, preview.closingPoints, row.asOfDate)}</dd>
           </div>
           <div className="flex justify-between gap-4">
             <dt className="text-gray-500">Balance</dt>
@@ -671,6 +775,12 @@ function ApplyDialog({
             <span><strong>Apply failed:</strong> {failedReason}</span>
           </div>
         )}
+        {retryReason && (
+          <div role="alert" data-testid="apply-retrying" className="flex items-start gap-2 bg-amber-50 border border-amber-300 rounded-xl px-3 py-2.5 text-sm text-amber-800">
+            <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+            <span><strong>Not applied yet:</strong> {retryReason}</span>
+          </div>
+        )}
         {error && (
           <div role="alert" className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2.5 text-xs text-red-700">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -680,13 +790,13 @@ function ApplyDialog({
 
         <div className="flex items-center justify-end gap-2">
           <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
-            {failedReason ? 'Close' : 'Back'}
+            {failedReason || retryReason ? 'Close' : 'Back'}
           </Button>
           <Button
             type="button"
             variant="primary"
             loading={submitting}
-            disabled={!preview.canApply || failedReason !== null}
+            disabled={!preview.canApply || failedReason !== null || retryReason !== null}
             onClick={confirm}
             data-testid="confirm-apply"
           >
@@ -710,18 +820,24 @@ function CancelDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const trimmed = reason.trim();
+  const inFlight = useRef(false);
 
   async function confirm() {
-    if (submitting || !trimmed) return;
+    if (inFlight.current || !trimmed) return; // synchronous double-click guard
+    inFlight.current = true;
     setSubmitting(true);
     setError(null);
-    const res = await api.post<HeldRow>(
-      `/api/admin/held-opening-balances/${encodeURIComponent(row.id)}/cancel?clientId=${encodeURIComponent(clientId)}`,
-      { reason: trimmed },
-    );
-    setSubmitting(false);
-    if (!res.success) { setError(res.error || 'Cancel failed'); return; }
-    onCancelled(`Cancelled the held balance for ${row.outletCode}.`);
+    try {
+      const res = await api.post<HeldRow>(
+        `/api/admin/held-opening-balances/${encodeURIComponent(row.id)}/cancel?clientId=${encodeURIComponent(clientId)}`,
+        { reason: trimmed },
+      );
+      if (!res.success) { setError(res.error || 'Cancel failed'); return; }
+      onCancelled(`Cancelled the held balance for ${row.outletCode}.`);
+    } finally {
+      inFlight.current = false;
+      setSubmitting(false);
+    }
   }
 
   return (
