@@ -98,6 +98,23 @@ export function withClientMedium(
   return { ...(init ?? {}), headers };
 }
 
+/**
+ * A write that changes NO data a cached read shows: an automatic/background request (X-Background: 1 — push
+ * re-subscribe on every Bajaj load, install beacon) or any /api/push/* call. Clearing the read cache for these made
+ * Profile re-fetch /api/sales/outlets + /api/sales/me seconds after the lists had loaded them (staging, 2026-11-21).
+ */
+export function isCacheNeutralWrite(input: RequestInfo | URL, init: RequestInit | undefined): boolean {
+  try {
+    const raw = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    const path = new URL(raw, typeof window !== 'undefined' ? window.location.origin : 'http://localhost').pathname;
+    if (path.startsWith('/api/push/')) return true;
+    const headers = new Headers(init?.headers ?? (typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined));
+    return headers.get(BACKGROUND_HEADER) === '1';
+  } catch {
+    return false; // unknown → treat as a real write (clearing is the safe side)
+  }
+}
+
 let installed = false;
 
 /** Patch window.fetch once (idempotent, browser-only, never throws). */
@@ -114,7 +131,7 @@ export function installClientMediumHeader(): void {
         // Request-volume work (2026-11-21): any same-origin /api WRITE clears the client read cache
         // (lib/session-cache.ts) when it starts AND when it settles, so a KYC submit / capture / redemption /
         // approval / settings save is followed by fresh reads — never a cached pre-write answer.
-        write = isSameOriginApi(input) && isWriteMethod(methodOf(input, init));
+        write = isSameOriginApi(input) && isWriteMethod(methodOf(input, init)) && !isCacheNeutralWrite(input, nextInit);
         if (write) noteApiMutation('POST');
       } catch {
         nextInit = init; // tagging must never break a request
