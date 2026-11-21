@@ -25,8 +25,10 @@ A reminder after login / on app open for users who haven't allowed notifications
   to login never reminds, auto-asks or uses up the flag. Once per session (`sessionStorage['pwa-notif-reminder']` =
   the confirmed user id; a different user in the same tab sees it again). The flag is written ONLY after the reminder
   has been on screen ≥ 3 s, or on a dismiss / Enable / "check again" — never at render: on a brand-new session the
-  service worker's first `clients.claim()` fires `controllerchange` ~1 s in and `ServiceWorkerRegister` reloads the
-  page, which used to burn the flag on exactly the first open (fix `fix/notif-reminder-sw-reload`, 2026-11-19). The
+  service worker's first `clients.claim()` fired `controllerchange` ~1 s in and `ServiceWorkerRegister` reloaded the
+  page, which used to burn the flag on exactly the first open (fix `fix/notif-reminder-sw-reload`, 2026-11-19). Since
+  2026-11-21 that first-install claim no longer reloads (it doubled the first dashboard load); an UPDATE's claim, or a
+  tap on the "New version — Refresh" banner, still reloads (incl. an update later in a rep's very first session). The
   dwell rule was chosen over "wait for a pending SW claim" because a pending first claim can't be detected reliably
   and the dwell rule also survives any other early reload; the cost is the reminder may flash ~1 s then re-appear
   after that reload. "Remind me later" / × / Escape = rest of the session (a backdrop tap does NOT dismiss); back on

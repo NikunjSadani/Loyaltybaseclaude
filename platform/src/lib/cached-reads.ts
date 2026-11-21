@@ -6,7 +6,7 @@
  * Each returns the parsed JSON envelope (`{ success, data }`) or null on a non-2xx / network error — exactly what
  * the old inline `fetch(...).then(r => r.ok ? r.json() : null)` call sites produced. Failures are never cached.
  */
-import { getCached, FEATURES_TTL_MS, DASHBOARD_REUSE_MS } from '@/lib/session-cache';
+import { getCached, invalidateCached, peekCached, FEATURES_TTL_MS, DASHBOARD_REUSE_MS } from '@/lib/session-cache';
 
 export type Envelope<T = unknown> = { success?: boolean; data?: T; error?: string } | null;
 
@@ -56,9 +56,19 @@ export const SALES_OUTLETS_URL = '/api/sales/outlets';
 
 /**
  * GET /api/sales/outlets — the caller's outlet roster. Shared by the dashboard, Outlets, Tasks, Support (ticket
- * outlet picker) and Profile (outlet counts) so moving between them reuses ONE answer for 2 min (scoped to the
- * user/tenant; any write — KYC submit, capture, … — clears it).
+ * outlet picker) and Profile (outlet counts) so moving between them reuses ONE answer for 60 s (scoped to the
+ * user/tenant; any write — KYC submit, capture, … — clears it). `force` (the dashboard's background revalidation,
+ * the Outlets / Tasks refresh control) drops the cached copy first, so a fresh answer replaces it — never the old
+ * copy re-stored.
  */
-export function getSalesOutlets<T = { outlets?: any[]; members?: any[] }>(): Promise<Envelope<T>> {
-  return getCached(SALES_OUTLETS_URL, () => jsonOrNull<T>(SALES_OUTLETS_URL), { shouldCache: isSuccess, ttlMs: DASHBOARD_REUSE_MS });
+export const OUTLET_LIST_TTL_MS = 60_000;
+export function getSalesOutlets<T = { outlets?: any[]; members?: any[] }>(opts: { force?: boolean } = {}): Promise<Envelope<T>> {
+  if (opts.force) invalidateCached(SALES_OUTLETS_URL);
+  return getCached(SALES_OUTLETS_URL, () => jsonOrNull<T>(SALES_OUTLETS_URL), { shouldCache: isSuccess, ttlMs: OUTLET_LIST_TTL_MS });
+}
+
+/** When the cached roster was actually fetched (for the lists' "Updated <time>" hint); null when not cached. */
+export function salesOutletsFetchedAt(): Date | null {
+  const hit = peekCached(SALES_OUTLETS_URL);
+  return hit ? new Date(Date.now() - hit.ageMs) : null;
 }

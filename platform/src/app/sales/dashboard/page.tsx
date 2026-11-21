@@ -374,7 +374,8 @@ export default function SalesDashboard() {
       banners:    () => (SALES_BANNERS_ENABLED
         ? fetchBannersResult()
         : Promise.resolve({ banners: [] as Banner[], popups: [], ok: true })),
-      outlets:    () => getSalesOutlets(),
+      // force: this loader only runs on a miss or a stale (>2 min) revalidation → always a fresh roster.
+      outlets:    () => getSalesOutlets({ force: true }),
       kyc:        () => fetch('/api/kyc').then((r) => r.json()).catch(() => null),
     } as const;
     type PartName = keyof typeof parts;

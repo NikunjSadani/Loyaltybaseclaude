@@ -132,7 +132,8 @@ describe('Bajaj notification reminder', () => {
     stubNotification('denied');
     const first = renderBajaj();
     expect(await screen.findByRole('dialog')).toBeTruthy();
-    // ~1 s in, the SW's first clients.claim() → controllerchange → ServiceWorkerRegister reloads the page.
+    // Any early reload (historically the SW's first clients.claim() → controllerchange reload — removed 2026-11-21 —
+    // and still: an update reload, deploy-skew reload or pull-to-refresh) must not burn the flag.
     expect(sessionStorage.getItem(REMINDER_SESSION_KEY)).toBeNull(); // not burned at render time
     first.unmount();
 

@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { getSalesOutlets } from '@/lib/cached-reads';
+import { getSalesOutlets, salesOutletsFetchedAt } from '@/lib/cached-reads';
+import { ListRefreshControl } from '@/components/sales/list-refresh-control';
 import Link from '@/components/navigation/no-prefetch-link';
 import {
   FileCheck, XCircle, ChevronRight, Clock, Bell, Tag,
@@ -296,6 +297,11 @@ export default function TasksPage() {
     }));
   };
 
+  // Refresh control: >0 = the rep asked for a fresh roster (bypasses the 60 s cache).
+  const [listRefresh, setListRefresh] = useState(0);
+  const [listRefreshing, setListRefreshing] = useState(false);
+  const [listUpdatedAt, setListUpdatedAt] = useState<Date | null>(null);
+
   useEffect(() => {
     setRoleState(getRole());
 
@@ -309,12 +315,13 @@ export default function TasksPage() {
       schemeApi.listSalesEligible()
         .then((r) => { const list = r.success ? (r.data.schemes ?? []) : []; setSchemes(list); return list; })
         .catch(() => { setSchemes([]); return []; }),
-      getSalesOutlets(), // shared 2-min roster read (lib/cached-reads.ts)
+      getSalesOutlets({ force: listRefresh > 0 }), // shared 60 s roster read; the refresh control forces fresh
       fetchTaskConfig(),
       // Approval/Rejected counts derive from SUBMISSIONS (shared buildKycSubRows)
       // so they match the dashboard + KYC list — incl. no-outlet submissions.
       fetch('/api/kyc', { headers }).then((r) => r.json()).catch(() => null),
     ]).then(([, oBody, config, kycResult]) => {
+      if (oBody?.success) setListUpdatedAt(salesOutletsFetchedAt() ?? new Date());
       const apiOutlets: OutletRow[] = (oBody?.data?.outlets ?? []).map(mapOutlet);
       setOutlets(apiOutlets);
       setTaskConfig(config);
@@ -343,8 +350,8 @@ export default function TasksPage() {
         const merged: VisibilityStatusMap = apiMap ?? {};
         setVisibilityItems(apiMap === null ? [] : buildVisibilityTaskItems(visibleOutlets, merged, visibilityEnabled));
       });
-    }).catch(() => {}).finally(() => setLoading(false));
-  }, []);
+    }).catch(() => {}).finally(() => { setLoading(false); setListRefreshing(false); });
+  }, [listRefresh]);
 
   useEffect(() => {
     const onStorage = () => {
@@ -555,6 +562,11 @@ export default function TasksPage() {
           </h1>
           <p className="text-xs text-gray-400 mt-0.5">Your pending action items</p>
         </div>
+        <ListRefreshControl
+          updatedAt={listUpdatedAt}
+          refreshing={listRefreshing}
+          onRefresh={() => { setListRefreshing(true); setListRefresh((n) => n + 1); }}
+        />
         {totalTasks > 0 && (
           <span className="text-[11px] font-bold bg-[var(--brand-primary)] text-white px-2 py-1 rounded-full">
             {totalTasks}

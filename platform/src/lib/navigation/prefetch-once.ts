@@ -16,10 +16,11 @@
  * can never become a per-render or per-navigation loop.
  */
 import { useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname } from 'next/navigation';
 import type { AppRouterInstance, PrefetchOptions } from 'next/dist/shared/lib/app-router-context.shared-runtime';
 
-const prefetched = new Set<string>();
+/** href -> when it was handed out for prefetch this session. Deleted (re-armed) when a refresh had to be dropped. */
+const prefetched = new Map<string, number>();
 /** Re-prefetches after a Next cache invalidation, per href per session (bounded). */
 export const MAX_REPREFETCH_PER_HREF = 10;
 /** An invalidation this soon after the last prefetch of an href does NOT re-prefetch it — the load-time
@@ -33,8 +34,13 @@ export function prefetchWithRefresh(router: Pick<AppRouterInstance, 'prefetch'>,
   const onInvalidate = () => {
     const n = reprefetches.get(href) ?? 0;
     if (n >= MAX_REPREFETCH_PER_HREF) return;
-    if (Date.now() - (lastPrefetchAt.get(href) ?? 0) < REPREFETCH_COOLDOWN_MS) return;
     reprefetches.set(href, n + 1);
+    if (Date.now() - (lastPrefetchAt.get(href) ?? 0) < REPREFETCH_COOLDOWN_MS) {
+      // Too soon to refresh now, but never lose it: re-arm the href so the next navigation's usePrefetchOnce check
+      // (once the cooldown has passed) prefetches it again. Still counted against MAX_REPREFETCH_PER_HREF.
+      prefetched.delete(href);
+      return;
+    }
     prefetchWithRefresh(router, href);
   };
   lastPrefetchAt.set(href, Date.now());
@@ -47,12 +53,17 @@ export function prefetchWithRefresh(router: Pick<AppRouterInstance, 'prefetch'>,
   }
 }
 
-/** Hrefs not yet prefetched this session; marks them as done. Exported for tests. */
+/**
+ * Hrefs not yet prefetched this session (or re-armed after a dropped refresh whose cooldown has passed); marks them
+ * with the current time. Exported for tests.
+ */
 export function takeUnprefetched(hrefs: readonly string[]): string[] {
   const todo: string[] = [];
+  const now = Date.now();
   for (const h of hrefs) {
     if (!h || prefetched.has(h)) continue;
-    prefetched.add(h);
+    if (now - (lastPrefetchAt.get(h) ?? -Infinity) < REPREFETCH_COOLDOWN_MS) continue; // re-armed, still cooling
+    prefetched.set(h, now);
     todo.push(h);
   }
   return todo;
@@ -60,6 +71,8 @@ export function takeUnprefetched(hrefs: readonly string[]): string[] {
 
 export function usePrefetchOnce(hrefs: readonly string[]): void {
   const router = useRouter();
+  // Re-checked on every navigation (cheap): only never-prefetched or re-armed hrefs are prefetched.
+  const pathname = usePathname();
   const key = hrefs.join('\n');
   useEffect(() => {
     const todo = takeUnprefetched(key ? key.split('\n') : []);
@@ -73,7 +86,7 @@ export function usePrefetchOnce(hrefs: readonly string[]): void {
     else setTimeout(run, 1500);
     // `router` is stable for the app's lifetime; keying on the joined hrefs avoids re-running per render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, pathname]);
 }
 
 /** Test-only. */

@@ -15,7 +15,7 @@
 // Self-contained: no toast/context dependency, so it is safe wherever it is
 // mounted. Kept dependency-light on purpose.
 // -----------------------------------------------------------------------------
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 const SW_ENABLED = process.env.NEXT_PUBLIC_PWA_SW_ENABLED === 'true';
 const SCOPED_PREFIXES = ['/sales', '/partner'];
@@ -28,6 +28,8 @@ function inScope(pathname: string): boolean {
 
 export default function ServiceWorkerRegister({ tenantSlug }: { tenantSlug?: string }) {
   const [waitingWorker, setWaitingWorker] = useState<ServiceWorker | null>(null);
+  // Set when the rep taps Refresh on the update banner — that controllerchange ALWAYS reloads.
+  const reloadRequested = useRef(false);
 
   useEffect(() => {
     // Gate 1: the SW runs when the global flag is on OR the tenant is Bajaj. Every
@@ -40,11 +42,19 @@ export default function ServiceWorkerRegister({ tenantSlug }: { tenantSlug?: str
     if (!('serviceWorker' in navigator)) return;
 
     let cancelled = false;
+    // Did a service worker control this page at ANY point before the current controllerchange? Re-read at every
+    // update event (not only at mount): on a rep's very first session the first install claims the page mid-session,
+    // and a LATER deploy's update must still reload. Only the first-ever install (no controller before it) skips the
+    // reload — that claim has nothing stale to replace, and reloading it loaded the dashboard twice on first login.
+    let hadController = !!navigator.serviceWorker.controller;
+    const noteController = () => { hadController = hadController || !!navigator.serviceWorker.controller; };
 
     // Promote a worker to "waiting" => offer the refresh prompt.
     const trackInstalling = (worker: ServiceWorker | null) => {
       if (!worker) return;
+      noteController();
       worker.addEventListener('statechange', () => {
+        noteController();
         // Only show the prompt for an UPDATE (controller already exists), not the
         // very first install, where there is nothing stale to replace.
         if (
@@ -61,12 +71,14 @@ export default function ServiceWorkerRegister({ tenantSlug }: { tenantSlug?: str
       .register('/sw.js', { scope: '/', updateViaCache: 'none' })
       .then((registration) => {
         if (cancelled) return;
+        noteController();
         // A new SW may already be waiting (installed between visits).
         if (registration.waiting && navigator.serviceWorker.controller) {
           setWaitingWorker(registration.waiting);
         }
         trackInstalling(registration.installing);
         registration.addEventListener('updatefound', () => {
+          noteController();
           trackInstalling(registration.installing);
         });
       })
@@ -74,13 +86,16 @@ export default function ServiceWorkerRegister({ tenantSlug }: { tenantSlug?: str
         // Registration failures must never break the app — swallow silently.
       });
 
-    // When an UPDATED SW takes control, reload once so the new shell is live. NOT on the very first install: the SW's
-    // clientsClaim makes it take control of the page (controller null → SW) with nothing stale to replace, and that
-    // reload loaded the dashboard — and every one of its requests — twice on a rep's first login (staging, 2026-11-21).
-    const hadController = !!navigator.serviceWorker.controller;
+    // When an UPDATED SW takes control (or the rep tapped Refresh), reload once so the new shell is live.
     let reloaded = false;
     const onControllerChange = () => {
-      if (reloaded || !hadController) return;
+      if (reloaded) return;
+      if (!reloadRequested.current && !hadController) {
+        // First-ever install claiming the page: nothing stale → no reload. From now on a controller exists, so a
+        // later update in this same session DOES reload.
+        hadController = true;
+        return;
+      }
       reloaded = true;
       window.location.reload();
     };
@@ -96,7 +111,8 @@ export default function ServiceWorkerRegister({ tenantSlug }: { tenantSlug?: str
   }, [tenantSlug]);
 
   const applyUpdate = () => {
-    // Tell the waiting SW to activate; controllerchange (above) then reloads.
+    // Tell the waiting SW to activate; controllerchange (above) then reloads — always, because the rep asked.
+    reloadRequested.current = true;
     waitingWorker?.postMessage({ type: 'SKIP_WAITING' });
     setWaitingWorker(null);
   };
