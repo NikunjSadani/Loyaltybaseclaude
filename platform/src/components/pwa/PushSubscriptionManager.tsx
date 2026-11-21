@@ -276,8 +276,9 @@ export default function PushSubscriptionManager({
 
   // "Seen this session" is written ONLY when the user has really had the reminder: it stayed on screen for
   // REMINDER_SEEN_AFTER_MS, or they dismissed / acted on it. Never at render time — on a brand-new session the
-  // service worker's first `clients.claim()` fires `controllerchange` ~1 s in and ServiceWorkerRegister reloads the
-  // page; marking at render made the reminder vanish for the whole session on exactly that first open. A dwell rule
+  // service worker's first `clients.claim()` used to make ServiceWorkerRegister reload the page ~1 s in (since
+  // 2026-11-21 that first-install claim no longer reloads; update reloads still do); marking at render made the
+  // reminder vanish for the whole session on exactly that first open. A dwell rule
   // is independent of the SW (it also survives a deploy-skew reload, a pull-to-refresh, or a SW that never claims),
   // whereas waiting for a "pending" claim can't be detected reliably on a first visit. Not counted while it waits
   // behind the install modal.

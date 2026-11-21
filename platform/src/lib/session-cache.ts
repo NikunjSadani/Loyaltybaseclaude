@@ -71,6 +71,9 @@ interface Entry {
 const store = new Map<string, Entry>();
 /** Bumped on every clear — a load that started under an older generation never writes its result. */
 let generation = 0;
+/** Per-key generation, bumped by invalidateCached — invalidating ONE key must not void every other in-flight load
+ *  (a forced roster read inside the dashboard's own loader would otherwise stop the dashboard storing its part). */
+const keyGeneration = new Map<string, number>();
 
 function now(): number {
   return Date.now();
@@ -89,6 +92,7 @@ function load<T>(key: string, loader: () => Promise<T>, shouldCache: (v: T) => b
   const entry = store.get(key) ?? {};
   if (entry.inflight) return entry.inflight as Promise<T>;
   const gen = generation;
+  const kgen = keyGeneration.get(key) ?? 0;
   // eslint-disable-next-line prefer-const -- read inside the IIFE's `finally`, which always runs after assignment
   let p!: Promise<T>;
   p = (async () => {
@@ -96,7 +100,7 @@ function load<T>(key: string, loader: () => Promise<T>, shouldCache: (v: T) => b
       // Deferred one microtask so a loader that throws synchronously still settles through `finally` AFTER `p`
       // is assigned below.
       const value = await Promise.resolve().then(loader);
-      if (gen === generation && shouldCache(value)) {
+      if (gen === generation && kgen === (keyGeneration.get(key) ?? 0) && shouldCache(value)) {
         store.set(key, { value, at: now() });
       }
       return value;
@@ -167,9 +171,11 @@ export function setCached<T>(key: string, value: T): void {
 export function invalidateCached(match: string | ((key: string) => boolean)): void {
   const test = typeof match === 'string' ? (k: string) => k.startsWith(match) : match;
   for (const full of [...store.keys()]) {
-    if (test(unscoped(full))) store.delete(full);
+    if (test(unscoped(full))) {
+      store.delete(full);
+      keyGeneration.set(full, (keyGeneration.get(full) ?? 0) + 1);
+    }
   }
-  generation += 1;
 }
 
 let channel: BroadcastChannel | null = null;
@@ -245,6 +251,7 @@ export function noteApiMutation(method: string): void {
 /** Test-only. */
 export function __resetSessionCacheForTests(): void {
   store.clear();
+  keyGeneration.clear();
   generation = 0;
 }
 

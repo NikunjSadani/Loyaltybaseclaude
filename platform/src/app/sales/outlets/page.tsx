@@ -26,7 +26,8 @@ import { visibilityApi } from '@/lib/visibility';
 import { classifyVisibilityCapture, VISIBILITY_SUMMARY_BUCKET_LABELS, type VisibilitySummaryBucket } from '@/lib/visibility-types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
-import { getOutletTargets, getSalesOutlets } from '@/lib/cached-reads';
+import { getOutletTargets, getSalesOutlets, salesOutletsFetchedAt } from '@/lib/cached-reads';
+import { ListRefreshControl } from '@/components/sales/list-refresh-control';
 
 /* ─── Outlet roster ─────────────────────────────────────────────────────────── */
 
@@ -189,6 +190,10 @@ export default function SalesOutletsPage() {
   const [beatFilter, setBeatFilter] = useState<string>('ALL');
   const [programFilter, setProgramFilter] = useState<string>('ALL');
   const [memberFilter, setMemberFilter] = useState<string>('');
+  // Refresh control: >0 = the rep asked for a fresh roster (bypasses the 60 s cache).
+  const [rosterRefresh, setRosterRefresh] = useState(0);
+  const [rosterRefreshing, setRosterRefreshing] = useState(false);
+  const [rosterUpdatedAt, setRosterUpdatedAt] = useState<Date | null>(null);
   // `?q=` from the dashboard's "see all results" — the same name-or-mobile match as the dashboard search.
   const [query, setQuery] = useState('');
   useEffect(() => {
@@ -225,9 +230,11 @@ export default function SalesOutletsPage() {
   // Roster (real /api/sales/outlets)
   useEffect(() => {
     setRoleState(getRole());
-    getSalesOutlets<{ outlets?: Outlet[]; members?: any[] }>() // shared 2-min roster read (lib/cached-reads.ts)
+    // Shared 60 s roster read (lib/cached-reads.ts); the refresh control forces a fresh one.
+    getSalesOutlets<{ outlets?: Outlet[]; members?: any[] }>({ force: rosterRefresh > 0 })
       .then((body) => {
         if (body?.success && body.data) {
+          setRosterUpdatedAt(salesOutletsFetchedAt() ?? new Date());
           setOutlets(body.data.outlets ?? []);
           // Manager-only Team Member filter options (empty for a leaf rep → filter hidden).
           setTeamMembers((body.data.members ?? []).map((m: {
@@ -240,8 +247,9 @@ export default function SalesOutletsPage() {
           })));
         }
       })
-      .catch(() => {});
-  }, []);
+      .catch(() => {})
+      .finally(() => setRosterRefreshing(false));
+  }, [rosterRefresh]);
 
   useEffect(() => {
     const onStorage = () => setRoleState(getRole());
@@ -451,6 +459,11 @@ export default function SalesOutletsPage() {
             ({visibleOutlets.length}/{outlets.length})
           </span>
         </h1>
+        <ListRefreshControl
+          updatedAt={rosterUpdatedAt}
+          refreshing={rosterRefreshing}
+          onRefresh={() => { setRosterRefreshing(true); setRosterRefresh((n) => n + 1); }}
+        />
         <div className="flex bg-gray-100 rounded-lg p-0.5 gap-0.5 shrink-0">
           {([
             { v: 'table', Icon: LayoutList,  label: 'Table' },
