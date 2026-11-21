@@ -192,17 +192,49 @@ export async function fetchBannersResult(): Promise<{ banners: Banner[]; popups:
 /**
  * Persist the full banner + popup list to the server.
  */
-export async function updateBanners(config: { banners: Banner[]; popups: Popup[] }): Promise<void> {
+export async function updateBanners(config: { banners: Banner[]; popups: Popup[] }): Promise<{ ok: boolean; message?: string }> {
   try {
-    await fetch('/api/admin/banner-config', {
+    const res = await fetch('/api/admin/banner-config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...authHeader() },
       body: JSON.stringify(config),
     });
+    if (res.ok) return { ok: true };
+    let message = `Could not save (error ${res.status}).`;
+    try {
+      const j = await res.json();
+      const m = j?.error?.message ?? j?.message;
+      if (typeof m === 'string' && m.trim()) message = m;
+      else if (Array.isArray(m) && m.length) message = m.join('; ');
+    } catch { /* keep the generic message */ }
+    return { ok: false, message };
+  } catch {
+    return { ok: false, message: 'Could not save — check your connection and try again.' };
   } finally {
     // Any /api write already clears the session cache (lib/session-cache.ts); this names the dependency explicitly.
     invalidateCached(SALES_BANNERS_KEY);
   }
+}
+
+// ── CTA links (audit fix 2026-11-21) ─────────────────────────────────────────
+
+/** The link to render for a CTA, or null when it is not an absolute http(s) URL (javascript:, data:, relative …).
+ *  Mirrors the API's save-time check (admin-programs/banner-config.service.ts isAllowedCtaUrl). */
+export function safeCtaUrl(url: string | null | undefined): string | null {
+  const v = (url ?? '').trim();
+  if (!v || /\s/.test(v)) return null;
+  try {
+    const u = new URL(v);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && u.hostname ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Form check: blank or http(s). The inline error text shown under the Button Link field. */
+export const CTA_URL_ERROR = 'Must start with http:// or https:// (or leave blank).';
+export function isValidCtaInput(url: string | null | undefined): boolean {
+  return !(url ?? '').trim() || safeCtaUrl(url) !== null;
 }
 
 // ── Sales app read path (owner 2026-11-21) ───────────────────────────────────

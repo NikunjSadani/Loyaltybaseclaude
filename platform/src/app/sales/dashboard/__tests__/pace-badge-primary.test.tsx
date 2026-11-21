@@ -29,6 +29,7 @@ vi.mock('@/lib/banner', () => ({
   SALES_BANNERS_TTL_MS: 60_000,
   getActiveSalesBanners: () => [],
   getBgStyle: () => ({}),
+  safeCtaUrl: (u?: string) => (u && /^https?:\/\//.test(u) ? u : null),
 }));
 vi.mock('@/lib/schemes', () => ({
   schemeApi: { listSalesEligible: () => Promise.resolve({ success: true, data: { schemes: [] } }) },

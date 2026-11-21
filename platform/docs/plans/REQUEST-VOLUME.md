@@ -20,6 +20,11 @@ sees every `showInSalesApp` banner whatever its audience. Client: `fetchSalesBan
 the session cache — key `sales:banners`, 60 s TTL, cleared on any API write incl. a banner-config save; only the
 dashboard calls it (no per-screen request). No banners (every prod tenant today) → nothing rendered, no error. The
 partner endpoint `/v1/partner/banners` is unchanged (partner roles only) and the sales app never calls it.
+ONE cache layer (audit fix): the dashboard calls `fetchSalesBannersResult` directly — it is NOT also wrapped in the
+2-min dashboard swr — so a banner change reaches reps within 60 s. **CTA links** (audit fix): the banner-config PUT
+refuses any button link that is not blank or an absolute http(s) URL (400 naming each banner / popup); the admin form
+flags it inline and disables Save; a refused save shows "Not saved: <reason>" and reloads the server copy; the
+partner + sales apps and the admin list render a CTA as a link ONLY when it is http(s) (else plain text / `#`).
 
 ## Outage evidence (2026-11-20)
 

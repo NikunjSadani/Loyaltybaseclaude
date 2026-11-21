@@ -19,7 +19,7 @@ import { classifyPaceGap, buildCasesToGoMsg, fmtKpiNum, remainingOf } from '@/li
 import { istDateKey, istMonthKey } from '@/lib/ist-date';
 import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfigResult, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
-import { fetchSalesBannersResult, getActiveSalesBanners, getBgStyle, SALES_BANNERS_TTL_MS, type Banner } from '@/lib/banner';
+import { fetchSalesBannersResult, getActiveSalesBanners, getBgStyle, safeCtaUrl, type Banner } from '@/lib/banner';
 import { swr, peekCached, invalidateCached, DASHBOARD_REUSE_MS, DASH_PREFIX } from '@/lib/session-cache';
 import { getSalesOutlets } from '@/lib/cached-reads';
 import { schemeApi } from '@/lib/schemes';
@@ -359,15 +359,19 @@ export default function SalesDashboard() {
     // outlet-type scope can never be clobbered by a late-resolving unscoped mount request (audit
     // Finding 1). Deoleo/non-toggle tenants still issue exactly ONE no-param request there.
     // Banners (owner 2026-11-21): the SALES read path GET /api/sales/banners (every SALES_* role, own tenant; only
-    // active, in-date, showInSalesApp banners) through the session cache (60 s TTL, cleared on any write incl. a
-    // banner-config save). Never /api/partner/banners (partner roles only → 403). None → nothing rendered.
+    // active, in-date, showInSalesApp banners). ONE cache layer: fetchSalesBannersResult's own session-cache entry
+    // (60 s TTL, cleared on any write incl. a banner-config save) — deliberately NOT also wrapped in the 2-min
+    // dashboard swr below, so a banner change shows within a minute. Never /api/partner/banners (partner roles only
+    // → 403). None / a failed read → nothing rendered (banners are not a figure; no "couldn't load" notice).
+    fetchSalesBannersResult()
+      .then((r) => { if (!cancelled && r.ok) setSalesBanners(getActiveSalesBanners(r.banners)); })
+      .catch(() => { /* never throws; nothing to show */ });
     //
     // Each part is cached ONLY when it succeeded (audit fix 3). A failed part keeps its previous good value (cached
     // or already on screen); with nothing to keep it is flagged in `coreErrors` → the Tasks card says which figures
     // could not load and offers Retry — never a silent 0.
     const parts = {
       taskConfig: () => fetchTaskConfigResult(),
-      banners:    () => fetchSalesBannersResult(),
       // force: this loader only runs on a miss or a stale (>2 min) revalidation → always a fresh roster.
       outlets:    () => getSalesOutlets({ force: true }),
       kyc:        () => fetch('/api/kyc').then((r) => r.json()).catch(() => null),
@@ -375,13 +379,11 @@ export default function SalesDashboard() {
     type PartName = keyof typeof parts;
     const okOf: Record<PartName, (v: any) => boolean> = {
       taskConfig: (v) => v?.ok === true,
-      banners:    (v) => v?.ok === true,
       outlets:    (v) => v?.success === true,
       kyc:        (v) => v?.success === true,
     };
     const apply: Record<PartName, (v: any) => void> = {
       taskConfig: (v) => setTaskConfig(v.config),
-      banners:    (v) => setSalesBanners(getActiveSalesBanners(v.banners)),
       outlets:    (v) => setOutlets((v.data?.outlets ?? []).map((o: any) => ({
         id:             o.id,
         kycId:          o.kycId ?? '',
@@ -409,11 +411,11 @@ export default function SalesDashboard() {
       const hadValue = peekCached(key) !== undefined;
       const fail = () => {
         if (cancelled) return;
-        // Nothing good to keep → say so (banners just stay hidden; they are not a figure).
-        if (!hadValue && name !== 'banners') setCoreErrors((prev) => (prev.includes(name) ? prev : [...prev, name]));
+        // Nothing good to keep → say so.
+        if (!hadValue) setCoreErrors((prev) => (prev.includes(name) ? prev : [...prev, name]));
       };
       swr<any>(key, parts[name], {
-        maxAgeMs: name === 'banners' ? SALES_BANNERS_TTL_MS : DASHBOARD_REUSE_MS,
+        maxAgeMs: DASHBOARD_REUSE_MS,
         shouldCache: okOf[name],
         onValue: (v) => {
           if (cancelled) return;
@@ -959,15 +961,19 @@ export default function SalesDashboard() {
                   {banner.body && (
                     <p className="text-xs text-white/80 mt-1 leading-relaxed">{banner.body}</p>
                   )}
-                  {banner.ctaLabel && banner.ctaUrl && (
+                  {banner.ctaLabel && safeCtaUrl(banner.ctaUrl) && (
                     <a
-                      href={banner.ctaUrl}
+                      href={safeCtaUrl(banner.ctaUrl)!}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="inline-block mt-2.5 px-3 py-1 bg-white/20 rounded-lg text-xs font-semibold"
                     >
                       {banner.ctaLabel}
                     </a>
+                  )}
+                  {banner.ctaLabel && !safeCtaUrl(banner.ctaUrl) && (
+                    // Not an http(s) link (or none) → the label as plain text, never an <a href>.
+                    <span className="inline-block mt-2.5 px-3 py-1 bg-white/20 rounded-lg text-xs font-semibold">{banner.ctaLabel}</span>
                   )}
                 </div>
               ))}

@@ -31,6 +31,7 @@ vi.mock('@/lib/banner', () => ({
   getActiveSalesBanners:     () => [],
   getActiveBannersFromList:  () => [],
   getBgStyle:                () => ({}),
+  safeCtaUrl: (u?: string) => (u && /^https?:\/\//.test(u) ? u : null),
   getActivePopup:            () => null,
   shouldShowPopup:           () => false,
   markPopupSeen:             () => undefined,

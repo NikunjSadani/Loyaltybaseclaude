@@ -83,6 +83,32 @@ describe('sales dashboard banners', () => {
     expect(SALES_BANNERS_TTL_MS).toBe(60_000);
   });
 
+  it('ONE cache layer: a return after 60 s re-reads the banners (not held for the 2-min dashboard reuse)', async () => {
+    const first = render(<SalesDashboardPage />);
+    await screen.findByText('View all');
+    expect(bannerCalls()).toBe(1);
+    first.unmount();
+    cleanup();
+    const t0 = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(t0 + SALES_BANNERS_TTL_MS + 1_000);
+    render(<SalesDashboardPage />);
+    await screen.findByText('View all');
+    await vi.waitFor(() => expect(bannerCalls()).toBe(2));
+  });
+
+  it('a non-http(s) CTA is never a link — the label shows as plain text', async () => {
+    bannersResponse = () => Promise.resolve({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ success: true, data: { banners: [
+        { id: 'x', type: 'text', title: 'Evil', body: '', ctaLabel: 'Tap', ctaUrl: 'javascript:alert(1)', videoUrl: '', bgColor: 'red', priority: 0, startDate: '', endDate: '' },
+      ] } }),
+    });
+    render(<SalesDashboardPage />);
+    expect(await screen.findByText('Tap')).toBeInTheDocument();
+    expect(screen.getByText('Tap').closest('a')).toBeNull();
+    expect(document.querySelector('a[href^="javascript"]')).toBeNull();
+  });
+
   it('a refused / failed banners read never breaks the dashboard and never shows a "couldn\'t load" notice', async () => {
     const err = vi.spyOn(console, 'error');
     bannersResponse = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });

@@ -2,7 +2,7 @@
 /** fetchSalesBannersResult (owner 2026-11-21): the sales read path through the 60 s session cache. */
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { __resetSessionCacheForTests } from '@/lib/session-cache';
-import { fetchSalesBannersResult, getActiveSalesBanners, updateBanners, SALES_BANNERS_ENDPOINT, type Banner } from '@/lib/banner';
+import { fetchSalesBannersResult, getActiveSalesBanners, updateBanners, safeCtaUrl, isValidCtaInput, SALES_BANNERS_ENDPOINT, type Banner } from '@/lib/banner';
 
 const fetchMock = vi.fn();
 vi.stubGlobal('fetch', fetchMock);
@@ -62,5 +62,24 @@ describe('getActiveSalesBanners — IST day', () => {
     const b = { id: 'x', active: true, showInSalesApp: true, startDate: '2026-11-21', endDate: '', priority: 0 } as Banner;
     expect(getActiveSalesBanners([b])).toHaveLength(1);
     vi.useRealTimers();
+  });
+});
+
+describe('CTA links (audit fix)', () => {
+  it('safeCtaUrl: only absolute http(s) URLs', () => {
+    expect(safeCtaUrl('https://a.com/x')).toBe('https://a.com/x');
+    expect(safeCtaUrl(' http://a.com ')).toBe('http://a.com');
+    for (const bad of ['javascript:alert(1)', 'data:text/html,x', '/partner', 'www.a.com', 'https://', '', null, undefined]) {
+      expect(safeCtaUrl(bad as string)).toBeNull();
+    }
+    expect(isValidCtaInput('')).toBe(true);
+    expect(isValidCtaInput('javascript:x')).toBe(false);
+  });
+
+  it('updateBanners reports a refused save with the server message (never a silent "saved")', async () => {
+    fetchMock.mockImplementation(() => res(400, { success: false, error: { message: 'Button links must start with http:// or https://' } }));
+    expect(await updateBanners({ banners: [], popups: [] })).toEqual({ ok: false, message: 'Button links must start with http:// or https://' });
+    fetchMock.mockImplementation(() => res(200, { success: true }));
+    expect(await updateBanners({ banners: [], popups: [] })).toEqual({ ok: true });
   });
 });
