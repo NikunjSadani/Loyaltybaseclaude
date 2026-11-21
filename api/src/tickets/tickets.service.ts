@@ -1090,7 +1090,7 @@ export class TicketsService {
         // The admin's own address is never also copied.
         if (own) cc = cc.filter((x) => x !== own.toLowerCase());
         // Owner 2026-11-21: no admin email but a CC list → the CC list receives it (as To). Body worded
-        // like the inbox case ("Hello," + "Asked: <name>") since it is not addressed to the admin.
+        // like the inbox case ("Hello," + "needs remarks from <name>") since it is not addressed to the admin.
         if (!own && cc.length) {
           toList = cc;
           cc = [];

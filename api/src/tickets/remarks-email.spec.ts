@@ -38,11 +38,12 @@ describe('renderRemarksEmail', () => {
     expect([...pos].sort((a, b) => a - b)).toEqual(pos);
   });
 
-  it('ask block: who asked, the note verbatim, asked-on time, "Asked: <admin>" when sent to the inbox', () => {
+  it('ask block: who asked, the note verbatim, asked-on time — never an "Asked: <admin>" line (owner 2026-11-21)', () => {
     const { html } = renderRemarksEmail(base());
     expect(html).toContain('Priya (Gifsy) (Gifsy support) needs remarks from Anil Shah:');
     expect(html).toContain('Please confirm whether the October invoice for this outlet was approved.');
-    expect(html).toMatch(/Asked on \d{1,2} \w{3} \d{4}, \d{1,2}:\d{2} (am|pm) IST · Asked: Anil Shah/);
+    expect(html).toMatch(/Asked on \d{1,2} \w{3} \d{4}, \d{1,2}:\d{2} (am|pm) IST<\/p>/);
+    expect(html).not.toContain('Asked: ');
     expect(html).toContain("Sent to your programme&#39;s ticket remarks inbox. Ask Anil Shah (or another client admin) to reply in the portal.");
     expect(html).toContain('Awaiting remarks from Anil Shah');
     expect(renderRemarksEmail(base({ toInbox: false })).html).not.toContain('Asked: Anil Shah');
@@ -58,11 +59,12 @@ describe('renderRemarksEmail', () => {
     expect(html).not.toMatch(/copied for information|Ask Anil Shah|Asked: /);
   });
 
-  it('with a CC list: every reader sees who was asked + "copied for information" + ask them to reply', () => {
+  it('with a CC list: every reader is told to ask the admin to reply — no "Asked:" / "copied for information" lines', () => {
     for (const over of [{ toInbox: true, hasCc: true }, { toInbox: false, hasCc: true }]) {
       const { html } = renderRemarksEmail(base(over));
-      expect(html).toContain('Asked: Anil Shah');
-      expect(html).toContain('If you received this as a Cc, you&#39;re copied for information.');
+      expect(html).not.toContain('Asked: ');
+      expect(html).not.toContain('copied for information');
+      expect(html).toContain('needs remarks from Anil Shah:');
       expect(html).toContain('Ask Anil Shah (or another client admin) to reply in the portal.');
       expect(html).toContain('Open ticket (portal login needed)');
     }
@@ -72,7 +74,7 @@ describe('renderRemarksEmail', () => {
     const { html } = renderRemarksEmail(base({ toInbox: true, ccOnly: true }));
     expect(html).toContain('>Hello,</p>');
     expect(html).toContain('Sent to your programme&#39;s ticket remarks CC list because Anil Shah has no email address on file.');
-    expect(renderRemarksEmail(base({ toInbox: true, askedAdminName: ' ' })).html).toContain('Asked: your team');
+    expect(renderRemarksEmail(base({ toInbox: true, askedAdminName: ' ' })).html).toContain('needs remarks from your team:');
   });
 
   it('button + the honest "replies to this email are not read" line', () => {

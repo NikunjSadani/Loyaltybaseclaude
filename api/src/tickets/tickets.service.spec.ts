@@ -857,7 +857,8 @@ describe('TicketsService', () => {
       expect(mockMsg91.sendEmail).toHaveBeenCalledTimes(1);
       const mail = mockMsg91.sendEmail.mock.calls[0][0];
       expect(mail.to).toEqual(['tickets@deoleo.example']); // NOT ca@deoleo.example
-      expect(mail.html).toContain('Asked: Deoleo Admin');
+      expect(mail.html).toContain('needs remarks from Deoleo Admin:');
+      expect(mail.html).not.toContain('Asked: ');
       expect(mail.html).toContain("ticket remarks inbox");
       expect(mockNotifications.writeInApp).toHaveBeenCalledWith(expect.objectContaining({ userId: 'cadmin1' }));
       expect(mockPrisma.ticketMessage.create).toHaveBeenCalledWith({
@@ -959,7 +960,8 @@ describe('TicketsService', () => {
       const mail = mockMsg91.sendEmail.mock.calls[0][0];
       expect(mail.to).toEqual(['a@deoleo.example', 'b@deoleo.example']);
       expect(mail.cc).toEqual(['c@deoleo.example']);
-      expect(mail.html).toContain('Asked: Deoleo Admin');
+      expect(mail.html).toContain('needs remarks from Deoleo Admin:');
+      expect(mail.html).not.toContain('Asked: ');
       expect(gifsyOnlyNotes()[0]).toMatch(
         /^Email sent to a@deoleo\.example, b@deoleo\.example \(client's ticket remarks inbox\), cc c@deoleo\.example — asked: Deoleo Admin/,
       );
@@ -990,7 +992,9 @@ describe('TicketsService', () => {
       const mail = mockMsg91.sendEmail.mock.calls[0][0];
       expect(mail.to).toEqual(['ops@deoleo.example', 'mgr@deoleo.example']);
       expect(mail).not.toHaveProperty('cc');
-      expect(mail.html).toContain('Asked: Deoleo Admin 2'); // not "Hi Deoleo Admin 2," — they are not a recipient
+      expect(mail.html).toContain('>Hello,</p>'); // not "Hi Deoleo Admin 2," — they are not a recipient
+      expect(mail.html).toContain('needs remarks from Deoleo Admin 2:');
+      expect(mail.html).not.toMatch(/Asked: |copied for information/);
       expect(gifsyOnlyNotes()[0]).toMatch(
         /^Email sent to the client's CC list ops@deoleo\.example, mgr@deoleo\.example — Deoleo Admin 2 \(the admin asked\) has no email address on file with link /,
       );

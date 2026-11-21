@@ -137,11 +137,11 @@ export function renderRemarksEmail(d: RemarksEmailData): { subject: string; html
   blocks.push(`<tr><td style="padding:0 0 10px;${FONT}">${para(d.toInbox || d.ccOnly ? 'Hello,' : `Hi ${d.askedAdminName},`)}</td></tr>`);
 
   // 1. THE ASK — highlighted
-  const askMeta = [`Asked on ${istDateTime(d.askedAt)}`, ...(shared ? [`Asked: ${asked}`] : [])].join(' · ');
+  // Owner 2026-11-21: no "Asked: <name>" meta line and no "you're copied for information" line.
+  const askMeta = `Asked on ${istDateTime(d.askedAt)}`;
   const sharedLines: string[] = [];
   if (d.ccOnly) sharedLines.push(`Sent to your programme's ticket remarks CC list because ${asked} has no email address on file.`);
   else if (d.toInbox) sharedLines.push("Sent to your programme's ticket remarks inbox.");
-  if (d.hasCc) sharedLines.push("If you received this as a Cc, you're copied for information.");
   if (shared) sharedLines.push(`Ask ${asked} (or another client admin) to reply in the portal.`);
   blocks.push(
     `<tr><td style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:12px 14px;${FONT}" data-block="ask">`
