@@ -774,7 +774,7 @@ describe('GifsyService', () => {
       expect(mockPrisma.client.update).not.toHaveBeenCalled();
     });
 
-    it('requireLocation (location gate): PATCH merges + echoes it; absent → OFF; non-boolean → 400', async () => {
+    it('requireLocation (location gate): PATCH merges + echoes it; absent → ON (default since 2026-11-21); explicit false → OFF; non-boolean → 400', async () => {
       const stored = { walletModule: true, outletMasterGeo: true };
       mockPrisma.client.findFirst.mockResolvedValue({
         id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
@@ -784,12 +784,20 @@ describe('GifsyService', () => {
         id: 'bajaj', internalName: 'Bajaj', status: 'ACTIVE', onboardedAt: new Date('2026-01-01'),
         branding: {}, features: data.features ?? stored,
       }));
+      // Absent key → the console projection shows ON (default ON for every tenant).
+      const absent = await service.updateClient(gifsy, 'bajaj', { status: 'ACTIVE' });
+      expect((absent.features as Record<string, unknown>).requireLocation).toBe(true);
+
+      // Emergency off → an EXPLICIT false is stored (merged, every other flag kept) and echoed as OFF.
+      mockPrisma.client.update.mockClear();
+      const off = await service.updateClient(gifsy, 'bajaj', { features: { requireLocation: false } });
+      expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({ ...stored, requireLocation: false });
+      expect((off.features as Record<string, unknown>).requireLocation).toBe(false);
+
+      mockPrisma.client.update.mockClear();
       const on = await service.updateClient(gifsy, 'bajaj', { features: { requireLocation: true } });
       expect(mockPrisma.client.update.mock.calls[0][0].data.features).toEqual({ ...stored, requireLocation: true });
       expect((on.features as Record<string, unknown>).requireLocation).toBe(true);
-
-      const off = await service.updateClient(gifsy, 'bajaj', { status: 'ACTIVE' });
-      expect((off.features as Record<string, unknown>).requireLocation).toBe(false);
 
       mockPrisma.client.update.mockClear();
       for (const v of ['true', 1, null]) {

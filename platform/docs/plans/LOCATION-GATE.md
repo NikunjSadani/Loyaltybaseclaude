@@ -1,15 +1,39 @@
 # Location gate + Location Report — design note
 
-**Status:** ✅ LIVE on prod `1fa2305c` (2026-11-19 night release). Flag `features.requireLocation` default OFF in the
-shipped code. **Bajaj prod: ON since 2026-11-21** (owner, Gifsy console → Clients → Bajaj → **Behaviour flags** — not
-"Feature Flags"; verified read-only on `gifsy_prod`, probe job `bajaj-prod-vis-verify` exec `n9vdj`: `requireLocation`
-true, `outletMasterGeo` true). Deoleo prod: key **absent** (OFF). Real-phone check (Android + iPhone) on Bajaj prod is
-still not recorded.
-**Scope:** TENANT-SCOPED in effect today — the gate, the Location Report (tile + API) and the Daily Ops Digest
-"Location" line all appear only for tenants with `requireLocation` ON (Deoleo sees nothing new). The code paths are
-shared (KYC / visibility services, reports, digest) — owner-approved 2026-11-18.
-**⚠️ Changing (owner decision 2026-11-21, platform-wide approved):** ON BY DEFAULT for every client incl. Deoleo and
-new clients — see "Owner decision 2026-11-21" below (branch `feat/require-location-default`, in build, not shipped).
+**Status:** ✅ LIVE on prod `1fa2305c` (2026-11-19 night release; prod now `97332c95`). In the shipped prod code the flag
+`features.requireLocation` is default OFF. **Bajaj prod: ON since 2026-11-21** (owner, Gifsy console → Clients → Bajaj →
+**Behaviour flags** — not "Feature Flags"; verified read-only on `gifsy_prod`, probe job `bajaj-prod-vis-verify` exec
+`n9vdj`: `requireLocation` true, `outletMasterGeo` true). Deoleo prod: key **absent** (no `outletMasterGeo`).
+**Owner decision 2026-11-21 (⚠️ PLATFORM-WIDE, approved): DEFAULT ON for every tenant** incl. Deoleo and every new
+client — built on branch `feat/require-location-default` (in the next batch `release/next`; not yet deployed). ON unless
+`features.requireLocation` is explicitly `false`; the Gifsy-console switch is only an **emergency off**. **Deoleo goes ON
+at that deploy with no data change — Deoleo heads-up needed first** (their reps will need location allowed + a fix for
+KYC / visibility). The 200 m blocking is unaffected (it stays driven only by `outletMasterGeo` / the visibility
+`geoFence`). Real-phone check (Android + iPhone) still not recorded.
+**Scope:** in the shipped prod code the gate, the Location Report (tile + API) and the Daily Ops Digest "Location" line
+appear only for tenants with `requireLocation` ON (code paths shared — owner-approved 2026-11-18). From the default-ON
+release: every tenant not switched off gets them. Older notes below that say "Deoleo OFF / byte-identical" then describe
+an **emergency-off** tenant (explicit `false`), which stays byte-identical to the pre-gate behaviour.
+
+## Default ON (2026-11-21, `feat/require-location-default`)
+
+- ONE read per side: api `isLocationRequired(features)` (`common/location-gate.helper.ts`; `isLocationRequiredFor` adds
+  the SALES_* role check) and FE `isLocationRequired` (`src/lib/location-required.ts`, used by `normalizeFeatures` and
+  the console's `isBehaviourFlagOn`). Rule: `features?.requireLocation !== false`. Every consumer goes through it: KYC
+  create, visibility capture, Location report builder + `/enabled` probe, digest tenant list, console projection
+  (`consoleFeatures`), FE KYC wizard / capture sheet. No client row → report / `/enabled` stay off (403 / false).
+- Defaults: `DEFAULT_CLIENT_CONFIG.features.requireLocation = true`; new-client wizard starts it ON and sends ONLY
+  deviations from the defaults (untouched → no key; switched off → explicit `false`).
+- Console: absent key shows ON; switching OFF PATCHes `{ requireLocation: false }` (no confirm) and shows the amber note
+  "Emergency off — KYC and visibility photos can then be submitted without a phone location (no location check for them)"; switching back ON keeps the confirm.
+  ⚠️ Copy check for the owner: a KYC without location is recorded `UNVERIFIABLE` only on `outletMasterGeo` tenants, and a
+  visibility capture only when that tenant's fence is on — on a tenant with neither (Deoleo today) a fix-less
+  submission is saved with no location but NOT labelled Unverifiable.
+- Phone: a settings-load FAILURE keeps the phone gate open (as before — features are then only defaults; the server
+  enforces the real setting).
+- Data trap checked: the console never wrote every flag on save (detail page PATCHes one key; the backend merges; the
+  wizard only added switched-ON behaviour flags), so no tenant got an accidental stored `false`. Any stored `false`
+  can only come from someone switching it off.
 
 ## Prod fix 2026-11-19 — conditional fence photos (`fix/vis-fence-conditional-fields`, owner-approved)
 
@@ -196,14 +220,17 @@ covered by the unit tests listed below.
 ## The setting — `clients.features.requireLocation`
 
 - A new explicit BEHAVIOUR flag (not a reuse of `outletMasterGeo` — the two are independent: the fence needs outlet
-  coordinates; the gate needs a fix). Absent / `false` = OFF (shipped code; `feat/require-location-default` will make
-  absent = ON — see the 2026-11-21 decision). Only a real boolean `true` turns it on (the console
-  PATCH refuses a non-boolean, like every behaviour flag).
+  coordinates; the gate needs a fix). **From `feat/require-location-default` (default ON): absent / `true` = ON; only an
+  explicit `false` = OFF.** Superseded rule (still the shipped prod code until that deploy): absent / `false` = OFF, only
+  a real boolean `true` turns it on. The console PATCH refuses a non-boolean, like every behaviour flag.
 - Read by: `api/src/common/location-gate.helper.ts` (`isLocationRequiredFor` — ON only for `SALES_*` callers; partner
   self-enrollment and admins are never gated), the KYC create path, the visibility capture path, the report (setting
   state), the digest (which tenants show the line); FE via `/api/sales/me` → `normalizeFeatures` → `requireLocation`.
 
 ### How to switch it on for a tenant (owner / GIFSY admin — Claude does NOT write staging/prod data)
+
+> Since default ON (2026-11-21) this is only needed to turn a tenant back ON after an emergency off; the emergency off
+> itself is the same switch turned OFF (stores an explicit `false`).
 
 1. Gifsy console → **Clients** → open the tenant (e.g. Bajaj) → section **Behaviour flags**.
 2. Switch on **"Require location for KYC and visibility capture"**. A confirmation lists what changes; confirm.

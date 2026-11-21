@@ -68,7 +68,7 @@ import type {
   VisibilitySection,
   VoucherDispersalSection,
   VouchersSection, TdsExcessSection } from './report.types';
-import { FENCE_BLOCK_ENTITY, LOCATION_REQUIRED_FEATURE, POOR_ACCURACY_M } from '../../common/location-gate.helper';
+import { FENCE_BLOCK_ENTITY, POOR_ACCURACY_M, isLocationRequired } from '../../common/location-gate.helper';
 import { SALES_ROLES } from '../location/location-compliance-report';
 
 const MINUTE_MS = 60 * 1000;
@@ -1184,7 +1184,7 @@ export class ScheduledReportsService {
         visibility: visibilityOn.has(c.id),
         // TenantService.resolveVisibilityCaptureMode's rule: absent = PHOTO_APPROVAL.
         visibilityPhoto: (features.visibilityCaptureMode ?? 'PHOTO_APPROVAL') === 'PHOTO_APPROVAL',
-        requireLocation: features[LOCATION_REQUIRED_FEATURE] === true,
+        requireLocation: isLocationRequired(features),
       };
     });
   }

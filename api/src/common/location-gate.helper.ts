@@ -1,8 +1,8 @@
 /**
  * Location gate ("no location, no use") — owner-approved 2026-11-18. Design: platform/docs/plans/LOCATION-GATE.md.
  *
- * Per-tenant BEHAVIOUR flag `clients.features.requireLocation` (default OFF → every tenant incl. live Deoleo is
- * byte-identical). When ON, a SALES rep's KYC submission and visibility capture are REFUSED server-side unless they
+ * Per-tenant BEHAVIOUR flag `clients.features.requireLocation` — DEFAULT ON for every tenant (owner 2026-11-21);
+ * only an explicit `false` (Gifsy console emergency off) turns it off — see `isLocationRequired`. When ON, a SALES rep's KYC submission and visibility capture are REFUSED server-side unless they
  * carry a valid GPS fix — so an old app build / page cannot bypass the phone-side gate. Non-sales initiators
  * (partner self-enrollment, admins on a desktop) are never gated.
  *
@@ -93,10 +93,19 @@ export function fixTimeProblem(ts: unknown, now: Date = new Date(), clientNow?: 
 export const WRONG_TIME_BOARD_FIX_MESSAGE =
   'The store board photo location has a wrong time — go back to the Address step and tap "Retry location" under the store board photo, then submit again.';
 
+/**
+ * THE single read of the tenant setting (owner 2026-11-21: default ON for every tenant). ON unless the tenant's
+ * `features.requireLocation` is EXPLICITLY `false` (the Gifsy console's emergency off). Absent key / no features
+ * blob → ON. The console PATCH only ever stores a real boolean, so `false` is the one off value.
+ */
+export function isLocationRequired(features: unknown): boolean {
+  const f = (features ?? {}) as Record<string, unknown>;
+  return f[LOCATION_REQUIRED_FEATURE] !== false;
+}
+
 /** True when the tenant requires location AND the caller is a sales rep (the only gated initiator). */
 export function isLocationRequiredFor(features: unknown, role: string | null | undefined): boolean {
-  const f = (features ?? {}) as Record<string, unknown>;
-  return f[LOCATION_REQUIRED_FEATURE] === true && typeof role === 'string' && role.startsWith('SALES_');
+  return isLocationRequired(features) && typeof role === 'string' && role.startsWith('SALES_');
 }
 
 export interface FenceBlockRecord {

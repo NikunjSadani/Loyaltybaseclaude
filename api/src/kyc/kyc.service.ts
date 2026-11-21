@@ -1928,7 +1928,8 @@ export class KycService {
     const outletMasterGeoEnabled =
       (geoClient?.features as Record<string, unknown> | null)?.outletMasterGeo === true;
     // ── LOCATION GATE ("no location, no use" — features.requireLocation, sales reps only; LOCATION-GATE.md) ──
-    // OFF (default, every tenant incl. Deoleo) → nothing here runs. ON → a rep's KYC without a valid board-photo
+    // DEFAULT ON for every tenant (owner 2026-11-21); explicit `false` (console emergency off) → nothing here runs.
+    // ON → a rep's KYC without a valid board-photo
     // GPS fix is refused before any write (the phone gate blocks it first; this stops an old page / crafted call).
     const locationRequired = isLocationRequiredFor(geoClient?.features, user.role);
     if (locationRequired) {

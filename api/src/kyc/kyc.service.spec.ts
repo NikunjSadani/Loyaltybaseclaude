@@ -330,7 +330,9 @@ describe('KycService', () => {
     mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
     // Default: tenant NOT geo-enabled (no outletMasterGeo flag) → create() skips all geo-fence
     // logic (geoFenceStatus/geoFenceDistanceM stay null). Geo tests override per case.
-    mockPrisma.client.findUnique.mockResolvedValue(null);
+    // requireLocation is DEFAULT ON since 2026-11-21 — the legacy cases run with the explicit emergency-off
+    // (`false`), which must stay byte-identical to the pre-gate behaviour.
+    mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: false } });
     // A1 defaults: the sales callers used across the suite (so1 / isr1) exist in a one-branch tree and the
     // target outlet is actively assigned to them, so the assigned-rep gate passes unless a test says otherwise.
     mockPrisma.salesUser.findMany.mockResolvedValue(DEFAULT_SALES_TREE);
@@ -1740,7 +1742,7 @@ describe('KycService', () => {
     }
 
     it('GATED within 200 m → records OK + the rounded distance', async () => {
-      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
       primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
       await service.create(so, { ...baseDto, boardPhotoGeo: nearGeo } as never);
       const data = mockTx.kycSubmission.create.mock.calls[0][0].data;
@@ -1751,7 +1753,7 @@ describe('KycService', () => {
     });
 
     it('GATED beyond 200 m → BadRequest with the exact owner message (no write)', async () => {
-      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
       // Only the outlet read is needed — the throw happens before any write.
       mockPrisma.outlet.findFirst.mockResolvedValueOnce({
         id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
@@ -1765,7 +1767,7 @@ describe('KycService', () => {
     });
 
     it('GATED but outlet has NO master coords → UNVERIFIABLE + allowed', async () => {
-      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
       primeHappyCreate({ latitude: null, longitude: null });
       // Even a far subject is allowed when there is no reference to fence against.
       const res = await service.create(so, { ...baseDto, boardPhotoGeo: farGeo } as never);
@@ -1776,7 +1778,7 @@ describe('KycService', () => {
     });
 
     it('GATED but NO subject GPS fix → UNVERIFIABLE + allowed (never blocks)', async () => {
-      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
       primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
       const res = await service.create(so, { ...baseDto } as never); // no boardPhotoGeo
       expect(res).toMatchObject({ submissionId: 'sub1' });
@@ -1800,7 +1802,7 @@ describe('KycService', () => {
     // UNVERIFIABLE (allow + flag), never block. A precise fix is fenced as before. Both the fix
     // accuracy (rounded) and the FE lock time are persisted for UAT benchmarking.
     it('ACCURACY BUFFER: a FAR subject with accuracy > 200 m → UNVERIFIABLE + allowed (not blocked, not OK)', async () => {
-      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
       primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
       const imprecise = { ...farGeo, accuracy: 250 };
       const res = await service.create(so, { ...baseDto, boardPhotoGeo: imprecise } as never);
@@ -1812,7 +1814,7 @@ describe('KycService', () => {
     });
 
     it('ACCURACY BUFFER: a precise (≤200 m) FAR subject STILL BLOCKS (buffer does not weaken a real outside)', async () => {
-      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
       mockPrisma.outlet.findFirst.mockResolvedValueOnce({
         id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
         outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK',
@@ -1825,7 +1827,7 @@ describe('KycService', () => {
     });
 
     it('ACCURACY BUFFER: accuracy null/absent → unchanged (computes + records OK near the outlet)', async () => {
-      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
       primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
       // Near fix with NO accuracy on the subject → behaves as today (compute + OK).
       const noAccuracy = { lat: 12.9001, lng: 77.5001, ts: '2026-10-28T00:00:00.000Z' };
@@ -1836,7 +1838,7 @@ describe('KycService', () => {
     });
 
     it('INSTRUMENTATION: persists rounded accuracy + boardPhotoLockMs on the gated path', async () => {
-      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
       primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
       await service.create(so, {
         ...baseDto,
@@ -1973,8 +1975,30 @@ describe('KycService', () => {
         });
       });
 
-      it('OFF (Deoleo default) + outside the fence → refusal unchanged, NOTHING recorded', async () => {
+      // DEFAULT ON (owner 2026-11-21): no requireLocation key / no client row → a rep's fix-less KYC is refused.
+      it.each([
+        ['absent key', { features: { outletMasterGeo: true } }],
+        ['empty features', { features: {} }],
+        ['no client row', null],
+      ])('DEFAULT ON — %s + sales rep + NO board-photo fix → 400 before any write', async (_l, row) => {
+        mockPrisma.client.findUnique.mockResolvedValue(row);
+        mockPrisma.outlet.findFirst.mockResolvedValueOnce({
+          id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
+          outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK', latitude: 12.9, longitude: 77.5,
+        });
+        await expect(service.create(so, { ...baseDto } as never)).rejects.toThrow(NO_LOC);
+        expect(mockTx.kycSubmission.create).not.toHaveBeenCalled();
+      });
+
+      it('DEFAULT ON — absent key + fresh fix near the outlet → accepted', async () => {
         mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+        primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
+        const res = await service.create(so, { ...baseDto, boardPhotoGeo: nearNow() } as never);
+        expect(res).toMatchObject({ submissionId: 'sub1' });
+      });
+
+      it('explicit false (emergency off) + outside the fence → refusal unchanged, NOTHING recorded', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
         mockPrisma.outlet.findFirst.mockResolvedValueOnce({
           id: 'outlet-1', clientId: 'bajaj', partnerId: null, outletCode: 'OUT-1',
           outletType: { code: 'WHOLESALER' }, requiredPaymentType: 'BANK', latitude: 12.9, longitude: 77.5,
@@ -1983,7 +2007,7 @@ describe('KycService', () => {
         expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
       });
 
-      it('OFF (Deoleo default) + no fix at all → still accepted exactly as today', async () => {
+      it('explicit false (emergency off) + no fix at all → still accepted exactly as before', async () => {
         primeHappyCreate({ latitude: 12.9, longitude: 77.5 });
         const res = await service.create(so, { ...baseDto } as never);
         expect(res).toMatchObject({ submissionId: 'sub1' });

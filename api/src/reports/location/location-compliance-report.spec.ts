@@ -48,7 +48,8 @@ const agg = (userId: string | null, o: Partial<LocationAggRow> = {}): LocationAg
 
 function fixtures() {
   return {
-    features: { bajaj: { requireLocation: true, outletMasterGeo: true }, deoleo: {} } as Record<string, Record<string, unknown>>,
+    // deoleo = emergency off (explicit false); acme = no key → DEFAULT ON (owner 2026-11-21).
+    features: { bajaj: { requireLocation: true, outletMasterGeo: true }, deoleo: { requireLocation: false }, acme: {} } as Record<string, Record<string, unknown>>,
     users: [
       { id: 'isr1', clientId: 'bajaj', name: 'Asha ISR', phone: '919876500001', role: 'SALES_ISR', salesUser: { region: null, zone: null } },
       { id: 'so1', clientId: 'bajaj', name: 'Bala SO', phone: '919876500002', role: 'SALES_SO', salesUser: { region: 'West', zone: null } },
@@ -154,7 +155,13 @@ describe('buildLocationReport', () => {
     expect(r.totals.medianAccuracyM).toBeNull();
   });
 
-  it('AUDIT #4: Deoleo (switch off) → 403 with a clear message, before any roster read', async () => {
+  it('DEFAULT ON: a tenant with no requireLocation key gets the report (no 403); setting reads ON', async () => {
+    const prisma = fakePrisma();
+    const r = await buildLocationReport(prisma as any, 'acme', params(), NOW);
+    expect(r.setting.requireLocation).toBe(true);
+  });
+
+  it('AUDIT #4: Deoleo (switch off — explicit false) → 403 with a clear message, before any roster read', async () => {
     const prisma = fakePrisma();
     await expect(buildLocationReport(prisma as any, 'deoleo', params(), NOW)).rejects.toThrow(
       new ForbiddenException(LOCATION_REPORT_OFF_MESSAGE),
@@ -257,9 +264,10 @@ describe('locationAggregateSql — real Postgres', () => {
 });
 
 describe('ReportsService.locationCompliance + export kind', () => {
-  it('ROUND 3 #1: /enabled answers per tenant (bajaj on, deoleo off, no tenant → off)', async () => {
+  it('ROUND 3 #1: /enabled answers per tenant (bajaj on, absent key on, deoleo explicit-false off, no tenant → off)', async () => {
     const svc = new ReportsService(fakePrisma() as any, {} as any);
     await expect(svc.locationComplianceEnabled({ clientId: 'bajaj' } as any)).resolves.toEqual({ enabled: true });
+    await expect(svc.locationComplianceEnabled({ clientId: 'acme' } as any)).resolves.toEqual({ enabled: true });
     await expect(svc.locationComplianceEnabled({ clientId: 'deoleo' } as any)).resolves.toEqual({ enabled: false });
     await expect(svc.locationComplianceEnabled({ clientId: ' ' } as any)).resolves.toEqual({ enabled: false });
   });

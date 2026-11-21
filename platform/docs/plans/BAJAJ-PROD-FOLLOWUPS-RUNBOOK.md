@@ -31,6 +31,11 @@
 
 ## A. Bajaj prod feature flags — `requireLocation`, `wholesalerPayoutInclActivation`, `helpVideos`
 
+> **Update 2026-11-21:** read-only probe — Bajaj prod `requireLocation` = explicit `true` (already ON). Owner then
+> decided `requireLocation` is DEFAULT ON for every tenant (branch `feat/require-location-default`, not deployed; Deoleo
+> has no key → goes ON at that deploy). See `LOCATION-GATE.md` "Default ON". The `requireLocation` steps below are
+> historical.
+
 ### What it does (plain words)
 | Flag | Effect when ON | Who sees what |
 |---|---|---|

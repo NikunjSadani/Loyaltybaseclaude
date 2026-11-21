@@ -23,7 +23,7 @@
 import { ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
-import { FENCE_BLOCK_ENTITY, LOCATION_REQUIRED_FEATURE, POOR_ACCURACY_M } from '../../common/location-gate.helper';
+import { FENCE_BLOCK_ENTITY, POOR_ACCURACY_M, isLocationRequired } from '../../common/location-gate.helper';
 import { resolveUsageParams, usageQueryError, USAGE_QUERY_TIMEOUT_MS, USAGE_TIMEOUT_MESSAGE } from '../usage/usage-report';
 import {
   LOCATION_PAGE_SIZE_DEFAULT,
@@ -256,7 +256,7 @@ export async function buildLocationReport(
 
   const client = await prisma.client.findUnique({ where: { id: clientId }, select: { features: true } });
   const features = ((client?.features ?? {}) as Record<string, unknown>) ?? {};
-  if (features[LOCATION_REQUIRED_FEATURE] !== true) throw new ForbiddenException(LOCATION_REPORT_OFF_MESSAGE);
+  if (!client || !isLocationRequired(features)) throw new ForbiddenException(LOCATION_REPORT_OFF_MESSAGE);
   const visCfg = await prisma.programSetting.findUnique({
     where: { clientId_settingKey: { clientId, settingKey: 'visibilityConfig' } },
     select: { settingValue: true },
@@ -373,7 +373,7 @@ export async function buildLocationReport(
       days: Math.round((Date.parse(`${p.to}T00:00:00Z`) - Date.parse(`${p.from}T00:00:00Z`)) / 86_400_000) + 1,
     },
     setting: {
-      requireLocation: features[LOCATION_REQUIRED_FEATURE] === true,
+      requireLocation: isLocationRequired(features),
       fenceOn,
       outletMasterFence: features.outletMasterGeo === true,
     },

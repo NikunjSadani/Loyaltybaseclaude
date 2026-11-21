@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { normalizeFeatures, DEFAULT_FEATURES } from '../tenant-features';
+import { isLocationRequired } from '../location-required';
 
 describe('normalizeFeatures', () => {
   it('returns full DEFAULT_FEATURES for an empty / missing blob', () => {
@@ -77,10 +78,18 @@ describe('normalizeFeatures', () => {
     expect(normalizeFeatures({ gifsyRejectFastTrack: 'true' }).gifsyRejectFastTrack).toBe(false);
   });
 
-  it('carries the requireLocation behaviour flag (location gate), defaulting OFF', () => {
-    expect(DEFAULT_FEATURES.requireLocation).toBe(false);
-    expect(normalizeFeatures({}).requireLocation).toBe(false);
+  it('carries the requireLocation behaviour flag (location gate), DEFAULT ON — off only on an explicit false (owner 2026-11-21)', () => {
+    expect(DEFAULT_FEATURES.requireLocation).toBe(true);
+    expect(normalizeFeatures({}).requireLocation).toBe(true);
+    expect(normalizeFeatures(undefined).requireLocation).toBe(true);
     expect(normalizeFeatures({ requireLocation: true }).requireLocation).toBe(true);
-    expect(normalizeFeatures({ requireLocation: 'true' }).requireLocation).toBe(false);
+    expect(normalizeFeatures({ requireLocation: false }).requireLocation).toBe(false);
+  });
+
+  it('isLocationRequired (the ONE FE read): absent → ON, true → ON, explicit false → OFF', () => {
+    expect(isLocationRequired({})).toBe(true);
+    expect(isLocationRequired(null)).toBe(true);
+    expect(isLocationRequired({ requireLocation: true })).toBe(true);
+    expect(isLocationRequired({ requireLocation: false })).toBe(false);
   });
 });

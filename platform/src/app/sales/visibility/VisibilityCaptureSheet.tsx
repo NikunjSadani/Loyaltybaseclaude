@@ -75,10 +75,12 @@ export function VisibilityCaptureSheet({
   // each photo's GPS fix; every other tenant (Deoleo) keeps the single getCurrentPosition call.
   const { features, loading: featuresLoading, error: featuresError, serverSkewMs, refetchClock } = useTenantFeatures('/api/sales/me', { clock: true });
   const preciseGps = features.outletMasterGeo;
-  // LOCATION GATE (features.requireLocation; docs/plans/LOCATION-GATE.md). OFF (Deoleo, every other tenant) → the hook
-  // does nothing. ON → the capture form stays hidden behind the location guide until location is allowed AND a fix
-  // arrives; submit re-checks first. The form stays MOUNTED while hidden, so photos already taken are kept.
-  const locationGate = useLocationGate(features.requireLocation && !featuresLoading, { serverSkewMs, recheckClock: refetchClock });
+  // LOCATION GATE (features.requireLocation; docs/plans/LOCATION-GATE.md). DEFAULT ON for every tenant (owner
+  // 2026-11-21); explicit false (console emergency off) → the hook does nothing. ON → the capture form stays hidden
+  // behind the location guide until location is allowed AND a fix arrives; submit re-checks first. The form stays
+  // MOUNTED while hidden, so photos already taken are kept. A settings-load failure keeps the gate open on the phone
+  // (features are then only defaults; the server enforces the real setting).
+  const locationGate = useLocationGate(features.requireLocation && !featuresLoading && !featuresError, { serverSkewMs, recheckClock: refetchClock });
   // Round-3 #4/#5: last-known setting (browser storage) → hold the camera only for reps whose programme required
   // location last time, at most 5 s while settings load; a "location may be required" note on a settings failure for
   // the same reps. Deoleo reps (last-known false) see neither; unknown (first ever load) → no hold.

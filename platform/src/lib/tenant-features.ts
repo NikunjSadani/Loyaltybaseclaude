@@ -23,6 +23,7 @@ import { authHeader } from '@/lib/api-client';
 import { getSalesMe, SALES_ME_URL } from '@/lib/cached-reads';
 import type { FeatureFlags } from '@/lib/platform/client-config';
 import { DEFAULT_CLIENT_CONFIG } from '@/lib/platform/default-client-config';
+import { isLocationRequired } from '@/lib/location-required';
 
 /**
  * Conservative default flags — used while the authenticated features load and for
@@ -54,7 +55,8 @@ export function normalizeFeatures(raw: unknown): FeatureFlags {
     outletMasterGeo:         bool(f.outletMasterGeo,         d.outletMasterGeo),
     allowPayoutWithoutPan:   bool(f.allowPayoutWithoutPan,   d.allowPayoutWithoutPan),
     gifsyRejectFastTrack:    bool(f.gifsyRejectFastTrack,    d.gifsyRejectFastTrack),
-    requireLocation:         bool(f.requireLocation,         d.requireLocation),
+    // Default ON (owner 2026-11-21): only an explicit false turns it off — the shared helper, never `bool(...)`.
+    requireLocation:         isLocationRequired(f),
     campaignEnrollmentForm:  bool(f.campaignEnrollmentForm,  d.campaignEnrollmentForm),
     salesTeamApp:            bool(f.salesTeamApp,            d.salesTeamApp),
     walletModule:            bool(f.walletModule,            d.walletModule),

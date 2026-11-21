@@ -5,7 +5,9 @@ import Link from 'next/link';
 import { ArrowLeft, ArrowRight, Check, AlertCircle, Building2 } from 'lucide-react';
 import { validateNewClientSlug, validateTenantDomain, normalizeTenantDomain } from '@/lib/platform/platform-admin';
 import type { FeatureKey } from '@/lib/platform/client-config';
-import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
+import {
+  BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, BEHAVIOUR_FLAG_DEFAULTS, behaviourFlagCreatePayload, type BehaviourFlagKey,
+} from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
 import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
 
@@ -110,7 +112,8 @@ export default function OnboardClientPage() {
     supportPhone:  '',
     invoicePrefix: 'TGSL-',
     features:      { ...DEFAULT_FEATURES },
-    behaviourFlags: { outletMasterGeo: false, soDeclarationKyc: false, allowPayoutWithoutPan: false, gifsyRejectFastTrack: false, requireLocation: false },
+    // requireLocation starts ON (owner 2026-11-21: default ON for every new client) — from the shared meta.
+    behaviourFlags: { ...BEHAVIOUR_FLAG_DEFAULTS },
   });
 
   const [slugErrors, setSlugErrors] = useState<string[]>([]);
@@ -184,11 +187,12 @@ export default function OnboardClientPage() {
           supportEmail: form.supportEmail,
           supportPhone: form.supportPhone,
           invoicePrefix: form.invoicePrefix,
-          // Behaviour flags ride the same features blob, but ONLY the ones switched ON are added —
+          // Behaviour flags ride the same features blob, but ONLY deviations from their defaults are added
+          // (default-OFF switched ON → true; default-ON requireLocation switched OFF → explicit false) —
           // an untouched wizard sends exactly the module set it always did.
           features: {
             ...form.features,
-            ...Object.fromEntries(BEHAVIOUR_FLAG_KEYS.filter((k) => form.behaviourFlags[k]).map((k) => [k, true])),
+            ...behaviourFlagCreatePayload(form.behaviourFlags),
           },
           // Only the ADDITIONAL branded domain — the backend always seeds the
           // canonical <slug>.gifsy.in on create. Omit the key when none entered.
@@ -534,7 +538,8 @@ function FeaturesStep({
       <div className="pt-2">
         <p className="text-sm font-semibold text-white">Behaviour flags</p>
         <p className="text-xs text-white/40 mt-0.5 mb-2">
-          These change how an existing flow behaves (they are not modules). OFF unless switched on.
+          These change how an existing flow behaves (they are not modules). OFF unless switched on — except
+          &ldquo;Require location&rdquo;, which is ON unless switched off.
         </p>
         <div className="space-y-2">
           {BEHAVIOUR_FLAG_KEYS.map((key) => {
@@ -562,6 +567,9 @@ function FeaturesStep({
                 <div className="flex-1 min-w-0">
                   <p className={`text-sm font-medium ${on ? 'text-white' : 'text-white/50'}`}>{meta.label}</p>
                   <p className="text-xs text-white/30 mt-0.5">{meta.description}</p>
+                  {meta.offNote && !on && (
+                    <p data-testid={`wizard-behaviour-flag-${key}-off-note`} className="text-xs text-amber-300 mt-1">{meta.offNote}</p>
+                  )}
                 </div>
                 <Toggle enabled={on} />
               </div>

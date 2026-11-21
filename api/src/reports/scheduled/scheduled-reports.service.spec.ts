@@ -180,10 +180,23 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
   });
 
   describe('Location line (LOCATION-GATE.md)', () => {
-    it('loads per tenant, scoped to the tenant: shown for the requireLocation tenant, hidden for a quiet Deoleo', async () => {
+    it('DEFAULT ON (2026-11-21): a tenant with NO requireLocation key shows the Location line', async () => {
+      prisma.client.findMany.mockResolvedValue([
+        { id: 'acme', internalName: 'acme', status: 'ACTIVE', branding: { displayName: 'Acme' }, features: {} },
+      ]);
+      setRecipients({ dailyDigest: ['ops@gifsy.in'] });
+      await svc.runDailyReports(NOW);
+      const html: string = sendEmail.mock.calls[0][0].html;
+      expect(html.slice(html.indexOf('data-tenant="acme"'))).toContain('data-section="Location"');
+      const locCalls = prisma.auditLog.count.mock.calls.filter(([a]: any) => a.where.entityType === 'LOCATION_FENCE_BLOCK');
+      expect(locCalls).toHaveLength(1);
+      expect(locCalls[0][0].where.metadata).toEqual({ path: ['clientId'], equals: 'acme' });
+    });
+
+    it('loads per tenant, scoped to the tenant: shown for the requireLocation tenant, hidden for an emergency-off (explicit false) Deoleo', async () => {
       prisma.client.findMany.mockResolvedValue([
         { id: 'bajaj', internalName: 'bajaj', status: 'ACTIVE', branding: { displayName: 'Bajaj' }, features: { requireLocation: true } },
-        { id: 'deoleo', internalName: 'Deoleo', status: 'ACTIVE', branding: {}, features: {} },
+        { id: 'deoleo', internalName: 'Deoleo', status: 'ACTIVE', branding: {}, features: { requireLocation: false } },
       ]);
       prisma.auditLog.count.mockImplementation(async ({ where }: any) => (where.metadata.equals === 'bajaj' ? 2 : 0));
       setRecipients({ dailyDigest: ['ops@gifsy.in'] });

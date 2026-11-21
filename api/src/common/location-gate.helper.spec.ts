@@ -4,6 +4,7 @@ import {
   isRealFix,
   FENCE_BLOCK_ENTITY,
   LOCATION_REQUIRED_FEATURE,
+  isLocationRequired,
   isLocationRequiredFor,
   recordFenceBlock,
 } from './location-gate.helper';
@@ -24,11 +25,23 @@ describe('location-gate.helper', () => {
       }
     });
 
-    it('is OFF when the flag is absent / false / not a real boolean (Deoleo default)', () => {
-      expect(isLocationRequiredFor({}, 'SALES_ISR')).toBe(false);
-      expect(isLocationRequiredFor(null, 'SALES_ISR')).toBe(false);
+    it('DEFAULT ON (owner 2026-11-21): ON when the flag is absent / no blob; OFF only on an explicit false', () => {
+      expect(isLocationRequiredFor({}, 'SALES_ISR')).toBe(true);
+      expect(isLocationRequiredFor(null, 'SALES_ISR')).toBe(true);
+      expect(isLocationRequiredFor(undefined, 'SALES_ISR')).toBe(true);
       expect(isLocationRequiredFor({ requireLocation: false }, 'SALES_ISR')).toBe(false);
-      expect(isLocationRequiredFor({ requireLocation: 'true' }, 'SALES_ISR')).toBe(false);
+      // Absent → still never gates a non-sales initiator.
+      expect(isLocationRequiredFor({}, 'CLIENT_ADMIN')).toBe(false);
+    });
+  });
+
+  describe('isLocationRequired (the single tenant-setting read)', () => {
+    it('absent → ON; true → ON; explicit false → OFF', () => {
+      expect(isLocationRequired({})).toBe(true);
+      expect(isLocationRequired(null)).toBe(true);
+      expect(isLocationRequired({ outletMasterGeo: true })).toBe(true);
+      expect(isLocationRequired({ requireLocation: true })).toBe(true);
+      expect(isLocationRequired({ requireLocation: false })).toBe(false);
     });
   });
 

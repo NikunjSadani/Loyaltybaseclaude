@@ -285,6 +285,45 @@ describe('Behaviour flags — gifsyRejectFastTrack (BF4)', () => {
 describe('Partner app tabs (B3)', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
+  // ── requireLocation: DEFAULT ON (owner 2026-11-21); the switch is an explicit emergency off ──
+  it('BF5: requireLocation ABSENT → shows ON (no note); switching OFF PATCHes an explicit false with NO confirm + shows the emergency-off note', async () => {
+    const patchSpy = vi.fn();
+    vi.stubGlobal('fetch', mockFetch(makeConfig({}), (body) => {
+      patchSpy(body);
+      return { status: 200, ok: true, json: async () => ({ success: true, data: { id: 'bajaj', internalName: 'Bajaj Consumer Care Ltd', status: 'ACTIVE' } }) };
+    }));
+    await renderPage();
+    const row = await screen.findByTestId('behaviour-flag-requireLocation');
+    const toggle = await within(row).findByRole('switch');
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    expect(screen.queryByTestId('behaviour-flag-requireLocation-note')).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
+    expect(patchSpy.mock.calls[0][0]).toEqual({ features: { requireLocation: false } });
+    await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'false'));
+    expect(screen.getByTestId('behaviour-flag-requireLocation-note').textContent).toBe(
+      'Emergency off — KYC and visibility photos can then be submitted without a phone location (no location check for them)',
+    );
+  });
+
+  it('BF5: requireLocation stored false → shows OFF + note; switching ON asks first, then PATCHes true', async () => {
+    const patchSpy = vi.fn();
+    vi.stubGlobal('fetch', mockFetch(makeConfig({ requireLocation: false }), (body) => {
+      patchSpy(body);
+      return { status: 200, ok: true, json: async () => ({ success: true, data: { id: 'bajaj', internalName: 'Bajaj Consumer Care Ltd', status: 'ACTIVE' } }) };
+    }));
+    await renderPage();
+    const row = await screen.findByTestId('behaviour-flag-requireLocation');
+    expect(await within(row).findByRole('switch')).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByTestId('behaviour-flag-requireLocation-note')).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole('switch'));
+    fireEvent.click(within(await screen.findByTestId('behaviour-flag-confirm')).getByRole('button', { name: 'Yes, require location' }));
+    await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
+    expect(patchSpy.mock.calls[0][0]).toEqual({ features: { requireLocation: true } });
+    await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true'));
+  });
+
   it('PA1: the leaderboard switch saves ONLY its own nested key; sibling effective values stay shown', async () => {
     const patchSpy = vi.fn();
     vi.stubGlobal('fetch', mockFetch(makeConfig({}), (body) => {

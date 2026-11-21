@@ -10,7 +10,7 @@
 > [`archive/RESUME-ARCHIVE-2026-11-15.md`](archive/RESUME-ARCHIVE-2026-11-15.md) (the full chronology up to 2026-11-15,
 > incl. the CUTOVER LEDGER #14–#52). **Never trust a SHA written here over `git log` + the serving image (§7).**
 >
-> Last updated: **2026-11-21** (prod `4a48dc0d`; `main` = `develop` = `97332c95` READY for the owner's prod deploy;
+> Last updated: **2026-11-21** (prod = `main` = `97332c95`, deployed + verified 2026-11-21; next batch `release/next`;
 > Bajaj prod `requireLocation` + `wholesalerPayoutInclActivation` ON; owner decisions 2026-11-21 — §1, §3, §4, §8).
 
 Multi-tenant FMCG **trade-loyalty** platform. Operator **Gifsy**; live clients **Deoleo** (since July 2026) and
@@ -24,10 +24,10 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 
 | | SHA | Since | Notes |
 |---|---|---|---|
-| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import` + `gifsy-migrate`) | **`4a48dc0d`** (deployed by the owner 2026-11-20 night IST; verified 2026-11-21 ~00:20 IST: migrate execution `gifsy-migrate-lnsg2` applied **8** migrations on `gifsy_prod` in 14 s — `20261119124400/124500/124600` (WRE debt), `20261120110000/110100/110200` (tickets), `20261120130000/130100` (auth); api + frontend on `4a48dc0d`; 0 errors / 0 5xx after; both tenants load) | 2026-11-20 | `origin/main` = `4a48dc0d`. TODO: record the pre-release backup id here if one was taken |
-| **`main` = `develop`** | **`97332c95`** (`release/2026-11-21` code tip `27581819` + docs); full gates green on push 2026-11-21. **READY for the owner's prod deploy** — prod stays `4a48dc0d` until the owner runs "Deploy — Production" (§6) | 2026-11-21 | |
+| **Production** (`gifsy-api`, `gifsy-frontend`, jobs `gifsy-sales-import` + `gifsy-migrate`) | **`97332c95`** (`release/2026-11-21` code tip `27581819` + docs; deployed and verified 2026-11-21; visibility review-history backfill verified on `gifsy_prod`: **51,140** Bajaj captures with history, **51,123** imported ones labelled "Imported — old app approval", **0** admin names) | 2026-11-21 | `origin/main` = `97332c95`. TODO: record the migrate execution id + pre-release backup id here |
+| **`main` = `develop`** | **`97332c95`** — same as prod; full gates green on push 2026-11-21. Next batch = **`release/next`** (local, not pushed — §4 item 12) | 2026-11-21 | |
 | **Staging** (`*-staging`) | **`develop`** (code tip **`27581819`** = `release/2026-11-21`; later commits up to `97332c95` are docs-only). Migrate execution `gifsy-migrate-staging-7hg7c` (2026-11-20 19:20 UTC) applied `20261120140000_visibility_review_events` cleanly. **Real-login check 2026-11-21: ALL PASS** (§3) | 2026-11-20/21 | see §3 |
-| Previous prod | `1fa2305c` → `7ba69566` → `71df01f7` → `de2f3700` → `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-19 … 11-15 | rollback targets (⚠️ a rollback below `4a48dc0d` leaves its 8 migrations in place — tickets rollback trap in `SUPPORT-TICKETS.md`; TODO confirm the WRE/auth ones are harmless to older code; a rollback below `1fa2305c` leaves the 45 additive reversal-engine/help columns+tables — harmless to older code) |
+| Previous prod | `4a48dc0d` (owner-deployed 2026-11-20 night IST; migrate `gifsy-migrate-lnsg2` applied 8 migrations — WRE debt, tickets, auth) → `1fa2305c` → `7ba69566` → `71df01f7` → `de2f3700` → `4e395b21` → `720ffce9` → `2eb8271d` | 2026-11-19 … 11-15 | rollback targets (⚠️ a rollback below `4a48dc0d` leaves its 8 migrations in place — tickets rollback trap in `SUPPORT-TICKETS.md`; TODO confirm the WRE/auth ones are harmless to older code; a rollback below `1fa2305c` leaves the 45 additive reversal-engine/help columns+tables — harmless to older code) |
 
 **The 2026-11-20 (night) prod release `4a48dc0d`** (owner-deployed; platform-wide items owner-approved in-session):
 - **Visibility Excel redesign**: per-photo columns grouped by photo label, "Open photo" links to the signed-in
@@ -59,7 +59,11 @@ visible outlet-detail link on `/sales/kyc` and of the bottom-nav pages), plus a 
 
 **The 2026-11-19 (night) prod release `f61aec24` + `1fa2305c`** (all owner-approved; platform-wide items approved in-session; money paths dual-audited; staging-verified with real Bajaj logins):
 - **Wallet Reversal Engine** shipped DORMANT: schema (45 additive migrations), LEGACY/SHADOW/V2 per-tenant flag (no rows on prod → LEGACY everywhere), backfill + verify jobs. Bajaj **staging** = V2 after the §9.1 wallet backfill (2,321 wallets, 0 blocked). Bajaj **prod** = LEGACY until its own backfill + owner go. → `WALLET-REVERSAL-ENGINE-DESIGN.md`
-- **Location gate + Location Report** (flag `features.requireLocation`, default OFF; **Bajaj prod ON since 2026-11-21**; becoming ON BY DEFAULT for every client — §3). → [`LOCATION-GATE.md`](LOCATION-GATE.md)
+- **Location gate + Location Report** (flag `features.requireLocation`; **Bajaj prod ON since 2026-11-21**, explicit
+  `true`). ⚠️ TRAP: on branch `feat/require-location-default` (in `release/next`, not deployed) it is **DEFAULT ON for
+  every tenant** — ON unless explicitly `false` (console = emergency off); read it ONLY via `isLocationRequired` (api
+  `common/location-gate.helper.ts`, FE `lib/location-required.ts`), never `=== true`. Prod: Deoleo key absent → goes ON
+  at that deploy with no data change (tell Deoleo's field team first). → [`LOCATION-GATE.md`](LOCATION-GATE.md)
 - **Visibility**: fence only the photos that apply to the outlet (fixes "Unverifiable" from a hidden Window 2); centred review dialog with Program/Sub-Program + large photos.
 - **Wholesaler wallet "Incl. Activation"** note under Lifetime Payout (flag `wholesalerPayoutInclActivation`; display-only for WHOLESALER outlets, no payout math change; Bajaj staging ON, **Bajaj prod ON since 2026-11-21**).
 - **Shared outlet wallet view** — the sales outlet page renders the partner's own wallet view (platform-wide, owner-approved).
@@ -179,8 +183,9 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
    `wholesalerPayoutInclActivation` ON — verified read-only (probe job `bajaj-prod-vis-verify` exec `n9vdj` on
    `gifsy_prod`: Bajaj `requireLocation` true, `outletMasterGeo` true, `wholesalerPayoutInclActivation` true,
    `helpVideos` absent; Deoleo all four absent, no explicit `false`). Server-side location test on Bajaj staging passed
-   the same day (`LOCATION-GATE.md`; real-phone GPS not exercised). **Still waiting on the owner:** `helpVideos` ON
-   after the content load; OK to load the Help & videos content on prod; OK to correct the remaining non-Privilege "Unverifiable" visibility captures in one go (list + SQL + backup
+   the same day (`LOCATION-GATE.md`; real-phone GPS not exercised). Default ON for every tenant is on
+   `feat/require-location-default` (next batch; Deoleo heads-up needed before that deploy). **Still waiting on the
+   owner:** `helpVideos` ON after the content load; OK to load the Help & videos content on prod; OK to correct the remaining non-Privilege "Unverifiable" visibility captures in one go (list + SQL + backup
    first — 2 were corrected earlier, backup `1795068290437`); Bajaj prod wallet backfill → reversal engine V2 (backup +
    owner OK; **before any credit reversal on Bajaj prod** — see §3 D3).
 7b. **Month-end sales files (300–350 MB):** test a 200 MB+ real Bajaj file on staging before 30 Nov (owner to send the
@@ -203,16 +208,19 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
     [`REQUEST-VOLUME.md`](REQUEST-VOLUME.md). **Sales banners** have never shown on the sales app for any tenant (the
     endpoint is partner-only) — owner decision pending; NOT turned on. Workers Paid is in place (10M req/mo) —
     TODO: confirm the monthly request budget against the ~30k req/h peak.
-11. **`release/2026-11-21`** (§3): staging real-login check DONE 2026-11-21 (all pass); `main` = `develop` = `97332c95`,
-    gates green on push. **READY — the owner runs "Deploy — Production"** (§6); then verify (§7) and add the release-log
-    row.
-12. **Owner decisions still pending (2026-11-21):** (a) run the prod deploy; (b) remove the prod deploy's second click
-    (§6 step 4); (c) Bajaj prod ticket remarks inbox — still unset (per-client To + CC ships in the next release);
-    (d) sales banners on the sales app; (e) request-volume measured trade-offs. **Decided 2026-11-21 (platform-wide
-    approved), next batch, local (§3):** location required ON BY DEFAULT for every client incl. Deoleo
-    (`feat/require-location-default`, in build — send Deoleo's field team a heads-up before the release); ticket remarks
-    To + CC (`feat/ticket-remarks-cc`, fix round); `fix/gps-photo-overlap` `0003f706` + `fix/hydration-418` `55155ce0`
-    done + audited, waiting for the batch.
+11. **`release/2026-11-21`** (§3): staging real-login check DONE 2026-11-21 (all pass); **deployed to prod — prod =
+    `main` = `97332c95`, verified 2026-11-21** (§1; visibility review-history backfill verified: 51,140 Bajaj captures
+    with history, 51,123 imported ones labelled "Imported — old app approval", 0 admin names). TODO if missing: the
+    release-log row in `DOCS-INDEX.md`.
+12. **Next batch = `release/next`** (local, not pushed): `fix/gps-photo-overlap` `0003f706` + `fix/hydration-418`
+    `55155ce0` (done + audited), `feat/request-volume`, `feat/ticket-remarks-cc` (per-client To + CC),
+    `feat/require-location-default` (⚠️ platform-wide, owner-approved 2026-11-21: location required ON BY DEFAULT for
+    every client incl. Deoleo; console switch = emergency off; Deoleo goes ON with no data change — send Deoleo's field
+    team a heads-up before the release; 200 m blocking unaffected — `outletMasterGeo` / visibility `geoFence` only).
+    **Before it ships:** independent audit of the location change, full gates, staging check + the measured
+    request-volume numbers, then the owner's go. **Owner decisions still pending (2026-11-21):** (a) remove the prod
+    deploy's second click (§6 step 4); (b) Bajaj prod ticket remarks inbox — still unset; (c) sales banners on the sales
+    app; (d) request-volume measured trade-offs; (e) real-phone location test (Android + iPhone).
 13. Owner may want HO / State-head **City** cells in the area columns shown as "N cities" (they can list hundreds of
     cities today) — not decided. The Usage report Mobile column shows full numbers (pre-existing, not changed).
 
