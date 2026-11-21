@@ -7,6 +7,7 @@
  * the old inline `fetch(...).then(r => r.ok ? r.json() : null)` call sites produced. Failures are never cached.
  */
 import { getCached, invalidateCached, peekCached, FEATURES_TTL_MS, DASHBOARD_REUSE_MS } from '@/lib/session-cache';
+import { visibilityApi } from '@/lib/visibility';
 
 export type Envelope<T = unknown> = { success?: boolean; data?: T; error?: string } | null;
 
@@ -71,4 +72,47 @@ export function getSalesOutlets<T = { outlets?: any[]; members?: any[] }>(opts: 
 export function salesOutletsFetchedAt(): Date | null {
   const hit = peekCached(SALES_OUTLETS_URL);
   return hit ? new Date(Date.now() - hit.ageMs) : null;
+}
+
+export const KYC_LIST_URL = '/api/kyc';
+export const SALES_TEAM_URL = '/api/sales/team';
+export const VISIBILITY_ELIGIBLE_KEY = 'visibility:sales-eligible';
+
+function fetchedAt(key: string): Date | null {
+  const hit = peekCached(key);
+  return hit ? new Date(Date.now() - hit.ageMs) : null;
+}
+
+/**
+ * GET /api/kyc — the caller's KYC submissions (KYC list + dashboard/Tasks approval counts). Same 60 s reuse and
+ * `force` semantics as getSalesOutlets: a back-navigation to the KYC list within the TTL makes no request; any write
+ * (KYC submit / approve / reject …) clears it.
+ */
+export function getKycSubmissions<T = { submissions?: any[] }>(opts: { force?: boolean } = {}): Promise<Envelope<T>> {
+  if (opts.force) invalidateCached(KYC_LIST_URL);
+  return getCached(KYC_LIST_URL, () => jsonOrNull<T>(KYC_LIST_URL), { shouldCache: isSuccess, ttlMs: OUTLET_LIST_TTL_MS });
+}
+
+/** GET /api/sales/team — a manager's direct reports (KYC list member filter). 60 s, `force` like the others. */
+export function getSalesTeam<T = { members?: any[] }>(opts: { force?: boolean } = {}): Promise<Envelope<T>> {
+  if (opts.force) invalidateCached(SALES_TEAM_URL);
+  return getCached(SALES_TEAM_URL, () => jsonOrNull<T>(SALES_TEAM_URL), { shouldCache: isSuccess, ttlMs: OUTLET_LIST_TTL_MS });
+}
+
+/** When the KYC list's submissions were actually fetched (its "Updated <time>" hint). */
+export function kycSubmissionsFetchedAt(): Date | null {
+  return fetchedAt(KYC_LIST_URL);
+}
+
+/**
+ * GET /api/visibility/sales/eligible (via visibilityApi) — the current window's capture eligibility. The Outlets page
+ * asked twice per open (its effect re-ran when the roster arrived); the dashboard and Tasks ask too. One shared,
+ * de-duplicated 60 s read; any write (a capture submit) clears it.
+ */
+export function getVisibilitySalesEligible(opts: { force?: boolean } = {}) {
+  if (opts.force) invalidateCached(VISIBILITY_ELIGIBLE_KEY);
+  return getCached(VISIBILITY_ELIGIBLE_KEY, () => visibilityApi.getSalesEligible(), {
+    shouldCache: (r) => r.success,
+    ttlMs: OUTLET_LIST_TTL_MS,
+  });
 }

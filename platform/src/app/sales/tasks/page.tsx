@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { getSalesOutlets, salesOutletsFetchedAt } from '@/lib/cached-reads';
+import { getSalesOutlets, salesOutletsFetchedAt, getVisibilitySalesEligible, getKycSubmissions } from '@/lib/cached-reads';
 import { ListRefreshControl } from '@/components/sales/list-refresh-control';
 import Link from '@/components/navigation/no-prefetch-link';
 import {
@@ -319,7 +319,7 @@ export default function TasksPage() {
       fetchTaskConfig(),
       // Approval/Rejected counts derive from SUBMISSIONS (shared buildKycSubRows)
       // so they match the dashboard + KYC list — incl. no-outlet submissions.
-      fetch('/api/kyc', { headers }).then((r) => r.json()).catch(() => null),
+      getKycSubmissions({ force: listRefresh > 0 }), // shared 60 s read (lib/cached-reads.ts)
     ]).then(([, oBody, config, kycResult]) => {
       if (oBody?.success) setListUpdatedAt(salesOutletsFetchedAt() ?? new Date());
       const apiOutlets: OutletRow[] = (oBody?.data?.outlets ?? []).map(mapOutlet);
@@ -340,7 +340,7 @@ export default function TasksPage() {
       setVisibilityMode(captureMode);
       if (!visibilityEnabled) { setVisibilityItems([]); return; }
       if (captureMode === 'PHOTO_APPROVAL') {
-        return visibilityApi.getSalesEligible()
+        return getVisibilitySalesEligible({ force: listRefresh > 0 })
           .then((r) => setVisibilityItems(buildPhotoCaptureTaskItems(r.success ? r.data : null)))
           .catch(() => setVisibilityItems([]));
       }

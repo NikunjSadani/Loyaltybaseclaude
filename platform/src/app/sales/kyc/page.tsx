@@ -16,6 +16,8 @@ import { useClientConfig } from '@/lib/platform/client-config-context';
 import { kycSubmissionOrderRank } from '@/lib/kyc-order';
 import { kycFiledViaNote } from '@/lib/sales-kyc-link';
 import { api } from '@/lib/api-client';
+import { getKycSubmissions, getSalesOutlets, getSalesTeam, kycSubmissionsFetchedAt } from '@/lib/cached-reads';
+import { ListRefreshControl } from '@/components/sales/list-refresh-control';
 
 interface KYCEntry {
   id: string;
@@ -198,6 +200,10 @@ function KYCListContent() {
   const [teamMembers,  setTeamMembers]  = useState<TeamMember[]>([]);
   const [typeFilter,   setTypeFilter]   = useState('');
   const [programFilter, setProgramFilter] = useState('');
+  // Refresh control: >0 = the rep asked for fresh lists (bypasses the 60 s cache).
+  const [listRefresh, setListRefresh] = useState(0);
+  const [listRefreshing, setListRefreshing] = useState(false);
+  const [listUpdatedAt, setListUpdatedAt] = useState<Date | null>(null);
 
   useEffect(() => {
     if (statusParam) setFilter(statusParam);
@@ -225,10 +231,13 @@ function KYCListContent() {
       } | null;
     }
 
-    const kycFetch: Promise<KYCEntry[]> = fetch('/api/kyc')
-      .then((r) => r.json())
+    // Shared 60 s reads (lib/cached-reads.ts): a back-navigation to this list within the TTL makes no request; any
+    // write clears them; the refresh control (listRefresh > 0) forces fresh ones.
+    const force = listRefresh > 0;
+    const kycFetch: Promise<KYCEntry[]> = getKycSubmissions<{ submissions: ApiSubmission[] }>({ force })
       .then((result) => {
-        if (!result.success) return [];
+        if (!result?.success || !result.data) return [];
+        setListUpdatedAt(kycSubmissionsFetchedAt() ?? new Date());
         return (result.data.submissions as ApiSubmission[]).map((s): KYCEntry => ({
           id:              s.id,
           // Store identity = the OUTLET (name/code/phone), NOT the rep. partnerName is
@@ -260,10 +269,9 @@ function KYCListContent() {
     //  - NOT_INTERESTED → shown DISTINCTLY and NON-actionable for ALL roles (only an
     //    admin can re-open such an outlet for enrollment).
     const canEnrollNow = canEnroll(role, slug);
-    const outletsFetch: Promise<KYCEntry[]> = fetch('/api/sales/outlets')
-      .then((r) => r.json())
+    const outletsFetch: Promise<KYCEntry[]> = getSalesOutlets({ force })
       .then((body): KYCEntry[] => {
-        if (!body.success) return [];
+        if (!body?.success || !body.data) return [];
         const outlets = (body.data.outlets ?? []) as any[];
 
         // ASSIGNMENT-scoped view of EVERY outlet in the caller's subtree, tagged with its
@@ -305,10 +313,9 @@ function KYCListContent() {
       .catch(() => [] as KYCEntry[]);
 
     const teamFetch = hasTeamView(role)
-      ? fetch('/api/sales/team')
-          .then((r) => r.json())
+      ? getSalesTeam({ force })
           .then((body) => {
-            if (body.success) {
+            if (body?.success && body.data) {
               setTeamMembers((body.data.members ?? []).map((m: any) => ({
                 id: m.id,
                 name: m.name,
@@ -347,8 +354,8 @@ function KYCListContent() {
         const subsNoCollision = (subs ?? []).filter((s) => !s.outletCode || !synthCodes.has(s.outletCode));
         setEntries([...synth, ...dedupeByOutlet(subsNoCollision)]);
       })
-      .finally(() => setLoading(false));
-  }, [role]);
+      .finally(() => { setLoading(false); setListRefreshing(false); });
+  }, [role, listRefresh]);
 
   const typeOptions    = Array.from(new Set(entries.map((e) => e.outletType).filter(Boolean))) as string[];
   const programOptions = Array.from(new Set(entries.map((e) => e.programName).filter(Boolean))) as string[];
@@ -418,7 +425,14 @@ function KYCListContent() {
   return (
     <div className="space-y-5 fade-in">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-gray-900">KYC Submissions</h1>
+        <div className="flex items-center gap-2 min-w-0">
+          <h1 className="text-xl font-bold text-gray-900">KYC Submissions</h1>
+          <ListRefreshControl
+            updatedAt={listUpdatedAt}
+            refreshing={listRefreshing}
+            onRefresh={() => { setListRefreshing(true); setListRefresh((n) => n + 1); }}
+          />
+        </div>
         {canEnrollRole && (
           <Link href="/sales/kyc/new">
             <Button variant="primary" size="sm">

@@ -21,7 +21,7 @@ import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfigResult, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
 import { fetchBannersResult, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
 import { swr, peekCached, invalidateCached, DASHBOARD_REUSE_MS, DASH_PREFIX } from '@/lib/session-cache';
-import { getSalesOutlets } from '@/lib/cached-reads';
+import { getSalesOutlets, getKycSubmissions, getVisibilitySalesEligible } from '@/lib/cached-reads';
 import { schemeApi } from '@/lib/schemes';
 import type { EligibleScheme } from '@/lib/scheme-types';
 import { fetchOutletVisibilityStatuses, VISIBILITY_ELIGIBLE_OUTLET_TYPES, VISIBILITY_STATUS_LOAD_ERROR } from '@/lib/visibility-upload';
@@ -376,7 +376,9 @@ export default function SalesDashboard() {
         : Promise.resolve({ banners: [] as Banner[], popups: [], ok: true })),
       // force: this loader only runs on a miss or a stale (>2 min) revalidation → always a fresh roster.
       outlets:    () => getSalesOutlets({ force: true }),
-      kyc:        () => fetch('/api/kyc').then((r) => r.json()).catch(() => null),
+      // force: this loader only runs on a miss or a stale revalidation → always fresh; the fresh copy is then shared
+      // with the KYC list / Tasks (lib/cached-reads.ts).
+      kyc:        () => getKycSubmissions({ force: true }),
     } as const;
     type PartName = keyof typeof parts;
     const okOf: Record<PartName, (v: any) => boolean> = {
@@ -468,7 +470,7 @@ export default function SalesDashboard() {
     if (captureMode === 'PHOTO_APPROVAL') {
       const visKey = `${DASH_PREFIX}visibility-eligible`;
       const hadVis = peekCached(visKey) !== undefined;
-      swr(visKey, () => visibilityApi.getSalesEligible(), {
+      swr(visKey, () => getVisibilitySalesEligible({ force: true }), {
         maxAgeMs: DASHBOARD_REUSE_MS,
         shouldCache: (r) => r.success,
         onValue: (r) => {

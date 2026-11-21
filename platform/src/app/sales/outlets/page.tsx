@@ -26,7 +26,7 @@ import { visibilityApi } from '@/lib/visibility';
 import { classifyVisibilityCapture, VISIBILITY_SUMMARY_BUCKET_LABELS, type VisibilitySummaryBucket } from '@/lib/visibility-types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
-import { getOutletTargets, getSalesOutlets, salesOutletsFetchedAt } from '@/lib/cached-reads';
+import { getOutletTargets, getSalesOutlets, salesOutletsFetchedAt, getVisibilitySalesEligible } from '@/lib/cached-reads';
 import { ListRefreshControl } from '@/components/sales/list-refresh-control';
 
 /* ─── Outlet roster ─────────────────────────────────────────────────────────── */
@@ -332,7 +332,9 @@ export default function SalesOutletsPage() {
       return;
     }
     let cancelled = false;
-    visibilityApi.getSalesEligible()
+    // Shared + de-duplicated 60 s read (lib/cached-reads.ts): this effect re-runs when the roster arrives, and the
+    // dashboard / Tasks ask for the same window — one request.
+    getVisibilitySalesEligible()
       .then((r) => {
         if (cancelled) return;
         if (!r.success) { setVisPhotoByCode({}); return; }
