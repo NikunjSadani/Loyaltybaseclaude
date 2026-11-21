@@ -3,7 +3,8 @@
  *
  * KLG1: ON + permission denied → the wizard is replaced by the location guide (with a way back to the KYC list).
  * KLG2: ON + a fix → the wizard (outlet step) shows.
- * KLG3: OFF (Deoleo) → the wizard shows straight away and no location check runs.
+ * KLG3: explicit false (emergency off) → the wizard shows straight away and no location check runs.
+ * KLG4: DEFAULT ON (owner 2026-11-21) — no stored key → gated.  KLG5: settings failure → phone gate open.
  */
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -16,10 +17,22 @@ vi.mock('next/link', () => ({
 }));
 vi.mock('jsqr', () => ({ default: vi.fn().mockReturnValue(null) }));
 
-let REQUIRE_LOCATION = false;
-vi.mock('@/lib/tenant-features', () => ({
-  useTenantFeatures: () => ({ features: { outletMasterGeo: false, requireLocation: REQUIRE_LOCATION }, loading: false }),
-}));
+// The raw stored value (undefined = key ABSENT) goes through the REAL normalizeFeatures → isLocationRequired.
+let REQUIRE_LOCATION: boolean | undefined = false;
+let FEATURES_ERROR = false;
+vi.mock('@/lib/tenant-features', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/tenant-features')>();
+  return {
+    ...actual,
+    useTenantFeatures: () => ({
+      features: actual.normalizeFeatures(
+        FEATURES_ERROR ? undefined : REQUIRE_LOCATION === undefined ? { outletMasterGeo: false } : { outletMasterGeo: false, requireLocation: REQUIRE_LOCATION },
+      ),
+      loading: false,
+      error: FEATURES_ERROR,
+    }),
+  };
+});
 
 import NewKYCPage from '../page';
 
@@ -89,7 +102,27 @@ describe('KYC-LG — KYC wizard location gate', () => {
     expect(screen.queryByTestId('location-gate-blocked')).toBeNull();
   });
 
-  it('KLG3: OFF (Deoleo) → wizard straight away, no location check', async () => {
+  it('KLG4: DEFAULT ON — key ABSENT + denied → the location guide (gate on without any stored value)', async () => {
+    REQUIRE_LOCATION = undefined;
+    getCurrentPosition.mockImplementation(denied);
+    render(<NewKYCPage />);
+    expect(await screen.findByTestId('location-gate-blocked')).toBeTruthy();
+    expect(screen.getByTestId('kyc-flow').hidden).toBe(true);
+  });
+
+  it('KLG5: settings load FAILED → the phone gate stays open (server enforces), no location check', async () => {
+    FEATURES_ERROR = true;
+    try {
+      render(<NewKYCPage />);
+      expect(screen.getByTestId('kyc-new-root')).toBeTruthy();
+      expect(screen.queryByTestId('kyc-flow')).toBeNull();
+      expect(getCurrentPosition).not.toHaveBeenCalled();
+    } finally {
+      FEATURES_ERROR = false;
+    }
+  });
+
+  it('KLG3: explicit false (emergency off) → wizard straight away, no location check (unchanged)', async () => {
     REQUIRE_LOCATION = false;
     render(<NewKYCPage />);
     expect(screen.getByTestId('kyc-new-root')).toBeTruthy();

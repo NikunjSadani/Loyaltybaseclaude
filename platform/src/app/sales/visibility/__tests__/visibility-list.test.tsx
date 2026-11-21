@@ -11,6 +11,11 @@
 import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+
+// requireLocation is DEFAULT ON since 2026-11-21 (LOCATION-GATE.md). These pre-gate cases model a tenant with the
+// explicit emergency off (`requireLocation: false`) at the ONE shared seam, so their flows stay byte-identical.
+// The default-ON / explicit-true paths are covered by the *location-gate* tests.
+vi.mock('@/lib/location-required', () => ({ isLocationRequired: () => false }));
 import type { SalesEligibleResponse } from '@/lib/visibility-types';
 
 let mockSettings: { visibilityEnabled?: boolean; visibilityCaptureMode?: string } = {

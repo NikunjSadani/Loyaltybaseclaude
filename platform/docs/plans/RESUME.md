@@ -58,7 +58,10 @@ visible outlet-detail link on `/sales/kyc` and of the bottom-nav pages), plus a 
 
 **The 2026-11-19 (night) prod release `f61aec24` + `1fa2305c`** (all owner-approved; platform-wide items approved in-session; money paths dual-audited; staging-verified with real Bajaj logins):
 - **Wallet Reversal Engine** shipped DORMANT: schema (45 additive migrations), LEGACY/SHADOW/V2 per-tenant flag (no rows on prod → LEGACY everywhere), backfill + verify jobs. Bajaj **staging** = V2 after the §9.1 wallet backfill (2,321 wallets, 0 blocked). Bajaj **prod** = LEGACY until its own backfill + owner go. → `WALLET-REVERSAL-ENGINE-DESIGN.md`
-- **Location gate + Location Report** (flag `features.requireLocation`, default OFF; owner switches ON for Bajaj prod). → [`LOCATION-GATE.md`](LOCATION-GATE.md)
+- **Location gate + Location Report** (flag `features.requireLocation`). ⚠️ TRAP: on branch `feat/require-location-default`
+  (not deployed) it is **DEFAULT ON for every tenant** — ON unless explicitly `false` (console = emergency off); read it
+  ONLY via `isLocationRequired` (api `common/location-gate.helper.ts`, FE `lib/location-required.ts`), never `=== true`.
+  Prod: Bajaj explicit `true`; Deoleo key absent → goes ON at that deploy (tell Deoleo first). → [`LOCATION-GATE.md`](LOCATION-GATE.md)
 - **Visibility**: fence only the photos that apply to the outlet (fixes "Unverifiable" from a hidden Window 2); centred review dialog with Program/Sub-Program + large photos.
 - **Wholesaler wallet "Incl. Activation"** note under Lifetime Payout (flag `wholesalerPayoutInclActivation`; Bajaj staging ON, prod: owner).
 - **Shared outlet wallet view** — the sales outlet page renders the partner's own wallet view (platform-wide, owner-approved).
@@ -174,7 +177,8 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
    (`--args=node,dist/sales-import/oneoff/sales-history-trim.main.js,trim`), `rebuild-days` on the 2 GiB
    `gifsy-sales-import` job, both with `--update-env-vars=TRIM_TARGET_DB=gifsy_prod`.
 7a. **After the 2026-11-19 night release (`1fa2305c`) — waiting on the owner:** switch ON for Bajaj prod
-   `features.requireLocation` (**owner 2026-11-21: only after a real-phone test on Bajaj staging** — pending owner),
+   `features.requireLocation` (**done — Bajaj prod reads explicit `true`, probe 2026-11-21**; default-ON-for-all is on
+   `feat/require-location-default`, Deoleo heads-up needed before that deploy),
    `wholesalerPayoutInclActivation`, `helpVideos` (Bajaj **staging** already has all three ON); OK to load the Help & videos content on
    prod; OK to correct the remaining non-Privilege "Unverifiable" visibility captures in one go (list + SQL + backup
    first — 2 were corrected earlier, backup `1795068290437`); Bajaj prod wallet backfill → reversal engine V2 (backup +
@@ -199,7 +203,8 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 11. **`release/2026-11-21`** (§3): staging real-login check DONE 2026-11-21 (all pass). **Owner decision pending: go
     on `release/2026-11-21` → `main`** (prod deploy per §6).
 12. **The owner's three pending decisions (2026-11-21):** (a) go on `release/2026-11-21` → `main`; (b) the real-phone
-    location test on Bajaj staging (then `requireLocation` ON on Bajaj prod); (c) request-volume numbers before
+    location test on Bajaj staging (Bajaj prod `requireLocation` already reads `true`; default ON for all tenants is on
+    `feat/require-location-default`); (c) request-volume numbers before
     `feat/request-volume` ships. The other local branches (`fix/gps-photo-overlap` audited + fixed; `fix/hydration-418`
     audit round 2 in progress) are part of the same next batch, not pushed (§3).
 13. Owner may want HO / State-head **City** cells in the area columns shown as "N cities" (they can list hundreds of

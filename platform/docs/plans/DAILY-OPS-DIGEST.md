@@ -84,7 +84,8 @@ Optional sections:
   `features.hubbleVoucherEnabled` was switched off (then titled "Vouchers (Hubble) — integration switched off").
 - **Sales Import** and **Billing progress**: `features.salesImport === true`.
 - **Visibility**: the `visibilityEnabled` program setting is `true`. This is the same rule `TenantSettingsService` uses.
-- **Location** (`LOCATION-GATE.md`): loaded AND shown ONLY for tenants with `features.requireLocation` ON (even with zeros,
+- **Location** (`LOCATION-GATE.md`): loaded AND shown ONLY for tenants with `features.requireLocation` ON — since the
+  2026-11-21 default-ON change (`feat/require-location-default`) that is every tenant unless explicitly `false` (even with zeros,
   with a "Require location is ON" note and the blocked count). Switch-off tenants (Deoleo) never load it, so their email
   is unchanged. Amber figures, not an attention item.
 

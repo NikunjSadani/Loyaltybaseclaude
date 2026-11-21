@@ -11,7 +11,7 @@ import {
 import { validateTenantDomain, normalizeTenantDomain, TENANT_DOMAIN_SUFFIX, tenantSiteUrl } from '@/lib/platform/platform-admin';
 import type { ClientConfig, FeatureKey, FeatureFlags } from '@/lib/platform/client-config';
 import { OutletTypeConfigSection } from '@/components/admin/outlet-type-config-section';
-import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
+import { BEHAVIOUR_FLAG_META, BEHAVIOUR_FLAG_KEYS, isBehaviourFlagOn, type BehaviourFlagKey } from '@/lib/platform/behaviour-flags';
 import { getToken } from '@/lib/auth-client';
 import { useCanManageHelpVideos } from '@/lib/help-videos-access';
 import { useIsGifsyAdmin } from '@/lib/use-is-gifsy-admin';
@@ -1169,7 +1169,7 @@ function FeatureFlagsSection({
 // ─────────────────────────────────────────────────────────────────────────────
 
 function LiveSwitchRow({
-  label, description, enabled, pending, disabled, onToggle, testId,
+  label, description, enabled, pending, disabled, onToggle, testId, note,
 }: {
   label: string;
   description: string;
@@ -1178,12 +1178,15 @@ function LiveSwitchRow({
   disabled: boolean;
   onToggle: () => void;
   testId?: string;
+  /** Optional amber line under the description (e.g. a default-ON flag that is switched off). */
+  note?: string;
 }) {
   return (
     <div data-testid={testId} className="flex items-center gap-4 px-4 py-3 rounded-xl bg-white/5 border border-white/5">
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium text-white">{label}</p>
         <p className="text-xs text-white/40 mt-0.5">{description}</p>
+        {note && <p data-testid={testId ? `${testId}-note` : undefined} className="text-xs text-amber-300 mt-1">{note}</p>}
       </div>
       {pending && <span className="text-xs text-white/40 shrink-0">Saving…</span>}
       <button
@@ -1252,16 +1255,21 @@ function BehaviourFlagsSection({
   return (
     <div className="pt-2 space-y-2">
       <p className="text-xs text-white/40 px-1">
-        These change how an existing flow behaves for this tenant. Each is OFF unless switched on here.
+        These change how an existing flow behaves for this tenant. Each is OFF unless switched on here — except
+        &ldquo;Require location&rdquo;, which is ON unless switched off (emergency off).
       </p>
       {BEHAVIOUR_FLAG_KEYS.map((key) => {
-        const enabled = config.features[key] === true;
+        // requireLocation: ON unless an explicit false is stored (shared isLocationRequired); switching it OFF
+        // PATCHes an explicit `false`, switching it back ON PATCHes `true`.
+        const enabled = isBehaviourFlagOn(key, config.features);
+        const meta = BEHAVIOUR_FLAG_META[key];
         return (
           <LiveSwitchRow
             key={key}
             testId={`behaviour-flag-${key}`}
-            label={BEHAVIOUR_FLAG_META[key].label}
-            description={BEHAVIOUR_FLAG_META[key].description}
+            label={meta.label}
+            description={meta.description}
+            note={meta.offNote && !enabled ? meta.offNote : undefined}
             enabled={enabled}
             pending={pendingKey === key}
             disabled={saving}

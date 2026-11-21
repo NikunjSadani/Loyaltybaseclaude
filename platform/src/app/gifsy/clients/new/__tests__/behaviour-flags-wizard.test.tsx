@@ -83,6 +83,36 @@ describe('New-client wizard — behaviour flags', () => {
     expect(features.kycApprovalFlow).toBe(true); // module set unchanged
   });
 
+  it('W7: requireLocation starts ON (default for every new client); untouched → NO requireLocation key sent (default applies)', async () => {
+    const postSpy = vi.fn();
+    stubFetch(postSpy);
+    await walkToFeatures();
+    const sw = await screen.findByTestId('wizard-behaviour-flag-requireLocation');
+    expect(sw).toHaveAttribute('aria-checked', 'true');
+    expect(screen.queryByTestId('wizard-behaviour-flag-requireLocation-off-note')).not.toBeInTheDocument();
+    await submitFromFeatures();
+    await waitFor(() => expect(postSpy).toHaveBeenCalledTimes(1));
+    expect(postSpy.mock.calls[0][0].features).not.toHaveProperty('requireLocation');
+  });
+
+  it('W8: switching requireLocation OFF (no confirm) shows the emergency-off note and sends an EXPLICIT false', async () => {
+    const postSpy = vi.fn();
+    stubFetch(postSpy);
+    await walkToFeatures();
+    const sw = await screen.findByTestId('wizard-behaviour-flag-requireLocation');
+    fireEvent.click(sw);
+    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+    expect(sw).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByTestId('wizard-behaviour-flag-requireLocation-off-note').textContent).toBe(
+      'Emergency off — photos/KYC without location will be saved as Unverifiable',
+    );
+    await submitFromFeatures();
+    await waitFor(() => expect(postSpy).toHaveBeenCalledTimes(1));
+    const features = postSpy.mock.calls[0][0].features as Record<string, unknown>;
+    expect(features.requireLocation).toBe(false);
+    expect(features).not.toHaveProperty('outletMasterGeo');
+  });
+
   it('W2: switching outletMasterGeo ON sends only that behaviour key', async () => {
     const postSpy = vi.fn();
     stubFetch(postSpy);

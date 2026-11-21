@@ -11,6 +11,11 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
+// requireLocation is DEFAULT ON since 2026-11-21 (LOCATION-GATE.md). These pre-gate cases model a tenant with the
+// explicit emergency off (`requireLocation: false`) at the ONE shared seam, so their flows stay byte-identical.
+// The default-ON / explicit-true paths are covered by the *location-gate* tests.
+vi.mock('@/lib/location-required', () => ({ isLocationRequired: () => false }));
+
 // Mock next/navigation
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn(), back: vi.fn() }),

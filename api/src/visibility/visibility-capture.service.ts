@@ -753,7 +753,8 @@ export class VisibilityCaptureService {
     const outletMasterGeoEnabled = geoFeatures.outletMasterGeo === true;
 
     // ── LOCATION GATE ("no location, no use" — features.requireLocation, sales reps only; LOCATION-GATE.md) ──
-    // OFF (default, every tenant incl. Deoleo) → nothing here runs. ON → every location-tagged photo the rep submits
+    // DEFAULT ON for every tenant (owner 2026-11-21); explicit `false` (console emergency off) → nothing here runs.
+    // ON → every location-tagged photo the rep submits
     // NOW must carry a valid fix (carried-forward approved photos are not re-checked), else 400 before any write.
     const locationRequired = isLocationRequiredFor(geoFeatures, user.role);
     if (locationRequired) {

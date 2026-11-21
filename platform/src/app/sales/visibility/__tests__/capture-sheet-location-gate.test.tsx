@@ -5,17 +5,28 @@
  * VCSLG1: ON + location blocked → the guide shows, the form is HIDDEN but still mounted (photos are kept), and the
  *         form is told requireLocation; "Test again" with a fix reveals the form.
  * VCSLG2: ON + a fix → the form shows; a submit whose fresh check fails is NOT sent to the API.
- * VCSLG3: OFF (Deoleo) → no guide, no location check at all, requireLocation=false.
+ * VCSLG3: explicit false (emergency off) → no guide, no location check at all, requireLocation=false.
+ * VCSLG4: DEFAULT ON (owner 2026-11-21) — no stored key → gated.
  */
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SalesEligibleOutlet } from '@/lib/visibility-types';
 
-let REQUIRE_LOCATION = false;
-vi.mock('@/lib/tenant-features', () => ({
-  useTenantFeatures: () => ({ features: { outletMasterGeo: false, requireLocation: REQUIRE_LOCATION }, loading: false }),
-}));
+// The raw stored value (undefined = key ABSENT) goes through the REAL normalizeFeatures → isLocationRequired.
+let REQUIRE_LOCATION: boolean | undefined = false;
+vi.mock('@/lib/tenant-features', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/tenant-features')>();
+  return {
+    ...actual,
+    useTenantFeatures: () => ({
+      features: actual.normalizeFeatures(
+        REQUIRE_LOCATION === undefined ? { outletMasterGeo: false } : { outletMasterGeo: false, requireLocation: REQUIRE_LOCATION },
+      ),
+      loading: false,
+    }),
+  };
+});
 
 const getSalesForm = vi.fn();
 const submitCapture = vi.fn();
@@ -107,7 +118,15 @@ describe('VCS-LG — capture sheet location gate', () => {
     expect(submitCapture).not.toHaveBeenCalled();
   });
 
-  it('VCSLG3: OFF (Deoleo) → no guide, no location check, requireLocation=false', async () => {
+  it('VCSLG4: DEFAULT ON — key ABSENT + blocked → guide shown, form told requireLocation', async () => {
+    REQUIRE_LOCATION = undefined;
+    getCurrentPosition.mockImplementation(denied);
+    render(<VisibilityCaptureSheet outlet={outlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    expect(await screen.findByTestId('location-gate-blocked')).toBeTruthy();
+    expect((await screen.findByTestId('form')).getAttribute('data-require')).toBe('true');
+  });
+
+  it('VCSLG3: explicit false (emergency off) → no guide, no location check, requireLocation=false (unchanged)', async () => {
     REQUIRE_LOCATION = false;
     render(<VisibilityCaptureSheet outlet={outlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
     expect((await screen.findByTestId('form')).getAttribute('data-require')).toBe('false');

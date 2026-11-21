@@ -4,11 +4,14 @@
  * client-config.ts). The Gifsy console edits them in a separate "Behaviour flags" section through the
  * SAME `PATCH /api/gifsy/clients/:slug { features }` path (GIFSY_ADMIN, tenancy:write); the backend
  * merges one key at a time, so every other stored flag survives. Default OFF for every tenant —
- * nothing changes for a tenant (incl. Deoleo) until its flag is switched on here.
+ * nothing changes for a tenant (incl. Deoleo) until its flag is switched on here — EXCEPT flags with
+ * `defaultOn` (requireLocation, owner 2026-11-21): ON when the key is absent; switching OFF stores an
+ * explicit `false` (emergency off).
  *
  * Shared by the client detail page and the new-client wizard so the copy never drifts.
  */
 import type { FeatureFlags } from './client-config';
+import { isLocationRequired } from '@/lib/location-required';
 
 export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan' | 'gifsyRejectFastTrack' | 'requireLocation'>;
 
@@ -21,6 +24,10 @@ export interface BehaviourFlagMeta {
    * who checks a KYC before GIFSY (gifsyRejectFastTrack).
    */
   confirmOn?: { title: string; points: string[]; confirmLabel: string };
+  /** ON when the tenant has no stored value (absent key); OFF only on an explicit stored `false`. */
+  defaultOn?: boolean;
+  /** Shown under the switch (amber) — e.g. what switching a default-ON flag off means. */
+  offNote?: string;
 }
 
 export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = {
@@ -68,7 +75,7 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = 
   requireLocation: {
     label: 'Require location for KYC and visibility capture',
     description:
-      "Sales reps can't start or submit a KYC or a visibility capture until location is allowed for the site AND the phone gets a GPS fix. Submissions without a location are also refused by the server. The rest of the sales app is unaffected.",
+      "ON by default for every client. Sales reps can't start or submit a KYC or a visibility capture until location is allowed for the site AND the phone gets a GPS fix. Submissions without a location are also refused by the server. The rest of the sales app is unaffected.",
     // It blocks field work for reps whose phones can't get a fix — confirm before switching ON (OFF never asks).
     confirmOn: {
       title: 'Require location for KYC and visibility capture?',
@@ -80,7 +87,38 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = 
       ],
       confirmLabel: 'Yes, require location',
     },
+    // Owner 2026-11-21: ON by default for every client (incl. Deoleo + every new client); the switch is only an
+    // explicit emergency off.
+    defaultOn: true,
+    offNote: 'Emergency off — photos/KYC without location will be saved as Unverifiable',
   },
 };
 
 export const BEHAVIOUR_FLAG_KEYS = Object.keys(BEHAVIOUR_FLAG_META) as BehaviourFlagKey[];
+
+/** The wizard's starting value per flag (a `defaultOn` flag starts ON). */
+export const BEHAVIOUR_FLAG_DEFAULTS = Object.fromEntries(
+  BEHAVIOUR_FLAG_KEYS.map((k) => [k, BEHAVIOUR_FLAG_META[k].defaultOn === true]),
+) as Record<BehaviourFlagKey, boolean>;
+
+/**
+ * Whether a behaviour flag is ON for a tenant's `features` blob. requireLocation goes through the ONE shared
+ * `isLocationRequired` (absent → ON); every other flag is ON only on a real `true`.
+ */
+export function isBehaviourFlagOn(key: BehaviourFlagKey, features: unknown): boolean {
+  if (key === 'requireLocation') return isLocationRequired(features);
+  return !!features && typeof features === 'object' && (features as Record<string, unknown>)[key] === true;
+}
+
+/**
+ * The wizard's create payload for the behaviour flags: ONLY deviations from the defaults are sent — a default-OFF
+ * flag switched ON → `true`; a default-ON flag switched OFF → explicit `false`. An untouched wizard sends nothing
+ * (the tenant then follows the defaults).
+ */
+export function behaviourFlagCreatePayload(flags: Record<BehaviourFlagKey, boolean>): Partial<Record<BehaviourFlagKey, boolean>> {
+  const out: Partial<Record<BehaviourFlagKey, boolean>> = {};
+  for (const k of BEHAVIOUR_FLAG_KEYS) {
+    if (flags[k] !== BEHAVIOUR_FLAG_DEFAULTS[k]) out[k] = flags[k];
+  }
+  return out;
+}

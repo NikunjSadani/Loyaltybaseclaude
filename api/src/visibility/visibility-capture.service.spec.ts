@@ -120,7 +120,9 @@ describe('VisibilityCaptureService', () => {
     mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: config });
     // Default: tenant NOT geo-enabled (no outletMasterGeo flag) → legacy KYC-board-ref fence
     // (byte-identical to before). The outletMasterGeo tests override this per case.
-    mockPrisma.client.findUnique.mockResolvedValue(null);
+    // requireLocation is DEFAULT ON since 2026-11-21 — these legacy cases run with the explicit emergency-off
+    // (`false`), which must stay byte-identical to the pre-gate behaviour.
+    mockPrisma.client.findUnique.mockResolvedValue({ features: { requireLocation: false } });
 
     // Caller = SO (allowed), with an active assignment to o1 (in-subtree).
     mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1', hierarchyLevel: { code: 'SO' } });
@@ -212,7 +214,7 @@ describe('VisibilityCaptureService', () => {
   describe('outlet-master geo-fence (outletMasterGeo gate)', () => {
     const BLOCK_MSG = 'You are far from the outlet. Please go to the outlet and try again.';
     const gatedOn = () =>
-      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
     /** outletRow + outlet-master coords (loadInScopeOutlet now selects latitude/longitude). */
     const outletWithMaster = (lat: number | null, lng: number | null) => ({
       ...outletRow,
@@ -483,7 +485,26 @@ describe('VisibilityCaptureService', () => {
         });
       });
 
-      it('OFF (default) → no GPS still allowed + flagged and an outside block records NOTHING (Deoleo parity)', async () => {
+      // DEFAULT ON (owner 2026-11-21): a tenant with NO requireLocation key (or no client row) is gated.
+      it.each([
+        ['absent key', { features: { outletMasterGeo: true } }],
+        ['empty features', { features: {} }],
+        ['no client row', null],
+      ])('DEFAULT ON — %s → a rep capture without GPS is refused (400, nothing written)', async (_l, row) => {
+        mockPrisma.client.findUnique.mockResolvedValue(row);
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        await expect(service.submitCapture(user, { outletId: 'o1', formValues: noGeo })).rejects.toThrow(NO_LOC);
+        expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+      });
+
+      it('DEFAULT ON — absent key + a fresh fix → accepted', async () => {
+        mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true } });
+        mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
+        const res = await service.submitCapture(user, { outletId: 'o1', formValues: nearNow() });
+        expect(res.version).toBe(1);
+      });
+
+      it('explicit false (emergency off) → no GPS still allowed + flagged and an outside block records NOTHING (Deoleo parity)', async () => {
         gatedOn();
         mockPrisma.outlet.findFirst.mockResolvedValue(outletWithMaster(12.9, 77.5));
         const res = await service.submitCapture(user, { outletId: 'o1', formValues: noGeo });
@@ -515,7 +536,9 @@ describe('VisibilityCaptureService', () => {
     const near = (key: string) => ({ key: `visibility-media/t1/${key}.jpg`, geo: { lat: 12.9003, lng: 77.5001, accuracy: 20 } }); // ~34 m
     const far = (key: string) => ({ key: `visibility-media/t1/${key}.jpg`, geo: { lat: 12.95, lng: 77.55, accuracy: 10 } });
     const outlet = (programCategory: string, gate = true) => {
-      mockPrisma.client.findUnique.mockResolvedValue(gate ? { features: { outletMasterGeo: true } } : null);
+      mockPrisma.client.findUnique.mockResolvedValue(
+        gate ? { features: { outletMasterGeo: true, requireLocation: false } } : { features: { requireLocation: false } },
+      );
       mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: 12.9, longitude: 77.5, programCategory });
       mockPrisma.visibilityForm.findUnique.mockResolvedValue(bajajForm);
     };

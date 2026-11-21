@@ -446,10 +446,13 @@ export default function NewKYCPage() {
   const soFlag = features.soDeclarationKyc && getStoredUser()?.role === 'SALES_SO';
 
   /* ── Location gate ("no location, no use" — features.requireLocation; docs/plans/LOCATION-GATE.md) ──
-   * OFF (default — Deoleo, every other tenant): the hook does nothing and the page is byte-identical. ON: the rep
+   * DEFAULT ON for every tenant (owner 2026-11-21; `features.requireLocation` is normalised by `isLocationRequired`).
+   * Explicit false (console emergency off): the hook does nothing. ON: the rep
    * cannot START the KYC (the wizard is replaced by a "location needed" guide) until location is allowed AND a
-   * real fix arrives, and cannot SUBMIT without passing a fresh check (the API refuses a fix-less KYC too). */
-  const locationGate = useLocationGate(features.requireLocation && !featuresLoading, { serverSkewMs, recheckClock: refetchClock });
+   * real fix arrives, and cannot SUBMIT without passing a fresh check (the API refuses a fix-less KYC too).
+   * A settings-load FAILURE keeps the gate open on the phone (features are then only defaults; the server still
+   * enforces the real setting) — same as before the default flipped. */
+  const locationGate = useLocationGate(features.requireLocation && !featuresLoading && !featuresError, { serverSkewMs, recheckClock: refetchClock });
   // Last-known setting (browser storage): only drives the settings-failure note for reps whose programme required
   // location last time. Deoleo reps (last-known false) never see it.
   const locationSetting = useLocationSetting(features.requireLocation, featuresLoading, featuresError);

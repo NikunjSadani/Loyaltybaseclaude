@@ -41,7 +41,8 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     outletMasterGeo: false,
     allowPayoutWithoutPan: false,
     gifsyRejectFastTrack: false,
-    requireLocation: false,
+    // Default ON for every tenant (owner 2026-11-21; LOCATION-GATE.md) — off only on an explicit stored false.
+    requireLocation: true,
     campaignEnrollmentForm: true,
     salesTeamApp: true,
     walletModule: true,

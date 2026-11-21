@@ -9,8 +9,9 @@ Bajaj change. Last updated: 2026-11-21.
 > **App name** "Bajaj Loyalty Club" set on prod by the owner and verified live (§15); Visibility Excel redesign +
 > client-admin download; capture-form GPS-pending fix; tickets assign/escalate (Bajaj "Ticket remarks email" — TODO:
 > record the prod value if set). **Bajaj staging flags (2026-11-21):** `requireLocation` ON, `helpVideos` ON,
-> `wholesalerPayoutInclActivation` ON. **Owner decision 2026-11-21:** `requireLocation` goes ON on Bajaj **prod** only
-> after a real-phone test on Bajaj staging (pending owner). Staging now runs `release/2026-11-21` (real-login verified
+> `wholesalerPayoutInclActivation` ON. **Bajaj prod `requireLocation` = true (explicit, read-only probe 2026-11-21).**
+> **Owner decision 2026-11-21 (later):** `requireLocation` DEFAULT ON for every tenant incl. Deoleo (branch
+> `feat/require-location-default`, not deployed) — see §14. Staging now runs `release/2026-11-21` (real-login verified
 > 2026-11-21; stricter visibility capture rule — no capture for outlets not KYC-approved). 2026-11-20 evening the Cloudflare Workers free-plan cap (Error 1027) took all tenants
 > down for 7 min — triggered by Bajaj sales-team request volume; see `RESUME.md` §1 / §4 item 10. Current state +
 > owner to-dos: `RESUME.md`.
@@ -347,15 +348,17 @@ and the Performance trend (`GET /partner/targets/trend`).
 - Sales history keeps programme outlets only, 4 months; import files 7 days — the deletion rules ship OFF
   (`SALES_RETENTION_V2`) and are switched on via `SALES-IMPORT-PIPELINE-PLAN.md` §17b. Decision log F15.
 
-## 14. Location gate — flag `requireLocation` (2026-11-18; LIVE on prod since `1fa2305c`, DORMANT until the owner switches it ON)
-- Gifsy console → Clients → Bajaj → **Behaviour flags** → "Require location for KYC and visibility capture" (confirm
-  dialog). Default OFF for every tenant; Deoleo OFF. Owner switches it ON for Bajaj (staging first, then prod) after the
-  release — Claude does not write the flag. **Bajaj staging: ON. Bajaj prod: owner decided 2026-11-21 to switch it ON
-  only after a real-phone test on Bajaj staging (pending owner).**
+## 14. Location gate — flag `requireLocation` (2026-11-18; LIVE on prod since `1fa2305c`; DEFAULT ON for every tenant from branch `feat/require-location-default`, not yet deployed)
+- **Owner decision 2026-11-21 (platform-wide, approved): DEFAULT ON for every client incl. Deoleo and every new client**
+  — ON unless `features.requireLocation` is explicitly `false`. Gifsy console → Clients → tenant → **Behaviour flags** →
+  "Require location for KYC and visibility capture" is now only the **emergency off** (switching OFF stores an explicit
+  `false`, no confirm; amber note "Emergency off — photos/KYC without location will be saved as Unverifiable").
+- Prod data (read-only probe 2026-11-21): **Bajaj prod = explicit `true`** (already ON), **Deoleo = key absent** (and no
+  `outletMasterGeo`) → Deoleo goes ON at the deploy of this branch with no data change. Bajaj staging: ON.
 - ON: a sales rep can't start or submit a KYC / visibility capture until location is allowed for the site AND the phone
   gets a fix (phone-specific guide + Test again); the API refuses fix-less submissions; "outside the 200 m fence"
   refusals are recorded for the Location Report. Independent of `outletMasterGeo` (the 200 m fence).
-- Location Report `/admin/reports/location` + Daily Ops Digest "Location" line — both only for switch-on tenants. Detail:
+- Location Report `/admin/reports/location` + Daily Ops Digest "Location" line — for every tenant not switched off. Detail:
   `LOCATION-GATE.md`.
 
 ## 15. App name — `branding.appName` (per client; LIVE on prod `4a48dc0d`, 2026-11-20)

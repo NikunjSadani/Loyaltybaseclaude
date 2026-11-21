@@ -19,6 +19,7 @@ import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { sniffFileType } from '../common/file-signature';
+import { isLocationRequired } from '../common/location-gate.helper';
 import {
   BRANDING_ASSET_MIME,
   brandingAssetRouteUrl,
@@ -150,8 +151,9 @@ function consoleFeatures(features: Record<string, unknown>) {
     allowPayoutWithoutPan: !!features.allowPayoutWithoutPan,
     // Bajaj: a KYC resubmitted after a GIFSY rejection (post-manager-approval) skips the managers.
     gifsyRejectFastTrack: !!features.gifsyRejectFastTrack,
-    // "No location, no use" for sales-rep KYC + visibility capture (LOCATION-GATE.md). Default OFF.
-    requireLocation: !!features.requireLocation,
+    // "No location, no use" for sales-rep KYC + visibility capture (LOCATION-GATE.md). DEFAULT ON (owner
+    // 2026-11-21): absent key → ON; only an explicit false (console emergency off) is OFF.
+    requireLocation: isLocationRequired(features),
     partnerApp,
   };
 }
