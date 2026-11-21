@@ -145,4 +145,21 @@ describe('VPC — Visibility — this period card', () => {
     );
     expect(screen.queryByTestId('visibility-capture-cta')).toBeNull();
   });
+
+  it('VPC5: not applicable (e.g. a wholesaler) → the card is hidden even though a reason is sent', async () => {
+    getOutletStatus.mockResolvedValue({
+      success: true,
+      data: status({
+        inScope: false,
+        canCapture: false,
+        notApplicable: true,
+        notInScopeReason: 'Outlet type WHOLESALER is not part of the visibility programme.',
+      }),
+    });
+    await renderPage();
+    await waitFor(() => expect(getOutletStatus).toHaveBeenCalled());
+    await screen.findAllByText('Mehta Distributors'); // page hydrated
+    expect(screen.queryByTestId('visibility-period-card')).toBeNull();
+    expect(screen.queryByText(/not part of the visibility programme/)).toBeNull();
+  });
 });

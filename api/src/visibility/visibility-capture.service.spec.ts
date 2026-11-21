@@ -1202,7 +1202,24 @@ describe('VisibilityCaptureService', () => {
         inScope: false,
         canCapture: false,
         notInScopeReason: 'This outlet is not KYC-approved yet — visibility can be captured once its KYC is approved.',
+        notApplicable: false, // temporary block — the sales app keeps showing the reason
       });
+    });
+
+    it('getOutletStatus: notApplicable for an outlet type / programme never covered — even while its KYC is pending', async () => {
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+      scopedCfg({});
+      // A wholesaler (type not in outletScope) whose KYC is pending: the reason says "KYC", but it is still not applicable.
+      outletDb({ id: 'o1', outletCode: 'OC1', name: 'W 1', isActive: false, programName: null, programCategory: null, outletType: { code: 'WHOLESALER', name: 'W' } });
+      const w = await service.getOutletStatus(user, 'o1');
+      expect(w).toMatchObject({ inScope: false, notApplicable: true });
+      // Programme excluded → not applicable.
+      outletDb({ id: 'o1', outletCode: 'OC1', name: 'Shop 1', programName: 'BSC', programCategory: null, outletType: { code: 'SSS', name: 'R' } });
+      scopedCfg({ programs: ['RLP'], subPrograms: [] });
+      expect((await service.getOutletStatus(user, 'o1')).notApplicable).toBe(true);
+      // In scope → never notApplicable.
+      scopedCfg({});
+      expect((await service.getOutletStatus(user, 'o1')).notApplicable).toBe(false);
     });
   });
 });
