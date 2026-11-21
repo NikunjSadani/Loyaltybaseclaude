@@ -1,8 +1,8 @@
 // WP5 — PAYOUT (₹) reversals under the Wallet Reversal Engine (WALLET-REVERSAL-ENGINE-DESIGN.md §8, §15 T-pay1..5).
 // Runs CreditsService end-to-end against an in-memory Prisma fake WITH transaction rollback and the partial unique
 // index on live payout allocations, so each test asserts the persisted state (entries, allocations, reversals, TDS
-// ledger, downloads), not mock call shapes. LEGACY (default) behaviour is covered here at the dispatch level and,
-// byte-for-byte, by the untouched assertions of credits.service.spec.ts.
+// ledger, downloads), not mock call shapes. One engine for every tenant since 2026-11-21 (no LEGACY / SHADOW mode);
+// a PAYOUT reversal still pending from before that (no allocation rows) is covered on its interim approve path.
 // Run: npx jest src/credits/payout-reversal-v2.spec.ts
 
 import { BadRequestException, ConflictException } from '@nestjs/common';
@@ -374,7 +374,7 @@ function entry(id: string, amountPaise: bigint, status: string, extra: Row = {})
   };
 }
 
-function setup(mode: 'LEGACY' | 'SHADOW' | 'V2' = 'V2') {
+function setup() {
   const db = new FakeDb();
   db.t('creditBatch').push({
     id: 'b1',
@@ -411,15 +411,14 @@ function setup(mode: 'LEGACY' | 'SHADOW' | 'V2' = 'V2') {
     { clientId: TENANT, outletCode: 'O1', name: 'Outlet One', isActive: true, state: null, phone: null, partner: partner('p1') },
     { clientId: TENANT, outletCode: 'O2', name: 'Outlet Two', isActive: true, state: null, phone: null, partner: partner('p2') },
   );
+  // No reversal-engine setting reader at all: the engine mode is retired (2026-11-21) — a read would throw here.
   const settings = {
-    mode: mode as 'LEGACY' | 'SHADOW' | 'V2',
-    getReversalEngineModeUncached: jest.fn(async () => settings.mode),
     getEffectiveSettings: jest.fn(async () => ({
       creditsPayouts: { monthCutoffDay: 31, safetyCapPoints: 1e6, safetyCapInr: 1e7, fourEyesEnabled: false, notifyEmails: [] },
     })),
     resolveTdsPolicy: jest.fn(async () => ({ section: 'SEC_194C', methodology: 'GROSS_UP' })),
   };
-  const wallet = { assertPointsReversalAllowed: jest.fn(), creditedPointsForBatchRow: jest.fn(async () => 0n) };
+  const wallet = { v2PointsReversalCap: jest.fn(async () => ({ cap: 1_000, positions: [{ amount: 1_000 }], unallocatedApproved: 0 })) };
   const service = new CreditsService(
     db.client(),
     { enqueue: jest.fn().mockResolvedValue({}), writeInApp: jest.fn(), notifyUser: jest.fn(), notifyUserWithChannels: jest.fn() } as any,
@@ -456,52 +455,75 @@ const reject = (s: ReturnType<typeof setup>, id: string) =>
 const download = (s: ReturnType<typeof setup>) =>
   s.service.createPayoutDownload(gifsy, { period: '2026-10', groupType: PayoutGroupType.STANDARD });
 
-// ─── LEGACY dispatch ───────────────────────────────────────────────────────────────────────────────────────────
-// Owner decision 1 (2026-11-16): SHADOW behaves exactly like LEGACY for PAYOUT reversals (today's screens + rules).
-describe.each(['LEGACY', 'SHADOW'] as const)('WP5 — %s tenant keeps the interim PAYOUT behaviour', (mode) => {
-  it('lists no entries (amount form), refuses an entry selection, and creates/approves exactly as the interim rule', async () => {
-    const s = setup(mode);
-    await expect(s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' })).resolves.toEqual({
-      mode: 'LEGACY',
-      engineMode: mode,
-      entries: [],
-    });
-    await expect(s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']))).rejects.toThrow(/not enabled/);
+// ─── One engine for every tenant (2026-11-21) ──────────────────────────────────────────────────────────────────
+// The per-tenant LEGACY / SHADOW modes are retired: every PAYOUT reversal picks whole entries. A PAYOUT reversal that
+// was raised BEFORE the retirement (still PENDING, no allocation rows) keeps approving through the interim
+// whole-entry path — decided by the data — so no pending request is stranded.
 
-    const r = await s.service.createReversal(admin, 'b1', req(50_000));
-    expect(s.allocs()).toHaveLength(0); // no reservation under LEGACY / SHADOW
-    expect(r).not.toHaveProperty('payoutEntries');
+/** A PENDING PAYOUT reversal raised under the retired LEGACY mode: no allocation rows, amount-only. */
+async function preRetirementPending(s: ReturnType<typeof setup>, amount: number, remarks?: string): Promise<Row> {
+  return s.db.model('creditReversal').create({
+    data: {
+      clientId: TENANT,
+      batchId: 'b1',
+      outletId: 'O1',
+      outletName: 'Outlet One',
+      fieldId: 'f1',
+      fieldName: 'Volume',
+      period: '2026-10',
+      awardType: 'PAYOUT',
+      originalPaise: 80_000n,
+      requestedPaise: BigInt(amount),
+      requestedBy: 'client-admin',
+      ...(remarks ? { requestRemarks: remarks } : {}),
+    },
+  });
+}
+
+describe('WP5 — every tenant: PAYOUT reversals pick entries; a pre-retirement pending one still approves', () => {
+  it('lists the entries (mode V2, no engineMode) and refuses an amount-only request in plain words', async () => {
+    const s = setup();
+    const res = await s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' });
+    expect(res.mode).toBe('V2');
+    expect(res).not.toHaveProperty('engineMode');
+    expect(res.entries.map((c) => c.id)).toEqual(['pe-a', 'pe-b']);
+    await expect(s.service.createReversal(admin, 'b1', req(50_000))).rejects.toThrow(/^Select the payout entries to reverse/);
+    expect(s.db.t('creditReversal')).toHaveLength(0);
+    // a valid selection reserves
+    const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
+    expect(s.allocs(r.id)).toMatchObject([{ payoutEntryId: 'pe-b', state: 'RESERVED' }]);
+  });
+
+  it('a pending reversal with NO allocation rows (raised before the retirement) approves through the interim whole-entry path', async () => {
+    const s = setup();
+    const r = await preRetirementPending(s, 50_000);
     const done = (await approve(s, r.id)) as Row;
     expect(s.e('pe-b').status).toBe('REVERSED'); // interim exact-subset pick
     expect(s.reversal(r.id).consumedPayoutEntryIds).toEqual(['pe-b']);
     expect(s.allocs()).toHaveLength(0);
     expect(done.clawbackShortfall).toBe(0);
-    // listReversals: a LEGACY reversal is returned exactly as stored (no payoutEntries key).
     const list = await s.service.listReversals(gifsy, {} as any);
     expect(list.reversals[0]).not.toHaveProperty('payoutEntries');
-    // Owner decision 3: the outcome summary is returned on every tenant (display only).
     expect(done.payoutOutcome).toMatchObject({
       headline: 'Approved · 1 entry cancelled (₹500.00) — will not be paid',
       lines: [{ kind: 'CANCELLED', entryId: 'pe-b', text: 'Entry cancelled · ₹500.00 · will not be paid' }],
       receivablePaise: 0,
       tdsCreditPaise: 0,
     });
-    const dl = await download(s);
-    expect(dl.reversalHeld).toEqual([]);
-    expect(dl.tdsCreditApplied).toEqual([]);
-    expect(s.db.t('auditLog')).toHaveLength(0);
-    expect(s.db.t('tdsCredit')).toHaveLength(0);
+    // the consumed entry is unreachable to a new (entry-picking) reversal
+    const c = await s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' });
+    expect(c.entries.find((x) => x.id === 'pe-b')).toMatchObject({ selectable: false });
   });
 
-  it('PAID entry with TDS withheld: receivable = NET received (shipped rule 7ba69566), no TDS credit — and said so', async () => {
-    const s = setup(mode);
+  it('pre-retirement pending, PAID entry with TDS withheld: receivable = NET received (shipped rule), no TDS credit — said so', async () => {
+    const s = setup();
     Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT', tdsDeductedPaise: 600n });
     s.db.t('tdsDeductionEntry').push({ id: 't2', creditPayoutEntryId: 'pe-a', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 600n, createdAt: new Date('2026-11-03') });
-    const r = await s.service.createReversal(admin, 'b1', req(30_000));
+    const r = await preRetirementPending(s, 30_000);
     const done = (await approve(s, r.id)) as Row;
     expect(s.reversal(r.id).shortfallPaise).toBe(29_400n); // ₹300 paid − ₹6 TDS withheld
     expect(s.db.t('tdsCredit')).toHaveLength(0);
-    expect(s.e('pe-a')).toMatchObject({ status: 'PAID', tdsDeductedPaise: 600n, tdsBaseReversedAt: null }); // LEGACY never marks
+    expect(s.e('pe-a')).toMatchObject({ status: 'PAID', tdsDeductedPaise: 600n, tdsBaseReversedAt: null });
     expect(done.payoutOutcome.headline).toBe('Approved · ₹294.00 recorded as owed');
     expect(done.payoutOutcome.lines[0].text).toBe(
       'Recorded as owed · ₹294.00 (paid ₹300.00 − TDS ₹6.00) · already paid — recover it off-platform · ' +
@@ -509,11 +531,11 @@ describe.each(['LEGACY', 'SHADOW'] as const)('WP5 — %s tenant keeps the interi
     );
   });
 
-  it('PAID entry FULLY withheld as TDS: reversed, the withholding offset in its FY, nothing owed (shipped rule) — said so', async () => {
-    const s = setup(mode);
+  it('pre-retirement pending, PAID entry FULLY withheld as TDS: reversed, the withholding offset in its FY, nothing owed — said so', async () => {
+    const s = setup();
     Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT', tdsDeductedPaise: 30_000n, utr: 'TDS-WITHHELD-X' });
     s.db.t('tdsDeductionEntry').push({ id: 't3', clientId: TENANT, creditPayoutEntryId: 'pe-a', panNumber: 'ABCDE1234F', section: 'SEC_194R', fyLabel: '2026-27', tdsDeductedThisPaise: 30_000n, createdAt: new Date('2026-11-03') });
-    const r = await s.service.createReversal(admin, 'b1', req(30_000));
+    const r = await preRetirementPending(s, 30_000);
     const done = (await approve(s, r.id)) as Row;
     expect(s.e('pe-a')).toMatchObject({ status: 'REVERSED', tdsDeductedPaise: 0n });
     expect(s.reversal(r.id).shortfallPaise).toBe(0n);
@@ -525,17 +547,16 @@ describe.each(['LEGACY', 'SHADOW'] as const)('WP5 — %s tenant keeps the interi
     );
   });
 
-  it('reject: says nothing was held or changed', async () => {
-    const s = setup(mode);
-    const r = await s.service.createReversal(admin, 'b1', req(50_000));
+  it('pre-retirement pending, reject: says nothing was held or changed', async () => {
+    const s = setup();
+    const r = await preRetirementPending(s, 50_000);
     const rj = (await reject(s, r.id)) as Row;
     expect(rj.payoutOutcome).toMatchObject({ headline: 'Rejected · no payout entry was held or changed', lines: [{ kind: 'NOTHING' }] });
     expect(s.e('pe-b').status).toBe('PENDING');
   });
 
-  it('refuses payoutEntryIds on a POINTS reversal (any mode)', async () => {
-    const s = setup('V2');
-    s.wallet.creditedPointsForBatchRow.mockResolvedValue(1_000n);
+  it('refuses payoutEntryIds on a POINTS reversal', async () => {
+    const s = setup();
     await expect(
       s.service.createReversal(admin, 'b1', { ...req(10, ['pe-b']), awardType: 'POINTS' as any }),
     ).rejects.toThrow(/Payout entries can only be chosen for a payout/);
@@ -551,13 +572,13 @@ describe.each(['LEGACY', 'SHADOW'] as const)('WP5 — %s tenant keeps the interi
   });
 });
 
-// ─── V2 (SHADOW = LEGACY for payouts since 2026-11-16) ─────────────────────────────────────────────────────────
-describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversals', (mode) => {
+// ─── Entry-targeted PAYOUT reversals (every tenant) ────────────────────────────────────────────────────────────
+describe('WP5 — entry-targeted PAYOUT reversals', () => {
   it('candidates: every entry of the (batch, outlet, field) with why it can or cannot be picked', async () => {
-    const s = setup(mode);
+    const s = setup();
     s.db.t('creditPayoutEntry').push(entry('pe-x', 10_000n, 'REVERSED', { createdAt: new Date('2026-11-03T00:00:00Z') }));
     const res = await s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' });
-    expect(res.mode).toBe(mode);
+    expect(res.mode).toBe('V2');
     expect(res.entries.map((c) => [c.id, c.amountPaise, c.selectable, c.blockedBy])).toEqual([
       ['pe-a', 30_000, true, null],
       ['pe-b', 50_000, true, null],
@@ -566,7 +587,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('T-pay2 exact subset: [₹300 PAID, ₹500 PENDING] — reversing the ₹500 entry is accepted and cancels it', async () => {
-    const s = setup(mode);
+    const s = setup();
     const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
     expect(s.allocs(r.id)).toMatchObject([{ payoutEntryId: 'pe-b', amountPaise: 50_000n, state: 'RESERVED' }]);
     const done = (await approve(s, r.id)) as Row;
@@ -596,7 +617,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('T-pay1 double consumption: a PAID entry becomes a receivable ONCE and is unreachable to a later reversal', async () => {
-    const s = setup(mode);
+    const s = setup();
     const r1 = await s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']));
     const d1 = (await approve(s, r1.id)) as Row;
     expect(s.e('pe-a').status).toBe('PAID'); // Q11: entry stays PAID
@@ -613,15 +634,14 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
     await expect(s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']))).rejects.toThrow(/already taken/);
     const c = await s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' });
     expect(c.entries.find((x) => x.id === 'pe-a')).toMatchObject({ selectable: false, blockedBy: 'CONSUMED' });
-    // …and if the tenant is switched back to LEGACY, the interim selector sees it as consumed too.
-    s.settings.mode = 'LEGACY';
+    // …and an amount-only request is refused in plain words (every PAYOUT reversal names its entries).
     await expect(s.service.createReversal(admin, 'b1', req(30_000))).rejects.toThrow(/whole payout entries/);
     // The live-allocation index holds exactly one row for the entry.
     expect(s.allocs().filter((a) => a.payoutEntryId === 'pe-a' && LIVE.includes(a.state))).toHaveLength(1);
   });
 
   it('P1: the request must equal the selected entries, which must belong to this outlet + field', async () => {
-    const s = setup(mode);
+    const s = setup();
     await expect(s.service.createReversal(admin, 'b1', req(50_000))).rejects.toThrow(/Select the payout entries/);
     await expect(s.service.createReversal(admin, 'b1', req(40_000, ['pe-b']))).rejects.toThrow(/must equal the selected/);
     await expect(s.service.createReversal(admin, 'b1', req(20_000, ['pe-c']))).rejects.toThrow(/not an entry of this outlet/);
@@ -632,7 +652,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('P2: an entry held by a pending reversal cannot be selected again; a rejection releases it', async () => {
-    const s = setup(mode);
+    const s = setup();
     // Only one pending reversal can exist per (batch, outlet, field), so the hold is proven via the candidates view
     // (the index backstop has its own test below), then released by a rejection.
     const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
@@ -650,7 +670,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('T-pay3 reservation vs download: a RESERVED entry is skipped by the bank file and re-enters it after a rejection', async () => {
-    const s = setup(mode);
+    const s = setup();
     const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
     const d1 = await download(s);
     expect(s.e('pe-c')).toMatchObject({ status: 'PROCESSING', downloadId: d1.downloadId });
@@ -673,7 +693,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('T-pay3 race: a reservation committed between the download read and its claim rolls the download back', async () => {
-    const s = setup(mode);
+    const s = setup();
     let fired = false;
     s.db.onDownloadCreate = () => {
       if (fired) return;
@@ -697,7 +717,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('T-pay4 PROCESSING: reservable, but approval is refused (nothing changes) until the bank result is recorded', async () => {
-    const s = setup(mode);
+    const s = setup();
     s.e('pe-b').status = 'PROCESSING';
     const r = await s.service.createReversal(admin, 'b1', req(50_000, ['pe-b']));
     await expect(approve(s, r.id)).rejects.toThrow(/already sent to the bank/);
@@ -714,7 +734,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('T-pay5 TDS offset: an unpaid entry’s withholding is offset ONCE; a PAID 194R entry gets none (receivable + credit); 194C PAID is refused (D1)', async () => {
-    const s = setup(mode);
+    const s = setup();
     // re-audit A1: the credit is usable only under the retailer's CURRENT key — the outlet owner holds the PAN it was withheld under
     s.db.t('outlet').find((o) => o.outletCode === 'O1')!.partner.panNumber = 'ABCDE1234F';
     s.db.t('channelPartner').push({ id: 'p1', clientId: TENANT, panNumber: 'ABCDE1234F', isParent: false }); // the retailer still holds it
@@ -741,7 +761,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('T-pay5 call-outs: the approval result names each TDS outcome (offset / not reversed on a paid entry)', async () => {
-    const s = setup(mode);
+    const s = setup();
     Object.assign(s.e('pe-b'), { status: 'FAILED', tdsSection: 'SEC_194C', tdsDeductedPaise: 1_000n });
     Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194R', tdsDeductedPaise: 600n });
     s.db.t('tdsDeductionEntry').push({ id: 't1', creditPayoutEntryId: 'pe-b', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 1_000n, createdAt: new Date('2026-11-03') });
@@ -760,7 +780,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('T-pay5 already offset (ledger net 0, stamp left) → no second offset row', async () => {
-    const s = setup(mode);
+    const s = setup();
     Object.assign(s.e('pe-b'), { status: 'FAILED', tdsSection: 'SEC_194C', tdsDeductedPaise: 1_000n });
     s.db.t('tdsDeductionEntry').push(
       { id: 't1', creditPayoutEntryId: 'pe-b', panNumber: 'ABCDE1234F', tdsDeductedThisPaise: 1_000n, createdAt: new Date('2026-11-03') },
@@ -773,7 +793,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('approve is whole-or-nothing and locks the entries in ascending id order', async () => {
-    const s = setup(mode);
+    const s = setup();
     const r = await s.service.createReversal(admin, 'b1', req(80_000, ['pe-b', 'pe-a']));
     await expect(
       s.service.patchReversal(gifsy, r.id, { action: ReversalAction.approve, approvedPaise: 50_000 }),
@@ -788,7 +808,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('a second approval of the same reversal is refused and changes nothing', async () => {
-    const s = setup(mode);
+    const s = setup();
     const r = await s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']));
     await approve(s, r.id);
     await expect(approve(s, r.id)).rejects.toThrow(/already APPROVED/);
@@ -797,7 +817,7 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 
   it('listReversals shows the held entries of an engine reversal (only)', async () => {
-    const s = setup(mode);
+    const s = setup();
     const r = await s.service.createReversal(admin, 'b1', req(80_000, ['pe-a', 'pe-b']));
     const list = await s.service.listReversals(gifsy, {} as any);
     const got = list.reversals.find((x) => x.id === r.id) as Row;
@@ -808,11 +828,10 @@ describe.each(['V2'] as const)('WP5 — %s tenant: entry-targeted PAYOUT reversa
   });
 });
 
-describe('WP5 — engine reversal approved after the flag goes back to LEGACY', () => {
-  it('is decided by its allocation rows, not the flag: approval still applies the reservation', async () => {
-    const s = setup('V2');
+describe('WP5 — an engine reversal is decided by its allocation rows', () => {
+  it('approval applies the reservation (no tenant setting is read)', async () => {
+    const s = setup();
     const r = await s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']));
-    s.settings.mode = 'LEGACY';
     await approve(s, r.id);
     expect(s.allocs(r.id)).toMatchObject([{ state: 'APPLIED_RECEIVABLE' }]);
     expect(s.reversal(r.id).shortfallPaise).toBe(30_000n);
@@ -982,7 +1001,7 @@ const FY = '2026-27';
  * 2026-27, 10% with a PAN, ₹20,000 FY limit.
  */
 function visSetup() {
-  const s = setup('V2');
+  const s = setup();
   const db = s.db;
   db.t('creditField').push({ id: 'fv', clientId: TENANT, payoutStream: 'VISIBILITY', isActive: true });
   const batch = (id: string, amount: number) =>
@@ -1235,36 +1254,39 @@ describe('Policy round B — reversing a PAID 194R payout whose TDS was DEDUCTED
 describe('Owner D1 (2026-11-19, every tenant): a 194C payout can not be reversed once PAID', () => {
   const as194CPaid = (s: ReturnType<typeof setup>) => Object.assign(s.e('pe-a'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT' });
 
-  it.each(['LEGACY', 'SHADOW'] as const)('%s: a request that needs the PAID 194C entry is refused with the owner wording', async (mode) => {
-    const s = setup(mode);
+  it('pre-retirement pending (interim path): a request that needs the PAID 194C entry is refused at approval with the owner wording', async () => {
+    const s = setup();
     as194CPaid(s);
-    await expect(s.service.createReversal(admin, 'b1', req(30_000))).rejects.toThrow(
+    const r = await preRetirementPending(s, 30_000);
+    await expect(approve(s, r.id)).rejects.toThrow(
       /^194C payouts can't be reversed once paid — this payout \(₹300\.00\) already reached the retailer/,
     );
-    // an unpaid entry of the same outlet + field still reverses as before
-    const r = await s.service.createReversal(admin, 'b1', req(50_000));
-    await approve(s, r.id);
+    expect(s.reversal(r.id).status).toBe('PENDING_GIFSY');
+    // an unpaid entry of the same outlet + field still reverses
+    await reject(s, r.id);
+    const r2 = await preRetirementPending(s, 50_000);
+    await approve(s, r2.id);
     expect(s.e('pe-b').status).toBe('REVERSED');
     expect(s.e('pe-a').status).toBe('PAID');
   });
 
-  it('LEGACY: an entry paid AFTER the request was raised is refused at approval (the admin rejects it instead)', async () => {
-    const s = setup('LEGACY');
+  it('pre-retirement pending: an entry paid AFTER the request was raised is refused at approval (the admin rejects it instead)', async () => {
+    const s = setup();
     Object.assign(s.e('pe-b'), { tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT' });
-    const r = await s.service.createReversal(admin, 'b1', req(50_000));
+    const r = await preRetirementPending(s, 50_000);
     Object.assign(s.e('pe-b'), { status: 'PAID' }); // the UTR came in meanwhile
     await expect(approve(s, r.id)).rejects.toThrow(/194C payouts can't be reversed once paid/);
     expect(s.reversal(r.id).status).toBe('PENDING_GIFSY');
   });
 
-  it('LEGACY: a legacy visibility row with no frozen section is 194C by default — refused too', async () => {
-    const s = setup('LEGACY');
+  it('a legacy visibility row with no frozen section is 194C by default — blocked in the picker too', async () => {
+    const s = setup();
     s.db.t('creditField').push({ id: 'f1', clientId: TENANT, payoutStream: 'VISIBILITY', isActive: true });
-    await expect(s.service.createReversal(admin, 'b1', req(30_000))).rejects.toThrow(/194C payouts can't be reversed once paid/);
+    await expect(s.service.createReversal(admin, 'b1', req(30_000, ['pe-a']))).rejects.toThrow(/194C payouts can't be reversed once paid/);
   });
 
   it('V2: the picker shows the PAID 194C entry blocked with the reason; selecting it is refused; approve refuses one paid since', async () => {
-    const s = setup('V2');
+    const s = setup();
     as194CPaid(s);
     const res = await s.service.listPayoutReversalEntries(admin, 'b1', { outletId: 'O1', fieldId: 'f1' });
     expect(res.entries.find((c) => c.id === 'pe-a')).toMatchObject({ selectable: false, blockedBy: 'PAID_194C' });
@@ -1559,7 +1581,7 @@ describe('Fix round B — H1 / D1 / D3 / D4 / D5', () => {
   });
 
   it('D5: typed remarks are saved on create (requestRemarks) and approve / reject (remarks), and audited', async () => {
-    const s = setup('V2');
+    const s = setup();
     const r1 = await s.service.createReversal(admin, 'b1', { ...req(50_000, ['pe-b']), remarks: '  wrong outlet  ' });
     expect(s.reversal(r1.id).requestRemarks).toBe('wrong outlet');
     expect(s.db.t('auditLog').find((a) => a.action === 'CREATE')!.metadata).toMatchObject({ remarks: 'wrong outlet' });
@@ -1573,9 +1595,9 @@ describe('Fix round B — H1 / D1 / D3 / D4 / D5', () => {
     expect(s.db.t('auditLog').find((a) => a.action === 'APPROVE')!.metadata).toMatchObject({ remarks: 'ok' });
   });
 
-  it('D5 LEGACY tenant: the requester\'s remarks are saved too (every tenant)', async () => {
-    const s = setup('LEGACY');
-    const r = await s.service.createReversal(admin, 'b1', { ...req(50_000), remarks: 'customer returned stock' });
+  it('D5 pre-retirement pending reversal: the approver\'s remarks are saved on the interim path too', async () => {
+    const s = setup();
+    const r = await preRetirementPending(s, 50_000, 'customer returned stock');
     expect(s.reversal(r.id).requestRemarks).toBe('customer returned stock');
     await s.service.patchReversal(gifsy, r.id, { action: ReversalAction.approve, remarks: 'approved after call' });
     expect(s.reversal(r.id).remarks).toBe('approved after call');

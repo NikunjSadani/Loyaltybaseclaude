@@ -45,37 +45,13 @@ export interface OutletTypeOption {
  */
 
 /**
- * Per-tenant POINTS reversal engine (WALLET-REVERSAL-ENGINE-DESIGN.md §9 step 5). Stored as the
- * program_settings row `reversalEngine`; absent ⇒ LEGACY.
- *  - LEGACY: today's floor-0 clawback + the Q14 interim refusal on debt wallets (byte-identical balances).
- *  - SHADOW: LEGACY is applied; the v2 result is computed alongside and the diff is recorded (audit log).
- *  - V2:     the position-based engine (applyCreditReversal).
+ * RETIRED (2026-11-21, owner: "move Deoleo to it and completely retire the old engine"): the per-tenant POINTS
+ * reversal engine mode. Every tenant now runs the one position-based engine (WalletService.applyCreditReversal); there
+ * is no LEGACY / SHADOW mode and no switch. A `reversalEngine` program_settings row left behind (e.g. Bajaj staging's
+ * 'V2') is IGNORED — nothing reads it. The key stays reserved only so the generic settings upsert keeps refusing it
+ * (AdminCoreService.upsertSetting) — nobody can write a value that looks like it means something.
  */
-export const REVERSAL_ENGINE_MODES = ['LEGACY', 'SHADOW', 'V2'] as const;
-export type ReversalEngineMode = (typeof REVERSAL_ENGINE_MODES)[number];
 export const REVERSAL_ENGINE_SETTING_KEY = 'reversalEngine';
-
-export function isReversalEngineMode(v: unknown): v is ReversalEngineMode {
-  return typeof v === 'string' && (REVERSAL_ENGINE_MODES as readonly string[]).includes(v);
-}
-
-/**
- * The stored `reversalEngine` value is not one of LEGACY | SHADOW | V2 (fix round A, M1). POINTS reversal
- * create / approve / attention FAIL CLOSED on it (this 400); normal points activity (earn, redeem, expiry, batch
- * confirm) treats it as LEGACY and says so loudly — WalletService.movementEngineMode + the attention banner.
- */
-export class InvalidReversalEngineSettingException extends BadRequestException {
-  constructor(public readonly value: unknown) {
-    super(
-      `Invalid reversalEngine setting for this tenant (${JSON.stringify(value)}); expected one of ${REVERSAL_ENGINE_MODES.join(' | ')} — contact Gifsy`,
-    );
-  }
-}
-
-/** M1 call-out wording (attention endpoint + banner + logs). */
-export function reversalEngineInvalidWarning(value: unknown): string {
-  return `reversalEngine setting is invalid: ${JSON.stringify(value)} — treated as LEGACY; fix in settings`;
-}
 
 /**
  * Per-tenant "POINTS reversal approvals paused" switch (WALLET-REVERSAL-ENGINE-DESIGN.md §9.1, owner Q5 2026-11-16):
@@ -607,34 +583,10 @@ export class TenantSettingsService {
   }
 
   /**
-   * UNCACHED read of the per-tenant reversal engine mode (WALLET-REVERSAL-ENGINE-DESIGN.md §9 step 5) — the
-   * program_settings row `reversalEngine` holding the string 'LEGACY' | 'SHADOW' | 'V2'.
-   *  - ABSENT row → 'LEGACY' (the default for every tenant: Deoleo and Bajaj keep today's reversal behaviour).
-   *  - A present but malformed value THROWS InvalidReversalEngineSettingException (fail closed on the money path: a
-   *    typo must never silently pick an engine). A read error propagates for the same reason — the reversal is
-   *    refused, never run on a guess. Normal points activity reads it via WalletService.movementEngineMode instead,
-   *    which treats the malformed value as LEGACY and says so (fix round A, M1).
-   *  - Written ONLY by WalletService.setReversalEngineMode (POST /v1/admin/credits/reversal-engine/mode — M2).
-   * Uncached like getPointsEngineFlagsUncached: a rollout / rollback flip must take effect fleet-wide at once.
-   * `db`: pass the CALLER's transaction when the caller holds row locks (e.g. a wallet FOR UPDATE) — reading on
-   * this service's own client would take a SECOND pool connection while the first is held, and ≥ pool-size
-   * concurrent lock holders then starve each other (WP7 pool test). Omitted → this service's client.
-   */
-  async getReversalEngineModeUncached(clientId: string, db: SettingsReader = this.prisma): Promise<ReversalEngineMode> {
-    const row = await db.programSetting.findUnique({
-      where: { clientId_settingKey: { clientId, settingKey: REVERSAL_ENGINE_SETTING_KEY } },
-      select: { settingValue: true },
-    });
-    if (!row) return 'LEGACY';
-    const v = row.settingValue;
-    if (isReversalEngineMode(v)) return v;
-    throw new InvalidReversalEngineSettingException(v);
-  }
-
-  /**
    * UNCACHED read of the POINTS-reversal pause switch (owner Q5). Absent row ⇒ not paused; `{ paused: false }` ⇒ not
    * paused; `{ paused: true, … }` ⇒ paused; anything else ⇒ paused + `malformed` (fail closed). Pass the caller's
-   * `tx` (same reason as getReversalEngineModeUncached).
+   * `tx` when the caller holds row locks — reading on this service's own client would take a SECOND pool connection
+   * while the first is held, and ≥ pool-size concurrent lock holders then starve each other (WP7 pool test).
    */
   async getPointsReversalPauseUncached(clientId: string, db: SettingsReader = this.prisma): Promise<PointsReversalPause> {
     const row = await db.programSetting.findUnique({

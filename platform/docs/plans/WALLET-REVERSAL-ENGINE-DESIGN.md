@@ -22,6 +22,79 @@
 | **Fix round 3 + D1–D3 (2026-11-19)** | One "points owed" definition (D1); liability = positive balances everywhere with the split explained (D2, platform-wide); D3 not required (known limitation); A4–A8, B1–B7 — §8.8 |
 | **Not built** | WP7 missing tests · WP8 shadow-diff report · REPLAY tool (rollout: replay Bajaj's past reversals on a data copy → V2) · dual money audit · staging run |
 | **Remaining effort** | ~7–8 h wall-clock with parallel agents (§13) |
+| **⚠️ LEGACY RETIRED (2026-11-21)** | Owner (platform-wide, approved): "the new engine is better; move Deoleo to it and completely retire the old engine." Branch `feat/retire-legacy-wallet-engine` — **read §0 first; it overrides every LEGACY / SHADOW / mode-switch passage below** (kept as history). |
+
+---
+
+## 0. LEGACY retired — one engine for every tenant (2026-11-21, branch `feat/retire-legacy-wallet-engine`)
+
+**What changed (every tenant — Deoleo, Bajaj, every future client):**
+- **No engine mode.** The per-tenant `reversalEngine` setting (LEGACY | SHADOW | V2), its reader, the GIFSY switch
+  `POST /v1/admin/credits/reversal-engine/mode` (+ DTO, audit entity `REVERSAL_ENGINE_MODE`) and the SHADOW diff are
+  deleted. An old `reversalEngine` row (Bajaj staging has `V2`) is **ignored** — nothing reads it; the generic
+  settings PUT still refuses the key ("retired — nothing was changed"). The §9.1 maintenance **pause stays** (the
+  backfill uses it).
+- **POINTS reversals** (create + approve) are always the position engine (§6): receiving wallet(s), oldest credit
+  first, over-reversal → debt repaid from future earnings. The LEGACY floor-0 clawback (`clawbackAward`), the Q14
+  debt refusal (`assertPointsReversalAllowed`, `DEBT_REVERSAL_PAUSED_MESSAGE`), the legacy credit pairing
+  (`findOriginalBatchCredit` / `pairLegacyBatchCredits` / `creditedPointsForBatchRow`) and the legacy stored-rows
+  POINTS cap are deleted, with their tests and the LEGACY golden fixture
+  (`api/src/credits/__fixtures__/legacy-reversal-golden.json`) — status-table mentions of it below are history.
+- **PAYOUT reversals** always name and reserve whole entries (§8). A PAYOUT reversal still PENDING from before the
+  retirement (no allocation rows) is approved through the interim whole-entry path — kept only so no pending request
+  is stranded (decided by the data, as before).
+- **Movements:** a SEQUENCED or PRISTINE wallet is always written by the tracked path (seq / pointsDelta / D /
+  positions). Before, on a LEGACY tenant (every prod tenant) even a brand-new wallet was written UN-sequenced. Only a
+  wallet that already has un-sequenced history keeps the pre-engine write path (owner Q1: never block earn / redeem,
+  never a mixed history) — logged loudly.
+- **Batch confirm:** the B9 ascending wallet pre-lock runs for every tenant; the confirm no longer takes the (mode)
+  shared advisory lock.
+
+**SAFETY GATE (the one rule that replaces the mode switch's precondition):** before any POINTS reversal is created or
+approved, every wallet that received that (batch, outlet, field) credit — and, when no credit position exists, the
+outlet's current partner's wallet — must be sequenced or pristine. Otherwise the request is REFUSED, loudly, with
+nothing written:
+- history but `movementSeq = 0` and not BLOCKED → **409 `WALLET_NOT_SEQUENCED`**: "Can't reverse: the wallet of
+  outlet X (program Y) has points history that has not been prepared for reversals yet. Gifsy must run the wallet
+  backfill for Y first, then retry. Nothing was changed …";
+- BLOCKED by the backfill → 409 `WALLET_NEEDS_ATTENTION` with the backfill's reason (unchanged);
+- every refusal is audited (`REVERSAL_ENGINE_REFUSAL`) and listed on the attention banner. Never a fall-back to
+  "subtract from the balance", never a partial apply.
+
+**Readiness (never silent):** `GET /v1/admin/credits/reversal-engine/attention` → `readiness { unsequencedWithHistory,
+blocked, ready, message }` for every tenant (the `mode` / `effectiveMode` / `modeWarning` fields are gone); the
+credits → Payout Status banner mounts for every tenant and shows the message; the Daily Ops Digest adds "N wallets
+with points history not yet prepared for reversals — run the wallet backfill" (+ blocked) when > 0. Predicate:
+`movementSeq = 0` AND backfillStatus NULL/DONE AND (any balance / counter ≠ 0 OR any transaction row).
+
+**Tenants at the retirement:** Bajaj prod — backfill APPLIED 2026-11-21 (2,281 wallets sequenced, 0 blocked, 0
+un-sequenced with history, 8 debt wallets 3,549 pts); **no switch call is needed**. ⚠️ Until this release deploys,
+prod still runs LEGACY, so any Bajaj wallet created / first credited after the backfill is written un-sequenced —
+check the readiness line after deploy and re-run the Bajaj backfill if it is > 0. Deoleo — 98 wallets, zero wallet
+transactions: **nothing to backfill**; its first movements are sequenced from seq 1. Bajaj staging — already V2
+(its `reversalEngine` row is now ignored).
+
+**Fix round after the dual audit (2026-11-21, no blocker / no number-changing bug):**
+- A1: every POINTS reversal created now gets a marker audit row (`POINTS_REVERSAL_ENGINE_MARKER`, entityId = reversal
+  id, same transaction). Approve refuses a POINTS reversal without it (409 `RAISED_UNDER_OLD_ENGINE`: "raised under the
+  old reversal engine … reject it and re-raise it") — never a silent switch of rules. Prod had 0 reversals at the
+  retirement; Bajaj staging's pending POINTS reversals must be re-raised. Reject needs no marker.
+- B1: `WALLET_NOT_SEQUENCED` names the client by display name (`branding.displayName` → `internalName` → slug) and
+  the next step "Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see
+  BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C" (same wording in the readiness line and the digest bullet).
+- A2: the unsequenced-movement warning is logged once per wallet per hour per process, with a running counter.
+- A3: with no credit position, the gate also checks wallets holding a pre-metadata credit of the batch (no
+  outletCode; `{fieldId}` of this field or nothing) for exactly a batch-row amount of the line — a previous partner.
+- A4: batch confirm keeps ONE atomic transaction (chunking would risk a partially credited batch); instead a
+  redemption takes its wallet row lock first with `lock_timeout 5s` and, if a confirm holds it, refuses with "Points
+  are being updated for this wallet right now … try again in a minute. Nothing was deducted."
+- Post-deploy check for every tenant, rollback note (prefer forward fix) and the Deoleo retailer-visible change:
+  `BAJAJ-PROD-FOLLOWUPS-RUNBOOK.md` §C-POST / "Rollback of the retirement release" / "Deoleo — what changes".
+
+**Migrating a client with imported points history (playbook rule):** import → run the wallet backfill (DRY RUN →
+backup → APPLY → VERIFY, §9.1) **before the client's first points reversal**. The readiness line shows "N wallets not
+yet prepared" until it is done, and every reversal touching such a wallet is refused (`WALLET_NOT_SEQUENCED`).
+A brand-new client with no imported history needs nothing.
 
 ---
 

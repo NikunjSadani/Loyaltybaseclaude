@@ -9,9 +9,10 @@
  *    redeeming on them keep working, only reversals are refused;
  *  - credits that couldn't be mapped to an outlet line (reversals of that line refused until Gifsy maps them);
  *  - historical clawbacks that took more than the wallet held: "recovered X, owed Y";
- *  - (fix round A) a malformed engine setting, LOUD and up front: "treated as LEGACY; fix in settings" (points activity
- *    keeps working on today's rules, reversals are refused); expiry-sweep lots that failed (retried by the next run);
+ *  - readiness, LOUD and up front: wallets with points history not yet prepared for reversals (Gifsy must run the
+ *    wallet backfill before any points reversal); expiry-sweep lots that failed (retried by the next run);
  *    reversals refused because Gifsy must act (e.g. a credit with no position on a sequenced wallet).
+ * Every tenant runs the same reversal rules (the per-tenant engine mode was retired), so this mounts for everyone.
  * Data: GET /api/admin/credits/reversal-engine/attention. Renders nothing when nothing needs attention.
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -53,11 +54,8 @@ interface OwedClawback {
 export interface ReversalAttention {
   /** The program these call-outs are about — "Resume approvals" targets exactly this one (fix round A, L6). */
   clientId?: string;
-  mode: string;
-  modeError: string | null;
-  /** Fix round A, M1: set when the stored engine value is malformed / unreadable. */
-  modeWarning?: string | null;
-  effectiveMode?: string;
+  /** Whether the program's wallets are prepared for points reversals; `message` is a plain-words line when not ready. */
+  readiness?: { unsequencedWithHistory: number; blocked: number; ready: boolean; message: string | null };
   pause: { paused: boolean; since: string | null; by: string | null; reason: string | null; malformed?: boolean };
   wallets: AttentionWallet[];
   walletsTotal: number;
@@ -176,19 +174,23 @@ export default function ReversalEngineAttentionBanner({ canLiftPause = false }: 
   const untracked = data.expiryUntracked ?? [];
   if (untrackedTotal > 0) parts.push(`${untrackedTotal} reversal${untrackedTotal === 1 ? '' : 's'} of a credit whose expiry history is unknown (last 30 days)`);
   if (refusalTotal > 0) parts.push(`${refusalTotal} points reversal${refusalTotal === 1 ? '' : 's'} refused — Gifsy must act (last 30 days)`);
-  if (data.modeError && !data.modeWarning) parts.push('reversal engine setting unreadable');
-  if (!paused && parts.length === 0 && !data.modeWarning) return null;
+  const notReady = !!data.readiness && !data.readiness.ready;
+  const readinessMessage = notReady
+    ? data.readiness?.message ||
+      'Some wallets with points history are not yet prepared for reversals — Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C'
+    : null;
+  if (!paused && parts.length === 0 && !readinessMessage) return null;
 
   return (
     <section
       aria-label="Points reversal call-outs"
       className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 space-y-2"
     >
-      {data.modeWarning && (
-        // M1: never buried in the details — a malformed engine setting is shown up front.
-        <div className="flex items-start gap-2" role="alert">
+      {readinessMessage && (
+        // Never buried in the details — wallets not prepared for reversals are shown up front.
+        <div className="flex items-start gap-2" role="alert" data-testid="attention-readiness">
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-red-700" aria-hidden />
-          <p className="font-semibold text-red-800 break-words">{data.modeWarning}</p>
+          <p className="font-semibold text-red-800 break-words">{readinessMessage}</p>
         </div>
       )}
       {paused && (
@@ -234,7 +236,6 @@ export default function ReversalEngineAttentionBanner({ canLiftPause = false }: 
       )}
       {open && (
         <div className="space-y-3 text-xs">
-          {data.modeError && !data.modeWarning && <p className="text-red-700">{data.modeError}</p>}
           {refusals.length > 0 && (
             <div>
               <p className="font-semibold mb-1">Points reversals refused — Gifsy must act ({refusalTotal})</p>

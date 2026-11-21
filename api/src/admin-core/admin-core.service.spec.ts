@@ -1070,8 +1070,8 @@ describe('AdminCoreService', () => {
       expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
     });
 
-    // Wallet Reversal Engine fix round A, M2: the reversal-engine money switches are NEVER written by the generic
-    // upsert — not even with allowPlatformOnlyKey (their dedicated GIFSY_ADMIN endpoints write the row themselves).
+    // Wallet Reversal Engine: the POINTS reversal pause and the RETIRED engine-mode key are NEVER written by the generic
+    // upsert — not even with allowPlatformOnlyKey (the pause has its dedicated GIFSY_ADMIN endpoint; the mode is gone).
     it.each([
       ['reversalEngine', 'V2'],
       ['reversalEngine', 'LEGACY'],
@@ -1080,6 +1080,13 @@ describe('AdminCoreService', () => {
       await expect(service.upsertSetting(gifsy, { key, value })).rejects.toBeInstanceOf(ForbiddenException);
       await expect(service.upsertSetting(gifsy, { key, value }, { allowPlatformOnlyKey: true })).rejects.toBeInstanceOf(
         ForbiddenException,
+      );
+      expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+    });
+
+    it('the retired reversalEngine key is refused with plain words: the mode is retired, nothing changed', async () => {
+      await expect(service.upsertSetting(gifsy, { key: 'reversalEngine', value: 'V2' })).rejects.toThrow(
+        'The points reversal engine mode was retired — every program uses the same reversal engine. Nothing was changed.',
       );
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
     });

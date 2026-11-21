@@ -11,9 +11,9 @@ import ReversalEngineAttentionBanner, { type ReversalAttention, untrackedWallets
 const ATTENTION = '/api/admin/credits/reversal-engine/attention';
 const PAUSE = '/api/admin/credits/reversal-engine/pause';
 
+// No `mode` field — the per-tenant engine mode was retired; every tenant gets the same payload shape.
 const base = (over: Partial<ReversalAttention> = {}): ReversalAttention => ({
-  mode: 'V2',
-  modeError: null,
+  readiness: { unsequencedWithHistory: 0, blocked: 0, ready: true, message: null },
   pause: { paused: false, since: null, by: null, reason: null },
   wallets: [],
   walletsTotal: 0,
@@ -87,14 +87,40 @@ describe('ReversalEngineAttentionBanner', () => {
   });
 
   // ── Wallet Reversal Engine fix round A ──
-  it('M1: a malformed engine setting is shown LOUDLY up front (no expand needed), even with nothing else to report', async () => {
-    const warning =
-      'reversalEngine setting is invalid: "v2" — treated as LEGACY; fix in settings. Earning, redeeming, expiry and batch confirms run on today\'s (LEGACY) rules';
-    mockFetch([base({ mode: 'INVALID', modeError: 'Invalid reversalEngine setting', modeWarning: warning, effectiveMode: 'LEGACY' })]);
+  it('readiness: wallets not prepared for reversals are shown LOUDLY up front (no expand needed), even with nothing else to report', async () => {
+    const message =
+      '12 wallets with points history are not yet prepared for reversals — Gifsy must run the wallet backfill for this program before any points reversal';
+    mockFetch([base({ readiness: { unsequencedWithHistory: 12, blocked: 0, ready: false, message } })]);
     render(<ReversalEngineAttentionBanner />);
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('reversalEngine setting is invalid: "v2" — treated as LEGACY; fix in settings');
-    expect(screen.queryByText('reversal engine setting unreadable')).toBeNull(); // not duplicated
+    expect(alert).toHaveTextContent(message);
+    expect(screen.getByTestId('attention-readiness')).toBe(alert);
+    expect(screen.queryByText(/V2|LEGACY|engine mode/)).toBeNull(); // plain words only
+  });
+
+  it('readiness: not ready without a server message still says so in plain words', async () => {
+    mockFetch([base({ readiness: { unsequencedWithHistory: 3, blocked: 1, ready: false, message: null } })]);
+    render(<ReversalEngineAttentionBanner />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/not yet prepared for reversals/);
+  });
+
+  it('readiness: no readiness line when ready (and nothing else → renders nothing)', async () => {
+    mockFetch([base({ readiness: { unsequencedWithHistory: 0, blocked: 0, ready: true, message: 'should not show' }, walletsTotal: 1, wallets: [
+      { walletId: 'w1', partnerName: 'Shop A', outletCodes: ['O1'], status: 'BLOCKED', reason: 'x' },
+    ] })]);
+    render(<ReversalEngineAttentionBanner />);
+    expect(await screen.findByText('1 wallet need Gifsy attention')).toBeInTheDocument();
+    expect(screen.queryByTestId('attention-readiness')).toBeNull();
+    expect(screen.queryByText('should not show')).toBeNull();
+  });
+
+  it('mounts on a payload with no mode / readiness fields at all (renders nothing when nothing to report)', async () => {
+    const legacyShape = { ...base() } as Partial<ReversalAttention>;
+    delete legacyShape.readiness;
+    mockFetch([legacyShape as ReversalAttention]);
+    const { container } = render(<ReversalEngineAttentionBanner />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalled());
+    expect(container).toBeEmptyDOMElement();
   });
 
   it('M1 / M3: expiry failures and Gifsy-must-act reversal refusals are counted and, expanded, listed with their reasons', async () => {

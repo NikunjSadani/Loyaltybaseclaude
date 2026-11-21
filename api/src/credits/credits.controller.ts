@@ -39,7 +39,7 @@ import {
 } from './dto/credits.dto';
 import { HeavyOp } from '../common/heavy-op-limiter';
 import { WalletService } from '../wallet/wallet.service';
-import { ReversalAttentionQueryDto, ReversalEngineModeDto, ReversalPauseDto, WalletsInDebtQueryDto } from './dto/reversal-engine.dto';
+import { ReversalAttentionQueryDto, ReversalPauseDto, WalletsInDebtQueryDto } from './dto/reversal-engine.dto';
 
 /**
  * Awards & Credits (§12a) — re-homed from
@@ -380,14 +380,7 @@ export class CreditsController {
     return this.wallet.setPointsReversalPause(user, { paused: dto.paused, reason: dto.reason ?? null, clientId: dto.clientId ?? null });
   }
 
-  // Fix round A, M2 — the ONLY way to set the tenant's points reversal engine (LEGACY | SHADOW | V2). Validated, audited;
-  // refuses V2 while wallets are not prepared by the backfill or approvals are paused; LEGACY (rollback) always allowed.
-  @Post('reversal-engine/mode')
-  @Roles('GIFSY_ADMIN')
-  @RequirePermission('credits:approve_reversal')
-  setReversalEngineMode(@CurrentUser() user: JwtPayload, @Body() dto: ReversalEngineModeDto) {
-    return this.wallet.setReversalEngineMode(user, { mode: dto.mode, reason: dto.reason ?? null, clientId: dto.clientId ?? null });
-  }
+  // (POST reversal-engine/mode was removed 2026-11-21: the per-tenant engine mode is retired — one engine for all.)
 }
 
 /**

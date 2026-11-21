@@ -1,12 +1,15 @@
-// Wallet Reversal Engine — fix round A, L5 (owner decision 2026-11-16: Deoleo stays LEGACY with NO backfill until it
-// needs a reversal). Proof that an un-backfilled wallet on a LEGACY tenant takes EXACTLY today's path: the same Prisma
-// statements, in the same order, with the same arguments, and the same resulting rows — as origin/main.
+// Wallet Reversal Engine — fix round A, L5, re-scoped 2026-11-21 when the per-tenant LEGACY mode was retired: proof that
+// a wallet with UN-sequenced history (the backfill has not processed it) still takes EXACTLY the pre-engine write path:
+// the same Prisma statements, in the same order, with the same arguments — as origin/main. (A PRISTINE wallet is now
+// always sequenced, and the interim reversal gate + floor-0 clawback were deleted, so those parts of the recording are
+// no longer compared — only its MOVEMENT prefix, steps 1–6, which is unchanged.)
 //
 // How: one Deoleo-style scenario (batch credit, plain credit, redemption, refused redemption, refund, admin credit +
-// debit, the interim reversal gate, a LEGACY clawback, an expiry sweep) is driven through WalletService against an
-// in-memory database that RECORDS every statement (model.method + normalised args, raw SQL text). The recording made
-// by origin/main's WalletService (2eb8271d) is the committed fixture __fixtures__/legacy-movement-parity.origin-main.json;
-// this branch must reproduce it statement for statement. The ONLY allowed difference is documented and normalised in
+// debit; then an expiry sweep) is driven through WalletService against an in-memory database that RECORDS every
+// statement (model.method + normalised args, raw SQL text). The recording made by origin/main's WalletService
+// (2eb8271d) is the committed fixture __fixtures__/legacy-movement-parity.origin-main.json (it also holds the old
+// gate / clawback / sweep statements — kept as recorded, not regenerated); this branch must reproduce its first
+// steps-1–6 statements exactly. The ONLY allowed difference is documented and normalised in
 // `canonical()`: the fast path's wallet UPDATE carries `movementSeq: 0` in its WHERE (atomic guard against a backfill
 // sequencing the wallet between the caller's read and the write — one `UPDATE … WHERE id = $1 AND "movementSeq" = 0`,
 // still ONE statement).
@@ -172,7 +175,6 @@ function recordingDb() {
       get: (_t, prop: string) => async (...args: unknown[]) => {
         settingsCalls.push(prop);
         rec(`tenantSettings.${prop}`, args.slice(0, 1));
-        if (prop === 'getReversalEngineModeUncached') return 'LEGACY';
         if (prop === 'getConversionRate') return 1;
         return null;
       },
@@ -209,20 +211,13 @@ async function scenario() {
   const gifsy = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' } as never;
   out.adjustCredit = await svc.adjust(gifsy, { partnerId: 'cp1', type: AdjustType.CREDIT, amount: 30, reason: 'r', approvedBy: 'a' } as never);
   out.adjustDebit = await svc.adjust(gifsy, { partnerId: 'cp1', type: AdjustType.DEBIT, amount: 20, reason: 'r', approvedBy: 'a' } as never);
-  // 7. the interim POINTS-reversal gate + a LEGACY clawback of the batch credit (approve path)
-  out.gate = await (h.db.$transaction as any)((tx: unknown) =>
-    svc.assertPointsReversalAllowed(tx as never, { clientId: 'deoleo', batchId: 'B1', outletCode: 'O1', fieldId: 'F' }),
-  );
-  out.clawback = await (h.db.$transaction as any)((tx: unknown) =>
-    svc.clawbackAward('cp1', 120, {
-      referenceType: 'CREDIT_REVERSAL', referenceId: 'R1', sourceType: 'CREDIT_FIELD', sourceId: 'F',
-      description: 'Clawback for reversal R1', originalCredit: { batchId: 'B1', outletCode: 'O1', fieldId: 'F' },
-    }, tx as never),
-  );
-  // 8. the expiry sweep (the opening lot is due)
+  // The movement prefix ends here (the fixture's step 7 — the deleted interim gate + LEGACY clawback — is not replayed).
+  const movementStatements = h.log.length;
+  const movementsOut = normalise(out) as Row;
+  // 8. the expiry sweep (the opening lot is due) — on the same un-sequenced wallet, still the pre-engine clamp
   const sweep = (await svc.expireDuePoints({ now: NOW })) as Row;
   out.sweep = { expiredLots: sweep.expiredLots, expiredPoints: sweep.expiredPoints };
-  return { h, snapshot: normalise({ out, tables: h.T }) as Row, log: h.log };
+  return { h, movementStatements, movementsOut, log: h.log };
 }
 
 /**
@@ -246,30 +241,76 @@ function canonical(log: { op: string; args?: any }[]) {
   });
 }
 
-describe('L5 — LEGACY un-backfilled wallet ≡ origin/main (statement-for-statement)', () => {
-  it('same statements, same order, same arguments, same resulting rows as origin/main 2eb8271d', async () => {
-    const { snapshot, log, h } = await scenario();
-    if (process.env.WALLET_PARITY_WRITE) {
-      fs.writeFileSync(FIXTURE, JSON.stringify({ generatedFrom: IMPL, log, snapshot }, null, 2));
+/**
+ * The ONE intended addition since origin/main (audit A4, 2026-11-21): a successful redemption first takes the wallet
+ * row lock under a 5 s lock_timeout and restores the previous value — exactly these 4 statements, right after the
+ * redemption's wallet read. They are removed here EXPLICITLY (and counted), never by loosening the comparison; a
+ * refused redemption (insufficient balance) is refused before the lock, so it adds none.
+ */
+const REDEEM_LOCK = [
+  "SELECT current_setting('lock_timeout') AS v",
+  "SELECT set_config('lock_timeout', ?, true)",
+  'SELECT id FROM wallets WHERE id = ? FOR UPDATE',
+  "SELECT set_config('lock_timeout', ?, true)",
+];
+function stripRedeemLock(log: { op: string; args?: any }[]): { log: { op: string; args?: any }[]; groups: number[] } {
+  const out: { op: string; args?: any }[] = [];
+  const groups: number[] = [];
+  for (let i = 0; i < log.length; i++) {
+    const isGroup = REDEEM_LOCK.every((sql, k) => log[i + k]?.op === '$queryRaw' && log[i + k]?.args === sql);
+    if (isGroup) {
+      groups.push(out.length); // position in the stripped log (= where origin/main continues)
+      i += REDEEM_LOCK.length - 1;
+      continue;
     }
+    out.push(log[i]);
+  }
+  return { log: out, groups };
+}
+
+describe('L5 — un-sequenced wallet WITH history ≡ origin/main pre-engine path (statement-for-statement)', () => {
+  it('movements (batch credit, plain credit, redeem, refused redeem, refund, admin credit + debit): same statements, order, arguments and results as origin/main 2eb8271d — plus ONLY the A4 redemption lock', async () => {
+    const { log, movementStatements, movementsOut, h } = await scenario();
     const fixture = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
+    const stripped = stripRedeemLock(log.slice(0, movementStatements));
+    // exactly one lock group (the successful redeem), placed right after that redemption's wallet read
+    expect(stripped.groups).toHaveLength(1);
+    expect(stripped.log[stripped.groups[0] - 1]?.op).toBe('wallet.findFirst');
+    expect(log.slice(0, movementStatements).filter((e) => e.op === '$queryRaw')).toHaveLength(REDEEM_LOCK.length);
+    const prefix = stripped.log.length;
     // eslint-disable-next-line no-console
-    console.log(`[L5 parity] origin/main ${fixture.log.length} statements · this branch ${log.length} statements`);
-    expect(canonical(log)).toEqual(canonical(fixture.log));
-    expect(snapshot).toEqual(fixture.snapshot);
-    // and nothing of the engine is touched: no flag / pause read, no position, no seq
+    console.log(`[L5 parity] movement prefix: origin/main ${prefix} of ${fixture.log.length} statements compared (+${REDEEM_LOCK.length} A4 lock statements)`);
+    expect(canonical(stripped.log)).toEqual(canonical(fixture.log.slice(0, prefix)));
+    // the fixture continues with the (deleted) interim reversal gate — the prefix boundary is exact
+    expect(fixture.log[prefix]?.op).toBe('$transaction');
+    for (const k of ['credit1', 'credit2', 'redeem', 'refund', 'adjustCredit', 'adjustDebit', 'errors']) {
+      expect(movementsOut[k]).toEqual(fixture.snapshot.out[k]);
+    }
+    // nothing of the engine is touched: no tenant-setting read at all, no position, no seq — on every step incl. the sweep
     expect(h.settingsCalls).toEqual([]);
     expect(h.T.walletCreditPosition).toHaveLength(0);
     expect(h.T.walletTransaction.every((t) => t.seq === undefined && t.pointsDelta === undefined)).toBe(true);
+    expect(h.T.wallet[0].movementSeq).toBe(0);
   });
 
-  it('per-movement statement counts (the query-count proof, readable): identical to origin/main', async () => {
-    const { log } = await scenario();
+  it('per-movement statement counts (the query-count proof, readable): identical to origin/main for the movement prefix, plus exactly 4 raw lock statements (A4)', async () => {
+    const { log, movementStatements } = await scenario();
     const fixture = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
     const counts = (l: { op: string }[]) => l.reduce<Record<string, number>>((m, e) => ((m[e.op] = (m[e.op] ?? 0) + 1), m), {});
-    expect(counts(log)).toEqual(counts(fixture.log));
+    const prefix = movementStatements - REDEEM_LOCK.length;
+    const expected = counts(fixture.log.slice(0, prefix));
+    expect(expected.$queryRaw).toBeUndefined(); // origin/main issued no raw statement in these movements
+    expect(counts(log.slice(0, movementStatements))).toEqual({ ...expected, $queryRaw: REDEEM_LOCK.length });
+    // no tenant lookup per movement (the retired engine-mode read needed one)
     expect(log.filter((e) => e.op === 'channelPartner.findFirst')).toHaveLength(
-      fixture.log.filter((e: { op: string }) => e.op === 'channelPartner.findFirst').length,
+      fixture.log.slice(0, prefix).filter((e: { op: string }) => e.op === 'channelPartner.findFirst').length,
     );
+  });
+
+  it('the expiry sweep on that wallet stays on the pre-engine clamp (no seq, no position) and never fails', async () => {
+    const { h, log, movementStatements } = await scenario();
+    const sweepOps = log.slice(movementStatements).map((e) => e.op);
+    expect(sweepOps).not.toContain('walletCreditPosition.findFirst');
+    expect(h.T.walletTransaction.filter((t) => t.transactionType === 'DEBIT_EXPIRY').every((t) => t.seq === undefined)).toBe(true);
   });
 });

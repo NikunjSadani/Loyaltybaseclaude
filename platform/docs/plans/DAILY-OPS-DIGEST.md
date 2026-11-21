@@ -109,6 +109,7 @@ Labels used below:
 | | fast-tracked | GIFSY-reject fast-track (Bajaj flag `gifsyRejectFastTrack`): a KYC whose PENDING_GIFSY history holds the marked DRAFT→PENDING_GIFSY row (`isFastTrackRow`, `api/src/kyc/kyc-fast-track.helper.ts` — the same predicate as the admin dashboard's field-chain exclusion; marker only, never the bare edge). It skipped the field chain, so it is **never a field-SLA item**. At Gifsy it ages on the Gifsy clock and is shown as "of which fast-tracked (skipped field)". At a field status (no code path does this today) it is left out of the field SLA and called out in red + as an attention item. Read from the same history rows (no extra query). |
 | Points | credited / redeemed / expired | `PointsLedger` `EARN` / `REDEEM` / `EXPIRE` points summed over `createdAt` in window (tenant via `wallet.partner.clientId`). Redeemed and expired are shown as absolute values. |
 | | negative wallets | `Wallet.redeemablePoints < 0` (now) |
+| | not ready for reversals (since 2026-11-21, every tenant) | wallets with points history the wallet backfill has not sequenced (`movementSeq = 0`, backfillStatus NULL/DONE, any balance/counter ≠ 0 or any transaction) and BLOCKED wallets (`backfillStatus = BLOCKED`, `movementSeq = 0`) — `unsequencedWithHistoryWhere` / `blockedWalletsWhere` in `wallet.service.ts`, the same counts as the credits-screen readiness line. Shown only when > 0. |
 | Redemptions | requested | `RedemptionOrder.createdAt` in window |
 | | completed / failed | `RedemptionStatusHistory.toStatus = DELIVERED / FAILED`, `createdAt` in window |
 | | failed list (≤ 10) | Latest FAILED history rows. Shows the outlet (`partner.businessName (partnerCode)`), the reward (`reward.name`) and the reason (`order.cancelReason`, falling back to the history `notes`). |
@@ -159,6 +160,7 @@ Each tenant section starts with a bullet list of every abnormal item. A window f
 figure are ONE bullet (they overlap), e.g. "1 payout failed or returned in the window (still open: …)":
 - KYCs breaching the Gifsy SLA or the field SLA
 - negative wallets
+- wallets not yet prepared for points reversals ("run the wallet backfill") and wallets blocked by the backfill
 - failed redemptions — ONE bullet with the Hubble share and the not-refunded count inside it ("3 redemptions failed in
   the window, 2 via Hubble (1 still holding points, not refunded)"); a separate "Hubble: N vouchers failed" bullet
   appears only if the Redemptions section itself failed to load; with no failure in the window: "Still open: …"

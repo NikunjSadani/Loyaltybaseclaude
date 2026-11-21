@@ -4,6 +4,7 @@ import { loadHolidaySet } from '../../common/holiday-calendar';
 import { loadBillingProgress } from '../../admin-core/dashboards/billing-progress';
 import { digestWindow } from './daily-ops-digest-report';
 import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../rewards/rewards.service';
+import { blockedWalletsWhere, unsequencedWithHistoryWhere } from '../../wallet/wallet.service';
 
 jest.mock('../../common/holiday-calendar', () => ({ loadHolidaySet: jest.fn().mockResolvedValue(new Set<string>()) }));
 // The dashboard loader has its own spec; here only its wiring is checked (the real summarize maps it).
@@ -107,7 +108,11 @@ function makePrisma() {
     kycSubmission: { count: jest.fn().mockResolvedValue(0) },
     kycStatusHistory: { count: jest.fn().mockResolvedValue(0) },
     pointsLedger: { groupBy: jest.fn().mockResolvedValue([]) },
-    wallet: { aggregate: jest.fn().mockResolvedValue({ _count: { _all: 0 }, _sum: { redeemablePoints: null } }) },
+    wallet: {
+      aggregate: jest.fn().mockResolvedValue({ _count: { _all: 0 }, _sum: { redeemablePoints: null } }),
+      // reversal readiness (engine retired 2026-11-21): un-sequenced-with-history + BLOCKED counts
+      count: jest.fn().mockResolvedValue(0),
+    },
     redemptionOrder: { count: jest.fn().mockResolvedValue(0) },
     redemptionStatusHistory: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
     creditBatch: { aggregate: jest.fn().mockResolvedValue(zeroAgg) },
@@ -798,6 +803,25 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       _count: { _all: true },
       _sum: { redeemablePoints: true },
     });
+    // no readiness figures when both counts are 0 (section unchanged)
+    expect(p.ok && p.data).not.toHaveProperty('walletsNotSequenced');
+    expect(p.ok && p.data).not.toHaveProperty('walletsBlocked');
+  });
+
+  it('points (engine retired 2026-11-21): reversal readiness — un-sequenced-with-history and BLOCKED wallet counts', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    prisma.wallet.count.mockImplementation(({ where }: any) =>
+      Promise.resolve(where.backfillStatus === 'BLOCKED' ? 2 : 12),
+    );
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN);
+    const p = input.tenants[0].points;
+    expect(p.ok && p.data).toMatchObject({ walletsNotSequenced: 12, walletsBlocked: 2 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const wheres = prisma.wallet.count.mock.calls.map((c: any[]) => c[0].where);
+    // both counts are tenant-scoped and only un-sequenced wallets (the readiness predicates)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bajaj = wheres.filter((w: any) => w.partner?.clientId === 'bajaj');
+    expect(bajaj).toEqual(expect.arrayContaining([unsequencedWithHistoryWhere('bajaj'), blockedWalletsWhere('bajaj')]));
   });
 
   it('redemptions: still-open = FAILED orders still holding points', async () => {

@@ -2,15 +2,29 @@
 // GET /v1/admin/credits/reversal-engine/attention (WalletService.reversalAttention), the GIFSY pause switch
 // (WalletService.setPointsReversalPause), the pause parser + tx-routed settings reads (TenantSettingsService), and the
 // pure Q3 narrowing helpers (reversal-policy.ts).
-import { WalletService } from './wallet.service';
+import { blockedWalletsWhere, readinessOf, unsequencedWithHistoryWhere, WalletService } from './wallet.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { parsePointsReversalPause, TenantSettingsService } from '../tenant/tenant-settings.service';
-import { approvalsPausedMessage, batchLineAmount, creditUnmappedMessage, unresolvedBlockingLine } from './reversal-policy';
+import {
+  approvalsPausedMessage,
+  batchLineAmount,
+  creditUnmappedMessage,
+  unresolvedBlockingLine,
+  walletNotSequencedMessage,
+  walletsNotSequencedReadinessMessage,
+} from './reversal-policy';
 
+/**
+ * `oldEngineRow`: what a left-behind `reversalEngine` program_settings row holds (the per-tenant mode was RETIRED
+ * 2026-11-21 — the value must be ignored, whatever it is). `pendingCount` / `blockedCount`: the wallet counts.
+ */
 function attentionHarness(
-  mode: 'LEGACY' | 'SHADOW' | 'V2' | 'BAD',
+  oldEngineRow: unknown,
   pauseValue: unknown = undefined,
-  opts: { expiryRows?: any[]; refusalRows?: any[]; walletCount?: number; cappedRows?: any[]; untrackedRows?: any[] } = {},
+  opts: {
+    expiryRows?: any[]; refusalRows?: any[]; cappedRows?: any[]; untrackedRows?: any[];
+    pendingCount?: number; blockedCount?: number;
+  } = {},
 ) {
   const calls: Record<string, any[]> = {};
   const rec = (k: string, ret: unknown) =>
@@ -36,11 +50,11 @@ function attentionHarness(
           : refusalRows;
   const prisma = {
     wallet: {
-      // `NOT` = the V2-flip "not prepared by the backfill" query (fix round A, M2)
-      count: rec('wallet.count', (a: any) => (a.where.NOT ? opts.walletCount ?? 0 : a.where.backfillStatus === 'BLOCKED' ? 1 : 1)),
-      findMany: rec('wallet.findMany', (a: any) =>
-        a.where.NOT ? Array.from({ length: Math.min(opts.walletCount ?? 0, a.take ?? 99) }, (_, i) => ({ id: `w-u${i}` })) : a.where.backfillStatus === 'BLOCKED' ? blocked : pending,
+      // BLOCKED query = blockedWalletsWhere (backfillStatus 'BLOCKED'); the other = unsequencedWithHistoryWhere
+      count: rec('wallet.count', (a: any) =>
+        a.where.backfillStatus === 'BLOCKED' ? opts.blockedCount ?? 1 : opts.pendingCount ?? 1,
       ),
+      findMany: rec('wallet.findMany', (a: any) => (a.where.backfillStatus === 'BLOCKED' ? blocked : pending)),
     },
     outlet: { findMany: rec('outlet.findMany', [{ partnerId: 'p-b', outletCode: 'O2' }, { partnerId: 'p-b', outletCode: 'O1' }]) },
     walletCreditPosition: {
@@ -61,7 +75,7 @@ function attentionHarness(
     programSetting: {
       findUnique: rec('programSetting.findUnique', (a: any) => {
         const key = a.where.clientId_settingKey.settingKey;
-        if (key === 'reversalEngine') return mode === 'BAD' ? { settingValue: 'v2' } : { settingValue: mode };
+        if (key === 'reversalEngine') return oldEngineRow === undefined ? null : { settingValue: oldEngineRow };
         return pauseValue === undefined ? null : { settingValue: pauseValue };
       }),
       upsert: rec('programSetting.upsert', {}),
@@ -81,18 +95,23 @@ function attentionHarness(
 }
 
 describe('GET reversal-engine/attention (WalletService.reversalAttention)', () => {
-  it('V2 tenant: BLOCKED + not-yet-backfilled wallets with reasons, unmapped credits, "recovered X, owed Y", pause state', async () => {
+  it('every tenant: BLOCKED + not-yet-backfilled wallets with reasons, unmapped credits, "recovered X, owed Y", pause state', async () => {
     const SINCE = '2026-11-16T03:00:00.000Z';
-    const { svc, calls } = attentionHarness('V2', { paused: true, since: SINCE, by: 'wallet-backfill', reason: 'APPLY' });
+    const { svc, calls } = attentionHarness(undefined, { paused: true, since: SINCE, by: 'wallet-backfill', reason: 'APPLY' });
     const r = await svc.reversalAttention('bajaj');
-    expect(r.mode).toBe('V2');
+    // the retired engine mode is gone from the response
+    expect(r).not.toHaveProperty('mode');
+    expect(r).not.toHaveProperty('effectiveMode');
+    expect(r).not.toHaveProperty('modeWarning');
+    expect(r).not.toHaveProperty('modeError');
     expect(r.pause).toEqual({ paused: true, since: SINCE, by: 'wallet-backfill', reason: 'APPLY' });
     expect(r.walletsTotal).toBe(2);
     expect(r.wallets.map((w) => [w.walletId, w.status, w.reason, w.outletCodes])).toEqual([
       ['w-b', 'BLOCKED', 'CHAIN_BROKEN: x', ['O1', 'O2']],
       ['w-n', 'NOT_BACKFILLED', 'not yet prepared by the wallet backfill', []],
     ]);
-    expect(r.wallets[0].action).toMatch(/Earning and redeeming keep working/);
+    expect(r.wallets[0].action).toMatch(/Earning and redeeming keep working.*fix the wallet history, then re-run/);
+    expect(r.wallets[1].action).toMatch(/Gifsy: run the wallet backfill for this program\.$/);
     expect(r.unmappedCredits[0]).toMatchObject({ positionId: 'u1', batchId: 'B1', amount: 50, reason: expect.stringMatching(/could not be matched to an outlet and field/) });
     expect(r.owedClawbacks).toEqual([
       expect.objectContaining({ creditReversalId: 'R9', recovered: 100, owed: 200, label: 'recovered 100, owed 200' }),
@@ -105,20 +124,79 @@ describe('GET reversal-engine/attention (WalletService.reversalAttention)', () =
     expect(calls['alloc.count'][0].where).toEqual({ owed: { gt: 0 }, overReversalDebt: false, creditReversal: { clientId: 'bajaj' } });
   });
 
-  it('LEGACY tenant: un-backfilled wallets are the normal state → not listed (only BLOCKED ones)', async () => {
-    const { svc, calls } = attentionHarness('LEGACY');
+  it('a tenant that had no reversalEngine row (Deoleo-like, was LEGACY): un-sequenced wallets with history ARE listed and counted', async () => {
+    const { svc, calls } = attentionHarness(undefined, undefined, { pendingCount: 4, blockedCount: 1 });
     const r = await svc.reversalAttention('deoleo');
-    expect(r.wallets.map((w) => w.status)).toEqual(['BLOCKED']);
-    expect(r.walletsNotBackfilled).toBe(0);
-    expect(calls['wallet.count']).toHaveLength(1);
+    expect(r.wallets.map((w) => w.status)).toEqual(['BLOCKED', 'NOT_BACKFILLED']);
+    expect(r.walletsNotBackfilled).toBe(4);
+    expect(r.walletsBlocked).toBe(1);
+    expect(r.walletsTotal).toBe(5);
+    expect(calls['wallet.count']).toHaveLength(2);
     expect(r.pause.paused).toBe(false);
+    expect(r.readiness).toEqual({
+      unsequencedWithHistory: 4,
+      blocked: 1,
+      ready: false,
+      message:
+        '4 wallets with points history are not yet prepared for reversals — Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C; ' +
+        '1 wallet was blocked by the wallet backfill — Gifsy must fix its history and re-run it. Points reversals on these wallets are refused until then.',
+    });
   });
 
-  it('a malformed engine flag is reported (never hidden), the rest still listed', async () => {
-    const { svc } = attentionHarness('BAD');
-    const r = await svc.reversalAttention('t');
-    expect(r.mode).toBe('INVALID');
-    expect(r.modeError).toMatch(/Invalid reversalEngine setting/);
+  it('readiness: nothing to sequence (fresh tenant / Deoleo with zero history) → ready, no message', async () => {
+    const { svc } = attentionHarness(undefined, undefined, { pendingCount: 0, blockedCount: 0 });
+    const r = await svc.reversalAttention('deoleo');
+    expect(r.readiness).toEqual({ unsequencedWithHistory: 0, blocked: 0, ready: true, message: null });
+  });
+
+  it('an old reversalEngine row is IGNORED whatever it holds (LEGACY / SHADOW / V2 / malformed): same response, never read', async () => {
+    const shapes: string[] = [];
+    for (const old of ['LEGACY', 'SHADOW', 'V2', 'v2', { x: 1 }, undefined]) {
+      const { svc, calls } = attentionHarness(old, undefined, { pendingCount: 2, blockedCount: 0 });
+      const r = await svc.reversalAttention('bajaj');
+      shapes.push(JSON.stringify({ ...r, wallets: r.wallets.map((w) => ({ ...w, checkedAt: null })) }));
+      const keys = (calls['programSetting.findUnique'] ?? []).map((a: any) => a.where.clientId_settingKey.settingKey);
+      expect(keys).not.toContain('reversalEngine');
+    }
+    expect(new Set(shapes).size).toBe(1);
+  });
+});
+
+describe('reversal readiness (one engine since 2026-11-21)', () => {
+  it('reversalReadiness(clientId): the two tenant-scoped counts', async () => {
+    const { svc, calls } = attentionHarness(undefined, undefined, { pendingCount: 7, blockedCount: 2 });
+    await expect(svc.reversalReadiness('bajaj')).resolves.toMatchObject({ unsequencedWithHistory: 7, blocked: 2, ready: false });
+    const wheres = calls['wallet.count'].map((a: any) => a.where);
+    expect(wheres).toEqual(expect.arrayContaining([unsequencedWithHistoryWhere('bajaj'), blockedWalletsWhere('bajaj')]));
+  });
+
+  it('unsequencedWithHistoryWhere is NULL-safe on backfillStatus (OR null / DONE — never `{ not: BLOCKED }`) and covers every figure + any row', () => {
+    const w: any = unsequencedWithHistoryWhere('t1');
+    expect(w.partner).toEqual({ clientId: 't1' });
+    expect(w.movementSeq).toBe(0);
+    expect(w.AND[0]).toEqual({ OR: [{ backfillStatus: null }, { backfillStatus: 'DONE' }] });
+    expect(JSON.stringify(w)).not.toMatch(/"not":"BLOCKED"/);
+    const history = w.AND[1].OR;
+    for (const f of ['redeemablePoints', 'debtPoints', 'earnedPoints', 'lockedPoints', 'redeemedPoints', 'expiredPoints', 'lifetimeEarned', 'lifetimeRedeemed', 'lifetimeExpired']) {
+      expect(history).toContainEqual({ [f]: { not: 0 } });
+    }
+    expect(history).toContainEqual({ transactions: { some: {} } });
+    expect(blockedWalletsWhere('t1')).toEqual({ partner: { clientId: 't1' }, movementSeq: 0, backfillStatus: 'BLOCKED' });
+  });
+
+  it('readinessOf / messages: plain words, singular and plural', () => {
+    expect(readinessOf(0, 0)).toEqual({ unsequencedWithHistory: 0, blocked: 0, ready: true, message: null });
+    expect(readinessOf(1, 0).message).toBe(
+      '1 wallet with points history is not yet prepared for reversals — Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C. Points reversals on these wallets are refused until then.',
+    );
+    expect(readinessOf(0, 3)).toMatchObject({ ready: false });
+    expect(walletsNotSequencedReadinessMessage(0, 3)).toBe(
+      '3 wallets were blocked by the wallet backfill — Gifsy must fix their history and re-run it. Points reversals on these wallets are refused until then.',
+    );
+    // B1: names the client by its display name and states the exact next step
+    expect(walletNotSequencedMessage('O1', 'Bajaj Consumer Care Ltd')).toBe(
+      "Can't reverse: the wallet of outlet O1 (Bajaj Consumer Care Ltd) has points history that has not been prepared for reversals yet. Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C, then retry. Nothing was changed — earning and redeeming on this wallet keep working meanwhile.",
+    );
   });
 });
 
@@ -146,16 +224,17 @@ describe('TenantSettingsService — Q5 pause parser + reads through the caller t
     }
   });
 
-  it('getReversalEngineModeUncached / getPointsReversalPauseUncached use the db handle they are given (the tx), not their own client', async () => {
+  it('getPointsReversalPauseUncached uses the db handle it is given (the tx), not its own client', async () => {
     const own = { programSetting: { findUnique: jest.fn(async () => null) } };
-    const tx = { programSetting: { findUnique: jest.fn(async () => ({ settingValue: 'V2' })) } };
+    const tx = { programSetting: { findUnique: jest.fn(async () => ({ settingValue: { paused: true, since: 'S' } })) } };
     const s = new TenantSettingsService(own as unknown as PrismaService);
-    await expect(s.getReversalEngineModeUncached('t', tx as never)).resolves.toBe('V2');
-    await s.getPointsReversalPauseUncached('t', tx as never);
-    expect(tx.programSetting.findUnique).toHaveBeenCalledTimes(2);
+    await expect(s.getPointsReversalPauseUncached('t', tx as never)).resolves.toMatchObject({ paused: true });
+    expect(tx.programSetting.findUnique).toHaveBeenCalledTimes(1);
     expect(own.programSetting.findUnique).not.toHaveBeenCalled();
-    await expect(s.getReversalEngineModeUncached('t')).resolves.toBe('LEGACY');
+    await expect(s.getPointsReversalPauseUncached('t')).resolves.toMatchObject({ paused: false });
     expect(own.programSetting.findUnique).toHaveBeenCalledTimes(1);
+    // the retired engine-mode reader is gone
+    expect((s as unknown as Record<string, unknown>).getReversalEngineModeUncached).toBeUndefined();
   });
 
   it('approvalsPausedMessage: owner wording with the start time', () => {
@@ -197,15 +276,6 @@ const gifsyHome = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'gifsy', assumed: 
 const gifsyInBajaj = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'bajaj', assumed: true };
 
 describe('fix round A — M1 attention call-outs', () => {
-  it('a malformed flag is LOUD: "invalid … treated as LEGACY; fix in settings", effective mode LEGACY, un-backfilled wallets not listed as problems', async () => {
-    const { svc } = attentionHarness('BAD');
-    const r = await svc.reversalAttention('bajaj');
-    expect(r).toMatchObject({ clientId: 'bajaj', mode: 'INVALID', effectiveMode: 'LEGACY' });
-    expect(r.modeWarning).toMatch(/^reversalEngine setting is invalid: "v2" — treated as LEGACY; fix in settings\. /);
-    expect(r.modeWarning).toMatch(/points reversal requests and approvals are refused until a Gifsy Admin sets a valid engine mode/);
-    expect(r.walletsNotBackfilled).toBe(0);
-  });
-
   it('expiry-sweep failures (last 30 days, this tenant) and Gifsy-must-act reversal refusals are listed with their reasons', async () => {
     const at = new Date();
     const { svc, calls } = attentionHarness('V2', undefined, {
@@ -278,65 +348,10 @@ describe('round 6 item 5 — an untracked-expiry reversal lists EVERY affected w
   });
 });
 
-describe('fix round A — M2 POST reversal-engine/mode (WalletService.setReversalEngineMode)', () => {
-  it('validates the value; nothing written on a bad one', async () => {
-    const { svc, calls } = attentionHarness('LEGACY');
-    await expect(svc.setReversalEngineMode(gifsyInBajaj, { mode: 'v2' })).rejects.toThrow(/reversalEngine must be one of LEGACY \| SHADOW \| V2 \(got "v2"\)/);
-    expect(calls['programSetting.upsert']).toBeUndefined();
-  });
-
-  it('→ V2 refused while wallets with history are not prepared by the backfill (and not listed BLOCKED); takes the EXCLUSIVE engine lock first; nothing written', async () => {
-    const { svc, calls } = attentionHarness('LEGACY', undefined, { walletCount: 7 });
-    await expect(svc.setReversalEngineMode(gifsyInBajaj, { mode: 'V2' })).rejects.toThrow(
-      /^Can't switch the reversal engine to V2: 7 wallet\(s\) with points history have not been prepared by the wallet backfill and are not listed as blocked \(e\.g\. w-u0, w-u1, w-u2, w-u3, w-u4\) — run the wallet backfill APPLY/,
-    );
-    expect(String(calls['$queryRaw'][0].join('?'))).toContain('pg_advisory_xact_lock(hashtextextended(');
-    const unprepared = calls['wallet.count'].find((a: any) => a.where.NOT).where;
-    expect(unprepared).toMatchObject({
-      partner: { clientId: 'bajaj' },
-      movementSeq: 0,
-      NOT: { backfillStatus: 'BLOCKED', backfillBlockedReason: { not: null } },
-    });
-    expect(calls['programSetting.upsert']).toBeUndefined();
-    expect(calls['auditLog.create']).toBeUndefined();
-  });
-
-  it('→ V2 / SHADOW refused while POINTS reversal approvals are paused (backfill running)', async () => {
-    const { svc, calls } = attentionHarness('LEGACY', { paused: true, since: 'S' });
-    for (const mode of ['V2', 'SHADOW']) {
-      await expect(svc.setReversalEngineMode(gifsyInBajaj, { mode })).rejects.toThrow(
-        new RegExp(`^Can't switch the reversal engine to ${mode} while points reversal approvals are paused \\(wallet maintenance started S\\)`),
-      );
-    }
-    expect(calls['programSetting.upsert']).toBeUndefined();
-  });
-
-  it('→ V2 when every wallet is prepared: writes the row + an audit row (old → new, reason, BLOCKED count), busts the cache', async () => {
-    const { svc, calls } = attentionHarness('SHADOW', undefined, { walletCount: 0 });
-    const res = await svc.setReversalEngineMode(gifsyInBajaj, { mode: 'V2', reason: 'Bajaj go-live' });
-    expect(res).toMatchObject({ clientId: 'bajaj', mode: 'V2', previous: 'SHADOW', blockedWalletsListed: 1 });
-    expect(res.note).toMatch(/1 wallet\(s\) are BLOCKED by the wallet backfill/);
-    const up = calls['programSetting.upsert'][0];
-    expect(up.where).toEqual({ clientId_settingKey: { clientId: 'bajaj', settingKey: 'reversalEngine' } });
-    expect(up.update.settingValue).toBe('V2');
-    expect(calls['auditLog.create'][0].data).toMatchObject({
-      action: 'UPDATE', entityType: 'REVERSAL_ENGINE_MODE', entityId: 'bajaj', actorId: 'g1',
-      oldValues: { value: 'SHADOW' }, newValues: { value: 'V2' }, metadata: { reason: 'Bajaj go-live', blockedWalletsListed: 1 },
-    });
-  });
-
-  it('→ LEGACY (rollback) is ALWAYS allowed — even paused, even with un-prepared wallets, even from a malformed value', async () => {
-    const { svc, calls } = attentionHarness('BAD', { paused: true, since: 'S' }, { walletCount: 9 });
-    await expect(svc.setReversalEngineMode(gifsyInBajaj, { mode: 'LEGACY' })).resolves.toMatchObject({ mode: 'LEGACY', previous: 'v2' });
-    expect(calls['programSetting.upsert'][0].update.settingValue).toBe('LEGACY');
-  });
-});
-
 describe('fix round A — L6 target tenant of the GIFSY pause / mode actions', () => {
   it('un-assumed Gifsy (home tenant) without an explicit clientId → refused, NOTHING written to the home tenant', async () => {
     const { svc, calls } = attentionHarness('V2');
     await expect(svc.setPointsReversalPause(gifsyHome, { paused: false })).rejects.toThrow(/^Choose the program: you are not working inside a client program/);
-    await expect(svc.setReversalEngineMode(gifsyHome, { mode: 'LEGACY' })).rejects.toThrow(/^Choose the program/);
     expect(calls['programSetting.upsert']).toBeUndefined();
   });
 

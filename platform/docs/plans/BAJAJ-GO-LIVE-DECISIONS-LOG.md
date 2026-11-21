@@ -9,6 +9,7 @@
 ## 1. Releases & process
 | Date | Decision | Rejected alternative | Where |
 |---|---|---|---|
+| 2026-11-21 | **LEGACY reversal engine RETIRED for every tenant** (platform-wide, approved): "the new engine is better; move Deoleo to it and completely retire the old engine." No mode / switch; a POINTS reversal on a wallet whose history is not sequenced is refused ("run the wallet backfill"); readiness shown on the credits screen + digest. Supersedes the 2026-11-16 row below. | Keep LEGACY for Deoleo | `WALLET-REVERSAL-ENGINE-DESIGN.md` §0, branch `feat/retire-legacy-wallet-engine` |
 | 2026-11-16 | **Wallet Reversal Engine rollout:** Deoleo stays **LEGACY**; Bajaj → **V2**; reversing an already-paid payout becomes a **net receivable** with the **TDS credited back on the PAN**; every reversal shows an **outcome summary** (all tenants). | — | `WALLET-REVERSAL-ENGINE-DESIGN.md` on `feat/wallet-reversal-engine` |
 | 2026-11-15 | **No silent pass-throughs:** every skip / refusal / fallback is called out in plain words to the admin/user. Standing rule for all work. | — | `RESUME.md` §5 |
 | 2026-11-15 | **Hubble refunds:** never refund after a timeout / 5xx / network / unknown answer; confirm refunds only a definitive Hubble 400/422 rejection + "not found" + canary; ops Retry refunds "no order" only after **2 hours** + canary; late webhooks always re-checked and flagged. ⚠️ platform-wide (rewards/Hubble). | 30-minute gate, same-tenant canary | prod `2eb8271d`; `HUBBLE-RECONCILE-RUNBOOK.md` |

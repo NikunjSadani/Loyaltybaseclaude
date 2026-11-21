@@ -1,8 +1,7 @@
 /// <reference types="vitest/globals" />
 /**
  * /admin/credits-payouts/status — WP5 payout reversal entry picker (Wallet Reversal Engine §8, Q9/Q10).
- *  - LEGACY engine (default, Deoleo): the Request Reversal modal is exactly the amount form it was.
- *  - V2: the modal lists the outlet+field's payout entries, preselects the available UNPAID ones, shows the
+ *  - every tenant (the per-tenant engine mode was retired): the modal lists the outlet+field's payout entries, preselects the available UNPAID ones, shows the
  *    blocked ones with the reason, and submits the selected ids with requestedPaise = Σ selected.
  */
 
@@ -42,7 +41,14 @@ const row = {
 
 const ok = (payload: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => payload });
 
-function mockApi(mode: 'LEGACY' | 'V2') {
+const ENTRIES = [
+  { id: 'pe-a', amountPaise: 30000, status: 'PAID', period: '2026-10', createdAt: '', selectable: true, blockedBy: null },
+  { id: 'pe-b', amountPaise: 50000, status: 'PENDING', period: '2026-10', createdAt: '', selectable: true, blockedBy: null },
+  { id: 'pe-x', amountPaise: 10000, status: 'REVERSED', period: '2026-10', createdAt: '', selectable: false, blockedBy: 'REVERSED' },
+];
+
+/** `shape`: 'v2' = today's `{ mode: 'V2', entries }`; 'bare' = `{ entries }` with no mode / engineMode field at all. */
+function mockApi(shape: 'v2' | 'bare' = 'v2') {
   const posts: Array<Record<string, unknown>> = [];
   const entryCalls: string[] = [];
   global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
@@ -53,20 +59,7 @@ function mockApi(mode: 'LEGACY' | 'V2') {
     }
     if (url.includes('/payout-reversal-entries')) {
       entryCalls.push(url);
-      return ok({
-        success: true,
-        data:
-          mode === 'LEGACY'
-            ? { mode, entries: [] }
-            : {
-                mode,
-                entries: [
-                  { id: 'pe-a', amountPaise: 30000, status: 'PAID', period: '2026-10', createdAt: '', selectable: true, blockedBy: null },
-                  { id: 'pe-b', amountPaise: 50000, status: 'PENDING', period: '2026-10', createdAt: '', selectable: true, blockedBy: null },
-                  { id: 'pe-x', amountPaise: 10000, status: 'REVERSED', period: '2026-10', createdAt: '', selectable: false, blockedBy: 'REVERSED' },
-                ],
-              },
-      });
+      return ok({ success: true, data: shape === 'v2' ? { mode: 'V2', entries: ENTRIES } : { entries: ENTRIES } });
     }
     if (url.endsWith('/reversals') && init?.method === 'POST') {
       posts.push(JSON.parse(String(init.body)));
@@ -93,29 +86,21 @@ describe('Payout status — payout reversal entry picker (WP5)', () => {
     } as ReturnType<typeof useAdminSession>);
   });
 
-  it('LEGACY: keeps the amount form and the original request body', async () => {
-    const api = mockApi('LEGACY');
-    await openModal();
-    await waitFor(() => expect(api.entryCalls).toHaveLength(1));
-    expect(api.entryCalls[0]).toContain('outletId=O1');
-    expect(screen.queryByTestId('payout-entry-picker')).toBeNull();
-    expect(screen.getByText('Reversal Amount (₹)')).toBeTruthy();
-    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '500' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Submit Reversal Request' }));
-    await screen.findByText(/awaiting Gifsy approval/);
-    expect(api.posts).toEqual([
-      {
-        outletId: 'O1', outletName: 'Outlet One', fieldId: 'f1', fieldName: 'Volume', awardType: 'PAYOUT',
-        originalPaise: 80000, requestedPaise: 50000,
-      },
-    ]);
-  });
-
-  it('V2: lists entries (only unpaid preselected, blocked disabled with reason) and submits the selected ids + their sum', async () => {
-    const api = mockApi('V2');
+  it('always the picker — even when the entries response carries no mode / engineMode field; never an amount form', async () => {
+    const api = mockApi('bare');
     await openModal();
     await screen.findByTestId('payout-entry-picker');
-    expect(screen.queryByText('Reversal Amount (₹)')).toBeNull();
+    expect(api.entryCalls[0]).toContain('outletId=O1');
+    expect(screen.queryByRole('spinbutton')).toBeNull();
+    expect(screen.queryByText(/Reversal Amount \(/)).toBeNull();
+    expect((await screen.findByLabelText('Payout entry ₹500.00 (PENDING)') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('lists entries (only unpaid preselected, blocked disabled with reason) and submits the selected ids + their sum', async () => {
+    const api = mockApi();
+    await openModal();
+    await screen.findByTestId('payout-entry-picker');
+    expect(screen.queryByText(/Reversal Amount \(/)).toBeNull();
     const a = screen.getByLabelText('Payout entry ₹300.00 (PAID)') as HTMLInputElement;
     const b = screen.getByLabelText('Payout entry ₹500.00 (PENDING)') as HTMLInputElement;
     const x = screen.getByLabelText('Payout entry ₹100.00 (REVERSED) — not selectable: Already reversed') as HTMLInputElement;
@@ -139,8 +124,8 @@ describe('Payout status — payout reversal entry picker (WP5)', () => {
     ]);
   });
 
-  it('V2: submitting needs at least one entry', async () => {
-    mockApi('V2');
+  it('submitting needs at least one entry', async () => {
+    mockApi();
     await openModal();
     await screen.findByTestId('payout-entry-picker');
     fireEvent.click(screen.getByLabelText('Payout entry ₹500.00 (PENDING)')); // the only pre-ticked entry

@@ -38,6 +38,7 @@ import {
   ALERT_NO_ORDER_UNVERIFIED,
 } from '../../voucher-dispersal/voucher-dispersal.processor';
 import { HUBBLE_NO_ORDER_REFUND_REASON } from '../../rewards/rewards.service';
+import { blockedWalletsWhere, unsequencedWithHistoryWhere } from '../../wallet/wallet.service';
 import { buildDailyOpsDigest, failedSections, kycPendingBuckets, MAX_FAILED_REDEMPTION_ROWS } from './daily-ops-digest-report';
 import {
   DIGEST_RUN_STATE_KEY,
@@ -644,12 +645,20 @@ export class ScheduledReportsService {
       _sum: { redeemablePoints: true },
     });
     const negativeWallets = (neg?._count as { _all?: number } | undefined)?._all ?? 0;
+    // Reversal readiness (engine retired 2026-11-21 — never silent): wallets whose history the backfill has not
+    // sequenced / BLOCKED. Two counts; each figure appears only when > 0 (the section is otherwise unchanged).
+    const [notSequenced, blocked] = await Promise.all([
+      this.prisma.wallet.count({ where: unsequencedWithHistoryWhere(clientId) }),
+      this.prisma.wallet.count({ where: blockedWalletsWhere(clientId) }),
+    ]);
     return {
       credited: sum('EARN'),
       redeemed: Math.abs(sum('REDEEM')),
       expired: Math.abs(sum('EXPIRE')),
       negativeWallets,
       ...(negativeWallets > 0 ? { owedPoints: Math.max(0, -(neg._sum.redeemablePoints ?? 0)) } : {}),
+      ...((notSequenced ?? 0) > 0 ? { walletsNotSequenced: notSequenced } : {}),
+      ...((blocked ?? 0) > 0 ? { walletsBlocked: blocked } : {}),
     };
   }
 

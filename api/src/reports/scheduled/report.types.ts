@@ -68,6 +68,13 @@ export interface PointsSection {
   negativeWallets: number;
   /** Owner D1 (2026-11-19): Σ |negative balances| — "points owed". Present only when negativeWallets > 0. */
   owedPoints?: number;
+  /**
+   * Reversal readiness (one engine since 2026-11-21): wallets with points history the wallet backfill has not
+   * sequenced (points reversals on them are refused). Present only when > 0.
+   */
+  walletsNotSequenced?: number;
+  /** Un-sequenced wallets the backfill BLOCKED (fix their history, re-run). Present only when > 0. */
+  walletsBlocked?: number;
 }
 
 export interface FailedRedemptionRow {

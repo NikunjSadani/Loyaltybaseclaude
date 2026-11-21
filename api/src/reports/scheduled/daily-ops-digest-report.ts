@@ -17,6 +17,7 @@ import { isFastTrackRow, type KycFastTrackHistoryRow } from '../../kyc/kyc-fast-
 import { monthLabel } from '../../sales-import/months/month-state';
 import { emailShell, esc, intIN, rupees, sectionHeading, statRow, table } from './email-html';
 import { VISIBILITY_WORDS } from '../../visibility/visibility-report-labels';
+import { BACKFILL_NEXT_STEP } from '../../wallet/reversal-policy';
 
 /** Mirrors digest-run-state PERSISTENT_FAILURE_RUNS (kept here so this module stays import-cycle free). */
 const PERSISTENT_FAILURE_RUNS = 3;
@@ -191,6 +192,18 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
         (owed ? ` (${intIN(owed)} pts owed)` : ''),
       t.points.data.negativeWallets,
     );
+  }
+  // Reversal readiness (never silent): wallets a points reversal would be refused on until Gifsy acts.
+  const notSeq = t.points.ok ? t.points.data.walletsNotSequenced ?? 0 : 0;
+  if (notSeq > 0) {
+    push(
+      `${plural(notSeq, 'wallet', 'wallets')} with points history not yet prepared for reversals — ${BACKFILL_NEXT_STEP}`,
+      notSeq,
+    );
+  }
+  const blockedW = t.points.ok ? t.points.data.walletsBlocked ?? 0 : 0;
+  if (blockedW > 0) {
+    push(`${plural(blockedW, 'wallet', 'wallets')} blocked by the wallet backfill — fix the history and re-run it`, blockedW);
   }
 
   // Redemption failures, Hubble voucher failures and "failed but not refunded" overlap: ONE bullet. The Hubble
@@ -635,7 +648,9 @@ function tenantSections(t: TenantDigest): string {
     renderSection(
       'Points',
       t.points,
-      (p) => p.credited === 0 && p.redeemed === 0 && p.expired === 0 && p.negativeWallets === 0,
+      (p) =>
+        p.credited === 0 && p.redeemed === 0 && p.expired === 0 && p.negativeWallets === 0 &&
+        !p.walletsNotSequenced && !p.walletsBlocked,
       (p) =>
         metricLine('In window', [
           ['credited', intIN(p.credited)],
@@ -646,6 +661,14 @@ function tenantSections(t: TenantDigest): string {
           ? metricLine('Wallets', [
               ['negative', intIN(p.negativeWallets), 'red'],
               ...(p.owedPoints ? [['pts owed', intIN(p.owedPoints), 'red'] as [string, string, 'red']] : []),
+            ])
+          : '') +
+        (p.walletsNotSequenced || p.walletsBlocked
+          ? metricLine('Not ready for reversals', [
+              ...(p.walletsNotSequenced
+                ? [['backfill not run', intIN(p.walletsNotSequenced), 'red'] as [string, string, 'red']]
+                : []),
+              ...(p.walletsBlocked ? [['blocked', intIN(p.walletsBlocked), 'red'] as [string, string, 'red']] : []),
             ])
           : ''),
     ),
