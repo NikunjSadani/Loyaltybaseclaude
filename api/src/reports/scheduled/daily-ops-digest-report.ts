@@ -23,6 +23,7 @@ const PERSISTENT_FAILURE_RUNS = 3;
 import type {
   BillingSection,
   DigestInput,
+  HeldBalancesSection,
   DigestResult,
   DigestWindow,
   KycSection,
@@ -276,6 +277,20 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
   }
 
   failed('Billing progress', t.billing);
+
+  failed('Held opening balances', t.heldBalances);
+  if (t.heldBalances?.ok) {
+    const h = t.heldBalances.data;
+    if (h.failed > 0) {
+      push(`${plural(h.failed, 'held opening balance', 'held opening balances')} FAILED (${intIN(h.failedPoints)} pts) — not posted; see Gifsy → Held Balances`, h.failed);
+    }
+    if (h.waitingNeedsApplyNow > 0) {
+      push(
+        `${plural(h.waitingNeedsApplyNow, 'held opening balance waits', 'held opening balances wait')} for a Gifsy "Apply now" (the outlet's wallet already has activity)`,
+        h.waitingNeedsApplyNow,
+      );
+    }
+  }
   return out;
 }
 
@@ -454,6 +469,7 @@ const SECTION_KEYS: Array<[keyof TenantDigest, string]> = [
   ['billing', 'Billing progress'],
   // A failed TDS (194R excess) section makes the run DEGRADED like any other section.
   ['tds', 'TDS (194R)'],
+  ['heldBalances', 'Held opening balances'],
 ];
 
 /**
@@ -538,6 +554,17 @@ export const LOCATION_SWITCHED_OFF_NOTE =
   '"Require location" is currently switched OFF for this client (emergency off) — new KYC and visibility submissions may have no location.';
 
 const note = (text: string, color = MUTED) => `<div style="font-size:12px;color:${color};margin:0 0 6px;">${esc(text)}</div>`;
+
+/** The owner's one-line held-opening-balance summary (exact wording, 2026-11-21). */
+export function heldBalancesLine(h: HeldBalancesSection): string {
+  return (
+    `Held opening balances: ${intIN(h.appliedInWindow)} applied today (${intIN(h.appliedInWindowPoints)} pts), ` +
+    `${intIN(h.waiting)} still waiting (${intIN(h.waitingPoints)} pts), ${intIN(h.failed)} failed` +
+    (h.failed > 0 ? ` (${intIN(h.failedPoints)} pts)` : '') +
+    (h.waitingNeedsApplyNow > 0 ? ` — ${intIN(h.waitingNeedsApplyNow)} of the waiting need a Gifsy "Apply now"` : '') +
+    '.'
+  );
+}
 
 /** Billing progress block (always rendered when present: an empty month is itself worth saying). */
 function billingBody(b: BillingSection): string {
@@ -814,6 +841,8 @@ function tenantSections(t: TenantDigest): string {
           : ''),
     ),
     renderSection('Billing progress', t.billing, () => false, billingBody),
+    // Always rendered for a tenant that HAS held rows (the collector omits the section otherwise).
+    renderSection('Held opening balances', t.heldBalances, () => false, (h) => note(heldBalancesLine(h), h.failed > 0 ? '#b91c1c' : '#374151')),
     renderSection(
       'TDS (194R)',
       t.tds,

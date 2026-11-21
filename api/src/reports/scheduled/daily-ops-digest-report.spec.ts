@@ -847,3 +847,42 @@ describe('buildDailyOpsDigest', () => {
     expect(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n')).toBe(html.replace(/\r\n/g, '\n'));
   });
 });
+
+describe('Held opening balances (client migration) — digest line', () => {
+  const held = (over: Partial<import('./report.types').HeldBalancesSection> = {}) => ({
+    totalRows: 40,
+    appliedInWindow: 2,
+    appliedInWindowPoints: 3127,
+    waiting: 38,
+    waitingPoints: 119718,
+    waitingNeedsApplyNow: 0,
+    failed: 0,
+    failedPoints: 0,
+    ...over,
+  });
+
+  it('prints the owner line for a tenant with held rows; no section for tenants without (Deoleo)', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), heldBalances: ok(held()) };
+    const r = buildDailyOpsDigest(input([t, quietTenant('deoleo', 'Deoleo')]));
+    expect(r.html).toContain('Held opening balances: 2 applied today (3,127 pts), 38 still waiting (1,19,718 pts), 0 failed.');
+    expect(r.html.match(/Held opening balances:/g)).toHaveLength(1);
+    expect(attentionItems(t)).toEqual([]);
+  });
+
+  it('FAILED rows and rows waiting for an "Apply now" are attention items (never silent)', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), heldBalances: ok(held({ failed: 3, failedPoints: 812, waitingNeedsApplyNow: 1 })) };
+    expect(needsAttention(t)).toEqual([
+      '3 held opening balances FAILED (812 pts) — not posted; see Gifsy → Held Balances',
+      '1 held opening balance waits for a Gifsy "Apply now" (the outlet\'s wallet already has activity)',
+    ]);
+    const r = buildDailyOpsDigest(input([t]));
+    expect(r.html).toContain('3 failed (812 pts) — 1 of the waiting need a Gifsy &quot;Apply now&quot;.');
+    expect(r.attentionItems).toBe(4);
+  });
+
+  it('a section that failed to load is reported (degraded run), never hidden', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), heldBalances: { ok: false as const, error: 'db timeout' } };
+    expect(failedSections(input([t]))).toEqual([{ key: 'bajaj/heldBalances', label: 'Bajaj: Held opening balances' }]);
+    expect(needsAttention(t)).toEqual(["Couldn't load the Held opening balances section"]);
+  });
+});

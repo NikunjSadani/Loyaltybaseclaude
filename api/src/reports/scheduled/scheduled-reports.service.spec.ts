@@ -133,6 +133,8 @@ function makePrisma() {
     voucherDispersalOrderAlert: { count: jest.fn().mockResolvedValue(0), groupBy: jest.fn().mockResolvedValue([]) },
     // Digest TDS pre-check: does the tenant have ANY 194R ledger row this FY? Default: none.
     tdsDeductionEntry: { findFirst: jest.fn().mockResolvedValue(null) },
+    // Held opening balances: no rows on any tenant → no section.
+    heldOpeningBalance: { groupBy: jest.fn().mockResolvedValue([]) },
   };
 }
 

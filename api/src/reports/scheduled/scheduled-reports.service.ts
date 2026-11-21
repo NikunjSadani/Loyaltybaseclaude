@@ -1,4 +1,5 @@
 import { internalSecretConfigured } from '../../common/internal-call';
+import { heldDigestFigures } from '../../wallet/held-opening-balances/held-balance-facts';
 import { TdsService } from '../../tds/tds.service';
 import { financialYear } from '../../tds/tds.helpers';
 import { randomUUID } from 'crypto';
@@ -524,6 +525,10 @@ export class ScheduledReportsService {
         tds: await section('tds', c, () => this.tdsExcess(c, nowMs)),
         messages: await section('messages', c, () => this.messages(c, window)),
       };
+      // Held opening balances (client migration): only tenants with held rows get the section (null = none).
+      const held = await section('heldBalances', c, () => heldDigestFigures(this.prisma, c, window));
+      if (!held.ok) digest.heldBalances = held;
+      else if (held.data) digest.heldBalances = { ok: true, data: held.data };
       if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window, t.visibilityPhoto, nowMs));
       // Every tenant (DEFAULT ON since 2026-11-21). An emergency-off tenant still loads it so its location history
       // is not hidden; the renderer shows it for them only when there was activity, with a "switched off" note.

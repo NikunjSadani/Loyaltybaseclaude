@@ -322,6 +322,22 @@ export interface TdsExcessSection {
   sample: Array<{ retailer: string; excessPaise: bigint }>;
 }
 
+/**
+ * Held opening balances (client migration, owner 2026-11-21) — present ONLY for tenants with any held row.
+ * Owner rule (no silent pass-through): "N applied today (pts), M still waiting (pts), K failed".
+ */
+export interface HeldBalancesSection {
+  totalRows: number;
+  appliedInWindow: number;
+  appliedInWindowPoints: number;
+  waiting: number;
+  waitingPoints: number;
+  /** of `waiting`: the outlet already has a wallet with activity → needs a Gifsy "Apply now" */
+  waitingNeedsApplyNow: number;
+  failed: number;
+  failedPoints: number;
+}
+
 export interface TenantDigest {
   clientId: string;
   name: string;
@@ -337,6 +353,8 @@ export interface TenantDigest {
   payouts: SectionResult<PayoutsSection>;
   /** 194R TDS taken in excess (flag only). */
   tds?: SectionResult<TdsExcessSection>;
+  /** Held opening balances — present only for tenants with any held row (or when the section failed to load). */
+  heldBalances?: SectionResult<HeldBalancesSection>;
   messages: SectionResult<MessagesSection>;
   /** Present ONLY for tenants with the visibilityEnabled setting ON. */
   visibility?: SectionResult<VisibilitySection>;
