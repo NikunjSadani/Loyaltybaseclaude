@@ -1999,10 +1999,14 @@ export class SchemeEnrollmentService {
     const vals = formValues as Record<string, unknown>;
     const out: Array<{ fieldId: string; label: string; type: string; key: string; viewPath: string; geo?: GpsCapture }> = [];
     for (const f of schema.fields ?? []) {
-      if (!MEDIA_FIELD_SET.has(f.type)) continue;
+      // A media-typed field, OR any field whose stored value is a scheme-media object key — e.g. a
+      // legacy UPI_QR_SCAN value from before 2026-09-14, when that type uploaded an image — so the
+      // drawer shows it as a photo, never as a raw key in the values list.
+      const v = vals[f.id];
+      if (!MEDIA_FIELD_SET.has(f.type) && !readMediaValue(v).key.trim().startsWith('scheme-media/')) continue;
       // A media value may be a bare object-key string OR `{ key, geo }` (per-photo geotag).
       // readMediaValue normalises both; a bare string yields no geo (renders exactly as before).
-      const { key, geo } = readMediaValue(vals[f.id]);
+      const { key, geo } = readMediaValue(v);
       if (key) {
         out.push({
           fieldId: f.id,
@@ -2061,16 +2065,28 @@ export class SchemeEnrollmentService {
    * enforced from the object key's tenant folder (`scheme-media/<clientId>/…`) — a
    * GIFSY_ADMIN is the cross-tenant operator; every other caller is pinned to its own
    * tenant. Any failure → bare 404 (no enumeration / info leak).
+   *
+   * `forbidForeignTenant` (the Excel viewer page's `GET /v1/schemes/media/file`): a key in
+   * ANOTHER tenant's folder answers 403 instead of 404, so the page can say "You don't have
+   * access" — the tenant segment is part of the request, so this leaks nothing about existence.
    */
-  async viewMedia(user: JwtPayload, key: string): Promise<{ stream: Readable; size: number; contentType: string; inline: boolean }> {
+  async viewMedia(
+    user: JwtPayload,
+    key: string,
+    opts: { forbidForeignTenant?: boolean } = {},
+  ): Promise<{ stream: Readable; size: number; contentType: string; inline: boolean }> {
     const deny = () => new NotFoundException();
     if (!key || typeof key !== 'string' || !key.startsWith('scheme-media/')) throw deny();
+    // No path tricks: a key is `scheme-media/<clientId>/<…>` with no "..", empty or backslash segment.
+    if (key.includes('\\') ||key.split('/').some((seg) => seg === '' || seg === '.' || seg === '..')) throw deny();
 
     const keyClientId = key.split('/')[1];
     if (!keyClientId) throw deny();
     // Un-assumed GIFSY reads any tenant's media; every other caller — incl. an ASSUMED
     // operator — is pinned to its (assumed) tenant folder.
-    if (!platformWide(user) && keyClientId !== user.clientId) throw deny();
+    if (!platformWide(user) && keyClientId !== user.clientId) {
+      throw opts.forbidForeignTenant ? new ForbiddenException("You don't have access to this file.") : deny();
+    }
 
     const file = await this.storage.openBoundedObject(key);
     if (!file) throw deny();

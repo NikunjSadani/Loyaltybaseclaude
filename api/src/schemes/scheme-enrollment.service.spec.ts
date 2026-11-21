@@ -1322,6 +1322,62 @@ describe('SchemeEnrollmentService', () => {
       expect(out.contentType).toBe('image/jpeg');
     });
   });
+
+  // The Excel viewer page's endpoint (GET /v1/schemes/media/file) — forbidForeignTenant.
+  describe('viewMedia for the signed-in viewer page (forbidForeignTenant)', () => {
+    const jpeg = () => ({ stream: Readable.from([Buffer.from([0xff, 0xd8, 0xff])]), size: 3, contentType: 'image/jpeg' });
+
+    it('another programme’s key → 403 (the page says "no access"), storage never touched', async () => {
+      for (const u of [tenantAdminUser, salesUser, partnerUser]) {
+        await expect(
+          service.viewMedia(u, 'scheme-media/bajaj/2026-09/a.jpg', { forbidForeignTenant: true }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      }
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
+    });
+
+    it('own tenant key → served (image inline; PDF inline as application/pdf)', async () => {
+      mockStorage.openBoundedObject.mockResolvedValueOnce(jpeg());
+      const img = await service.viewMedia(tenantAdminUser, 'scheme-media/deoleo/2026-09/a.jpg', { forbidForeignTenant: true });
+      expect(img).toMatchObject({ contentType: 'image/jpeg', inline: true });
+      mockStorage.openBoundedObject.mockResolvedValueOnce({ ...jpeg(), contentType: 'application/pdf' });
+      const pdf = await service.viewMedia(tenantAdminUser, 'scheme-media/deoleo/2026-09/gst.pdf', { forbidForeignTenant: true });
+      expect(pdf).toMatchObject({ contentType: 'application/pdf', inline: true });
+    });
+
+    it('missing object / non-scheme key / path tricks → 404', async () => {
+      mockStorage.openBoundedObject.mockResolvedValueOnce(null);
+      await expect(service.viewMedia(tenantAdminUser, 'scheme-media/deoleo/2026-09/gone.jpg', { forbidForeignTenant: true })).rejects.toBeInstanceOf(NotFoundException);
+      for (const k of ['visibility-media/deoleo/a.jpg', 'scheme-media/deoleo/../bajaj/a.jpg', 'scheme-media//a.jpg', 'scheme-media/deoleo\\a.jpg', '']) {
+        await expect(service.viewMedia(tenantAdminUser, k, { forbidForeignTenant: true })).rejects.toBeInstanceOf(NotFoundException);
+      }
+    });
+
+    it('un-assumed GIFSY reads any tenant (no 403)', async () => {
+      mockStorage.openBoundedObject.mockResolvedValueOnce(jpeg());
+      const out = await service.viewMedia(adminUser, 'scheme-media/bajaj/2026-09/a.jpg', { forbidForeignTenant: true });
+      expect(out.contentType).toBe('image/jpeg');
+    });
+  });
+
+  describe('adminGetEnrollment media — a legacy scheme-media key under a non-media type is a photo, not a raw value', () => {
+    it('lists a pre-2026-09-14 UPI_QR_SCAN image key in media (VPA values stay values)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', clientId: 'deoleo', deletedAt: null });
+      mockPrisma.schemeEnrollment.findFirst.mockResolvedValue({
+        id: 'enr1', formVersion: 1, schemeOutlet: {}, submissions: [],
+        formValues: { f_upi: 'scheme-media/deoleo/2026-09/q-upi.jpg', f_upi2: 'shop@upi', f_photo: 'scheme-media/deoleo/2026-09/p.jpg' },
+      });
+      mockPrisma.schemeEnrollmentFormVersion.findFirst.mockResolvedValue({
+        formSchema: { fields: [
+          { id: 'f_upi', type: 'UPI_QR_SCAN', label: 'UPI QR', order: 1 },
+          { id: 'f_upi2', type: 'UPI_QR_SCAN', label: 'UPI QR 2', order: 2 },
+          { id: 'f_photo', type: 'CAMERA', label: 'Photo', order: 3 },
+        ] },
+      });
+      const out = await service.adminGetEnrollment(tenantAdminUser, 's1', 'enr1');
+      expect(out.enrollment.media.map((m) => m.fieldId)).toEqual(['f_upi', 'f_photo']);
+    });
+  });
 });
 
 /**

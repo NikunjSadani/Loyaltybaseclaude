@@ -17,6 +17,7 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Public, Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { externalOrigin } from '../exports/exports.service';
 import { BroadcastDto } from './dto/scheme-notify.dto';
 
 /**
@@ -40,6 +41,8 @@ export class SchemeReportController {
 
   /**
    * GET /v1/schemes/media/view?token=<jwt> — PUBLIC tokenized media view (bug 2).
+   * LEGACY since 2026-11-21: exports now link to the signed-in viewer page instead; kept so
+   * links in earlier downloads keep working until their 30-day token lapses.
    *
    * No JWT auth guard (@Public): the bearer of a valid, unexpired, typ:'schememedia'
    * token may view exactly ONE enrollment-media object for one tenant. A link clicked
@@ -120,7 +123,8 @@ export class SchemeReportController {
   }
 
   /**
-   * GET /v1/schemes/:id/report/export — xlsx with auth-gated media links (D30).
+   * GET /v1/schemes/:id/report/export — xlsx with signed-in "Open photo" / "Open file" links
+   * (scheme-media-link.ts → the platform page /schemes/photo?key=…).
    *
    * Mounted under `:id/report/...` (NOT `:id/enrollments/...`) so it never shadows
    * the enrollment stream's `:id/enrollments/:enrollmentId` param route. Surfaces raw
@@ -139,18 +143,8 @@ export class SchemeReportController {
     @Param('id') id: string,
     @Req() req: Request,
   ) {
-    // Resolve the host the admin downloaded from so media links come back absolute
-    // to the RIGHT tenant: edge-proxy `x-forwarded-host` (comma-list → first) →
-    // `host` → PUBLIC_APP_BASE_URL's host → '' (relative fallback). Not
-    // security-critical — the media endpoint re-authenticates; this only decides
-    // where the click goes.
-    const first = (h?: string) => (h ? h.split(',')[0].trim() : '');
-    const fwd = req.headers['x-forwarded-host'];
-    const host =
-      first(Array.isArray(fwd) ? fwd[0] : fwd) ||
-      first(req.headers.host) ||
-      (process.env.PUBLIC_APP_BASE_URL ?? '').replace(/^https?:\/\//, '').replace(/\/.*$/, '') ||
-      '';
-    return this.reports.exportEnrollments(user, id, host);
+    // Media links point at the tenant's portal host from SERVER config (tenantPortalLink); the
+    // request's external origin is used only in a LOCAL environment (one local FE).
+    return this.reports.exportEnrollments(user, id, externalOrigin(req));
   }
 }

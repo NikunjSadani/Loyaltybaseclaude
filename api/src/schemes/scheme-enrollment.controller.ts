@@ -150,6 +150,24 @@ export class SchemeEnrollmentController {
     return this.enrollment.enroll(user, id, dto, activePartnerId);
   }
 
+  // ── Signed-in media stream for the Excel viewer page (/schemes/photo?key=…) ──
+  // GET /v1/schemes/media/file?key=<scheme-media key>. Same roles / permission as the
+  // in-app stream below (whose `:id` is ignored — tenant comes from the key), without the
+  // meaningless path param. A key of ANOTHER programme answers 403 (the page says "You
+  // don't have access") instead of 404 — the tenant segment is in the request itself, so
+  // this reveals nothing about which objects exist. Two-segment static path: no other
+  // `schemes/:id/file` route exists to shadow it.
+  @Get('media/file')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', ...ENROLLER_ROLES)
+  @RequirePermission('schemes:read')
+  async viewMediaFile(
+    @CurrentUser() user: JwtPayload,
+    @Query('key') key: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    return this.streamMedia(res, await this.enrollment.viewMedia(user, key, { forbidForeignTenant: true }));
+  }
+
   // ── Admin: auth-gated media stream (declared BEFORE the :enrollmentId GET so
   //          `media` is not swallowed by the param route). ─────────────────────
   @Get(':id/enrollments/media')
@@ -160,7 +178,13 @@ export class SchemeEnrollmentController {
     @Query('key') key: string,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const { stream, size, contentType, inline } = await this.enrollment.viewMedia(user, key);
+    return this.streamMedia(res, await this.enrollment.viewMedia(user, key));
+  }
+
+  private streamMedia(
+    res: Response,
+    { stream, size, contentType, inline }: Awaited<ReturnType<SchemeEnrollmentService['viewMedia']>>,
+  ): StreamableFile {
     const disposition = inline ? 'inline' : 'attachment; filename="media"';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', disposition);

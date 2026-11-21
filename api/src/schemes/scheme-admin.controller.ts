@@ -7,6 +7,7 @@ import {
   Post,
   Put,
   Query,
+  Req,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
@@ -16,6 +17,8 @@ import { SchemeAdminService } from './scheme-admin.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
+import { externalOrigin } from '../exports/exports.service';
+import type { Request } from 'express';
 import {
   CreateSchemeAdminDto,
   RosterQueryDto,
@@ -160,8 +163,8 @@ export class SchemeAdminController {
   @Get(':id/roster/export')
   @Roles('GIFSY_ADMIN')
   @RequirePermission('schemes:read')
-  getRosterExport(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.admin.getRosterExport(user, id);
+  getRosterExport(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Req() req: Request) {
+    return this.admin.getRosterExport(user, id, externalOrigin(req));
   }
 
   /**

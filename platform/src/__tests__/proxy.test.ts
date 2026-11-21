@@ -386,6 +386,28 @@ describe('proxy — Step 2: valid token + role gating', () => {
     expect(loc.searchParams.get('next')).toBe('/visibility/photo?key=visibility-media%2Fbajaj%2Fa.jpg');
   });
 
+  it('Scheme photo viewer: every signed-in role gets the PAGE (the API enforces roles + tenant)', async () => {
+    for (const role of ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'SALES_SO', 'SALES_ISR', 'SSS', 'WHOLESALER', 'MIS_USER', 'VENDOR']) {
+      mockJwt.mockResolvedValue({ payload: { role, sub: 'u-1' } } as never);
+      const res = await run(withToken('/schemes/photo?key=scheme-media%2Fdeoleo%2F2026-09%2Fa.jpg'));
+      expect({ role, next: isNext(res) }).toEqual({ role, next: true });
+    }
+  });
+
+  it('Scheme photo viewer is NOT public: signed out → sign-in carrying next back to the photo', async () => {
+    const res = await run(makeReq('/schemes/photo?key=scheme-media%2Fdeoleo%2F2026-09%2Fa.jpg', { headers: { 'sec-fetch-dest': 'document' } }));
+    expect(res.status).toBe(307);
+    const loc = new URL(res.headers.get('location') as string);
+    expect(loc.pathname).toBe('/auth/login');
+    expect(loc.searchParams.get('next')).toBe('/schemes/photo?key=scheme-media%2Fdeoleo%2F2026-09%2Fa.jpg');
+  });
+
+  it('the signed-in scheme media stream (/api/schemes/media/file) is NOT a public path (only media/view?token= is)', async () => {
+    const res = await run(makeReq('/api/schemes/media/file?key=scheme-media%2Fdeoleo%2Fa.jpg'));
+    expect(isNext(res)).toBe(false);
+    expect(res.status).toBe(401);
+  });
+
   it('GIFSY_ADMIN is allowed on /admin/gifsy', async () => {
     mockJwt.mockResolvedValue({ payload: { role: 'GIFSY_ADMIN', sub: 'g-1' } } as never);
     const res = await run(withToken('/admin/gifsy/settings'));
