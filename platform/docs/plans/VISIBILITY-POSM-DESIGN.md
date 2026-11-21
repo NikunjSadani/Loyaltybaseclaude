@@ -351,7 +351,10 @@ real-login verified 2026-11-21 (§17.6); **`main` = `develop` = `97332c95`** (re
   (`visibilityNotApplicable`: outlet type not in `outletScope`, or programme / sub-programme not covered — checked
   independently of KYC / parked / deactivated). The sales outlet page hides the "Visibility — this period" card for
   such outlets (e.g. wholesalers) instead of showing "Outlet type … is not part of the visibility programme." Temporary
-  blocks (KYC not approved yet, parked, not interested, deactivated, removed) still show their reason.
+  blocks (KYC not approved yet, parked, not interested) still show their reason; a deactivated outlet of a covered
+  type shows its reason too, one of an uncovered type is hidden; a removed outlet 404s and the card self-hides.
+  Note: with visibility ON but NO outlet types chosen yet, every outlet is "not applicable" → no card anywhere (set
+  the outlet scope in the visibility settings).
 - **Plain status words — one list per side, same strings, pinned by a test on each side:** API `VISIBILITY_WORDS`
   (`visibility-report-labels.ts` → `PLAIN_STATUS_LABEL` in `visibility-metrics.ts`, the Excel, status report, digest);
   platform `VISIBILITY_STATUS_WORDS` (`lib/visibility-types.ts` → `lib/visibility-report.ts`, queue / dialog, sales,
