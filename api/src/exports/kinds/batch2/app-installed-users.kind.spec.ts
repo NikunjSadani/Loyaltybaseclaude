@@ -37,7 +37,7 @@ interface FakeUser {
   role: string;
   status: string;
   deletedAt: Date | null;
-  salesUser: { hierarchyLevel: { code: string; name: string | null } | null } | null;
+  salesUser: { employeeCode: string | null; deletedAt?: Date | null; hierarchyLevel: { code: string; name: string | null } | null } | null;
   channelPartner: unknown;
 }
 interface FakeInstall { userId: string; clientId: string; platform: string; installedAt: Date; lastSeenAt: Date | null }
@@ -56,7 +56,7 @@ function makePrisma() {
   const users: FakeUser[] = [
     {
       id: 'u-isr', clientId: 'bajaj', name: 'Ravi', phone: '+91 90000 00001', role: 'SALES_ISR', status: 'ACTIVE', deletedAt: null,
-      salesUser: { hierarchyLevel: { code: 'XSR', name: '' } }, channelPartner: null,
+      salesUser: { employeeCode: ' EMP-ISR-1 ', hierarchyLevel: { code: 'XSR', name: '' } }, channelPartner: null,
     },
     {
       id: 'u-ret', clientId: 'bajaj', name: '=HYPERLINK("http://evil","x")', phone: '919000000002', role: 'WHOLESALER',
@@ -69,7 +69,8 @@ function makePrisma() {
     { id: 'u-g', clientId: 'gifsy', name: 'Operator', phone: '9000000009', role: 'GIFSY_ADMIN', status: 'ACTIVE', deletedAt: null, salesUser: null, channelPartner: null },
     {
       id: 'u-deo', clientId: 'deoleo', name: 'Maria', phone: '9000000007', role: 'SALES_ASM', status: 'ACTIVE', deletedAt: null,
-      salesUser: { hierarchyLevel: { code: 'ASM', name: 'Area Manager' } }, channelPartner: null,
+      // a SOFT-DELETED SalesUser row (the login's only one — userId @unique) still shows its employee code
+      salesUser: { employeeCode: 'DEO-77', deletedAt: D('2026-10-01T00:00:00Z'), hierarchyLevel: { code: 'ASM', name: 'Area Manager' } }, channelPartner: null,
     },
   ];
   const installs: FakeInstall[] = [
@@ -234,7 +235,7 @@ describe('app-installed-users export kind', () => {
     const { aoa, rowCount } = await build(CLIENT);
     expect(rowCount).toBe(4);
     expect(aoa[0]).toEqual([...INSTALLED_USERS_HEADERS]); // bajaj's ASM level is named "ASM"
-    expect(aoa[0].slice(0, 9)).toEqual(['Name', 'Phone', 'Role', 'Role Group', 'ASM', 'Zone', 'State', 'City', 'Outlet Code']);
+    expect(aoa[0].slice(0, 11)).toEqual(['Name', 'Phone', 'Role', 'Role Group', 'ASM', 'Zone', 'State', 'City', 'Employee ID', 'Outlet Code', 'Outlet Name']);
     // u-ret (11-12) → u-isr (11-10) → u-adm (10-01) → u-sus (09-15). NOT u-del (deleted), NOT u-g (Gifsy operator).
     expect(aoa.slice(1).map((r) => r[1])).toEqual(['9000000002', '9000000001', '9000000003', '9000000005']);
     expect(aoa[1]).toEqual([
@@ -246,6 +247,7 @@ describe('app-installed-users export kind', () => {
       'West',
       'Maharashtra',
       'Pune',
+      null, // Employee ID: a partner has no sales employee record → blank (as Outlet Code is for a sales user)
       'BJ-001',
       'Shree Stores',
       'Android',
@@ -257,16 +259,18 @@ describe('app-installed-users export kind', () => {
     expect(aoa[2]).toEqual([
       'Ravi', '9000000001' /* "+91 90000 00001" — no apostrophe-prefixed "+91" cell */, 'ISR' /* empty level name → Bajaj label for XSR */,
       'Sales', 'Priya' /* ISR → SO → ASM */, 'West', 'Maharashtra', 'Pune' /* from the ISR's assigned outlet */,
-      null, null, 'Android, iOS', '2026-11-10 10:00', '2026-11-15 15:30', 'Yes', 'Active',
+      'EMP-ISR-1' /* Employee ID = SalesUser.employeeCode (trimmed) */, null, null /* no outlet → blank Outlet Code / Name */, 'Android, iOS', '2026-11-10 10:00', '2026-11-15 15:30', 'Yes', 'Active',
     ]);
     expect(typeof aoa[2][1]).toBe('string'); // phone stays text
     expect(aoa[3].slice(2, 4)).toEqual(['Client admin', 'Admin']);
     expect(aoa[3].slice(4, 8)).toEqual(Array(4).fill('Not in sales hierarchy'));
-    expect(aoa[3][10]).toBe('Desktop');
+    expect(aoa[3][8]).toBeNull(); // an admin has no employee record → blank Employee ID
+    expect(aoa[3][11]).toBe('Desktop');
     expect(aoa[4][2]).toBe('SO'); // no level → from the role
     expect(aoa[4].slice(4, 8)).toEqual(Array(4).fill('Not set')); // a sales login with no employee record
-    expect(aoa[4][12]).toBeNull(); // no last-seen
-    expect(aoa[4][14]).toBe('Suspended'); // inactive / suspended users are KEPT
+    expect(aoa[4][8]).toBeNull(); // a sales login with no SalesUser row → blank Employee ID
+    expect(aoa[4][13]).toBeNull(); // no last-seen
+    expect(aoa[4][15]).toBe('Suspended'); // inactive / suspended users are KEPT
     expect(aoa.flat()).not.toContain('Old');
     expect(aoa.flat()).not.toContain('9000000004');
     expect(aoa.flat()).not.toContain('Operator');
@@ -278,6 +282,7 @@ describe('app-installed-users export kind', () => {
     // the ASM column header is the tenant's own level name; an ASM shows their own name; no outlets → "Not set"
     expect(aoa[0].slice(4, 8)).toEqual(['Area Manager', 'Zone', 'State', 'City']);
     expect(aoa[1].slice(4, 8)).toEqual(['Maria', 'Not set', 'Not set', 'Not set']);
+    expect(aoa[1][8]).toBe('DEO-77'); // Employee ID shown for every tenant, incl. Deoleo
   }, XLSX_TIMEOUT);
 
   it('an "About" sheet explains the area columns', async () => {
@@ -303,6 +308,8 @@ describe('app-installed-users export kind', () => {
       expect(m.findMany).toHaveBeenCalledTimes(1);
     }
     expect(prisma.user.findMany).toHaveBeenCalledTimes(2); // pre-existing 1,000-user batches — 2 reads for 2,000 rows
+    // Employee ID rides on the SAME user read (nested salesUser select) — no per-row / extra salesUser query.
+    expect(prisma.user.findMany.mock.calls[0][0]).toMatchObject({ select: { salesUser: { select: { employeeCode: true } } } });
   }, XLSX_TIMEOUT);
 
   it('soft-deleted users are excluded at BOTH reads (install population + user read)', async () => {

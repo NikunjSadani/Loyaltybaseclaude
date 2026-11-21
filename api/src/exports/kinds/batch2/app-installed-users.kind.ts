@@ -2,8 +2,8 @@
  * App Adoption → "Download installed users (Excel)" — GET /v1/push/adoption/installed-users (owner 2026-11-16).
  *
  * One row per user who has ≥ 1 `pwa_install` row (i.e. opened the app as an installed/home-screen app), newest first
- * install first. Columns: Name · Phone · Role · Role Group · ASM (tenant's level name) · Zone · State · City · Outlet
- * Code · Outlet Name · Platforms Installed · First Installed · Last Seen · Notifications Enabled · User Status, plus an
+ * install first. Columns: Name · Phone · Role · Role Group · ASM (tenant's level name) · Zone · State · City · Employee
+ * ID · Outlet Code · Outlet Name · Platforms Installed · First Installed · Last Seen · Notifications Enabled · User Status, plus an
  * "About" sheet explaining the area columns (reports/area/user-area.ts — owner 2026-11-20).
  *
  * Population — the SAME as the App Adoption page's "Installed to home screen" number (`tenantInstallWhere` in
@@ -74,6 +74,9 @@ export const INSTALLED_USERS_HEADERS = [
   'Zone',
   'State',
   'City',
+  // Employee ID (owner 2026-11-21, all tenants): the login's SalesUser.employeeCode; blank for anyone without a
+  // sales employee record — the same blank Outlet Code shows for a sales user.
+  'Employee ID',
   'Outlet Code',
   'Outlet Name',
   'Platforms Installed',
@@ -148,7 +151,7 @@ interface UserRow {
   phone: string;
   role: string;
   status: string;
-  salesUser: { hierarchyLevel: { code: string; name: string | null } | null } | null;
+  salesUser: { employeeCode: string | null; hierarchyLevel: { code: string; name: string | null } | null } | null;
   channelPartner: {
     partnerCode: string;
     outlets: Array<{ outletCode: string; name: string; outletType: { code: string; name: string } | null }>;
@@ -241,7 +244,9 @@ async function buildRows(
           phone: true,
           role: true,
           status: true,
-          salesUser: { select: { hierarchyLevel: { select: { code: true, name: true } } } },
+          // employeeCode rides on this SAME per-chunk read (no extra query). userId is @unique on SalesUser, so a
+          // login has at most one row — it is shown whether or not it is soft-deleted (it is the only one there is).
+          salesUser: { select: { employeeCode: true, hierarchyLevel: { select: { code: true, name: true } } } },
           channelPartner: {
             select: {
               partnerCode: true,
@@ -282,6 +287,7 @@ async function buildRows(
         areaCell(a.zone),
         areaCell(a.state),
         areaCell(a.city),
+        (u.salesUser?.employeeCode ?? '').trim(),
         outlet?.outletCode ?? (group === 'partner' ? u.channelPartner?.partnerCode ?? '' : ''),
         outlet?.name ?? '',
         platformsLabel(platforms.get(u.id) ?? new Set()),
@@ -325,7 +331,7 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
 
   // 4. Only now write the workbook.
   const sheet = await out.addSheet('Installed users', installedUsersHeaders(area.asmHeader), {
-    widths: [26, 14, 16, 10, 24, 16, 18, 18, 16, 30, 22, 18, 18, 12, 14],
+    widths: [26, 14, 16, 10, 24, 16, 18, 18, 14, 16, 30, 22, 18, 18, 12, 14],
   });
   for (const r of rows) await sheet.addRow(r);
 

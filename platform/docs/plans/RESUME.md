@@ -236,6 +236,7 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 14. **Held opening balances (Bajaj, 40 outlets, Σ 1,22,843 pts)** — ships in `release/next2` (§3). After deploy:
     runbook §D in order (deploy → §C-POST → dry run → backup → APPLY → verify → sweep). Operator uploads the manifest to
     `gs://gifsy-platform-files/migrations/held/bajaj-held-opening-balances-2026-11-11-v1.json` first. The 293 File-1-only outlets (2,22,995.55 pts) are IGNORED (owner decision 2026-11-21).
+15. **App Adoption installed-users Excel → "Employee ID" column** (before Outlet Code; `SalesUser.employeeCode`, blank for non-sales) — branch `feat/adoption-employee-id` (off `release/next2`, local, not pushed; ⚠️ platform-wide, owner-approved 2026-11-21 for all clients incl. Deoleo; additive column; see PWA-PLAN.md).
 
 ## 5. Owner process rules (adopted — apply to every change)
 
