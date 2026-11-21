@@ -74,6 +74,23 @@ check the readiness line after deploy and re-run the Bajaj backfill if it is > 0
 transactions: **nothing to backfill**; its first movements are sequenced from seq 1. Bajaj staging — already V2
 (its `reversalEngine` row is now ignored).
 
+**Fix round after the dual audit (2026-11-21, no blocker / no number-changing bug):**
+- A1: every POINTS reversal created now gets a marker audit row (`POINTS_REVERSAL_ENGINE_MARKER`, entityId = reversal
+  id, same transaction). Approve refuses a POINTS reversal without it (409 `RAISED_UNDER_OLD_ENGINE`: "raised under the
+  old reversal engine … reject it and re-raise it") — never a silent switch of rules. Prod had 0 reversals at the
+  retirement; Bajaj staging's pending POINTS reversals must be re-raised. Reject needs no marker.
+- B1: `WALLET_NOT_SEQUENCED` names the client by display name (`branding.displayName` → `internalName` → slug) and
+  the next step "Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see
+  BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C" (same wording in the readiness line and the digest bullet).
+- A2: the unsequenced-movement warning is logged once per wallet per hour per process, with a running counter.
+- A3: with no credit position, the gate also checks wallets holding a pre-metadata credit of the batch (no
+  outletCode; `{fieldId}` of this field or nothing) for exactly a batch-row amount of the line — a previous partner.
+- A4: batch confirm keeps ONE atomic transaction (chunking would risk a partially credited batch); instead a
+  redemption takes its wallet row lock first with `lock_timeout 5s` and, if a confirm holds it, refuses with "Points
+  are being updated for this wallet right now … try again in a minute. Nothing was deducted."
+- Post-deploy check for every tenant, rollback note (prefer forward fix) and the Deoleo retailer-visible change:
+  `BAJAJ-PROD-FOLLOWUPS-RUNBOOK.md` §C-POST / "Rollback of the retirement release" / "Deoleo — what changes".
+
 **Migrating a client with imported points history (playbook rule):** import → run the wallet backfill (DRY RUN →
 backup → APPLY → VERIFY, §9.1) **before the client's first points reversal**. The readiness line shows "N wallets not
 yet prepared" until it is done, and every reversal touching such a wallet is refused (`WALLET_NOT_SEQUENCED`).

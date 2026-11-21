@@ -190,6 +190,68 @@ poster objects are deleted from the bucket). Or switch `helpVideos` off (all mem
 > un-sequenced while prod was still LEGACY). A reversal on such a wallet is refused (`WALLET_NOT_SEQUENCED`) — never
 > applied the old way. The C6 / rollback text below is kept as history only.
 
+### C-POST. After the retirement release is on prod — EVERY tenant (Bajaj AND Deoleo), one owner go per tenant
+
+Run for `<slug>` = `bajaj`, then `deoleo` (and every future client before its first points reversal). `$OPS` = the
+keyless ops identity (RESUME §7/§8).
+
+1. **Readiness** (read-only). Screen: Gifsy console, work in the client → Credits → Payout Status → the banner's red
+   readiness line (absent = ready). Or SQL (same predicate as the API, `unsequencedWithHistoryWhere`):
+   ```sql
+   SELECT current_database();  -- must be gifsy_prod
+   SELECT count(*) FILTER (WHERE w."backfillStatus" IS DISTINCT FROM 'BLOCKED' AND (
+            w."redeemablePoints" <> 0 OR w."debtPoints" <> 0 OR w."earnedPoints" <> 0 OR w."lockedPoints" <> 0 OR
+            w."redeemedPoints" <> 0 OR w."expiredPoints" <> 0 OR w."lifetimeEarned" <> 0 OR w."lifetimeRedeemed" <> 0 OR
+            w."lifetimeExpired" <> 0 OR EXISTS (SELECT 1 FROM wallet_transactions t WHERE t."walletId" = w.id))) AS not_sequenced,
+          count(*) FILTER (WHERE w."backfillStatus" = 'BLOCKED') AS blocked
+   FROM wallets w JOIN channel_partners cp ON cp.id = w."partnerId"
+   WHERE cp."clientId" = '<slug>' AND w."movementSeq" = 0;
+   ```
+   **What the count means (B3):** wallets that have ANY points history (any balance or counter ≠ 0, or any passbook row)
+   but no movement sequence — whatever their `backfillStatus` (NULL, or DONE left from an earlier run), except
+   BLOCKED, which is counted separately. Each one refuses points reversals until it is sequenced. Pristine wallets
+   (all 0, no row) are never counted — their first movement is sequenced automatically.
+   **Expected:** Deoleo `not_sequenced 0, blocked 0` (98 wallets, zero transactions — 2026-11-21 dry run: planned 0,
+   noop 98). Bajaj `blocked 0`; `not_sequenced` = 0 only if no Bajaj wallet was created / credited / redeemed between
+   the 2026-11-21 APPLY and the deploy (prod still ran LEGACY then, so such activity on an un-sequenced or new wallet
+   was written un-sequenced) — any number > 0 is that activity, not a fault.
+2. If both are 0 → done for this tenant. If `not_sequenced > 0`:
+   a. **Pause approvals** — the APPLY in (c) pauses POINTS reversal create/approve for its own window and lifts the
+      pause at the end (also after a crash). To hold it longer by hand:
+      `POST /api/admin/credits/reversal-engine/pause {"paused":true,"clientId":"<slug>","reason":"backfill"}`.
+   b. **Dry run** (C1 pattern):
+      ```bash
+      gcloud run jobs execute gifsy-migrate --region asia-south1 $OPS --wait \
+        --args=node,dist/wallet/backfill/backfill.main.js \
+        --update-env-vars="EXPECTED_DB=gifsy_prod,TENANTS=<slug>"
+      ```
+      Go/no-go: planned = the readiness count (± live activity), 0 blocked, 0 BLOCKING anomalies.
+   c. **Backup** (C2) then **APPLY** (C3 pattern):
+      ```bash
+      gcloud sql backups create --instance=gifsy-db $OPS --description="pre-backfill <slug> <date>"
+      gcloud run jobs execute gifsy-migrate --region asia-south1 $OPS --wait \
+        --args=node,dist/wallet/backfill/backfill.main.js \
+        --update-env-vars="EXPECTED_DB=gifsy_prod,TENANTS=<slug>,BACKFILL_APPLY=true,BACKFILL_CONFIRM=APPLY gifsy_prod"
+      ```
+   d. **Verify** (C4 pattern, `TENANTS=<slug>`, the V0 objects from (c)) → exit 0; then step 1 again → `not_sequenced 0`.
+   e. **Resume** — confirm the pause is lifted (C5 pause query → 0 rows or `paused=false`); if not:
+      `POST /api/admin/credits/reversal-engine/pause {"paused":false,"clientId":"<slug>"}` (or "Resume approvals").
+
+### Rollback of the retirement release (B4)
+Rolling back to the release before `feat/retire-legacy-wallet-engine` is SAFE for balances but changes rules:
+sequenced wallets stay on the tracked path (the old code keeps any `movementSeq > 0` wallet sequenced), and the old
+code reads the `reversalEngine` flag again — absent on prod = LEGACY. Debt booked by reversals approved under the one
+engine then meets the old rules: LEGACY refuses POINTS reversals on wallets with debt (Q14) and floors new reversals at
+0. Nothing is lost, but reversals on those wallets stop until a V2 flag row is written. **Prefer a forward fix over a
+rollback.** Marker rows (`POINTS_REVERSAL_ENGINE_MARKER`) are harmless to the old code.
+
+### Deoleo — what changes for retailers (B7)
+Owner decision (2026-11-19/21, negative wallets repay from future earnings): after the retirement a Deoleo POINTS
+reversal larger than the wallet holds takes the wallet **below zero** (debt, repaid from future earnings) instead of
+stopping at 0, and the passbook row reads "Credit reversed (<field> · <period>) −N · M owed, repaid from future
+earnings" (the old "Clawback … [SHORTFALL …]" wording is gone). Deoleo has never had a reversal (prod probe
+2026-11-21), so no existing row changes.
+
 ### What it does (plain words)
 The Wallet Reversal Engine (V2) needs every Bajaj wallet's history numbered in order and each credit's "how much debt
 did it repay" recorded. The **backfill** writes that bookkeeping only — movement sequence numbers, ledger links, credit
