@@ -7,7 +7,7 @@
 **Owner decision 2026-11-21 (⚠️ PLATFORM-WIDE, approved): DEFAULT ON for every tenant** incl. Deoleo and every new
 client — built on branch `feat/require-location-default` (in the next batch `release/next`; not yet deployed). ON unless
 `features.requireLocation` is explicitly `false`; the Gifsy-console switch is only an **emergency off**. **Deoleo goes ON
-at that deploy with no data change — Deoleo heads-up needed first** (their reps will need location allowed + a fix for
+at that deploy with no data change — no Deoleo heads-up needed (owner 2026-11-21: reps already keep location on for KYC/visibility)** (their reps will need location allowed + a fix for
 KYC / visibility). The 200 m blocking is unaffected (it stays driven only by `outletMasterGeo` / the visibility
 `geoFence`). Real-phone check (Android + iPhone) still not recorded.
 **Scope:** every tenant not switched off gets the gate; the Location Report (tile + API) and the Daily Ops Digest
@@ -220,7 +220,7 @@ with the server outlet context, exactly like submit validation): only photos tha
   - visibility blocks only under `outletMasterGeo` OR the tenant's own `visibilityConfig.geoFence.enabled` + radius;
   - `requireLocation` itself only requires a fix, and records `LOCATION_FENCE_BLOCK` audit rows where a fence already
     blocks.
-- **Recommended:** a heads-up to Deoleo's field team before the release.
+- **Recommended:** no heads-up needed (owner 2026-11-21: reps already keep location on).
 
 ## Staging test 2026-11-21 (server side, Bajaj staging)
 

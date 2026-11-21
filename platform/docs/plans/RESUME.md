@@ -184,7 +184,7 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
    `gifsy_prod`: Bajaj `requireLocation` true, `outletMasterGeo` true, `wholesalerPayoutInclActivation` true,
    `helpVideos` absent; Deoleo all four absent, no explicit `false`). Server-side location test on Bajaj staging passed
    the same day (`LOCATION-GATE.md`; real-phone GPS not exercised). Default ON for every tenant is on
-   `feat/require-location-default` (next batch; Deoleo heads-up needed before that deploy). **Still waiting on the
+   `feat/require-location-default` (next batch; no Deoleo heads-up needed (owner 2026-11-21: reps already keep location on for KYC/visibility) before that deploy). **Still waiting on the
    owner:** `helpVideos` ON after the content load; OK to load the Help & videos content on prod; OK to correct the remaining non-Privilege "Unverifiable" visibility captures in one go (list + SQL + backup
    first — 2 were corrected earlier, backup `1795068290437`); Bajaj prod wallet backfill → reversal engine V2 (backup +
    owner OK; **before any credit reversal on Bajaj prod** — see §3 D3).
@@ -215,8 +215,8 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 12. **Next batch = `release/next`** (local, not pushed): `fix/gps-photo-overlap` `0003f706` + `fix/hydration-418`
     `55155ce0` (done + audited), `feat/request-volume`, `feat/ticket-remarks-cc` (per-client To + CC),
     `feat/require-location-default` (⚠️ platform-wide, owner-approved 2026-11-21: location required ON BY DEFAULT for
-    every client incl. Deoleo; console switch = emergency off; Deoleo goes ON with no data change — send Deoleo's field
-    team a heads-up before the release; 200 m blocking unaffected — `outletMasterGeo` / visibility `geoFence` only).
+    every client incl. Deoleo; console switch = emergency off; Deoleo goes ON with no data change — no heads-up needed
+    (owner 2026-11-21: reps already keep location on); 200 m blocking unaffected — `outletMasterGeo` / visibility `geoFence` only).
     **Before it ships:** independent audit of the location change, full gates, staging check + the measured
     request-volume numbers, then the owner's go. **Owner decisions still pending (2026-11-21):** (a) remove the prod
     deploy's second click (§6 step 4); (b) Bajaj prod ticket remarks inbox — still unset; (c) sales banners on the sales

@@ -364,7 +364,7 @@ and the Performance trend (`GET /partner/targets/trend`).
   Claude does not write the flag.
 - Prod data (read-only probe 2026-11-21, exec `n9vdj`): **Bajaj prod = explicit `true`** (switched ON by the owner
   2026-11-21; `outletMasterGeo` also ON) → no change for Bajaj. **Deoleo = key absent** (and no `outletMasterGeo`) →
-  Deoleo goes ON at the deploy of this branch with no data change — send Deoleo's field team a heads-up first. Bajaj
+  Deoleo goes ON at the deploy of this branch with no data change — no heads-up needed (owner 2026-11-21). Bajaj
   staging: ON. Server-side staging test passed 2026-11-21; real-phone run not recorded.
 - ON: a sales rep can't start or submit a KYC / visibility capture until location is allowed for the site AND the phone
   gets a fix (phone-specific guide + Test again); the API refuses fix-less submissions; "outside the 200 m fence"
