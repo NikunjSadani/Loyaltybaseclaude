@@ -78,6 +78,7 @@ export function usageAboutRows(report: UsageReport, p: UsageParams, now: Date): 
     [report.asmHeader, report.notes.area[0] ?? ''],
     ['Zone / State / City', report.notes.area[1] ?? ''],
     ['Not set / Not in hierarchy', report.notes.area[2] ?? ''],
+    ['"N cities" / "N states"', report.notes.area[3] ?? ''],
     ['Avg minutes per tracked day', 'Minutes ÷ days with tracking (days before tracking started are left out).'],
     ['Phone / computer', 'From the browser identity. Tablets count as phones; an iPad asking for the desktop site counts as a computer.'],
     ['Background activity', 'Automatic refreshes (notification bell, download badge, status polling) are not counted — only real actions.'],

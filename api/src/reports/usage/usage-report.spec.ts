@@ -377,7 +377,9 @@ describe('buildUsageReport', () => {
     expect(area('idle')).toEqual([['Not set'], ['Not set'], ['Gujarat'], ['Vadodara']]); // no rep, blank zone
     expect(area('a1')).toEqual(Array(4).fill(['Not in sales hierarchy']));
     expect(r.asmHeader).toBe('ASM');
-    expect(r.notes.area).toHaveLength(3);
+    expect(r.notes.area).toHaveLength(4);
+    expect(r.notes.area[3]).toMatch(/"<N> cities"/);
+    expect(by.get('s2')).not.toHaveProperty('cityAll'); // an ASM's row keeps its full list
   });
 
   it('2,000 users → the same number of DB reads as 10 users (area data is batch-loaded, never per row)', async () => {

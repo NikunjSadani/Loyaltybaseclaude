@@ -142,10 +142,15 @@ server action, not an authenticated `/api` call. Any NEW poll/timer must use `ba
   no own outlet → "Group — N outlets"; sales users → outlets covered by them and their active downline (SalesUser.zone
   wins). Inactive / vacant reps are ignored. Excel writes full lists; the page shows 5 + "+N more" (tooltip + click to
   expand). Admin/MIS/Gifsy → "Not in sales hierarchy". The Region column now also follows parent-group assignments.
+- **Above-ASM counts (owner 2026-11-21, platform-wide approved):** rows ABOVE the ASM rung (same rank rule as the ASM
+  column — the tenant's own level numbers, else the canonical code order) show City as "<N> cities" when they cover 2+
+  cities (one city / "Not set" as-is) and State as "<N> states" only when > 5 states; Zone unchanged; everyone else
+  unchanged. Applied in the resolver (`summariseAboveAsm`), so both Excels write the count; the page shows the count
+  with the full list in the tooltip (`cityAll` / `stateAll` on the row). A 4th About / notes line explains it.
 
 **Area columns — staging check (2026-11-21, real logins):** ASM / Zone / State / City filled in both the App
 installed-users export and the Usage report; admin rows read "Not in sales hierarchy"; users above ASM read "Above ASM
-level". HO / State-head **City** cells can list hundreds of cities — the owner may prefer "N cities" (not decided).
+level". HO / State-head **City** cells listed hundreds of cities — owner decided 2026-11-21: "N cities" (see above).
 Deoleo: both exports work with its level names XSR / RSM / ZNM / NSM. The Mobile column shows full numbers
 (pre-existing behaviour, unchanged). Bajaj staging has no MIS_USER, so MIS checks used Deoleo's.
 

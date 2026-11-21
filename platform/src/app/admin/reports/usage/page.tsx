@@ -40,12 +40,15 @@ const fmtInt = (n: number) => n.toLocaleString('en-IN')
 const fmtNum = (n: number | null) => (n == null ? '—' : n.toLocaleString('en-IN', { maximumFractionDigits: 1 }))
 const roleLabel = (r: string) => r.replace(/_/g, ' ')
 
-/** One area cell: first few values, "+N more" expands in place; the full list is always in the tooltip. */
-function AreaCell({ values }: { values: string[] }) {
+/** One area cell: first few values, "+N more" expands in place; the full list is always in the tooltip.
+ *  `all` = the full list behind a summarised "<N> cities" / "<N> states" cell (rows above the ASM level, owner
+ *  2026-11-21) — shown only in the tooltip. */
+function AreaCell({ values, all }: { values: string[]; all?: string[] }) {
   const [open, setOpen] = useState(false)
   const { shown, hidden, full } = areaPreview(values)
+  const tip = all && all.length ? all.filter(Boolean).join(', ') : full
   return (
-    <td className={`px-3 py-1.5 text-gray-600 ${open ? 'whitespace-normal min-w-[220px]' : 'whitespace-nowrap'}`} title={full || undefined}>
+    <td className={`px-3 py-1.5 text-gray-600 ${open ? 'whitespace-normal min-w-[220px]' : 'whitespace-nowrap'}`} title={tip || undefined}>
       {open ? full : (shown || '—')}
       {hidden > 0 && (
         <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
@@ -372,7 +375,7 @@ export default function UsageReportPage() {
                       <tr key={r.userId} className="border-b border-gray-100 hover:bg-gray-50">
                         <td className="px-3 py-1.5 font-medium whitespace-nowrap max-w-[200px] truncate" title={r.name}>{r.name}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{roleLabel(r.role)}</td>
-                        {[r.asm, r.zone, r.state, r.city].map((v, i) => <AreaCell key={i} values={v ?? []} />)}
+                        {[[r.asm], [r.zone], [r.state, r.stateAll], [r.city, r.cityAll]].map(([v, all], i) => <AreaCell key={i} values={v ?? []} all={all} />)}
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-500 font-mono">{r.phone || '—'}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600 max-w-[180px] truncate" title={r.programmes.join(', ')}>{r.programmes.join(', ') || '—'}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600 max-w-[180px] truncate" title={r.regions.join(', ')}>{r.regions.join(', ') || '—'}</td>

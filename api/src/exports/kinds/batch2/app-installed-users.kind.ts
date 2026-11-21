@@ -322,6 +322,7 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
   await about.addRow([area.asmHeader, asmNote]);
   await about.addRow(['Zone / State / City', geoNote]);
   await about.addRow(['Not set / Not in hierarchy', blankNote]);
+  await about.addRow(['"N cities" / "N states"', area.notes[3] ?? '']);
   return { rowCount: rows.length };
 }
 

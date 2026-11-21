@@ -20,6 +20,10 @@ export interface UsageRow {
   zone: string[]
   state: string[]
   city: string[]
+  /** Rows above the ASM level (owner 2026-11-21): city / state summarised to "<N> cities" / "<N> states"; the full
+   *  list for the tooltip. Absent otherwise. */
+  cityAll?: string[]
+  stateAll?: string[]
   daysActive: number
   trackedDays: number
   visits: number

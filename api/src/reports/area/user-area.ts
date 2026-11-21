@@ -52,13 +52,38 @@ export interface UserArea {
   zone: string[];
   state: string[];
   city: string[];
+  /** Set only when `city` was summarised to ["<N> cities"] (a row above the ASM level): the full list, for a tooltip. */
+  cityAll?: string[];
+  /** Set only when `state` was summarised to ["<N> states"] (above-ASM row with > AREA_MAX_VALUES states). */
+  stateAll?: string[];
+}
+
+/**
+ * Rows ABOVE the ASM level (owner 2026-11-21): a State Head / NSM / HO covers so many cities that the full list is
+ * noise. City → "<N> cities" whenever they cover 2+ cities (one city / "Not set" shows as-is); State → "<N> states"
+ * only when they cover more than AREA_MAX_VALUES states. Zone is unchanged. Everyone else is unchanged.
+ */
+export function summariseAboveAsm(area: UserArea): UserArea {
+  const real = (l: string[]) => l.filter((v) => v !== AREA_NOT_SET);
+  const cities = real(area.city);
+  const states = real(area.state);
+  const out: UserArea = { ...area };
+  if (cities.length >= 2) {
+    out.city = [`${cities.length} cities`];
+    out.cityAll = area.city;
+  }
+  if (states.length > AREA_MAX_VALUES) {
+    out.state = [`${states.length} states`];
+    out.stateAll = area.state;
+  }
+  return out;
 }
 
 export interface UserAreaResolver {
   /** The ASM column header: the tenant's own name for the ASM level ("ASM" by default). */
   asmHeader: string;
   resolve(user: { id: string; role: string }): UserArea;
-  /** Plain-English lines for the sheet's About / notes: [ASM, Zone/State/City, placeholder words]. */
+  /** Plain-English lines for the sheet's About / notes: [ASM, Zone/State/City, placeholder words, above-ASM counts]. */
   notes: string[];
 }
 
@@ -137,6 +162,7 @@ export function areaNotes(asmHeader: string): string[] {
     `${a}: the ${a} this user reports to in the sales hierarchy; an ${a} shows their own name. Users above the ${a} level show "${above}". "Vacant (code)" = that ${a} position is vacant in the uploaded hierarchy (we show the vacant territory, not the next manager up). Retailers / wholesalers show the ${a} of each active sales rep covering their outlet (assigned to the outlet, to its owner, or to its parent group); a rep who sits above the ${a} level shows as "${above} — Name (level)". Inactive or vacant reps are ignored.`,
     `Zone / State / City: retailers / wholesalers — their main outlet in the outlet master (the outlet shown as their Outlet Code); a group head with no outlet of their own shows "Group — N outlets" in all four columns. Sales users — the outlets covered by them and by the active reps below them (a zone typed on the employee record wins). The Excel file lists every value; the page shows the first ${AREA_MAX_VALUES} and "+N more" (click to see all).`,
     `"${AREA_NOT_SET}" = the value is missing in the uploaded data (no ${a} in the reporting chain, no active rep covering the outlet, no outlet assigned, or a blank outlet field). "${AREA_NOT_IN_HIERARCHY}" = admin, MIS and Gifsy logins.`,
+    `Users above the ${a} level (e.g. state / national heads, head office): City shows "<N> cities" (the number of distinct cities they cover) instead of the full list, and State shows "<N> states" when they cover more than ${AREA_MAX_VALUES} states; Zone is shown in full. On the page, hover the cell to see the full list.`,
   ];
 }
 
@@ -313,12 +339,13 @@ export function buildUserAreaResolver(
     if (su) {
       const g = geoAll.get(su.id) ?? newGeo();
       const ownZone = clean(su.zone);
-      return {
+      const area: UserArea = {
         asm: [asmForSelf(su)],
         zone: ownZone ? [ownZone] : areaValues(g.zones),
         state: areaValues(g.states),
         city: areaValues(g.cities),
       };
+      return isAbove(su) ? summariseAboveAsm(area) : area;
     }
     if (role.startsWith('SALES_')) return fill(AREA_NOT_SET); // a sales login with no employee record
     if (PARTNER_ROLES.has(role)) {
