@@ -33,11 +33,17 @@ interface AdoptionData {
   };
   installed: {
     users: number;
+    /** pwa_install rows (one per user × platform). Optional so an older API build still renders. */
+    devices?: number;
+    byRole?: { role: string; users: number }[];
     byPlatform: { platform: string; users: number }[];
   };
 }
 
 const fmtInt = (n: number) => (n ?? 0).toLocaleString('en-IN');
+
+/** Install platforms are stored upper-case; show them like the notifications card's OS names. */
+const PLATFORM_LABEL: Record<string, string> = { ANDROID: 'Android', IOS: 'iOS', DESKTOP: 'Desktop', OTHER: 'Other' };
 
 /* ─── Small presentational pieces ────────────────────────────────────────────── */
 
@@ -338,11 +344,21 @@ export default function AdminAppAdoptionPage() {
                 </p>
                 <p className="text-sm text-gray-500 mb-0.5">users</p>
               </div>
+              {/* Same layout as "Notifications enabled" (owner 2026-11-21): devices line + By role + By OS. */}
+              {typeof installed.devices === 'number' && (
+                <p className="text-xs text-gray-400 -mt-3">
+                  across {fmtInt(installed.devices)} devices
+                </p>
+              )}
 
-              <div className="pt-2 border-t border-gray-100">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 pt-2 border-t border-gray-100">
                 <BreakdownList
-                  title="By platform"
-                  rows={installed.byPlatform.map((p) => ({ label: p.platform, users: p.users }))}
+                  title="By role"
+                  rows={(installed.byRole ?? []).map((r) => ({ label: r.role, users: r.users }))}
+                />
+                <BreakdownList
+                  title="By OS"
+                  rows={installed.byPlatform.map((p) => ({ label: PLATFORM_LABEL[p.platform] ?? p.platform, users: p.users }))}
                 />
               </div>
             </CardContent>

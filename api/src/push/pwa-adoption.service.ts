@@ -31,6 +31,8 @@ export interface AdoptionReport {
   };
   installed: {
     users: number; // distinct users of this tenant (not deleted) who launched the installed PWA — see tenantInstallWhere
+    devices: number; // pwa_install rows (one per user × platform)
+    byRole: { role: string; users: number }[];
     byPlatform: { platform: string; users: number }[];
   };
 }
@@ -89,13 +91,16 @@ export class PwaAdoptionService {
     // ── Installed to home screen (pwa_install) — same population as the installed-users Excel. ──
     const installs = await this.prisma.pwaInstall.findMany({
       where: tenantInstallWhere(clientId),
-      select: { userId: true, platform: true },
+      select: { userId: true, platform: true, user: { select: { role: true } } },
     });
     const installUsers = new Set<string>();
     const platformUsers = new Map<string, Set<string>>();
+    const installRoleUsers = new Map<string, Set<string>>();
     for (const i of installs) {
       installUsers.add(i.userId);
       (platformUsers.get(i.platform) ?? platformUsers.set(i.platform, new Set()).get(i.platform)!).add(i.userId);
+      const role = i.user?.role ?? 'UNKNOWN';
+      (installRoleUsers.get(role) ?? installRoleUsers.set(role, new Set()).get(role)!).add(i.userId);
     }
 
     return {
@@ -112,6 +117,11 @@ export class PwaAdoptionService {
       },
       installed: {
         users: installUsers.size,
+        // One pwa_install row per (user, platform) → "across N devices" like the notifications card.
+        devices: installs.length,
+        byRole: [...installRoleUsers.entries()]
+          .map(([role, set]) => ({ role, users: set.size }))
+          .sort((a, b) => b.users - a.users),
         byPlatform: [...platformUsers.entries()]
           .map(([platform, set]) => ({ platform, users: set.size }))
           .sort((a, b) => b.users - a.users),
