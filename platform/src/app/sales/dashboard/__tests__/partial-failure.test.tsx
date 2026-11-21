@@ -16,6 +16,8 @@ vi.mock('@/lib/task-config', () => ({
 }));
 vi.mock('@/lib/banner', () => ({
   fetchBannersResult: () => Promise.resolve({ banners: [], popups: [], ok: true }),
+  fetchSalesBannersResult: () => Promise.resolve({ banners: [], ok: true }),
+  SALES_BANNERS_TTL_MS: 60_000,
   getActiveSalesBanners: () => [],
   getBgStyle: () => ({}),
 }));

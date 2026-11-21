@@ -11,10 +11,15 @@
 3. **Prefetch-once is ineffective without `loading.tsx`** — the once-per-session bottom-nav prefetch does not help
    the route without a loading boundary.
 
-## Sales banners (owner decision pending — NOT turned on)
+## Sales banners (owner 2026-11-21 — ON, branch `feat/small-owner-asks`, platform-wide approved)
 
-Sales banners have **never shown on the sales app for any tenant**: the banners endpoint is partner-only. Whether to
-show them to sales is an open owner decision; the branch does not turn them on.
+The sales dashboard reads `GET /api/sales/banners` (→ `/v1/sales/banners`, every SALES_* role, own tenant only;
+`api/src/sales/sales-banners.service.ts`): only `active` + `showInSalesApp` banners in their date window (IST day),
+priority order, display fields only, never popups. Audience: the partner `audience` is an outlet-type target, so sales
+sees every `showInSalesApp` banner whatever its audience. Client: `fetchSalesBannersResult` (`lib/banner.ts`) through
+the session cache — key `sales:banners`, 60 s TTL, cleared on any API write incl. a banner-config save; only the
+dashboard calls it (no per-screen request). No banners (every prod tenant today) → nothing rendered, no error. The
+partner endpoint `/v1/partner/banners` is unchanged (partner roles only) and the sales app never calls it.
 
 ## Outage evidence (2026-11-20)
 

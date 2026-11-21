@@ -205,8 +205,8 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
     dashboard 2-min reuse, post-submit invalidation. **Owner approved 2026-11-21 on condition screen switching stays
     smooth**; audit found cross-tab staleness, a failed read cached as 0, and prefetch-once ineffective without
     `loading.tsx` — fix round in progress; **owner sees the measured trade-offs before it ships** →
-    [`REQUEST-VOLUME.md`](REQUEST-VOLUME.md). **Sales banners** have never shown on the sales app for any tenant (the
-    endpoint is partner-only) — owner decision pending; NOT turned on. Workers Paid is in place (10M req/mo) —
+    [`REQUEST-VOLUME.md`](REQUEST-VOLUME.md). **Sales banners**: owner 2026-11-21 → ON via the new sales read path
+    `GET /v1/sales/banners` (branch `feat/small-owner-asks`, not yet pushed). Workers Paid is in place (10M req/mo) —
     TODO: confirm the monthly request budget against the ~30k req/h peak.
 11. **`release/2026-11-21`** (§3): staging real-login check DONE 2026-11-21 (all pass); **deployed to prod — prod =
     `main` = `97332c95`, verified 2026-11-21** (§1; visibility review-history backfill verified: 51,140 Bajaj captures
@@ -220,9 +220,10 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
     **Before it ships:** independent audit of the location change, full gates, staging check + the measured
     request-volume numbers, then the owner's go. **Owner decisions still pending (2026-11-21):** (a) remove the prod
     deploy's second click (§6 step 4); (b) Bajaj prod ticket remarks inbox — still unset; (c) sales banners on the sales
-    app; (d) request-volume measured trade-offs; (e) real-phone location test (Android + iPhone).
-13. Owner may want HO / State-head **City** cells in the area columns shown as "N cities" (they can list hundreds of
-    cities today) — not decided. The Usage report Mobile column shows full numbers (pre-existing, not changed).
+    app — DECIDED 2026-11-21: on (branch `feat/small-owner-asks`); (d) request-volume measured trade-offs; (e) real-phone location test (Android + iPhone).
+13. HO / State-head **City** cells → "N cities" (State → "N states" when > 5) — DECIDED + built 2026-11-21 on branch
+    `feat/small-owner-asks` (see USAGE-REPORT.md). Ticket remarks emails lose the "Asked:" and "copied for
+    information" lines on the same branch (SUPPORT-TICKETS.md). The Usage report Mobile column shows full numbers (pre-existing, not changed).
 
 ## 5. Owner process rules (adopted — apply to every change)
 
