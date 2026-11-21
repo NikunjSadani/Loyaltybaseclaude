@@ -11,10 +11,20 @@ import { platformWide } from '../common/tenant-scope';
 import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import { EnrollmentFormSchema, FormField, readMediaValue } from './enrollment-form.helper';
 import {
+  loadSchemeMediaLinkWriter,
+  mediaSafe,
+  schemeMediaAboutRows,
+  schemeMediaKeyOf,
+  schemeMediaKeysOfArray,
+  type MediaCell,
+} from './scheme-media-link';
+import {
   AudienceFilter,
   buildOutletWhereFromFilter,
   OUTLET_NAME_HEADER_ALIASES,
 } from './scheme-roster.helper';
+
+export type { MediaCell } from './scheme-media-link';
 
 /**
  * Inline-safe mime allowlist for the PUBLIC media-view endpoint — identical to the
@@ -42,7 +52,7 @@ const NAME_ALIAS_SET: ReadonlySet<string> = new Set(
 
 /**
  * Field types whose captured value is a stored GCS object key (media). In the
- * export these render as an AUTH-GATED view link (D30), NOT the raw key. Kept
+ * export these render as a SIGNED-IN viewer link (scheme-media-link.ts), NOT the raw key. Kept
  * local so it stays correct even as enrollment-form.helper's FORM_FIELD_TYPES is
  * extended by the sibling stream (adds SIGNATURE etc.). UPI_QR_SCAN is NOT here:
  * its captured value is a live-scanned UPI VPA string, exported as a plain text
@@ -71,8 +81,8 @@ export interface ExportRosterRow {
   prefillValues: Record<string, unknown> | null;
   /**
    * The LIVE enrollment's id (the current submission snapshot the export renders),
-   * or null when the row is not enrolled / soft-deleted. Threaded into the media
-   * view-token (`sub`) so the PUBLIC endpoint resolves the object key server-side.
+   * or null when the row is not enrolled / soft-deleted. (Media links no longer depend
+   * on it — they carry the object key to the signed-in viewer page.)
    */
   enrollmentId: string | null;
   enrollment: {
@@ -96,8 +106,9 @@ export interface ExportColumn {
 
 /**
  * Render ONE captured field value for the export cell.
- *   - media field (key present)  → a REAL Excel hyperlink (HyperlinkCell) whose
- *                                  target is the PUBLIC tokenized view URL (`mintLink`)
+ *   - media field (key present)  → `mediaCell(key)`: a REAL Excel hyperlink "Open photo" /
+ *                                  "Open file" to the signed-in viewer page
+ *   - any value holding a `scheme-media/` key (legacy type change) → the same link
  *   - GPS_POINT ({lat,lng,...})   → "lat, lng (±acc)"
  *   - array (multi-select)        → comma-joined
  *   - object                      → JSON
@@ -109,9 +120,13 @@ export interface ExportColumn {
 export function renderExportValue(
   field: FormField,
   value: unknown,
-  mintLink: (mediaKey: string) => string,
+  mediaCell: MediaCell,
 ): string | HyperlinkCell {
   if (value === null || value === undefined || value === '') return '';
+
+  // A stored scheme-media key is ALWAYS a link, whatever the field's type says today.
+  const anyKey = schemeMediaKeyOf(value);
+  if (anyKey) return mediaCell(anyKey);
 
   // TOGGLE (boolean) → human "Yes"/"No" instead of the raw "true"/"false" string.
   // A real `false` reaches here (it passes the null/'' guard above) and must render
@@ -126,12 +141,11 @@ export function renderExportValue(
   if (MEDIA_FIELD_TYPES.has(field.type)) {
     // A media value may be a bare object-key string OR `{ key, geo }` (per-photo geotag);
     // readMediaValue normalises both. The geo (if any) is surfaced in a separate companion
-    // column by the row builder — here we only render the "View image" link.
+    // column by the row builder — here we only render the link.
     const { key } = readMediaValue(value);
     if (!key) return '';
-    // A clickable "View image" link that opens from a downloaded .xlsx. The target
-    // is a self-authenticating tokenized URL (mintLink) — NOT the raw key.
-    return { __hyperlink: true, text: 'View image', target: mintLink(key) };
+    // A key outside scheme-media/ (never written by the upload endpoint) is still a link, never text.
+    return mediaCell(key);
   }
 
   if (field.type === 'GPS_POINT' && typeof value === 'object') {
@@ -142,7 +156,11 @@ export function renderExportValue(
     }
   }
 
-  if (Array.isArray(value)) return value.map((v) => String(v)).join(', ');
+  if (Array.isArray(value)) {
+    const safe = mediaSafe(value, mediaCell);
+    if (!Array.isArray(safe)) return safe as string | HyperlinkCell;
+    return value.map((v) => String(v)).join(', ');
+  }
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
@@ -189,8 +207,8 @@ export function resolveOutletName(r: ExportRosterRow): { name: string; consumedK
  * an IDENTICAL key set — inserted in a FIXED grouped order (Identity → uploaded
  * Excel columns → master attrs → status → captured form values) — so buildXlsx,
  * which derives the header from the FIRST row's keys, never drops a column when
- * the first roster row has no enrollment. Media fields become auth-gated links
- * via `mintLink`. The returned `columns` drive a second "Columns" legend sheet.
+ * the first roster row has no enrollment. Media fields become signed-in viewer links
+ * via `mediaCell`. The returned `columns` drive a second "Columns" legend sheet.
  *
  * Column sourcing:
  *   - Identity/master/status  → the roster row + matched loyalty outlet master.
@@ -204,7 +222,7 @@ export function resolveOutletName(r: ExportRosterRow): { name: string; consumedK
 export function buildEnrollmentExportRows(
   roster: ExportRosterRow[],
   fields: FormField[],
-  mintLink: (submissionId: string, fieldId: string) => string,
+  mediaCell: MediaCell,
 ): { rows: Record<string, unknown>[]; columns: ExportColumn[] } {
   // The fixed BUILT-IN columns (identity + master + status). Defined here (not lower)
   // so the field-label de-collision below can see them, and reused by the `reserved`
@@ -266,6 +284,27 @@ export function buildEnrollmentExportRows(
   }
   const geoColFor = (fieldId: string): string => geoNameFor.get(fieldId) as string;
 
+  // Multi-file values (an ARRAY of stored keys on any row): one link per file — file 1 in the
+  // field's own column, files 2..N in adjacent "<col> – file N" columns (one hyperlink per cell;
+  // nothing is hidden). Only fields that actually hold >1 file on some row get the extra columns.
+  const extraFileCols = new Map<string, string[]>();
+  for (const f of fields) {
+    let max = 0;
+    for (const r of roster) {
+      const v = (r.enrollment?.formValues as Record<string, unknown> | undefined)?.[f.id];
+      max = Math.max(max, schemeMediaKeysOfArray(v).length);
+    }
+    if (max < 2) continue;
+    const names: string[] = [];
+    for (let i = 2; i <= max; i++) {
+      let name = `${columnFor.get(f.id) as string} – file ${i}`;
+      while (geoTaken.has(name)) name = `${name} (2)`;
+      geoTaken.add(name);
+      names.push(name);
+    }
+    extraFileCols.set(f.id, names);
+  }
+
   // The reserved (non-Excel) headers: base identity, master attrs, status (all defined
   // above), and every form-field column. An uploaded Excel header colliding with any of
   // these is suffixed ` (Excel)` rather than dropped (RESERVED-collision trap) so the
@@ -278,6 +317,7 @@ export function buildEnrollmentExportRows(
     // The per-photo geotag companion headers are reserved too, so an uploaded Excel
     // column sharing a "<col> (Geo)" header is de-collided rather than overwriting it.
     ...[...mediaGeoFields].map(geoColFor),
+    ...[...extraFileCols.values()].flat(),
   ]);
   // Case-INSENSITIVE view of the reserved headers: an uploaded Excel column that differs
   // from a reserved header only in letter-case (e.g. "status" vs the built-in "Status")
@@ -361,9 +401,6 @@ export function buildEnrollmentExportRows(
     // Case-insensitive prefill lookup (bug 3 captured-column fallback + prefillKey match).
     const pvByNorm = new Map<string, unknown>();
     for (const [k, v] of Object.entries(pv)) pvByNorm.set(normalizeKey(k), v);
-    // Per-row media minter: bind this row's live enrollment id + the field id. No live
-    // enrollment (not enrolled / soft-deleted) → no media, so no token is minted.
-    const rowMint = (fieldId: string): string => (r.enrollmentId ? mintLink(r.enrollmentId, fieldId) : '');
     const row: Record<string, unknown> = {};
     // Identity
     row['Outlet Ref'] = r.outletRef;
@@ -372,7 +409,7 @@ export function buildEnrollmentExportRows(
     row['Tagged Employee'] = r.taggedEmployeeCode ?? '';
     row['Submitted By (Employee)'] = r.enrollment?.submittedByEmployeeCode ?? '';
     // Uploaded audience-Excel columns (blank where a row lacks that key).
-    for (const c of excelCols) row[c.header] = pv[c.origKey] ?? '';
+    for (const c of excelCols) row[c.header] = mediaSafe(pv[c.origKey] ?? '', mediaCell);
     // Master attrs (matched loyalty outlet)
     row['Zone'] = r.zone ?? '';
     row['Program'] = r.programName ?? '';
@@ -396,11 +433,19 @@ export function buildEnrollmentExportRows(
           : undefined;
       // Prefill fallback is for TEXT-ish fields only. A MEDIA field stores a GCS object
       // key as its captured value; an uploaded prefill string is NOT a key, so falling
-      // back to it would render a bogus "View image" hyperlink pointing at a non-key
-      // (mintLink ignores it → empty/404 target). Media fields therefore use the captured
-      // value ONLY (empty cell when not captured), never the prefill.
+      // back to it would render a bogus link pointing at a non-key. Media fields therefore
+      // use the captured value ONLY (empty cell when not captured), never the prefill.
       const effective = MEDIA_FIELD_TYPES.has(f.type) ? captured : captured ?? prefill;
-      row[columnFor.get(f.id) as string] = renderExportValue(f, effective, () => rowMint(f.id));
+      const extra = extraFileCols.get(f.id);
+      const fileKeys = extra ? schemeMediaKeysOfArray(captured) : [];
+      if (extra && fileKeys.length > 0) {
+        // One link per file: file 1 here, the rest in the adjacent columns ('' where this row has fewer).
+        row[columnFor.get(f.id) as string] = mediaCell(fileKeys[0]);
+        extra.forEach((name, i) => { row[name] = fileKeys[i + 1] ? mediaCell(fileKeys[i + 1]) : ''; });
+      } else {
+        row[columnFor.get(f.id) as string] = renderExportValue(f, effective, mediaCell);
+        if (extra) for (const name of extra) row[name] = '';
+      }
       // Companion per-photo geotag cell (media fields that carry geo on any row). Reads the
       // CAPTURED value only — a bare-string key (no geo) yields an empty cell.
       if (mediaGeoFields.has(f.id)) {
@@ -429,10 +474,19 @@ export function buildEnrollmentExportRows(
     { name: 'Submitted By Phone', source: 'Enrollment record (submitting user)' },
     { name: 'Rejection Reason', source: 'Enrollment record' },
     ...fields.flatMap((f) => {
-      const base = { name: columnFor.get(f.id) as string, source: 'Captured on the enrollment form' };
+      const base = {
+        name: columnFor.get(f.id) as string,
+        source: MEDIA_FIELD_TYPES.has(f.type)
+          ? 'Captured on the enrollment form — a clickable "Open photo" / "Open file" link (sign-in needed; see About)'
+          : 'Captured on the enrollment form',
+      };
+      const files = (extraFileCols.get(f.id) ?? []).map((name) => ({
+        name,
+        source: 'Captured on the enrollment form — the next file of this field (a clickable link; see About)',
+      }));
       return mediaGeoFields.has(f.id)
-        ? [base, { name: geoColFor(f.id), source: 'Per-photo GPS captured at photo time' }]
-        : [base];
+        ? [base, ...files, { name: geoColFor(f.id), source: 'Per-photo GPS captured at photo time' }]
+        : [base, ...files];
     }),
   ];
 
@@ -488,7 +542,7 @@ function rosterAttr(prefillValues: unknown, aliases: ReadonlySet<string>): strin
  *   - tenantReport  — read-only subset for the tenant admin: the same aggregates
  *                     PLUS a per-outlet row list, but NO raw media/formValues (D26).
  *   - exportEnrollments — xlsx of roster rows + captured field values, each media
- *                     field rendered as an auth-gated view link (D30).
+ *                     value rendered as a signed-in viewer link (scheme-media-link.ts).
  * All tenant-scoped by clientId.
  */
 @Injectable()
@@ -501,39 +555,13 @@ export class SchemeReportService {
   ) {}
 
   /**
-   * Mint a self-contained, 30-day media view token + its absolute app-proxy URL for
-   * the export link (bug 2). Mirrors the KYC doc-view token EXACTLY:
-   *   - HS256 JWT signed with JWT_SECRET, expiresIn '30d'
-   *   - carries ONLY { sub: <enrollmentId>, clientId, fieldId, typ: 'schememedia' }
-   *
-   * `sub` is the LIVE enrollment id (SchemeEnrollment) — the current submission
-   * snapshot the export renders (`SchemeEnrollment.formValues[fieldId]` is the GCS
-   * object key). The token carries NO raw object key: the PUBLIC endpoint re-resolves
-   * it server-side from the tenant-verified enrollment (viewMediaByToken). Type-gated
-   * (`typ:'schememedia'`) so it can never be replayed at the doc-view endpoint (and a
-   * docview/access token can never be replayed here).
-   *
-   * The URL targets the backend's versioned `/v1/*` surface DIRECTLY (not the FE `/api/*`
-   * proxy prefix). The report is proxied `/api/schemes/:id/report/export` → backend, so the
-   * host we resolve here (x-forwarded-host / host) is the API host the rewrite forwarded to
-   * (e.g. api.gifsy.in), NOT the tenant FE host — and the API host serves `/v1/...`, never
-   * `/api/...`. Using `/api/...` here produced a 404 (the historical bug); `/v1/...` hits the
-   * @Public endpoint directly, so the link is clickable from a .xlsx opened outside the
-   * browser with no session and no dependence on the FE edge. No host → path-relative fallback.
-   */
-  private mediaViewLink(enrollmentId: string, clientId: string, fieldId: string, host: string): string {
-    const token = this.jwt.sign(
-      { sub: enrollmentId, clientId, fieldId, typ: 'schememedia' },
-      { secret: this.config.get('JWT_SECRET'), expiresIn: '30d' },
-    );
-    const path = `/v1/schemes/media/view?token=${encodeURIComponent(token)}`;
-    return host ? `https://${host}${path}` : path;
-  }
-
-  /**
    * GET /v1/schemes/media/view?token=<jwt> (PUBLIC) — stream a scheme enrollment
    * media object inline, authorised SOLELY by the token. Mirrors KycService.viewDocument
    * line-for-line.
+   *
+   * LEGACY (2026-11-21): exports no longer mint these 30-day tokens — they link to the signed-in
+   * viewer page (scheme-media-link.ts). Kept so links in files downloaded earlier keep working
+   * until their token lapses.
    *
    * Security contract — on ANY failure throw a BARE NotFoundException (no detail) so the
    * endpoint never enumerates media or leaks why a request failed:
@@ -806,10 +834,11 @@ export class SchemeReportService {
 
   /**
    * Excel export (D25/D30) — one row per roster row with base attributes + one
-   * column per form field. Media fields render as auth-gated view links (D30).
-   * Tenant-scoped.
+   * column per form field. Media values render as "Open photo" / "Open file" links to the
+   * signed-in viewer page on the tenant's portal host (`callerOrigin` = the request's external
+   * origin, used only in a LOCAL environment). Tenant-scoped.
    */
-  async exportEnrollments(user: JwtPayload, schemeId: string, host = ''): Promise<StreamableFile> {
+  async exportEnrollments(user: JwtPayload, schemeId: string, callerOrigin = ''): Promise<StreamableFile> {
     const scheme = await this.prisma.scheme.findFirst({
       where: { id: schemeId, ...(platformWide(user) ? {} : { clientId: user.clientId }) },
       select: { id: true, code: true, clientId: true },
@@ -902,15 +931,23 @@ export class SchemeReportService {
         : null,
     }));
 
-    const { rows, columns } = buildEnrollmentExportRows(mapped, fields, (enrollmentId, fieldId) =>
-      this.mediaViewLink(enrollmentId, clientId, fieldId, host),
-    );
+    // Links on the SCHEME's tenant host (an un-assumed GIFSY export of tenant X links to X's portal).
+    const links = await loadSchemeMediaLinkWriter(this.prisma, clientId, callerOrigin);
+    const { rows, columns } = buildEnrollmentExportRows(mapped, fields, (key) => links.cell(key));
 
     // Second sheet: a legend documenting where every column's value comes from.
     const legendRows = columns.map((c) => ({ Column: c.name, Source: c.source }));
+    // Third sheet: About — how the photo / file links work (sign-in) + the link-limit note.
+    const aboutRows = [
+      { Item: 'Report', Details: `Scheme ${scheme.code} — enrollments` },
+      { Item: 'Generated on', Details: `${istDateTimeCell(new Date())} (India time)` },
+      { Item: 'Rows in the Enrollments sheet', Details: String(rows.length) },
+      ...schemeMediaAboutRows(links, 'Enrollments'),
+    ];
     const buffer = buildXlsx([
       { name: 'Enrollments', rows },
       { name: 'Columns', rows: legendRows },
+      { name: 'About', rows: aboutRows },
     ]);
     const filename = `scheme_${scheme.code}_enrollments_${new Date().toISOString().split('T')[0]}.xlsx`;
 

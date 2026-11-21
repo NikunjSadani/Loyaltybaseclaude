@@ -1322,6 +1322,164 @@ describe('SchemeEnrollmentService', () => {
       expect(out.contentType).toBe('image/jpeg');
     });
   });
+
+  // The Excel viewer page's endpoint (GET /v1/schemes/media/file) — forbidForeignTenant.
+  describe('viewMedia for the signed-in viewer page (forbidForeignTenant)', () => {
+    const jpeg = () => ({ stream: Readable.from([Buffer.from([0xff, 0xd8, 0xff])]), size: 3, contentType: 'image/jpeg' });
+
+    it('another programme’s key → 403 (the page says "no access"), storage never touched', async () => {
+      for (const u of [tenantAdminUser, salesUser, partnerUser]) {
+        await expect(
+          service.viewMedia(u, 'scheme-media/bajaj/2026-09/a.jpg', { forbidForeignTenant: true }),
+        ).rejects.toBeInstanceOf(ForbiddenException);
+      }
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
+    });
+
+    it('own tenant key → served (image inline; PDF inline as application/pdf)', async () => {
+      mockStorage.openBoundedObject.mockResolvedValueOnce(jpeg());
+      const img = await service.viewMedia(tenantAdminUser, 'scheme-media/deoleo/2026-09/a.jpg', { forbidForeignTenant: true });
+      expect(img).toMatchObject({ contentType: 'image/jpeg', inline: true });
+      mockStorage.openBoundedObject.mockResolvedValueOnce({ ...jpeg(), contentType: 'application/pdf' });
+      const pdf = await service.viewMedia(tenantAdminUser, 'scheme-media/deoleo/2026-09/gst.pdf', { forbidForeignTenant: true });
+      expect(pdf).toMatchObject({ contentType: 'application/pdf', inline: true });
+    });
+
+    it('missing object / non-scheme key / path tricks → 404', async () => {
+      mockStorage.openBoundedObject.mockResolvedValueOnce(null);
+      await expect(service.viewMedia(tenantAdminUser, 'scheme-media/deoleo/2026-09/gone.jpg', { forbidForeignTenant: true })).rejects.toBeInstanceOf(NotFoundException);
+      for (const k of ['visibility-media/deoleo/a.jpg', 'scheme-media/deoleo/../bajaj/a.jpg', 'scheme-media//a.jpg', 'scheme-media/deoleo\\a.jpg', '']) {
+        await expect(service.viewMedia(tenantAdminUser, k, { forbidForeignTenant: true })).rejects.toBeInstanceOf(NotFoundException);
+      }
+    });
+
+    it('un-assumed GIFSY reads any tenant (no 403)', async () => {
+      mockStorage.openBoundedObject.mockResolvedValueOnce(jpeg());
+      const out = await service.viewMedia(adminUser, 'scheme-media/bajaj/2026-09/a.jpg', { forbidForeignTenant: true });
+      expect(out.contentType).toBe('image/jpeg');
+    });
+  });
+
+  // Audit fix (2026-11-21): SALES_* and partner logins see ONLY media of a record in their reach.
+  describe('viewMedia — record-level scope for sales + partner logins', () => {
+    const KEY = 'scheme-media/deoleo/2026-09/p-shop.jpg';
+    const jpeg = () => ({ stream: Readable.from([Buffer.from([0xff, 0xd8, 0xff])]), size: 3, contentType: 'image/jpeg' });
+    const holder = (over: Record<string, unknown> = {}) => ({
+      schemeOutletId: 'so1', taggedSalesUserId: null, matchedOutletId: null, matchedPartnerId: null, submittedByUserId: null, ...over,
+    });
+    const team = () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce({ id: 'su-caller' }); // the caller
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 'su-caller', reportingToId: null },
+        { id: 'su-child', reportingToId: 'su-caller' },
+        { id: 'su-other', reportingToId: null },
+      ]);
+    };
+    beforeEach(() => {
+      mockPrisma.$queryRaw.mockReset();
+      mockPrisma.salesUser.findFirst.mockReset();
+      mockPrisma.salesUserAssignment.findFirst.mockReset();
+      mockPrisma.channelPartner.findFirst.mockReset();
+      mockPrisma.channelPartner.findMany.mockReset();
+      mockStorage.openBoundedObject.mockResolvedValue(jpeg());
+    });
+
+    it('looks the key up bounded by tenant + upload month (one raw query with the key as a bound value)', async () => {
+      mockPrisma.$queryRaw.mockResolvedValue([holder({ submittedByUserId: salesUser.sub })]);
+      await service.viewMedia(salesUser, KEY, { forbidForeignTenant: true });
+      const q = mockPrisma.$queryRaw.mock.calls[0];
+      const sql = (q[0] as string[]).join('?');
+      expect(sql).toContain('jsonb_path_exists');
+      expect(sql).toContain('"scheme_submissions"');
+      expect(q.slice(1)).toEqual(expect.arrayContaining([new Date(Date.UTC(2026, 8, 1)), 'deoleo', KEY]));
+    });
+
+    it('SALES: own submission / tagged in downline / submitted by downline / assigned in downline → served', async () => {
+      mockPrisma.$queryRaw.mockResolvedValueOnce([holder({ submittedByUserId: salesUser.sub })]);
+      await expect(service.viewMedia(salesUser, KEY)).resolves.toMatchObject({ contentType: 'image/jpeg' });
+
+      team();
+      mockPrisma.$queryRaw.mockResolvedValueOnce([holder({ taggedSalesUserId: 'su-child' })]);
+      await expect(service.viewMedia(salesUser, KEY)).resolves.toMatchObject({ contentType: 'image/jpeg' });
+
+      team();
+      mockPrisma.$queryRaw.mockResolvedValueOnce([holder({ submittedByUserId: 'u-child' })]);
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce({ id: 'su-child' }); // team submitter
+      await expect(service.viewMedia(salesUser, KEY)).resolves.toMatchObject({ contentType: 'image/jpeg' });
+
+      team();
+      mockPrisma.$queryRaw.mockResolvedValueOnce([holder({ matchedOutletId: 'o1' })]);
+      mockPrisma.salesUserAssignment.findFirst.mockResolvedValueOnce({ id: 'a1' });
+      await expect(service.viewMedia(salesUser, KEY)).resolves.toMatchObject({ contentType: 'image/jpeg' });
+      expect(mockPrisma.salesUserAssignment.findFirst.mock.calls[0][0].where).toMatchObject({
+        unassignedAt: null, OR: [{ outletId: 'o1' }],
+      });
+    });
+
+    it('SALES: a record outside the team, an unheld key, or a caller with no sales profile → 403 on BOTH routes; no bytes read', async () => {
+      for (const opts of [{}, { forbidForeignTenant: true }]) {
+        team();
+        mockPrisma.$queryRaw.mockResolvedValueOnce([holder({ taggedSalesUserId: 'su-other', submittedByUserId: 'u-other', matchedOutletId: 'o9' })]);
+        mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // submitter not in team
+        mockPrisma.salesUserAssignment.findFirst.mockResolvedValueOnce(null);
+        await expect(service.viewMedia(salesUser, KEY, opts)).rejects.toBeInstanceOf(ForbiddenException);
+
+        mockPrisma.$queryRaw.mockResolvedValueOnce([]); // no record holds the key
+        await expect(service.viewMedia(salesUser, KEY, opts)).rejects.toBeInstanceOf(ForbiddenException);
+
+        mockPrisma.$queryRaw.mockResolvedValueOnce([holder({ taggedSalesUserId: 'su-child' })]);
+        mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null); // no SalesUser row for the login
+        await expect(service.viewMedia(salesUser, KEY, opts)).rejects.toBeInstanceOf(ForbiddenException);
+      }
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
+    });
+
+    it('PARTNER: only a record of a partner this login operates (or submitted)', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp-own', businessName: 'B', ownerName: 'O', groupId: null, isParent: false, outlets: [] });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([holder({ matchedPartnerId: 'cp-own' })]);
+      await expect(service.viewMedia(partnerUser, KEY)).resolves.toMatchObject({ contentType: 'image/jpeg' });
+      mockPrisma.$queryRaw.mockResolvedValueOnce([holder({ matchedPartnerId: 'cp-someone-else' })]);
+      await expect(service.viewMedia(partnerUser, KEY)).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('admins are unchanged: CLIENT_ADMIN / GIFSY never run the record lookup', async () => {
+      await service.viewMedia(tenantAdminUser, KEY);
+      await service.viewMedia(adminUser, KEY);
+      expect(mockPrisma.$queryRaw).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('uploadMedia — key extension = sniffed type', () => {
+    it('a PDF uploaded as "scan.jpg" is stored as …/scan.pdf; a nameless JPEG as capture.jpg', async () => {
+      mockStorage.generateKey.mockImplementation((folder: string, name: string) => `${folder}/2026-11/u-${name}`);
+      mockStorage.uploadFile.mockResolvedValue('gs://x');
+      const pdf = Buffer.from('%PDF-1.4 test');
+      await service.uploadMedia(partnerUser, { buffer: pdf, size: pdf.length, originalname: 'scan.jpg' } as Express.Multer.File);
+      expect(mockStorage.generateKey).toHaveBeenLastCalledWith('scheme-media/deoleo', 'scan.pdf');
+      const jpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]);
+      await service.uploadMedia(partnerUser, { buffer: jpg, size: jpg.length, originalname: '' } as Express.Multer.File);
+      expect(mockStorage.generateKey.mock.calls.at(-1)?.[1]).toMatch(/^capture\.jpe?g$/);
+    });
+  });
+
+  describe('adminGetEnrollment media — a legacy scheme-media key under a non-media type is a photo, not a raw value', () => {
+    it('lists a pre-2026-09-14 UPI_QR_SCAN image key in media (VPA values stay values)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', clientId: 'deoleo', deletedAt: null });
+      mockPrisma.schemeEnrollment.findFirst.mockResolvedValue({
+        id: 'enr1', formVersion: 1, schemeOutlet: {}, submissions: [],
+        formValues: { f_upi: 'scheme-media/deoleo/2026-09/q-upi.jpg', f_upi2: 'shop@upi', f_photo: 'scheme-media/deoleo/2026-09/p.jpg' },
+      });
+      mockPrisma.schemeEnrollmentFormVersion.findFirst.mockResolvedValue({
+        formSchema: { fields: [
+          { id: 'f_upi', type: 'UPI_QR_SCAN', label: 'UPI QR', order: 1 },
+          { id: 'f_upi2', type: 'UPI_QR_SCAN', label: 'UPI QR 2', order: 2 },
+          { id: 'f_photo', type: 'CAMERA', label: 'Photo', order: 3 },
+        ] },
+      });
+      const out = await service.adminGetEnrollment(tenantAdminUser, 's1', 'enr1');
+      expect(out.enrollment.media.map((m) => m.fieldId)).toEqual(['f_upi', 'f_photo']);
+    });
+  });
 });
 
 /**

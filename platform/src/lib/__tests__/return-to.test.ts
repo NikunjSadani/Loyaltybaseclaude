@@ -57,6 +57,15 @@ describe('returnPathForRole', () => {
     expect(returnPathForRole('/visibility', 'MIS_USER')).toBeNull();
     expect(returnPathForRole('//evil.example/visibility/photo?key=x', 'MIS_USER')).toBeNull();
   });
+  it('the scheme photo viewer is a return target for EVERY signed-in role too', () => {
+    const photo = '/schemes/photo?key=scheme-media%2Fdeoleo%2F2026-09%2Fa.jpg';
+    for (const r of ['CLIENT_ADMIN', 'GIFSY_ADMIN', 'GIFSY_STAFF', 'SALES_ISR', 'SALES_SO', 'MIS_USER', 'WHOLESALER', 'SSS', 'VENDOR']) {
+      expect(returnPathForRole(photo, r)).toBe(photo);
+    }
+    expect(returnPathForRole('/schemes/photos-admin', 'MIS_USER')).toBeNull();
+    expect(returnPathForRole('/schemes', 'MIS_USER')).toBeNull();
+    expect(returnPathForRole('//evil.example/schemes/photo?key=x', 'MIS_USER')).toBeNull();
+  });
 });
 
 describe('loginUrlWithNext / readNextParam', () => {

@@ -15,6 +15,8 @@ import { SchemeAdminService } from './scheme-admin.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import * as XLSX from 'xlsx';
+import { StreamableFile } from '@nestjs/common';
 
 const mockPrisma = {
   scheme: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
@@ -28,6 +30,7 @@ const mockPrisma = {
     count: jest.fn(),
   },
   schemeEnrollment: { count: jest.fn() },
+  clientDomain: { findMany: jest.fn() },
   outlet: { findMany: jest.fn() },
   salesUser: { findMany: jest.fn() },
   // $transaction handles BOTH the callback form (form versioning) and the
@@ -828,6 +831,49 @@ describe('SchemeAdminService', () => {
       ).rejects.toBeInstanceOf(NotFoundException);
       expect(mockPrisma.schemeOutlet.findMany).not.toHaveBeenCalled();
       expect(mockPrisma.schemeOutlet.updateMany).not.toHaveBeenCalled();
+    });
+  });
+  // Roster export: an uploaded cell holding a stored scheme-media key is a signed-in link, never raw text.
+  describe('getRosterExport — media keys in uploaded columns', () => {
+    const ORIG = process.env.TENANT_LINK_ENV;
+    afterEach(() => {
+      if (ORIG === undefined) delete process.env.TENANT_LINK_ENV;
+      else process.env.TENANT_LINK_ENV = ORIG;
+    });
+    const read = async (file: StreamableFile) => {
+      const chunks: Buffer[] = [];
+      await new Promise<void>((res, rej) => file.getStream().on('data', (c: Buffer) => chunks.push(Buffer.from(c))).on('end', () => res()).on('error', rej));
+      return XLSX.read(Buffer.concat(chunks), { type: 'buffer' });
+    };
+    const roster = (pv: Record<string, unknown>) => [{
+      outletRef: 'A1', outletName: 'Shop', matchedOutletId: null, prefillValues: pv,
+      matchedOutlet: null, taggedSalesUser: null, enrollment: null,
+    }];
+
+    it('links the key on the tenant host and adds an About sheet; no raw scheme-media/ text anywhere', async () => {
+      process.env.TENANT_LINK_ENV = 'production';
+      mockPrisma.scheme.findFirst.mockResolvedValue({ ...activeScheme, code: 'SC1' });
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue(roster({ Beat: 'North', Board: 'scheme-media/t1/2026-09/b.jpg' }));
+      mockPrisma.clientDomain.findMany.mockResolvedValue([]);
+      const wb = await read(await service.getRosterExport(user, 's1'));
+      expect(mockPrisma.clientDomain.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { clientId: 't1' } }));
+      const ws = wb.Sheets['Roster'];
+      const hdr = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1 })[0] as string[];
+      const cell = ws[XLSX.utils.encode_cell({ r: 1, c: hdr.indexOf('Board') })] as XLSX.CellObject;
+      expect(cell.v).toBe('Open photo');
+      expect(cell.l?.Target).toBe(`https://t1.gifsy.in/schemes/photo?key=${encodeURIComponent('scheme-media/t1/2026-09/b.jpg')}`);
+      expect(wb.SheetNames).toEqual(['Roster', 'About']);
+      const texts = wb.SheetNames.flatMap((n) => Object.keys(wb.Sheets[n]).filter((a) => !a.startsWith('!')).map((a) => String((wb.Sheets[n][a] as XLSX.CellObject).v ?? '')));
+      expect(texts.filter((t) => t.includes('scheme-media/'))).toEqual([]);
+    });
+
+    it('a roster with no media keys is unchanged (one Roster sheet, values as-is)', async () => {
+      mockPrisma.scheme.findFirst.mockResolvedValue({ ...activeScheme, code: 'SC1' });
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue(roster({ Beat: 'North' }));
+      mockPrisma.clientDomain.findMany.mockResolvedValue([]);
+      const wb = await read(await service.getRosterExport(user, 's1'));
+      expect(wb.SheetNames).toEqual(['Roster']);
+      expect(XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets['Roster'])[0].Beat).toBe('North');
     });
   });
 });

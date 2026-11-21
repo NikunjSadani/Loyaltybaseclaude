@@ -12,6 +12,7 @@ import {
   type Pagination, type SchemeReport, type TenantSchemeReport, type DeletedEnrollmentRow,
 } from '@/lib/schemes';
 import type { GpsCapture } from '@/lib/scheme-types';
+import { isSchemeFileKey, isSchemeMediaKey, schemePhotoPagePath } from '@/lib/scheme-photo-link';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared per-scheme Enrollments view (D25). Powers BOTH:
@@ -644,7 +645,7 @@ function EnrollmentDrawer({
 // shown read-only; the payload starts from the FULL current formValues so those
 // untouched values are preserved on the new version.
 
-function EnrollmentEditForm({
+export function EnrollmentEditForm({
   schemeId, enrollmentId, detail, onSaved, onCancel,
 }: {
   schemeId: string;
@@ -693,6 +694,25 @@ function EnrollmentEditForm({
           // uneditable, so the ENR-M7 checkbox editor below would never render for real data. Exempt
           // ONLY a MULTI_SELECT array — a plain object `{}` / media / GPS object is still caught.
           const isObjectVal = v != null && typeof v === 'object' && !(f.type === 'MULTI_SELECT' && Array.isArray(v));
+          // A stored photo/file key — e.g. a legacy UPI_QR_SCAN image from before 2026-09-14, or a
+          // media field's bare key — is NEVER an editable text box (typing would overwrite the key)
+          // and never shown as raw text: a read-only "Open photo" link; the value is kept on save.
+          // (No replace: UPI_QR_SCAN no longer uploads images, and media fields aren't editable here.)
+          const mediaKey = isSchemeMediaKey(v) ? v.trim() : null;
+          if (mediaKey) {
+            return (
+              <div key={f.id}>
+                <label className="block text-xs font-medium text-gray-700 mb-1">{f.label}</label>
+                <div className="flex items-center justify-between gap-2 text-xs text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
+                  <span>Photo / file kept (not editable here)</span>
+                  <a href={schemePhotoPagePath(mediaKey)} target="_blank" rel="noopener noreferrer"
+                    className="text-[var(--brand-primary)] font-medium hover:underline">
+                    {isSchemeFileKey(mediaKey) ? 'Open file' : 'Open photo'}
+                  </a>
+                </div>
+              </div>
+            );
+          }
           if (UNEDITABLE_FIELD_TYPES.has(f.type) || isObjectVal) {
             const isObj = isObjectVal;
             return (

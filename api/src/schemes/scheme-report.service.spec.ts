@@ -3,8 +3,8 @@ import { Readable } from 'node:stream';
 // Covers: report aggregation (counts, coverage %, breakdowns; standalone bucket),
 // the tenant read-only row list (no raw media), the pure export row builder
 // (uniform columns + media→REAL Excel hyperlink, bugs 1/3), an END-TO-END xlsx
-// round-trip proving cellSafe + tokenized-media-hyperlink minting (bug 2), and the
-// PUBLIC tokenized media-view endpoint's security contract.
+// round-trip proving cellSafe + signed-in "Open photo" viewer links (scheme-media-link.ts,
+// 2026-11-21), and the LEGACY public tokenized media-view endpoint's security contract.
 // Run: npx jest src/schemes/scheme-report.service.spec.ts
 
 import * as XLSX from 'xlsx';
@@ -16,6 +16,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { buildXlsx, isHyperlinkCell, HyperlinkCell } from '../common/xlsx';
 import { FormField } from './enrollment-form.helper';
+import { SCHEME_LINK_LIMIT } from './scheme-media-link';
 import {
   SchemeReportService,
   buildEnrollmentExportRows,
@@ -61,15 +62,26 @@ function cellByHeader(ws: XLSX.WorkSheet, header: string, dataRow: number): XLSX
 }
 
 describe('renderExportValue (pure)', () => {
-  // mintLink now takes (submissionId, fieldId); renderExportValue's third arg is the
-  // media-only (key)=>url closure the builder binds per row+field.
-  const link = (k: string) => `/link/${k}`;
+  // The third arg renders one media KEY as a cell (the export binds the per-sheet link writer).
+  const link = (k: string): HyperlinkCell => ({ __hyperlink: true, text: 'L', target: `/link/${k}` });
 
   it('renders a media field as a REAL hyperlink cell (not the raw key)', () => {
     const cam = renderExportValue(field({ id: 'p', type: 'CAMERA' }), 'gcs/key.jpg', link);
-    expect(cam).toEqual({ __hyperlink: true, text: 'View image', target: '/link/gcs/key.jpg' });
+    expect(cam).toEqual({ __hyperlink: true, text: 'L', target: '/link/gcs/key.jpg' });
     const doc = renderExportValue(field({ id: 'd', type: 'DOCUMENT' }), 'gcs/doc.pdf', link);
-    expect(doc).toEqual({ __hyperlink: true, text: 'View image', target: '/link/gcs/doc.pdf' });
+    expect(doc).toEqual({ __hyperlink: true, text: 'L', target: '/link/gcs/doc.pdf' });
+  });
+
+  it('links a scheme-media key stored under a NON-media type (legacy UPI_QR_SCAN image, TEXT, {key,geo}, array)', () => {
+    const k = 'scheme-media/deoleo/2026-09/0b7c-qr.jpg';
+    expect(renderExportValue(field({ id: 'u', type: 'UPI_QR_SCAN' }), k, link)).toEqual(link(k));
+    expect(renderExportValue(field({ id: 't', type: 'TEXT' }), ` ${k} `, link)).toEqual(link(k));
+    expect(renderExportValue(field({ id: 't', type: 'TEXT' }), { key: k, geo: { lat: 1, lng: 2 } }, link)).toEqual(link(k));
+    expect(renderExportValue(field({ id: 'm', type: 'MULTI_SELECT' }), [k], link)).toEqual(link(k));
+    // Several items in one cell: every file's address, one per line — never hidden.
+    expect(renderExportValue(field({ id: 'm', type: 'MULTI_SELECT' }), [k, 'A'], link)).toBe(`/link/${k}\nA`);
+    // Only the FULL key shape counts — a look-alike stays text.
+    expect(renderExportValue(field({ id: 't', type: 'TEXT' }), 'scheme-media/deoleo/a b.jpg', link)).toBe('scheme-media/deoleo/a b.jpg');
   });
 
   it('treats SIGNATURE (a net-new media type) as media', () => {
@@ -134,8 +146,8 @@ describe('buildEnrollmentExportRows (pure)', () => {
     field({ id: 'f_name', type: 'TEXT', label: 'Owner', order: 1 }),
     field({ id: 'f_photo', type: 'CAMERA', label: 'Photo', order: 2 }),
   ];
-  // mintLink(submissionId, fieldId) → the media URL.
-  const link = (sub: string, fid: string) => `/media/${sub}/${fid}`;
+  // mediaCell(key) → the cell for one stored media key.
+  const link = (k: string): HyperlinkCell => ({ __hyperlink: true, text: 'Open photo', target: `/media/${k}` });
 
   // Roster-row factory — an enrolled row auto-gets a stable enrollmentId (media minting
   // needs it) unless one is supplied.
@@ -167,8 +179,8 @@ describe('buildEnrollmentExportRows (pure)', () => {
     expect(Object.keys(rows[0])).toEqual(Object.keys(rows[1]));
     expect(rows[0]).toMatchObject({ Matched: 'No', Status: 'NOT_ENROLLED', Owner: '', Photo: '' });
     expect(rows[1]).toMatchObject({ Matched: 'Yes', Status: 'SUBMITTED', Owner: 'Ravi' });
-    // Photo is a real hyperlink cell whose target uses the row's enrollment id + field id.
-    expect(rows[1]['Photo']).toEqual({ __hyperlink: true, text: 'View image', target: '/media/enr_X1/f_photo' });
+    // Photo is a real hyperlink cell built from the stored key.
+    expect(rows[1]['Photo']).toEqual({ __hyperlink: true, text: 'Open photo', target: '/media/gcs/p.jpg' });
   });
 
   it('de-collides duplicate field labels', () => {
@@ -347,18 +359,29 @@ describe('buildEnrollmentExportRows (pure)', () => {
     expect(columns.some((c) => c.name === 'Beat (Excel)')).toBe(false);
   });
 
-  it('renders a media field as an ABSOLUTE hyperlink when the mintLink resolves a host', () => {
-    const absLink = (sub: string, fid: string) =>
-      `https://deoleo.example.com/v1/schemes/media/view?token=tok_${sub}_${fid}`;
+  it('a multi-file value → one link per file in adjacent "<col> – file N" columns (legend included), nothing hidden', () => {
+    const k1 = 'scheme-media/deoleo/2026-09/a-1.jpg';
+    const k2 = 'scheme-media/deoleo/2026-09/a-2.jpg';
+    const k3 = 'scheme-media/deoleo/2026-09/a-3.pdf';
     const roster: ExportRosterRow[] = [
-      row({ outletRef: 'A', enrollment: enrolled({ formValues: { f_photo: 'gcs/p.jpg' } }) }),
+      row({ outletRef: 'A', enrollment: enrolled({ formValues: { f_photo: [k1, k2, k3] } }) }),
+      row({ outletRef: 'B', enrollment: enrolled({ formValues: { f_photo: [k1] } }) }),
+      row({ outletRef: 'C' }),
     ];
-    const { rows } = buildEnrollmentExportRows(roster, fields, absLink);
-    expect(rows[0]['Photo']).toEqual({
-      __hyperlink: true,
-      text: 'View image',
-      target: 'https://deoleo.example.com/v1/schemes/media/view?token=tok_enr_A_f_photo',
-    });
+    const { rows, columns } = buildEnrollmentExportRows(roster, fields, link);
+    expect(rows[0]['Photo']).toEqual(link(k1));
+    expect(rows[0]['Photo – file 2']).toEqual(link(k2));
+    expect(rows[0]['Photo – file 3']).toEqual(link(k3));
+    expect(rows[1]).toMatchObject({ Photo: link(k1), 'Photo – file 2': '', 'Photo – file 3': '' });
+    expect(Object.keys(rows[2])).toEqual(Object.keys(rows[0]));
+    const names = columns.map((c) => c.name);
+    expect(names.slice(names.indexOf('Photo'))).toEqual(['Photo', 'Photo – file 2', 'Photo – file 3']);
+  });
+
+  it('an uploaded Excel cell holding a scheme-media key is linked, never written as text', () => {
+    const k = 'scheme-media/deoleo/2026-09/x-board.jpg';
+    const { rows } = buildEnrollmentExportRows([row({ prefillValues: { 'Board Photo': k } })], fields, link);
+    expect(rows[0]['Board Photo']).toEqual(link(k));
   });
 
   it('lists every column with its source in the legend, in column order', () => {
@@ -372,6 +395,7 @@ describe('buildEnrollmentExportRows (pure)', () => {
       'Owner', 'Photo',
     ]);
     expect(columns.find((c) => c.name === 'Owner')?.source).toBe('Captured on the enrollment form');
+    expect(columns.find((c) => c.name === 'Photo')?.source).toContain('"Open photo" / "Open file" link (sign-in needed');
     expect(columns.find((c) => c.name === 'Zone')?.source).toBe('Matched loyalty outlet master');
   });
 });
@@ -396,6 +420,7 @@ const mockPrisma = {
   schemeEnrollment: { findMany: jest.fn(), findUnique: jest.fn() },
   schemeEnrollmentForm: { findUnique: jest.fn() },
   outlet: { count: jest.fn() },
+  clientDomain: { findMany: jest.fn() },
   // Per-tenant outlet-type display names (loadOutletTypeDisplayNames). Defaults to [] in
   // beforeEach ⇒ empty display map ⇒ reports fall back to outletType.name (Deoleo parity).
   outletTypeClientConfig: { findMany: jest.fn() },
@@ -416,6 +441,7 @@ describe('SchemeReportService', () => {
     mockConfig.get.mockReturnValue('test-secret');
     // Default: tenant has NO per-type displayName → empty map → outletType.name passes through.
     mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
+    mockPrisma.clientDomain.findMany.mockResolvedValue([]);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         SchemeReportService,
@@ -581,81 +607,124 @@ describe('SchemeReportService', () => {
   });
 
   describe('exportEnrollments (end-to-end xlsx)', () => {
-    it('mints a tokenized media hyperlink and cellSafe-escapes a formula-injection value', async () => {
-      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', clientId: 'deoleo' });
-      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
-        {
-          outletRef: 'A1', outletName: 'Shop', matchedOutletId: 'o1',
-          prefillValues: { Tier: 'Gold' },
-          taggedSalesUser: { employeeCode: 'E1' },
-          matchedOutlet: { name: 'Shop', zone: 'W', programName: 'P', programCategory: 'C', outletType: { name: 'Retail' } },
-          enrollment: {
-            id: 'enr1', status: 'SUBMITTED', currentVersion: 1, enrolledAt: new Date('2026-07-25T00:00:00Z'), rejectionReason: null,
-            deletedAt: null, submittedBy: { name: 'Rep', phone: '9990000001', salesUser: null },
-            formValues: { f_note: '=SUM(A1)', f_photo: 'gcs/shop.jpg' },
-          },
-        },
-      ]);
-      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue({
-        formSchema: {
-          fields: [
-            { id: 'f_note', type: 'TEXT', label: 'Note', order: 1 },
-            { id: 'f_photo', type: 'CAMERA', label: 'Photo', order: 2 },
-          ],
-        },
+    const ORIG_LINK_ENV = process.env.TENANT_LINK_ENV;
+    afterEach(() => {
+      if (ORIG_LINK_ENV === undefined) delete process.env.TENANT_LINK_ENV;
+      else process.env.TENANT_LINK_ENV = ORIG_LINK_ENV;
+      SCHEME_LINK_LIMIT.perSheet = 60_000;
+    });
+
+    const KEY = 'scheme-media/deoleo/2026-09/0b7c-shop.jpg';
+    const PDF = 'scheme-media/deoleo/2026-09/0b7c-gst.pdf';
+    const LEGACY_UPI = 'scheme-media/deoleo/2026-09/0b7c-upi_qr.jpg';
+    const rosterRow = (ref: string, formValues: Record<string, unknown>, prefillValues: Record<string, unknown> | null = { Tier: 'Gold' }) => ({
+      outletRef: ref, outletName: 'Shop', matchedOutletId: 'o1',
+      prefillValues,
+      taggedSalesUser: { employeeCode: 'E1' },
+      matchedOutlet: { name: 'Shop', zone: 'W', programName: 'P', programCategory: 'C', outletType: { name: 'Retail' } },
+      enrollment: {
+        id: `enr_${ref}`, status: 'SUBMITTED', currentVersion: 1, enrolledAt: new Date('2026-07-25T00:00:00Z'), rejectionReason: null,
+        deletedAt: null, submittedBy: { name: 'Rep', phone: '9990000001', salesUser: null },
+        formValues,
+      },
+    });
+    const FORM = {
+      formSchema: {
+        fields: [
+          { id: 'f_note', type: 'TEXT', label: 'Note', order: 1 },
+          { id: 'f_photo', type: 'CAMERA', label: 'Photo', order: 2 },
+          { id: 'f_doc', type: 'DOCUMENT', label: 'GST certificate', order: 3 },
+          { id: 'f_upi', type: 'UPI_QR_SCAN', label: 'UPI QR', order: 4 },
+        ],
+      },
+    };
+
+    /** Every cell value (display text) of every sheet — for the no-raw-key scan. */
+    const allCellTexts = (wb: XLSX.WorkBook): string[] =>
+      wb.SheetNames.flatMap((n) => {
+        const ws = wb.Sheets[n];
+        return Object.keys(ws).filter((a) => !a.startsWith('!')).map((a) => String((ws[a] as XLSX.CellObject).v ?? ''));
       });
 
-      const file = await service.exportEnrollments(asTenant('deoleo'), 's1');
-      expect(file).toBeInstanceOf(StreamableFile);
+    it('writes "Open photo" / "Open file" links to the signed-in viewer on the tenant portal host (prod), never a token, never a raw key', async () => {
+      process.env.TENANT_LINK_ENV = 'production';
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', clientId: 'deoleo' });
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
+        rosterRow('A1', { f_note: '=SUM(A1)', f_photo: { key: KEY, geo: { lat: 12.9, lng: 77.6, accuracy: 8 } }, f_doc: PDF, f_upi: LEGACY_UPI }),
+        rosterRow('A2', { f_note: 'ok', f_upi: '9876543210@paytm' }, { Tier: 'Silver', 'Old Photo': KEY }),
+      ]);
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue(FORM);
+      mockPrisma.clientDomain.findMany.mockResolvedValue([{ domain: 'loyalty.deoleo.example', isPrimary: true }]);
 
+      const file = await service.exportEnrollments(asTenant('deoleo'), 's1', 'http://localhost:3000');
+      expect(file).toBeInstanceOf(StreamableFile);
       const buf = await streamToBuffer(file);
       const wb = XLSX.read(buf, { type: 'buffer' });
       const ws = wb.Sheets['Enrollments'];
       const rows = XLSX.utils.sheet_to_json<Record<string, string>>(ws);
 
-      // Media cell displays "View image" and carries a real hyperlink to the PUBLIC
-      // tokenized backend route (path-relative form — no host threaded in).
-      const photoCell = cellByHeader(ws, 'Photo', 0);
-      expect(photoCell?.v).toBe('View image');
-      expect(photoCell?.l?.Target).toBe('/v1/schemes/media/view?token=TESTTOKEN');
-      // The token is minted with the enrollment id, tenant, field id, and type gate.
-      expect(mockJwt.sign).toHaveBeenCalledWith(
-        { sub: 'enr1', clientId: 'deoleo', fieldId: 'f_photo', typ: 'schememedia' },
-        expect.objectContaining({ expiresIn: '30d' }),
-      );
+      // Domain lookup is pinned to the SCHEME's tenant.
+      expect(mockPrisma.clientDomain.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { clientId: 'deoleo' } }));
+      const enc = (k: string) => `https://loyalty.deoleo.example/schemes/photo?key=${encodeURIComponent(k)}`;
+      const photo = cellByHeader(ws, 'Photo', 0);
+      expect(photo?.v).toBe('Open photo');
+      expect(photo?.l?.Target).toBe(enc(KEY));
+      const doc = cellByHeader(ws, 'GST certificate', 0);
+      expect(doc?.v).toBe('Open file');
+      expect(doc?.l?.Target).toBe(enc(PDF));
+      // Legacy UPI_QR_SCAN image key (pre 2026-09-14) → a link; a real VPA stays text.
+      expect(cellByHeader(ws, 'UPI QR', 0)?.l?.Target).toBe(enc(LEGACY_UPI));
+      expect(rows[1]['UPI QR']).toBe('9876543210@paytm');
+      // An uploaded Excel column holding a key → a link too.
+      expect(cellByHeader(ws, 'Old Photo', 1)?.l?.Target).toBe(enc(KEY));
+      // No token is minted any more.
+      expect(mockJwt.sign).not.toHaveBeenCalled();
       // cellSafe escaped the formula so Excel treats it as text (leading apostrophe).
       expect(rows[0]['Note']).toBe("'=SUM(A1)");
-      expect(rows[0]['Tagged Employee']).toBe('E1');
-
-      const legend = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets['Columns']);
-      expect(legend.find((c) => c.Column === 'Photo')?.Source).toBe('Captured on the enrollment form');
-      expect(legend.find((c) => c.Column === 'Tier')?.Source).toBe('Audience Excel upload');
       expect(rows[0]['Tier']).toBe('Gold');
+
+      // NO raw `scheme-media/` key in ANY cell of ANY sheet (the links' URL-encoded key lives only in .l.Target).
+      const texts = allCellTexts(wb);
+      expect(texts.filter((t) => t.includes('scheme-media/'))).toEqual([]);
+      expect(buf.includes(Buffer.from('/v1/schemes/media/view'))).toBe(false);
+
+      // About sheet: links need sign-in, name the host.
+      const about = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets['About']);
+      const links = about.find((r) => r.Item === 'PHOTO / FILE LINKS')?.Details ?? '';
+      expect(links).toContain('signed in');
+      expect(links).toContain('loyalty.deoleo.example');
+      expect(about.some((r) => r.Item === 'LINK LIMIT')).toBe(false);
     });
 
-    it('makes media links ABSOLUTE against the resolved host', async () => {
+    it('staging links use the uat- host; no primary domain → <slug>.gifsy.in with a note on About', async () => {
+      process.env.TENANT_LINK_ENV = 'staging';
       mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', clientId: 'deoleo' });
-      mockPrisma.schemeOutlet.findMany.mockResolvedValue([
-        {
-          outletRef: 'A1', outletName: 'Shop', matchedOutletId: 'o1', prefillValues: null,
-          taggedSalesUser: { employeeCode: 'E1' },
-          matchedOutlet: { name: 'Shop', zone: 'W', programName: 'P', programCategory: 'C', outletType: { name: 'Retail' } },
-          enrollment: {
-            id: 'enr1', status: 'SUBMITTED', currentVersion: 1, enrolledAt: new Date('2026-07-25T00:00:00Z'), rejectionReason: null,
-            deletedAt: null, submittedBy: { name: 'Rep', phone: '9990000001', salesUser: null },
-            formValues: { f_photo: 'gcs/shop.jpg' },
-          },
-        },
-      ]);
-      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue({
-        formSchema: { fields: [{ id: 'f_photo', type: 'CAMERA', label: 'Photo', order: 1 }] },
-      });
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([rosterRow('A1', { f_photo: KEY })]);
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue(FORM);
+      mockPrisma.clientDomain.findMany.mockResolvedValue([]);
+      const wb = XLSX.read(await streamToBuffer(await service.exportEnrollments(asTenant('deoleo'), 's1')), { type: 'buffer' });
+      expect(cellByHeader(wb.Sheets['Enrollments'], 'Photo', 0)?.l?.Target).toBe(
+        `https://uat-deoleo.gifsy.in/schemes/photo?key=${encodeURIComponent(KEY)}`,
+      );
+      const about = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets['About']);
+      expect(about.find((r) => r.Item === 'Link address')?.Details).toContain('no primary domain');
+    });
 
-      const file = await service.exportEnrollments(asTenant('deoleo'), 's1', 'deoleo.gifsy.in');
-      const wb = XLSX.read(await streamToBuffer(file), { type: 'buffer' });
+    it('past the per-sheet hyperlink cap the rest carry the viewer URL as text, and About says how many', async () => {
+      process.env.TENANT_LINK_ENV = 'production';
+      SCHEME_LINK_LIMIT.perSheet = 1;
+      mockPrisma.scheme.findFirst.mockResolvedValue({ id: 's1', code: 'SC1', clientId: 'deoleo' });
+      mockPrisma.schemeOutlet.findMany.mockResolvedValue([rosterRow('A1', { f_photo: KEY, f_doc: PDF })]);
+      mockPrisma.schemeEnrollmentForm.findUnique.mockResolvedValue(FORM);
+      const wb = XLSX.read(await streamToBuffer(await service.exportEnrollments(asTenant('deoleo'), 's1')), { type: 'buffer' });
       const ws = wb.Sheets['Enrollments'];
-      const photoCell = cellByHeader(ws, 'Photo', 0);
-      expect(photoCell?.l?.Target).toBe('https://deoleo.gifsy.in/v1/schemes/media/view?token=TESTTOKEN');
+      expect(cellByHeader(ws, 'Photo', 0)?.l?.Target).toContain('/schemes/photo?key=');
+      const second = cellByHeader(ws, 'GST certificate', 0);
+      expect(second?.l).toBeUndefined();
+      expect(String(second?.v)).toBe(`https://deoleo.gifsy.in/schemes/photo?key=${encodeURIComponent(PDF)}`);
+      const about = XLSX.utils.sheet_to_json<Record<string, string>>(wb.Sheets['About']);
+      expect(about.find((r) => r.Item === 'LINK LIMIT')?.Details).toContain('remaining 1');
+      expect(allCellTexts(wb).filter((t) => t.includes('scheme-media/'))).toEqual([]);
     });
 
     it('surfaces the submitting rep employee code + falls back Outlet Name; a soft-deleted enrollment leaks NOTHING', async () => {

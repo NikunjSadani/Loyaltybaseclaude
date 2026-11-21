@@ -10,6 +10,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { problemRowsEcho } from '../common/upload-echo';
 import { buildXlsx } from '../common/xlsx';
+import { loadSchemeMediaLinkWriter, mediaSafe, schemeMediaAboutRows } from './scheme-media-link';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   CreateSchemeAdminDto,
@@ -665,7 +666,7 @@ export class SchemeAdminService {
    * roster still emits a header-only sheet (one all-'' base row) rather than 404, so the
    * admin always gets a well-formed (possibly empty) file.
    */
-  async getRosterExport(user: JwtPayload, schemeId: string): Promise<StreamableFile> {
+  async getRosterExport(user: JwtPayload, schemeId: string, callerOrigin = ''): Promise<StreamableFile> {
     const scheme = await this.assertSchemeOwnership(user, schemeId);
 
     const roster = await this.prisma.schemeOutlet.findMany({
@@ -710,6 +711,9 @@ export class SchemeAdminService {
       ...Object.fromEntries(prefillCols.map((k) => [k, ''])),
     });
 
+    // An uploaded cell that holds a stored scheme-media key is never written as text: it becomes the same
+    // signed-in "Open photo" / "Open file" link as the enrollment export (scheme-media-link.ts).
+    const links = await loadSchemeMediaLinkWriter(this.prisma, user.clientId, callerOrigin);
     const rows: Record<string, unknown>[] = roster.map((r) => {
       const pv = (r.prefillValues as Record<string, unknown> | null) ?? {};
       const row = baseRow();
@@ -727,7 +731,7 @@ export class SchemeAdminService {
         : '';
       for (const k of prefillCols) {
         const v = pv[k];
-        row[k] = v === undefined || v === null ? '' : v;
+        row[k] = v === undefined || v === null ? '' : mediaSafe(v, (key) => links.cell(key));
       }
       return row;
     });
@@ -735,7 +739,11 @@ export class SchemeAdminService {
     // Empty roster → one all-'' base row so buildXlsx still emits a header-only sheet.
     if (rows.length === 0) rows.push(baseRow());
 
-    const buffer = buildXlsx([{ name: 'Roster', rows }]);
+    // The About sheet appears only when the roster actually carries a photo / file link.
+    const buffer = buildXlsx([
+      { name: 'Roster', rows },
+      ...(links.links + links.asText > 0 ? [{ name: 'About', rows: schemeMediaAboutRows(links, 'Roster') }] : []),
+    ]);
     const filename = `scheme_${scheme.code ?? scheme.id}_roster_${new Date().toISOString().split('T')[0]}.xlsx`;
 
     return new StreamableFile(buffer, {

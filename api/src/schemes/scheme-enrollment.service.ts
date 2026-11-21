@@ -16,7 +16,8 @@ import { Msg91Service } from '../notifications/msg91.service';
 import { captureOtpDeliveryHandle } from '../notifications/otp-delivery';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide, isGifsyOperator } from '../common/tenant-scope';
-import { resolveActivePartnerId } from '../common/partner-group.helper';
+import { resolveActivePartnerId, resolveOperableContexts } from '../common/partner-group.helper';
+import { schemeMediaKeyParts } from './scheme-media-link';
 import { descendantSalesUserIds, SalesUserEdge } from '../sales/sales-hierarchy-access.helper';
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
 import { generateNumericOtp } from '../common/otp';
@@ -1999,10 +2000,14 @@ export class SchemeEnrollmentService {
     const vals = formValues as Record<string, unknown>;
     const out: Array<{ fieldId: string; label: string; type: string; key: string; viewPath: string; geo?: GpsCapture }> = [];
     for (const f of schema.fields ?? []) {
-      if (!MEDIA_FIELD_SET.has(f.type)) continue;
+      // A media-typed field, OR any field whose stored value is a scheme-media object key — e.g. a
+      // legacy UPI_QR_SCAN value from before 2026-09-14, when that type uploaded an image — so the
+      // drawer shows it as a photo, never as a raw key in the values list.
+      const v = vals[f.id];
+      if (!MEDIA_FIELD_SET.has(f.type) && !schemeMediaKeyParts(readMediaValue(v).key.trim())) continue;
       // A media value may be a bare object-key string OR `{ key, geo }` (per-photo geotag).
       // readMediaValue normalises both; a bare string yields no geo (renders exactly as before).
-      const { key, geo } = readMediaValue(vals[f.id]);
+      const { key, geo } = readMediaValue(v);
       if (key) {
         out.push({
           fieldId: f.id,
@@ -2046,11 +2051,11 @@ export class SchemeEnrollmentService {
       throw new BadRequestException('Unsupported or corrupt file. Upload a JPG, PNG, WEBP, GIF, or PDF.');
     }
 
-    // Tenant-foldered key so the auth-gated view can enforce tenant from the path.
-    const key = this.storage.generateKey(
-      `scheme-media/${user.clientId}`,
-      file.originalname || `capture.${sniffed.ext}`,
-    );
+    // Tenant-foldered key so the auth-gated view can enforce tenant from the path. The key's
+    // extension is the SNIFFED type (never the client's file name), so an export can tell a photo
+    // from a PDF by the key alone ("Open photo" / "Open file").
+    const original = (file.originalname || 'capture').replace(/\.[^./\\]*$/, '') || 'capture';
+    const key = this.storage.generateKey(`scheme-media/${user.clientId}`, `${original}.${sniffed.ext}`);
     const fileUrl = await this.storage.uploadFile(file.buffer, key, sniffed.mime);
     return { key, fileUrl, mimeType: sniffed.mime, fileSizeBytes: file.size };
   }
@@ -2061,16 +2066,29 @@ export class SchemeEnrollmentService {
    * enforced from the object key's tenant folder (`scheme-media/<clientId>/…`) — a
    * GIFSY_ADMIN is the cross-tenant operator; every other caller is pinned to its own
    * tenant. Any failure → bare 404 (no enumeration / info leak).
+   *
+   * `forbidForeignTenant` (the Excel viewer page's `GET /v1/schemes/media/file`): a key in
+   * ANOTHER tenant's folder answers 403 instead of 404, so the page can say "You don't have
+   * access" — the tenant segment is part of the request, so this leaks nothing about existence.
    */
-  async viewMedia(user: JwtPayload, key: string): Promise<{ stream: Readable; size: number; contentType: string; inline: boolean }> {
+  async viewMedia(
+    user: JwtPayload,
+    key: string,
+    opts: { forbidForeignTenant?: boolean } = {},
+  ): Promise<{ stream: Readable; size: number; contentType: string; inline: boolean }> {
     const deny = () => new NotFoundException();
-    if (!key || typeof key !== 'string' || !key.startsWith('scheme-media/')) throw deny();
+    // The FULL stored-key shape only (`scheme-media/<clientId>/<YYYY-MM>/<file>` — no path tricks).
+    const parts = schemeMediaKeyParts(typeof key === 'string' ? key : '');
+    if (!parts) throw deny();
 
-    const keyClientId = key.split('/')[1];
-    if (!keyClientId) throw deny();
+    const keyClientId = parts.clientId;
     // Un-assumed GIFSY reads any tenant's media; every other caller — incl. an ASSUMED
     // operator — is pinned to its (assumed) tenant folder.
-    if (!platformWide(user) && keyClientId !== user.clientId) throw deny();
+    if (!platformWide(user) && keyClientId !== user.clientId) {
+      throw opts.forbidForeignTenant ? new ForbiddenException(NO_MEDIA_ACCESS) : deny();
+    }
+    // Sales + partner logins: only media of a record they can see (admins unchanged).
+    await this.assertMediaReach(user, key, parts);
 
     const file = await this.storage.openBoundedObject(key);
     if (!file) throw deny();
@@ -2079,7 +2097,106 @@ export class SchemeEnrollmentService {
     const inline = INLINE_SAFE_MIME.has(rawMime);
     return { stream: file.stream, size: file.size, contentType: inline ? rawMime : 'application/octet-stream', inline };
   }
+
+  /**
+   * Record-level media scope for SALES_* and partner (SSS / WHOLESALER / SUB_STOCKIST) logins — admin roles
+   * (CLIENT_ADMIN, GIFSY) keep tenant-wide access. Allowed only when the key is held by a LIVE enrollment (current
+   * values or any submitted version) on a non-removed roster row that the caller can see:
+   *   - SALES: the row's tagged employee is in the caller's team (descendantSalesUserIds — self + downline), OR the
+   *     record was submitted by someone in that team, OR the matched outlet/partner is actively assigned to someone
+   *     in it (the same reach as getSalesTargets / assertSalesReachRoster);
+   *   - partner: the row's matched partner is one this login operates (resolveOperableContexts), or the login
+   *     submitted it.
+   * Anything else — incl. a key no record holds — → the same 403 "no access" (existence is never revealed).
+   */
+  private async assertMediaReach(user: JwtPayload, key: string, parts: { clientId: string; monthStart: Date }): Promise<void> {
+    const isSales = SALES_MEDIA_ROLES.has(user.role);
+    const isPartner = PARTNER_MEDIA_ROLES.has(user.role);
+    if (!isSales && !isPartner) return;
+    const noAccess = () => new ForbiddenException(NO_MEDIA_ACCESS);
+
+    const rows = await this.recordsHoldingMediaKey(parts.clientId, key, parts.monthStart);
+    if (rows.length === 0) throw noAccess();
+    if (rows.some((r) => r.submittedByUserId === user.sub)) return;
+
+    if (isPartner) {
+      const ctx = await resolveOperableContexts(this.prisma, { clientId: user.clientId, userSub: user.sub, phone: user.phone ?? null });
+      const mine = new Set(ctx.operable.map((p) => p.partnerId));
+      if (rows.some((r) => r.matchedPartnerId && mine.has(r.matchedPartnerId))) return;
+      throw noAccess();
+    }
+
+    const caller = await this.prisma.salesUser.findFirst({
+      where: { userId: user.sub, clientId: user.clientId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!caller) throw noAccess();
+    const reach = descendantSalesUserIds(caller.id, await this.loadSalesEdges(user.clientId)); // self + downline
+    if (rows.some((r) => r.taggedSalesUserId && reach.has(r.taggedSalesUserId))) return;
+    const submitters = [...new Set(rows.map((r) => r.submittedByUserId).filter((u): u is string => !!u))];
+    if (submitters.length > 0) {
+      const teamSubmitter = await this.prisma.salesUser.findFirst({
+        where: { clientId: user.clientId, userId: { in: submitters }, id: { in: [...reach] } },
+        select: { id: true },
+      });
+      if (teamSubmitter) return;
+    }
+    const or: Prisma.SalesUserAssignmentWhereInput[] = [];
+    for (const r of rows) {
+      if (r.matchedOutletId) or.push({ outletId: r.matchedOutletId });
+      if (r.matchedPartnerId) or.push({ partnerId: r.matchedPartnerId });
+    }
+    if (or.length > 0) {
+      const assigned = await this.prisma.salesUserAssignment.findFirst({
+        where: { unassignedAt: null, salesUserId: { in: [...reach] }, OR: or },
+        select: { id: true },
+      });
+      if (assigned) return;
+    }
+    throw noAccess();
+  }
+
+  /**
+   * The roster rows (live enrollment, non-removed row, in the key's tenant) whose CURRENT values or any SUBMITTED
+   * version hold this key — as a bare value, `{ key, geo }`, or inside an array (jsonpath lax mode unwraps arrays).
+   *
+   * Efficiency: there is no media→record table and no index on the JSON values, so this is a BOUNDED scan: the
+   * tenant's roster rows (scheme_outlets.clientId index) → their 1:1 enrollment, only enrollments updated on/after
+   * the key's UPLOAD MONTH (a key is uploaded before the submit that stores it, and updatedAt only moves forward),
+   * and only submissions created on/after it; LIMIT 50. Proposed follow-up if it shows in latency: a
+   * `scheme_media(key PK, schemeOutletId)` table written at submit, making this one indexed lookup.
+   */
+  private async recordsHoldingMediaKey(clientId: string, key: string, monthStart: Date) {
+    return this.prisma.$queryRaw<Array<{
+      schemeOutletId: string;
+      taggedSalesUserId: string | null;
+      matchedOutletId: string | null;
+      matchedPartnerId: string | null;
+      submittedByUserId: string | null;
+    }>>`
+      SELECT DISTINCT so."id" AS "schemeOutletId", so."taggedSalesUserId", so."matchedOutletId",
+             so."matchedPartnerId", x."submittedByUserId"
+      FROM "scheme_outlets" so
+      JOIN "scheme_enrollments" e ON e."schemeOutletId" = so."id"
+      CROSS JOIN LATERAL (
+        SELECT e."formValues" AS fv, e."submittedByUserId" AS "submittedByUserId"
+        UNION ALL
+        SELECT s."formValues", s."submittedByUserId" FROM "scheme_submissions" s
+        WHERE s."enrollmentId" = e."id" AND s."createdAt" >= ${monthStart}
+      ) x
+      WHERE so."clientId" = ${clientId}
+        AND so."deletedAt" IS NULL
+        AND e."deletedAt" IS NULL
+        AND e."updatedAt" >= ${monthStart}
+        AND jsonb_path_exists(x.fv, '$.* ? (@ == $k || @.key == $k)', jsonb_build_object('k', ${key}::text))
+      LIMIT 50`;
+  }
 }
+
+/** The plain 403 text of every "not yours" media answer (the viewer page shows its own wording). */
+const NO_MEDIA_ACCESS = "You don't have access to this file.";
+const SALES_MEDIA_ROLES: ReadonlySet<string> = new Set(['SALES_HO', 'SALES_STATE_HEAD', 'SALES_ASM', 'SALES_SO', 'SALES_ISR']);
+const PARTNER_MEDIA_ROLES: ReadonlySet<string> = new Set(['SSS', 'WHOLESALER', 'SUB_STOCKIST']);
 
 /**
  * Media-typed field set — a module-local copy of the helper's set (avoids a cyclic import
