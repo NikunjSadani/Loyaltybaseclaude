@@ -287,6 +287,33 @@ describe('needsAttention', () => {
     expect(needsAttention(t)).toEqual(['8 negative wallets']);
   });
 
+  it('reversal readiness (engine retired 2026-11-21): un-sequenced / BLOCKED wallets are bullets only when > 0', () => {
+    const t = quietTenant('bajaj', 'Bajaj');
+    t.points = ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 0 });
+    expect(needsAttention(t)).toEqual([]);
+    t.points = ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 0, walletsNotSequenced: 12, walletsBlocked: 1 });
+    expect(needsAttention(t)).toEqual([
+      '12 wallets with points history not yet prepared for reversals — run the wallet backfill',
+      '1 wallet blocked by the wallet backfill — fix the history and re-run it',
+    ]);
+    t.points = ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 0, walletsNotSequenced: 1 });
+    expect(needsAttention(t)).toEqual([
+      '1 wallet with points history not yet prepared for reversals — run the wallet backfill',
+    ]);
+  });
+
+  it('reversal readiness renders the Points section even when nothing else moved (never an empty-looking tenant)', () => {
+    const t = quietTenant('bajaj', 'Bajaj');
+    t.points = ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 0, walletsNotSequenced: 3, walletsBlocked: 2 });
+    const r = buildDailyOpsDigest(input([t]));
+    expect(r.html).toContain('data-section="Points"');
+    expect(r.html).toContain('Not ready for reversals');
+    expect(r.html).toContain('backfill not run');
+    expect(r.attentionItems).toBe(5);
+    // a quiet tenant without the figures stays quiet
+    expect(buildDailyOpsDigest(input([quietTenant('deoleo', 'Deoleo')])).html).not.toContain('Not ready for reversals');
+  });
+
   it('Hubble failures are NOT listed twice: they ride the redemption bullet; alone only if Redemptions failed to load', () => {
     const t = quietTenant('x', 'X');
     t.redemptions = ok({ requested: 2, completed: 0, failed: 2, failedNotRefunded: 0, failedRows: [] });

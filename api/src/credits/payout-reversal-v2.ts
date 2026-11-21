@@ -1,9 +1,8 @@
 /**
  * PAYOUT (₹) reversals under the Wallet Reversal Engine — WP5 (WALLET-REVERSAL-ENGINE-DESIGN.md §8, Q9–Q11).
  *
- * Active for a tenant whose `reversalEngine` flag is V2 (owner 2026-11-16: SHADOW behaves exactly like LEGACY for
- * PAYOUT reversals; LEGACY — the default, Deoleo — never reaches
- * this module at create time; see CreditsService.createReversal). The rules:
+ * Every tenant's PAYOUT reversals are created here (the per-tenant engine mode was retired 2026-11-21; see
+ * CreditsService.createReversal). The rules:
  *  P1 entry-targeted: the request names the WHOLE payout entries it reverses (operator picks them; the UI
  *     preselects every open entry of the (batch, outlet, field)); requested = Σ selected (Q9).
  *  P2 reservation at create: one RESERVED PayoutReversalAllocation per entry. The partial unique index
@@ -17,9 +16,10 @@
  *     2026-11-19): entry REVERSED + withholding offset in its original FY, no receivable → APPLIED_CANCELLED.
  *  P5 the cap is structural (an entry can be allocated once). P6 shortfall = Σ receivables.
  *
- * Which reversals take this path at APPROVE/REJECT is decided by the data, not the flag: a PAYOUT reversal that
- * holds allocation rows was raised under the engine; one without (raised under LEGACY, or before the engine) keeps
- * the interim whole-entry path. So flipping a tenant's flag back to LEGACY never strands a reservation.
+ * Which reversals take this path at APPROVE/REJECT is decided by the data: a PAYOUT reversal that holds allocation
+ * rows was raised here; one without (still PENDING from before 2026-11-21, raised under the retired LEGACY mode) keeps
+ * the interim whole-entry approve path (CreditsService.selectPayoutEntriesForReversal), so no such pending request is
+ * stranded. Every NEW PAYOUT reversal reserves its entries here.
  *
  * `planPayoutAllocationBackfill` (bottom) is the PURE planner that turns the PAYOUT reversals approved before the
  * engine into allocation rows (§8 "Backfill existing PAYOUT reversals; ambiguous → flagged") — see its doc.

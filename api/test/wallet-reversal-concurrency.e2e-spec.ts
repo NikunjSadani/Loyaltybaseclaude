@@ -19,9 +19,9 @@
  * Postgres grants the lock, so both interleavings of every pair are exercised (and asserted to have happened).
  * Storm tests additionally fire many operations with no gate at all. On PGlite the same ops run serially in each order.
  *
- * Every scenario runs on a V2 tenant (program_settings.reversalEngine = 'V2') and has a LEGACY-tenant control.
- * Pending (it.skip + TODO) until the parallel work packages land: WP4 (credits.service V2 approve path) and WP5
- * (payout reservations vs bank download).
+ * One engine for every tenant since 2026-11-21 (the per-tenant LEGACY / SHADOW / V2 mode is retired). Scenarios run on
+ * a plain tenant; the former LEGACY controls now run on a tenant that still carries a LEFTOVER
+ * `program_settings.reversalEngine = 'LEGACY'` row, which must be ignored — same engine, same oracle-exact history.
  */
 import { randomBytes } from 'node:crypto';
 import { BadRequestException } from '@nestjs/common';
@@ -29,10 +29,7 @@ import { PrismaClient } from '@prisma/client';
 import type { Client } from 'pg';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { TenantSettingsService } from '../src/tenant/tenant-settings.service';
-import {
-  WalletService,
-  DEBT_REVERSAL_PAUSED_MESSAGE,
-} from '../src/wallet/wallet.service';
+import { WalletService } from '../src/wallet/wallet.service';
 import { CreditsService } from '../src/credits/credits.service';
 import { ReversalAction } from '../src/credits/dto/credits.dto';
 import type { JwtPayload } from '../src/common/decorators/current-user.decorator';
@@ -74,7 +71,6 @@ d(
     let prisma: PrismaClient;
     let wallet: WalletService;
     let credits: CreditsService;
-    const tenantModes = new Map<string, 'V2' | 'LEGACY'>();
     let holder: Client | null = null; // holds the gate lock (server mode)
     let monitor: Client | null = null; // watches pg_stat_activity (server mode)
 
@@ -82,11 +78,9 @@ d(
       db = await startDisposableDb({ poolSize: 40 }); // > any burst below: these scenarios test LOCKS, not pool size
       prisma = db.prisma();
       const ps = prisma as unknown as PrismaService;
-      // The real TenantSettingsService in BOTH modes (reads program_settings — production behaviour). Since policy
-      // round A, WalletService.movementPath / reverseCreditBatchPoints (and the credits POINTS-reversal pause gate)
-      // read the flags through the CALLER's transaction, so PGlite (one transaction at a time) no longer deadlocks on
-      // a nested read — before the fix, the PGlite run had to answer the flag from `tenantModes` (kept as the
-      // fixtures' record of what they wrote). See the pool-starvation test below.
+      // The real TenantSettingsService in BOTH modes (reads program_settings — production behaviour). The credits
+      // POINTS-reversal pause gate reads its switch through the CALLER's transaction (no nested pool connection), and
+      // no wallet path reads a tenant setting any more (the engine mode is retired). See the pool test below.
       const tenantSettings = new TenantSettingsService(ps);
       wallet = new WalletService(ps, tenantSettings);
       // patchReversal (POINTS) only touches prisma + walletService; the other collaborators are never reached.
@@ -171,9 +165,11 @@ d(
     }
 
     // ─── fixtures ──────────────────────────────────────────────────────────────────────────────────────────────────
+    /** 'V2' = a plain tenant; 'LEFTOVER_LEGACY' = one still carrying a retired reversalEngine='LEGACY' row (ignored). */
+    type TenantKind = 'V2' | 'LEFTOVER_LEGACY';
     interface Tenant {
       clientId: string;
-      mode: 'V2' | 'LEGACY';
+      kind: TenantKind;
       outletTypeId: string;
     }
     interface W {
@@ -190,18 +186,18 @@ d(
     }
     const FIELD = 'F-WRE';
 
-    async function tenant(mode: 'V2' | 'LEGACY'): Promise<Tenant> {
-      const clientId = `wre-${mode.toLowerCase()}-${rid()}`;
-      if (mode === 'V2') {
+    async function tenant(kind: TenantKind = 'V2'): Promise<Tenant> {
+      const clientId = `wre-${kind.toLowerCase().replace('_', '-')}-${rid()}`;
+      if (kind === 'LEFTOVER_LEGACY') {
+        // a row written before the retirement — nothing may read it
         await prisma.programSetting.create({
-          data: { clientId, settingKey: 'reversalEngine', settingValue: 'V2' },
+          data: { clientId, settingKey: 'reversalEngine', settingValue: 'LEGACY' },
         });
       }
-      tenantModes.set(clientId, mode);
       const type = await prisma.outletType.create({
         data: { code: `WRE_${rid()}`, name: 'WRE e2e' },
       });
-      return { clientId, mode, outletTypeId: type.id };
+      return { clientId, kind, outletTypeId: type.id };
     }
 
     async function newWallet(
@@ -339,8 +335,8 @@ d(
     }
 
     /**
-     * The §6 approve contract the credits service (WP4) wraps around the engine: credit_batches row lock → guarded
-     * PENDING_GIFSY → APPROVED flip (never twice) → reverseCreditBatchPoints (per-tenant dispatcher) → shortfall.
+     * The §6 approve contract the credits service wraps around the engine: credit_batches row lock → guarded
+     * PENDING_GIFSY → APPROVED flip (never twice) → reverseCreditBatchPoints (the one engine) → shortfall.
      */
     function approve(t: Tenant, r: Rev, opts: { batchLock?: boolean } = {}) {
       return prisma.$transaction(async (tx) => {
@@ -422,42 +418,6 @@ d(
       const rep = await replayWalletThroughOracle(prisma, walletId);
       expect(rep.mismatches).toEqual([]);
       return rep;
-    }
-
-    /** LEGACY wallets: no v2 column written; the before/after pairs chain exactly from 0 to the balance; lots = B. */
-    async function expectLegacyChain(walletId: string) {
-      const w = await prisma.wallet.findUniqueOrThrow({
-        where: { id: walletId },
-      });
-      const rows = await prisma.walletTransaction.findMany({
-        where: { walletId },
-      });
-      expect(w.movementSeq).toBe(0);
-      expect(w.debtPoints).toBe(0);
-      expect(rows.every((r) => r.seq === null && r.pointsDelta === null)).toBe(
-        true,
-      );
-      expect(
-        await prisma.walletCreditPosition.count({ where: { walletId } }),
-      ).toBe(0);
-      const left = [...rows];
-      let cur = 0;
-      while (left.length) {
-        const i = left.findIndex((r) => r.balanceBefore === cur);
-        if (i < 0)
-          throw new Error(
-            `legacy chain broken at balance ${cur}: ${JSON.stringify(left.map((r) => [r.balanceBefore, r.balanceAfter]))}`,
-          );
-        cur = left[i].balanceAfter;
-        left.splice(i, 1);
-      }
-      expect(cur).toBe(w.redeemablePoints);
-      const lots = await prisma.pointsLedger.aggregate({
-        where: { walletId, isExpired: false, points: { gt: 0 } },
-        _sum: { remainingPoints: true },
-      });
-      expect(lots._sum.remainingPoints ?? 0).toBe(w.redeemablePoints);
-      return w;
     }
 
     async function walletRow(walletId: string) {
@@ -567,8 +527,8 @@ d(
         },
       );
 
-      it('LEGACY control: B = Σ, exact before/after chain, lots = B, no v2 column written', async () => {
-        const t = await tenant('LEGACY');
+      it('leftover reversalEngine=LEGACY row (ignored): the same engine — seq 1..N contiguous, B = Σ, one position per credit, = oracle', async () => {
+        const t = await tenant('LEFTOVER_LEGACY');
         const w = await newWallet(t);
         const b = await batch(t, [
           {
@@ -581,14 +541,20 @@ d(
           amounts.map((a) => () => batchCredit(t, w, b, a)),
         );
         expect(errs(out)).toEqual([]);
-        const row = await expectLegacyChain(w.walletId);
+        await expectOracle(w.walletId);
+        const row = await walletRow(w.walletId);
         expect(row.redeemablePoints).toBe(amounts.reduce((s, a) => s + a, 0));
+        expect(row.movementSeq).toBe(N);
+        expect(
+          await prisma.walletCreditPosition.count({ where: { walletId: w.walletId } }),
+        ).toBe(N);
         if (db.concurrent) {
           const storm2 = await storm(
             amounts.map((a) => () => batchCredit(t, w, b, a + 1000)),
           );
           expect(errs(storm2)).toEqual([]);
-          await expectLegacyChain(w.walletId);
+          await expectOracle(w.walletId);
+          expect((await walletRow(w.walletId)).movementSeq).toBe(2 * N);
         }
       });
     });
@@ -597,21 +563,19 @@ d(
     describe('connection pool at production sizing', () => {
       /**
        * PrismaService builds `new Pool({ connectionString })` (pg default max 10) and Prisma's interactive-transaction
-       * timeout defaults to 5 s. WalletService.applyMovement → movementPath reads the tenant flag through
-       * TenantSettingsService.getReversalEngineModeUncached, i.e. `this.prisma` — a SECOND pool connection, requested
-       * while the transaction (holding the wallet row lock) still holds its own. Once ≥ pool-size wallet transactions are
-       * in flight, the lock holder waits for a free connection that only its own lock-waiters can release → every one
-       * of them times out. Applies to EVERY tenant (LEGACY wallets with movementSeq 0 take the same read).
-       * Was RED (WP7 finding); FIXED in policy round A: movementPath / reverseCreditBatchPoints / the pause gate read
-       * through the caller's `tx` (getReversalEngineModeUncached(clientId, tx)) → expected GREEN; regression guard.
+       * timeout defaults to 5 s. A read on `this.prisma` from inside a wallet transaction takes a SECOND pool
+       * connection while the transaction (holding the wallet row lock) still holds its own; once ≥ pool-size wallet
+       * transactions are in flight, the lock holder waits for a free connection that only its own lock-waiters can
+       * release → every one of them times out (WP7 finding — it was the reversal-engine mode read). The mode is retired
+       * (2026-11-21) and every wallet-path read goes through the caller's `tx` → expected GREEN; regression guard.
        */
       itServer(
-        'pool 4, tx timeout 5 s: 6 concurrent credits on one LEGACY wallet all complete',
+        'pool 4, tx timeout 5 s: 6 concurrent credits on one wallet all complete',
         async () => {
           const small = db.prisma({ poolSize: 4, txTimeoutMs: 5_000 });
           const ps = small as unknown as PrismaService;
           const svc = new WalletService(ps, new TenantSettingsService(ps));
-          const t = await tenant('LEGACY');
+          const t = await tenant('LEFTOVER_LEGACY');
           const w = await newWallet(t);
           await holder!.query('BEGIN');
           await holder!.query(
@@ -751,9 +715,9 @@ d(
       );
 
       it.each([['redeem first'], ['reversal first']])(
-        'LEGACY control, %s: B 0, never negative, shortfall only when redeemed first',
+        'leftover-LEGACY-row tenant (ignored), never-negative wallet, %s: what was redeemed first is owed as debt — never written off; = oracle',
         async (order) => {
-          const t = await tenant('LEGACY');
+          const t = await tenant('LEFTOVER_LEGACY');
           const w = await newWallet(t);
           const b = await batch(t, [{ outletCode: w.outletCode, amount: 500 }]);
           await batchCredit(t, w, b, 500);
@@ -766,14 +730,21 @@ d(
           const [redeemOut, approveOut] =
             order === 'redeem first' ? out : [out[1], out[0]];
           expect(approveOut.ok).toBe(true);
-          await expectLegacyChain(w.walletId);
-          expect((await walletRow(w.walletId)).redeemablePoints).toBe(0); // = V2 oracle on a never-negative wallet (R2)
-          expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(0);
+          await expectOracle(w.walletId);
+          const row = await walletRow(w.walletId);
+          const [alloc] = await allocations(r.id);
+          if (redeemOut.ok) {
+            // 400 spent before the reversal: 100 recovered, 400 owed (owner 2026-11-19), nothing written off
+            expect([row.redeemablePoints, row.debtPoints]).toEqual([-400, 400]);
+            expect([alloc.recovered, alloc.owed, alloc.shortfall]).toEqual([100, 400, 0]);
+          } else {
+            expect([row.redeemablePoints, row.debtPoints]).toEqual([0, 0]);
+            expect([alloc.recovered, alloc.owed, alloc.shortfall]).toEqual([500, 0, 0]);
+          }
           const cr = await prisma.creditReversal.findUniqueOrThrow({
             where: { id: r.id },
           });
-          if (redeemOut.ok) expect(Number(cr.shortfallPaise)).toBe(400);
-          else expect(Number(cr.shortfallPaise)).toBe(0);
+          expect(Number(cr.shortfallPaise ?? 0n)).toBe(0);
           if (db.concurrent)
             expect(redeemOut.ok).toBe(order === 'redeem first');
         },
@@ -839,8 +810,8 @@ d(
         expect((await walletRow(w.walletId)).redeemablePoints).toBe(300);
       });
 
-      it('LEGACY control (engine dispatcher): exactly one clawback', async () => {
-        const t = await tenant('LEGACY');
+      it('leftover-LEGACY-row tenant (ignored), engine dispatcher: exactly one reversal, one allocation, = oracle', async () => {
+        const t = await tenant('LEFTOVER_LEGACY');
         const w = await newWallet(t);
         const b = await batch(t, [{ outletCode: w.outletCode, amount: 500 }]);
         await batchCredit(t, w, b, 500);
@@ -851,15 +822,15 @@ d(
         );
         expect(oks(out)).toBe(1);
         expect(await clawbackRows(w.walletId, r.id)).toHaveLength(1);
-        expect((await expectLegacyChain(w.walletId)).redeemablePoints).toBe(
-          200,
-        );
+        expect(await allocations(r.id)).toHaveLength(1);
+        await expectOracle(w.walletId);
+        expect((await walletRow(w.walletId)).redeemablePoints).toBe(200);
       });
 
-      it.each([['LEGACY'], ['V2']] as const)(
+      it.each([['LEFTOVER_LEGACY'], ['V2']] as const)(
         'credits.service patchReversal, %s tenant (never-negative wallet): 3 concurrent approvals → exactly one',
-        async (mode) => {
-          const t = await tenant(mode);
+        async (kind) => {
+          const t = await tenant(kind);
           const w = await newWallet(t);
           const b = await batch(t, [{ outletCode: w.outletCode, amount: 500 }]);
           await batchCredit(t, w, b, 500);
@@ -877,20 +848,14 @@ d(
           ).toBe(true);
           expect(await clawbackRows(w.walletId, r.id)).toHaveLength(1);
           expect((await walletRow(w.walletId)).redeemablePoints).toBe(200);
-          if (mode === 'V2') {
-            // Today's credits path (LEGACY math on a tracked wallet) still keeps ρ + allocations in step — B-neutral.
-            expect(await allocations(r.id)).toHaveLength(1);
-            await expectOracle(w.walletId);
-          } else {
-            await expectLegacyChain(w.walletId);
-          }
+          // one engine for every tenant: ρ + allocations in step, oracle-exact
+          expect(await allocations(r.id)).toHaveLength(1);
+          await expectOracle(w.walletId);
         },
       );
 
-      // TODO(WP4): un-skip once credits.service approve routes POINTS through reverseCreditBatchPoints (V2 math on debt
-      // wallets). Today patchReversal calls the LEGACY assertPointsReversalAllowed + clawbackAward directly, which
-      // refuses every debt wallet (DEBT_REVERSAL_PAUSED_MESSAGE) — expected after WP4: exactly one approval, T-c result.
-      it.skip('[pending WP4] credits.service patchReversal, V2 debt wallet (T-c): 3 concurrent approvals → one allocation, B −500 (the spent 400 owed — owner 2026-11-19)', async () => {
+      // credits.service approve routes every POINTS reversal through the engine (the LEGACY debt refusal is gone).
+      it('credits.service patchReversal, debt wallet (T-c): 3 concurrent approvals → one allocation, B −500 (the spent 400 owed — owner 2026-11-19)', async () => {
         const t = await tenant('V2');
         const w = await newWallet(t, { debt: 100 });
         const b = await batch(t, [{ outletCode: w.outletCode, amount: 500 }]);
@@ -902,9 +867,7 @@ d(
           () => patchApprove(t, r),
           () => patchApprove(t, r),
         ]);
-        expect(errs(out).map((e) => e.message)).not.toContain(
-          DEBT_REVERSAL_PAUSED_MESSAGE,
-        );
+        expect(errs(out).every((e) => /already (processed|APPROVED)/.test(e.message))).toBe(true);
         expect(oks(out)).toBe(1);
         const allocs = await allocations(r.id);
         expect(allocs).toHaveLength(1);
@@ -1002,11 +965,11 @@ d(
         },
       );
 
-      it.each([['LEGACY'], ['V2']] as const)(
+      it.each([['LEFTOVER_LEGACY'], ['V2']] as const)(
         'credits.service, %s tenant: approve R1 300 ∥ createReversal R2 (300 / 200) on credit 500 → Σ approved + pending ≤ 500',
-        async (mode) => {
+        async (kind) => {
           for (const second of [300, 200]) {
-            const t = await tenant(mode);
+            const t = await tenant(kind);
             const w = await newWallet(t);
             const b = await batch(t, [
               { outletCode: w.outletCode, amount: 500 },
@@ -1049,8 +1012,7 @@ d(
             expect(committed).toBeLessThanOrEqual(500);
             if (second === 300) expect(out[1].ok).toBe(false); // 300 + 300 > 500, whichever order
             expect((await walletRow(w.walletId)).redeemablePoints).toBe(200);
-            if (mode === 'V2') await expectOracle(w.walletId);
-            else await expectLegacyChain(w.walletId);
+            await expectOracle(w.walletId);
           }
         },
       );
@@ -1100,9 +1062,9 @@ d(
       );
 
       it.each([['expiry first'], ['reversal first']])(
-        'LEGACY control, %s → B 0, never negative',
+        'leftover-LEGACY-row tenant (ignored), never-negative wallet, %s → B 0, never negative, nothing owed; = oracle',
         async (order) => {
-          const t = await tenant('LEGACY');
+          const t = await tenant('LEFTOVER_LEGACY');
           const w = await newWallet(t);
           const b = await batch(t, [{ outletCode: w.outletCode, amount: 500 }]);
           const c = await batchCredit(t, w, b, 500);
@@ -1114,15 +1076,15 @@ d(
             order === 'expiry first' ? ops : [ops[1], ops[0]],
           );
           expect(errs(out)).toEqual([]);
-          const row = await expectLegacyChain(w.walletId);
-          expect(row.redeemablePoints).toBe(0);
+          await expectOracle(w.walletId);
+          const row = await walletRow(w.walletId);
+          expect([row.redeemablePoints, row.debtPoints]).toEqual([0, 0]);
           expect(await minBalanceAfter(w.walletId)).toBeGreaterThanOrEqual(0);
-          const cr = await prisma.creditReversal.findUniqueOrThrow({
-            where: { id: r.id },
-          });
-          expect(row.lifetimeExpired + (500 - Number(cr.shortfallPaise))).toBe(
-            500,
-          ); // each point leaves exactly once
+          const [alloc] = await allocations(r.id);
+          // each point leaves exactly once: expired (counted as alreadyExpired) or recovered by the reversal — never owed
+          expect(alloc.owed).toBe(0);
+          expect(row.lifetimeExpired + alloc.recovered).toBe(500);
+          expect(alloc.alreadyExpired).toBe(row.lifetimeExpired);
           if (db.concurrent)
             expect(row.lifetimeExpired).toBe(
               order === 'expiry first' ? 500 : 0,

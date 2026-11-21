@@ -1,10 +1,11 @@
 /// <reference types="vitest/globals" />
 /**
- * /admin/credits-payouts/status — Wallet Reversal Engine fix round B:
- *  - D5: the typed remarks (trimmed) are sent on BOTH create paths (LEGACY amount form + V2 entry picker); blank → omitted.
- *  - the attention banner is mounted only when the engine mode is known and not LEGACY.
- *  - #4 "Loading payout entries…" + Submit disabled until the lookup answers; #5 failed lookup → Retry.
- *  - #6 a failed V2 submit keeps the form, reloads the entries and drops ticks that are no longer selectable.
+ * /admin/credits-payouts/status — Wallet Reversal Engine fix round B (every tenant — the per-tenant engine mode was
+ * retired, so there is no LEGACY / SHADOW path any more):
+ *  - D5: the typed remarks (trimmed) are sent on BOTH create paths (POINTS amount form + PAYOUT entry picker); blank → omitted.
+ *  - the attention banner is mounted for every tenant (the payload has no `mode`); readiness is shown up front.
+ *  - #4 "Loading payout entries…" + Submit disabled until the lookup answers; #5 failed lookup → error + Retry.
+ *  - #6 a failed submit keeps the form, reloads the entries and drops ticks that are no longer selectable.
  *  - #20 dialog semantics: role=dialog, Escape closes, focus returns to the Reverse button.
  */
 
@@ -30,10 +31,11 @@ const batch = {
   id: 'b1', batchCode: 'CB-2026-10-001', period: '2026-10', status: 'CONFIRMED', uploadedBy: 'ops',
   uploadedAt: '2026-10-01T00:00:00.000Z', totalOutlets: 1, totalPoints: 0, totalPayoutPaise: 80000,
 };
-const row = {
+const payoutRow = {
   rowNum: 1, outletId: 'O1', outletName: 'Outlet One', fieldId: 'f1', fieldName: 'Volume',
   amount: 80000, narration: '', awardType: 'PAYOUT', status: 'OK', errors: [],
 };
+const pointsRow = { ...payoutRow, amount: 400, awardType: 'POINTS' };
 
 type Entry = { id: string; amountPaise: number; status: string; period: string; createdAt: string; selectable: boolean; blockedBy: string | null };
 const entry = (id: string, amountPaise: number, status: string, selectable = true, blockedBy: string | null = null): Entry =>
@@ -41,15 +43,20 @@ const entry = (id: string, amountPaise: number, status: string, selectable = tru
 
 const ok = (payload: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => payload });
 
+type EntriesAnswer = { mode?: string; entries?: Entry[] };
+
 interface ApiOpts {
-  engineMode?: string | null;
+  /** Attention read: 'fail' = network error; otherwise fields merged over the default (approvals paused). */
+  attention?: 'fail' | Record<string, unknown>;
   /** Sequence of responses for the entries lookup ('fail' = network error); the last one repeats. */
-  entries?: Array<{ mode: string; entries: Entry[] } | 'fail' | 'pending'>;
+  entries?: Array<EntriesAnswer | 'fail' | 'pending'>;
   postFail?: boolean;
-  /** What a 'pending' lookup answers once released (default LEGACY, no entries). */
-  pendingAnswer?: { mode: string; entries: Entry[] };
+  /** What a 'pending' lookup answers once released. */
+  pendingAnswer?: EntriesAnswer;
   /** Wallets below zero answered by GET …/wallets-in-debt (default none). */
   debtWallets?: Array<Record<string, unknown>>;
+  /** The batch row (default a PAYOUT row). */
+  row?: typeof payoutRow;
 }
 
 function mockApi(opts: ApiOpts) {
@@ -59,7 +66,7 @@ function mockApi(opts: ApiOpts) {
   let release: (() => void) | null = null;
   global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    // Wallets below zero (fix round 4, item 5 — mounted on every tenant): none here.
+    // Wallets below zero (mounted on every tenant): none unless given.
     if (url.includes('/reversal-engine/wallets-in-debt')) {
       const w = opts.debtWallets ?? [];
       return ok({
@@ -69,13 +76,15 @@ function mockApi(opts: ApiOpts) {
     }
     if (url.includes('/reversal-engine/attention')) {
       attentionCalls.push(url);
-      if (opts.engineMode === null) return Promise.reject(new TypeError('Failed to fetch'));
+      if (opts.attention === 'fail') return Promise.reject(new TypeError('Failed to fetch'));
+      // No `mode` field — the contract no longer carries one.
       return ok({
         success: true,
         data: {
-          mode: opts.engineMode ?? 'LEGACY', modeError: null,
+          readiness: { unsequencedWithHistory: 0, blocked: 0, ready: true, message: null },
           pause: { paused: true, since: null, by: null, reason: null },
           wallets: [], walletsTotal: 0, unmappedCredits: [], unmappedTotal: 0, owedClawbacks: [], owedTotal: 0,
+          ...(opts.attention ?? {}),
         },
       });
     }
@@ -84,11 +93,15 @@ function mockApi(opts: ApiOpts) {
       return ok({ success: true, data: { batches: [batch], pagination: { page: 1, limit: 50, total: 1, pages: 1 } } });
     }
     if (url.includes('/payout-reversal-entries')) {
-      const seq = opts.entries ?? [{ mode: 'LEGACY', entries: [] }];
+      const seq = opts.entries ?? [{ mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] }];
       const r = seq[Math.min(entryCalls.length, seq.length - 1)];
       entryCalls.push(url);
       if (r === 'fail') return Promise.reject(new TypeError('Failed to fetch'));
-      if (r === 'pending') return new Promise((resolve) => { release = () => resolve({ ok: true, status: 200, json: async () => ({ success: true, data: opts.pendingAnswer ?? { mode: 'LEGACY', entries: [] } }) }); });
+      if (r === 'pending') {
+        return new Promise((resolve) => {
+          release = () => resolve({ ok: true, status: 200, json: async () => ({ success: true, data: opts.pendingAnswer ?? { mode: 'V2', entries: [] } }) });
+        });
+      }
       return ok({ success: true, data: r });
     }
     if (url.endsWith('/reversals') && init?.method === 'POST') {
@@ -98,7 +111,7 @@ function mockApi(opts: ApiOpts) {
       }
       return ok({ success: true, data: { id: 'r1' } });
     }
-    if (/\/api\/admin\/credits\/batches\/b1$/.test(url)) return ok({ success: true, data: { ...batch, rows: [row] } });
+    if (/\/api\/admin\/credits\/batches\/b1$/.test(url)) return ok({ success: true, data: { ...batch, rows: [opts.row ?? payoutRow] } });
     return ok({ success: true, data: null });
   }) as unknown as typeof fetch;
   return { posts, entryCalls, attentionCalls, release: () => release?.() };
@@ -115,7 +128,7 @@ async function openModal() {
 
 const submitBtn = () => screen.getByRole('button', { name: /Submit Reversal Request|Submitting…/ }) as HTMLButtonElement;
 
-describe('Payout status — reversal fix round B', () => {
+describe('Payout status — reversal fix round B (every tenant)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(useAdminSession).mockReturnValue({
@@ -123,18 +136,37 @@ describe('Payout status — reversal fix round B', () => {
     } as ReturnType<typeof useAdminSession>);
   });
 
-  it('banner: not mounted for a LEGACY tenant (screen as before)', async () => {
-    const api = mockApi({ engineMode: 'LEGACY' });
+  it('banner: mounted for every tenant — the attention payload has no mode field', async () => {
+    mockApi({});
+    render(<PayoutStatusPage />);
+    expect(await screen.findByText(/Points reversal approvals are paused/)).toBeTruthy();
+    expect(screen.getByLabelText('Points reversal call-outs')).toBeTruthy();
+  });
+
+  it('banner: renders nothing when there is nothing to report (no empty box)', async () => {
+    const api = mockApi({ attention: { pause: { paused: false, since: null, by: null, reason: null } } });
     render(<PayoutStatusPage />);
     await screen.findByTestId('batch-header-b1');
     await waitFor(() => expect(api.attentionCalls.length).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 0));
     expect(screen.queryByLabelText('Points reversal call-outs')).toBeNull();
-    expect(screen.queryByText(/Points reversal approvals are paused/)).toBeNull();
   });
 
-  it('fix round 4 item 5 / owner D2: a LEGACY tenant with negative wallets (e.g. imported) sees the wallets-below-zero list — neutral wording', async () => {
+  it('banner: shows the readiness line when wallets are not prepared for reversals', async () => {
+    const message = '12 wallets with points history are not yet prepared for reversals — Gifsy must run the wallet backfill for this program before any points reversal';
+    mockApi({ attention: { readiness: { unsequencedWithHistory: 12, blocked: 0, ready: false, message } } });
+    render(<PayoutStatusPage />);
+    expect((await screen.findByTestId('attention-readiness')).textContent).toBe(message);
+  });
+
+  it('banner: a failed call-out read is shown, never silent', async () => {
+    mockApi({ attention: 'fail' });
+    render(<PayoutStatusPage />);
+    expect((await screen.findByText(/Could not load reversal call-outs/)).getAttribute('role')).toBe('alert');
+  });
+
+  it('owner D2: negative wallets (e.g. imported) show the wallets-below-zero list on any tenant — neutral wording', async () => {
     mockApi({
-      engineMode: 'LEGACY',
       debtWallets: [{
         walletId: 'w9', partnerName: 'Imported Shop', outletCodes: ['O9'], balance: -841, debtPoints: 0, owedPoints: 841,
         sources: [], note: 'No reversal behind it — negative from imported / earlier history',
@@ -142,36 +174,23 @@ describe('Payout status — reversal fix round B', () => {
     });
     render(<PayoutStatusPage />);
     expect((await screen.findByTestId('wallets-in-debt-summary')).textContent).toBe('1 wallet below zero · 841 pts owed');
-    expect(screen.queryByLabelText('Points reversal call-outs')).toBeNull(); // the engine banner stays off on LEGACY
+    expect(await screen.findByLabelText('Points reversal call-outs')).toBeTruthy(); // both mounted
   });
 
-  it('banner: not mounted when the mode cannot be read', async () => {
-    const api = mockApi({ engineMode: null });
-    render(<PayoutStatusPage />);
-    await screen.findByTestId('batch-header-b1');
-    await waitFor(() => expect(api.attentionCalls.length).toBeGreaterThan(0));
-    expect(screen.queryByText(/Points reversal approvals are paused/)).toBeNull();
-    expect(screen.queryByText(/Could not load reversal call-outs/)).toBeNull();
-  });
-
-  it('banner: mounted for a V2 tenant', async () => {
-    mockApi({ engineMode: 'V2' });
-    render(<PayoutStatusPage />);
-    expect(await screen.findByText(/Points reversal approvals are paused/)).toBeTruthy();
-  });
-
-  it('D5 LEGACY amount path: sends the trimmed remarks', async () => {
-    const api = mockApi({ entries: [{ mode: 'LEGACY', entries: [] }] });
+  it('D5 POINTS amount path: debt copy (never written off) and the trimmed remarks are sent', async () => {
+    const api = mockApi({ row: pointsRow });
     await openModal();
-    await screen.findByText('Reversal Amount (₹)');
-    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '500' } });
+    await screen.findByText('Reversal Amount (pts)');
+    expect(screen.getByText(/repaid from its future earnings — nothing is written off/)).toBeTruthy();
+    expect(api.entryCalls).toHaveLength(0); // POINTS rows never look up payout entries
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '300' } });
     fireEvent.change(screen.getByLabelText('Remarks (optional)'), { target: { value: '  wrong outlet  ' } });
     fireEvent.click(submitBtn());
     await screen.findByText(/awaiting Gifsy approval/);
-    expect(api.posts[0]).toMatchObject({ requestedPaise: 50000, remarks: 'wrong outlet' });
+    expect(api.posts[0]).toMatchObject({ awardType: 'POINTS', requestedPaise: 300, remarks: 'wrong outlet' });
   });
 
-  it('D5 V2 entry path: sends the trimmed remarks; blank remarks are omitted', async () => {
+  it('D5 entry path: sends the trimmed remarks; blank remarks are omitted', async () => {
     const api = mockApi({ entries: [{ mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] }] });
     await openModal();
     await screen.findByTestId('payout-entry-picker');
@@ -189,101 +208,54 @@ describe('Payout status — reversal fix round B', () => {
     expect(api.posts[1]).not.toHaveProperty('remarks');
   });
 
-  it('#4 (audit B5 — LEGACY / Deoleo identical): the amount form is there at once and Submit works while the lookup is pending', async () => {
-    const api = mockApi({ entries: ['pending'] });
+  it('#4: "Loading payout entries…" and Submit waits (no amount form) while the lookup is pending; the answer shows the picker', async () => {
+    const api = mockApi({ entries: ['pending'], pendingAnswer: { mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] } });
     await openModal();
-    expect(screen.queryByTestId('payout-entries-loading')).toBeNull();
-    expect(screen.getByText('Reversal Amount (₹)')).toBeTruthy();
-    expect(submitBtn().disabled).toBe(false);
-    api.release();
-    await waitFor(() => expect(api.entryCalls).toHaveLength(1));
-    expect(screen.getByText('Reversal Amount (₹)')).toBeTruthy(); // LEGACY answer → the same form
-    expect(submitBtn().disabled).toBe(false);
-  });
-
-  it('#5 (audit B5): a failed lookup keeps the amount form (the server refuses an amount-only request on a V2 tenant with a clear message); a V2 answer switches to the picker', async () => {
-    const failed = mockApi({ entries: ['fail'] });
-    await openModal();
-    await waitFor(() => expect(failed.entryCalls).toHaveLength(1));
-    expect(screen.queryByTestId('payout-entries-error')).toBeNull();
-    expect(screen.getByText('Reversal Amount (₹)')).toBeTruthy();
-    expect(submitBtn().disabled).toBe(false);
-  });
-
-  it('re-audit B2 — V2 tenant: "Loading payout entries…" and Submit waits (no amount form) while the lookup is pending', async () => {
-    mockApi({ engineMode: 'V2', entries: ['pending'] });
-    render(<PayoutStatusPage />);
-    await waitFor(() => expect(vi.mocked(global.fetch).mock.calls.some((c) => String(c[0]).includes('/reversal-engine/attention'))).toBe(true));
-    fireEvent.click(await screen.findByTestId('batch-header-b1'));
-    // the mode is known before the modal opens
-    await new Promise((r) => setTimeout(r, 0));
-    fireEvent.click(await screen.findByRole('button', { name: /Reverse/ }));
-    await screen.findByRole('dialog');
     expect((await screen.findByTestId('payout-entries-loading')).textContent).toBe('Loading payout entries…');
-    expect(screen.queryByText('Reversal Amount (₹)')).toBeNull();
+    expect(screen.queryByRole('spinbutton')).toBeNull();
     expect(submitBtn().disabled).toBe(true);
+    api.release();
+    await screen.findByTestId('payout-entry-picker');
+    await waitFor(() => expect(submitBtn().disabled).toBe(false));
   });
 
-  it('re-audit B2 — V2 tenant: a failed lookup shows an error with Retry (never a silent fallback); Retry loads the picker', async () => {
-    const api = mockApi({ engineMode: 'V2', entries: ['fail', { mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] }] });
-    render(<PayoutStatusPage />);
-    await waitFor(() => expect(api.attentionCalls.length).toBeGreaterThan(0));
-    fireEvent.click(await screen.findByTestId('batch-header-b1'));
-    await new Promise((r) => setTimeout(r, 0));
-    fireEvent.click(await screen.findByRole('button', { name: /Reverse/ }));
-    await screen.findByRole('dialog');
+  it('#5: a failed lookup shows an error with Retry (never a silent fallback); Retry loads the picker', async () => {
+    const api = mockApi({ entries: ['fail', { mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] }] });
+    await openModal();
     const err = await screen.findByTestId('payout-entries-error');
     expect(err.textContent).toContain("Couldn't load payout entries — retry");
-    expect(screen.queryByText('Reversal Amount (₹)')).toBeNull();
+    expect(screen.queryByRole('spinbutton')).toBeNull();
     expect(submitBtn().disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByTestId('payout-entry-picker');
     expect(api.entryCalls).toHaveLength(2);
-    expect(submitBtn().disabled).toBe(false);
-  });
-
-  it('final item 8 — page mode V2 but the entries read answers LEGACY: the amount form, Submit enabled', async () => {
-    const api = mockApi({ engineMode: 'V2', entries: [{ mode: 'LEGACY', entries: [] }] });
-    render(<PayoutStatusPage />);
-    await waitFor(() => expect(api.attentionCalls.length).toBeGreaterThan(0));
-    fireEvent.click(await screen.findByTestId('batch-header-b1'));
-    await new Promise((r) => setTimeout(r, 0));
-    fireEvent.click(await screen.findByRole('button', { name: /Reverse/ }));
-    await screen.findByRole('dialog');
-    await screen.findByText('Reversal Amount (₹)');
     await waitFor(() => expect(submitBtn().disabled).toBe(false));
   });
 
-  it('final item 8 — V2 arrives after the user typed an amount: a notice says it was cleared, nothing is pre-ticked', async () => {
-    const api = mockApi({ entries: ['pending'], pendingAnswer: { mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] } });
+  it('#5: an answer without an entries list is an error with Retry — never the amount form', async () => {
+    mockApi({ entries: [{ mode: 'V2' }] });
     await openModal();
-    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '250' } }); // the amount form's number input
-    api.release();
-    await screen.findByTestId('payout-entry-picker');
-    expect(screen.getByTestId('payout-mode-switch-notice').textContent).toBe(
-      'This programme now reverses by payout entry — your typed amount ₹250.00 was cleared; pick entries',
-    );
-    expect((screen.getByLabelText('Payout entry ₹500.00 (PENDING)') as HTMLInputElement).checked).toBe(false);
-    expect(submitBtn().disabled).toBe(true); // nothing picked yet
+    expect(await screen.findByTestId('payout-entries-error')).toBeTruthy();
+    expect(screen.queryByRole('spinbutton')).toBeNull();
+    expect(submitBtn().disabled).toBe(true);
   });
 
-  it('#5b: a V2 answer switches the modal to the entry picker', async () => {
-    mockApi({ entries: [{ mode: 'V2', entries: [entry('pe-b', 50000, 'PENDING')] }] });
+  it('#5b: an answer that omits the mode field still shows the entry picker', async () => {
+    mockApi({ entries: [{ entries: [entry('pe-b', 50000, 'PENDING')] }] });
     await openModal();
     await screen.findByTestId('payout-entry-picker');
-    expect(submitBtn().disabled).toBe(false);
+    await waitFor(() => expect(submitBtn().disabled).toBe(false));
   });
 
   it('owner D1: a PAID 194C entry shows why it can not be picked', async () => {
     mockApi({ entries: [{ mode: 'V2', entries: [entry('pe-a', 30000, 'PAID', false, 'PAID_194C'), entry('pe-b', 50000, 'PENDING')] }] });
     await openModal();
-    await screen.findByTestId('payout-entry-picker');
     expect(
-      screen.getByLabelText("Payout entry ₹300.00 (PAID) — not selectable: Paid 194C payout — 194C payouts can't be reversed once paid"),
+      await screen.findByLabelText("Payout entry ₹300.00 (PAID) — not selectable: Paid 194C payout — 194C payouts can't be reversed once paid"),
     ).toBeTruthy();
   });
 
-  it('#6: a failed V2 submit keeps the form, reloads entries and drops ticks no longer selectable', async () => {
+  it('#6: a failed submit keeps the form, reloads entries and drops ticks no longer selectable', async () => {
     const api = mockApi({
       postFail: true,
       entries: [
@@ -292,8 +264,7 @@ describe('Payout status — reversal fix round B', () => {
       ],
     });
     await openModal();
-    await screen.findByTestId('payout-entry-picker');
-    expect((screen.getByLabelText('Payout entry ₹500.00 (FAILED)') as HTMLInputElement).checked).toBe(true);
+    expect(((await screen.findByLabelText('Payout entry ₹500.00 (FAILED)')) as HTMLInputElement).checked).toBe(true);
     fireEvent.click(submitBtn());
     expect((await screen.findByRole('alert')).textContent).toMatch(/held by another pending reversal/);
     await waitFor(() => expect(api.entryCalls).toHaveLength(2));
@@ -306,7 +277,7 @@ describe('Payout status — reversal fix round B', () => {
   });
 
   it('#20: dialog semantics, Escape closes and focus returns to the Reverse button', async () => {
-    mockApi({ entries: [{ mode: 'LEGACY', entries: [] }] });
+    mockApi({});
     const reverse = await openModal();
     const dialog = screen.getByRole('dialog');
     expect(dialog.getAttribute('aria-modal')).toBe('true');
@@ -318,9 +289,9 @@ describe('Payout status — reversal fix round B', () => {
   });
 
   it('#20: Tab from the last control wraps to the first (focus trap)', async () => {
-    mockApi({ entries: [{ mode: 'LEGACY', entries: [] }] });
+    mockApi({});
     await openModal();
-    await screen.findByText('Reversal Amount (₹)');
+    await screen.findByTestId('payout-entry-picker');
     const dialog = screen.getByRole('dialog');
     const cancel = screen.getByRole('button', { name: 'Cancel' });
     cancel.focus();

@@ -1406,15 +1406,14 @@ export class AdminCoreService {
       );
     }
 
-    // GIFSY-ADMIN-ONLY money controls at the DATA boundary (Wallet Reversal Engine fix round A, M2): the per-tenant
-    // reversal engine mode (`reversalEngine`) and the POINTS reversal maintenance pause (`pointsReversalApprovalsPaused`)
-    // decide how real-money points reversals run. They are written ONLY through the dedicated, validated, audited
-    // GIFSY_ADMIN endpoints (POST /v1/admin/credits/reversal-engine/mode — which refuses V2 while wallets are not
-    // backfilled or approvals are paused — and POST …/reversal-engine/pause). No allowPlatformOnlyKey bypass: those
-    // endpoints write the row themselves, never through this generic upsert.
+    // Money controls at the DATA boundary (Wallet Reversal Engine): the POINTS reversal maintenance pause
+    // (`pointsReversalApprovalsPaused`) is written ONLY through the dedicated, audited GIFSY_ADMIN endpoint
+    // (POST …/reversal-engine/pause) or the wallet backfill. The old per-tenant engine mode (`reversalEngine`) was
+    // RETIRED 2026-11-21 — every tenant runs the one engine and nothing reads the key — so it is refused here too, never
+    // written again (a value would look meaningful and is not). No allowPlatformOnlyKey bypass for either.
     if (dto.key === REVERSAL_ENGINE_SETTING_KEY) {
       throw new ForbiddenException(
-        'The points reversal engine mode can only be changed by a Gifsy Admin via the dedicated reversal-engine endpoint.',
+        'The points reversal engine mode was retired — every program uses the same reversal engine. Nothing was changed.',
       );
     }
     if (dto.key === POINTS_REVERSAL_PAUSE_SETTING_KEY) {

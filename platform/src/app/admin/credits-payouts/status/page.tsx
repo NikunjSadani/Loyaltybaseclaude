@@ -97,7 +97,7 @@ interface ReversalTarget {
   originalPaise: number;
 }
 
-/** WP5 — a payout entry a PAYOUT reversal may pick (reversal engine V2 only — SHADOW = LEGACY for payouts, owner 2026-11-16). */
+/** WP5 — a payout entry a PAYOUT reversal picks (every tenant — a payout reversal always covers whole entries). */
 interface PayoutReversalEntry {
   id:          string;
   /** Integer paise. */
@@ -121,10 +121,8 @@ const ENTRY_BLOCK_TEXT: Record<string, string> = {
 /** Only unpaid entries are pre-ticked; an already-paid entry becomes money owed back, so it is an explicit choice (#7). */
 const PRE_TICK_STATUSES = new Set(['PENDING', 'FAILED']);
 
-/** Loading state of the PAYOUT-row entry lookup (decides LEGACY amount form vs V2 entry picker). */
+/** Loading state of the PAYOUT-row entry lookup (the modal waits for it — loading → picker, or error + Retry). */
 type EntryLoad = 'idle' | 'loading' | 'ready' | 'error';
-
-const ATTENTION_URL = '/api/admin/credits/reversal-engine/attention';
 const REMARKS_MAX = 1000;
 
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
@@ -152,41 +150,20 @@ export default function PayoutStatusPage() {
 
   // Reversal state
   const [revTarget,  setRevTarget]  = useState<ReversalTarget | null>(null);
+  // Amount form — POINTS rows only (a PAYOUT reversal always picks whole payout entries).
   const [revAmount,  setRevAmount]  = useState('');
-  // Final item 8: an amount the user TYPED in the amount form (mode not known yet) — never dropped silently if the
-  // entries read then says V2 (refs: read inside the async loader, after the user may have typed).
-  const revAmountTypedRef = useRef<string | null>(null);
-  const [revSwitchNotice, setRevSwitchNotice] = useState<string | null>(null);
   const [revRemarks, setRevRemarks] = useState('');
   const [revMsg,     setRevMsg]     = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [revLoading, setRevLoading] = useState(false);
-  // WP5 entry picker: set only when the tenant's reversal engine is V2 (LEGACY and SHADOW keep the amount form).
+  // WP5 entry picker for PAYOUT rows (every tenant).
   const [revEntries,  setRevEntries]  = useState<PayoutReversalEntry[] | null>(null);
   const [revSelected, setRevSelected] = useState<string[]>([]);
-  // Load state of the payout-entries read. Re-audit B2: on a tenant KNOWN to be V2 the modal waits for it (loading →
-  // picker, or an error with Retry — never a silent fallback); on LEGACY / SHADOW (or before the mode is known) the
-  // amount form shows at once, exactly as in 7ba69566.
+  // Load state of the payout-entries read: the modal waits for it (loading → picker, or an error with Retry — never a
+  // silent fallback to an amount form).
   const [revEntryLoad, setRevEntryLoad] = useState<EntryLoad>('idle');
   const revRequestRef = useRef(0);
   const revDialogRef  = useRef<HTMLDivElement>(null);
   const revTriggerRef = useRef<HTMLElement | null>(null);
-
-  // Reversal engine mode for this tenant: the attention call-out banner is mounted only once the mode is known and
-  // is not LEGACY (a LEGACY tenant — Deoleo — sees the screen exactly as before; a failed read mounts nothing).
-  const [engineMode, setEngineMode] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const res  = await fetch(ATTENTION_URL);
-        const json = await res.json();
-        if (alive && json?.success && typeof json.data?.mode === 'string') setEngineMode(json.data.mode);
-      } catch {
-        // Unknown mode → no banner.
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
 
   // Period options for the filter dropdown. Derived from the UNFILTERED first page so
   // selecting a period does not collapse the dropdown to that single option. Grows as
@@ -287,24 +264,20 @@ export default function PayoutStatusPage() {
       originalPaise: row.amount,
     });
     // Pre-fill in human units: rupees for PAYOUT, points for POINTS
-    setRevAmount(row.awardType === 'PAYOUT' ? String(row.amount / 100) : String(row.amount));
+    // Pre-fill the amount form (POINTS rows only — PAYOUT rows pick entries).
+    setRevAmount(row.awardType === 'PAYOUT' ? '' : String(row.amount));
     setRevRemarks('');
     setRevMsg(null);
     setRevEntries(null);
     setRevSelected([]);
-    revAmountTypedRef.current = null;
-    setRevSwitchNotice(null);
     setRevEntryLoad(row.awardType === 'PAYOUT' ? 'loading' : 'idle');
     if (row.awardType === 'PAYOUT') void loadPayoutEntries(batch.id, row.outletId, row.fieldId);
     else revRequestRef.current++;
   }
 
   /**
-   * WP5: under the V2 reversal engine a payout reversal picks whole entries; LEGACY → the amount form as before.
-   * Audit B5 / re-audit B2: on a tenant known to be V2 (the attention read above) the modal shows "Loading payout
-   * entries…" and Submit waits; a failed read shows an error with Retry. On LEGACY / SHADOW — or while the tenant's mode
-   * is not known yet — the amount form shows at once exactly as in 7ba69566; an answered V2 still switches to the picker
-   * (and a V2 server refuses an amount-only request in plain words).
+   * WP5: a payout reversal picks whole entries (every tenant). The modal shows "Loading payout entries…" and Submit
+   * waits; a failed read (or an answer without an entries list) shows an error with Retry — never an amount form.
    * `keepSelection` (after a failed submit, #6): keep only the previously ticked entries that are still selectable.
    */
   async function loadPayoutEntries(batchId: string, outletId: string, fieldId: string, keepSelection?: string[]) {
@@ -317,31 +290,14 @@ export default function PayoutStatusPage() {
       if (reqId !== revRequestRef.current) return; // the modal moved on
       const data = json?.success ? json.data : null;
       if (!data) throw new Error('entries not loaded');
-      if (data.mode !== 'LEGACY' && Array.isArray(data.entries)) {
-        const entries = data.entries as PayoutReversalEntry[];
-        setRevEntries(entries);
-        const typed = !keepSelection && revAmountTypedRef.current !== null ? revAmountTypedRef.current : null;
-        if (typed !== null) {
-          // The user typed an amount in the amount form before the answer came: say it was cleared, pre-tick nothing.
-          const rupeesTyped = Number(typed);
-          setRevSwitchNotice(
-            `This programme now reverses by payout entry — your typed amount ` +
-              `${Number.isFinite(rupeesTyped) ? inr(Math.round(rupeesTyped * 100)) : typed} was cleared; pick entries`,
-          );
-          setRevAmount('');
-          setRevSelected([]);
-        } else {
-          setRevSelected(
-            keepSelection
-              ? keepSelection.filter((id) => entries.some((e) => e.id === id && e.selectable))
-              : entries.filter((e) => e.selectable && PRE_TICK_STATUSES.has(e.status)).map((e) => e.id),
-          );
-        }
-      } else if (data.mode === 'LEGACY' || data.mode === 'SHADOW') {
-        setRevEntries(null); // amount form (SHADOW = LEGACY for payouts)
-      } else {
-        throw new Error('entries not loaded');
-      }
+      if (!Array.isArray(data.entries)) throw new Error('entries not loaded');
+      const entries = data.entries as PayoutReversalEntry[];
+      setRevEntries(entries);
+      setRevSelected(
+        keepSelection
+          ? keepSelection.filter((id) => entries.some((e) => e.id === id && e.selectable))
+          : entries.filter((e) => e.selectable && PRE_TICK_STATUSES.has(e.status)).map((e) => e.id),
+      );
       setRevEntryLoad('ready');
     } catch {
       if (reqId !== revRequestRef.current) return;
@@ -455,20 +411,17 @@ export default function PayoutStatusPage() {
   async function submitReversal() {
     if (!revTarget) return;
     if (revEntries) return submitPayoutEntryReversal();
+    // A PAYOUT reversal always picks entries — never an amount-only request.
+    if (revTarget.awardType === 'PAYOUT') return;
     const inputAmt = Number(revAmount);
     if (!inputAmt || inputAmt <= 0) {
       setRevMsg({ type: 'err', text: 'Please enter a valid amount.' });
       return;
     }
-    // Convert user input back to paise (for PAYOUT rows); POINTS rows already whole numbers.
-    const requestedPaise = revTarget.awardType === 'PAYOUT'
-      ? Math.round(inputAmt * 100)
-      : inputAmt;
+    // POINTS rows: whole points (the DTO field is named requestedPaise for both award types).
+    const requestedPaise = inputAmt;
     if (requestedPaise > revTarget.originalPaise) {
-      const origDisplay = revTarget.awardType === 'PAYOUT'
-        ? inr(revTarget.originalPaise)
-        : `${revTarget.originalPaise.toLocaleString('en-IN')} pts`;
-      setRevMsg({ type: 'err', text: `Amount cannot exceed ${origDisplay}.` });
+      setRevMsg({ type: 'err', text: `Amount cannot exceed ${revTarget.originalPaise.toLocaleString('en-IN')} pts.` });
       return;
     }
     setRevLoading(true);
@@ -516,11 +469,10 @@ export default function PayoutStatusPage() {
         </div>
       </div>
 
-      {engineMode !== null && engineMode !== 'LEGACY' && (
-        <ReversalEngineAttentionBanner canLiftPause={session.role === 'GIFSY_ADMIN'} />
-      )}
-      {/* Audit item 9 + owner D2 (2026-11-19): every wallet below zero on ANY tenant (LEGACY included — e.g. imported
-          negatives) + the reversal(s) behind it when there are any. Renders nothing when no wallet is below zero. */}
+      {/* Every tenant: renders nothing when there is nothing to report. */}
+      <ReversalEngineAttentionBanner canLiftPause={session.role === 'GIFSY_ADMIN'} />
+      {/* Audit item 9 + owner D2 (2026-11-19): every wallet below zero on ANY tenant (e.g. imported negatives) + the
+          reversal(s) behind it when there are any. Renders nothing when no wallet is below zero. */}
       <WalletsInDebtSection />
 
       {/* Filter */}
@@ -773,11 +725,7 @@ export default function PayoutStatusPage() {
 
             {revMsg?.type !== 'ok' && (
               <>
-                {engineMode === 'V2' && revTarget.awardType === 'PAYOUT' && revEntryLoad === 'loading' && !revEntries ? (
-                  <p role="status" data-testid="payout-entries-loading" className="text-xs text-gray-500 animate-pulse">
-                    Loading payout entries…
-                  </p>
-                ) : engineMode === 'V2' && revTarget.awardType === 'PAYOUT' && revEntryLoad === 'error' && !revEntries ? (
+                {revTarget.awardType === 'PAYOUT' && revEntryLoad === 'error' && !revEntries ? (
                   <div role="alert" data-testid="payout-entries-error" className="flex items-center justify-between gap-3 rounded-xl bg-red-50 px-4 py-3 text-xs text-red-700">
                     <span>Couldn&apos;t load payout entries — retry</span>
                     <button
@@ -788,13 +736,12 @@ export default function PayoutStatusPage() {
                       Retry
                     </button>
                   </div>
+                ) : revTarget.awardType === 'PAYOUT' && !revEntries ? (
+                  <p role="status" data-testid="payout-entries-loading" className="text-xs text-gray-500 animate-pulse">
+                    Loading payout entries…
+                  </p>
                 ) : revEntries ? (
                 <fieldset className="space-y-2" data-testid="payout-entry-picker">
-                  {revSwitchNotice && (
-                    <p role="status" data-testid="payout-mode-switch-notice" className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                      {revSwitchNotice}
-                    </p>
-                  )}
                   <legend className="text-xs font-medium text-gray-700">Payout entries to reverse</legend>
                   {revEntries.length === 0 ? (
                     <p className="text-xs text-gray-500">No payout entries exist for this outlet and field in this batch.</p>
@@ -842,27 +789,18 @@ export default function PayoutStatusPage() {
                 </fieldset>
                 ) : (
                 <div className="space-y-2">
-                  <label className="text-xs font-medium text-gray-700">
-                    Reversal Amount {revTarget.awardType === 'PAYOUT' ? '(₹)' : '(pts)'}
-                  </label>
+                  <label className="text-xs font-medium text-gray-700">Reversal Amount (pts)</label>
                   <input
                     type="number"
                     value={revAmount}
-                    onChange={(e) => {
-                      revAmountTypedRef.current = e.target.value;
-                      setRevAmount(e.target.value);
-                    }}
-                    max={revTarget.awardType === 'PAYOUT' ? revTarget.originalPaise / 100 : revTarget.originalPaise}
+                    onChange={(e) => setRevAmount(e.target.value)}
+                    max={revTarget.originalPaise}
                     min={1}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
                   />
                   <p className="text-xs text-gray-500">
-                    {revTarget.awardType === 'PAYOUT'
-                      ? 'Payout reversals cover whole payout entries only: enter the full amount of one or more entries for this outlet and field. Unpaid entries are cancelled; a paid one becomes a receivable to recover off-platform.'
-                      : engineMode === 'V2'
-                        // Owner decision 2026-11-19 (V2 engine only): an over-reversal becomes wallet debt, never a write-off.
-                        ? 'Points are taken back from the wallet that received the credit. Points of that credit that already expired count as recovered — nothing is taken for them. Points it no longer holds (already redeemed) are recorded as debt on that wallet and repaid from its future earnings — nothing is written off. The outlet can’t redeem while the balance is below zero.'
-                        : 'Points are removed from the outlet’s wallet (never below 0; points already redeemed are reported as a shortfall). While a wallet carries a negative balance, reversals on it are paused — contact Gifsy.'}
+                    {/* Owner decision 2026-11-19: an over-reversal becomes wallet debt, never a write-off. */}
+                    Points are taken back from the wallet that received the credit. Points of that credit that already expired count as recovered — nothing is taken for them. Points it no longer holds (already redeemed) are recorded as debt on that wallet and repaid from its future earnings — nothing is written off. The outlet can’t redeem while the balance is below zero.
                   </p>
                 </div>
                 )}
@@ -883,9 +821,8 @@ export default function PayoutStatusPage() {
                     onClick={submitReversal}
                     disabled={
                       revLoading ||
-                      // Final item 8: on a known-V2 tenant Submit waits for the entries read; once it has answered
-                      // (picker, or LEGACY → the amount form) Submit is available.
-                      (engineMode === 'V2' && revTarget.awardType === 'PAYOUT' && revEntryLoad !== 'ready') ||
+                      // A PAYOUT reversal's Submit waits for the entries read (picker shown).
+                      (revTarget.awardType === 'PAYOUT' && (revEntryLoad !== 'ready' || !revEntries)) ||
                       (!!revEntries && revSelected.length === 0)
                     }
                     className="flex-1 py-2.5 bg-amber-600 text-white rounded-xl text-sm font-semibold hover:bg-amber-700 disabled:opacity-50"

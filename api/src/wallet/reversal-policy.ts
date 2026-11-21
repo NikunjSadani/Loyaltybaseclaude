@@ -10,7 +10,11 @@ import { ConflictException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { PointsReversalPause, TenantSettingsService } from '../tenant/tenant-settings.service';
 
-export type ReversalAttentionCode = 'WALLET_NEEDS_ATTENTION' | 'CREDIT_UNMAPPED' | 'APPROVALS_PAUSED';
+export type ReversalAttentionCode =
+  | 'WALLET_NEEDS_ATTENTION'
+  | 'WALLET_NOT_SEQUENCED'
+  | 'CREDIT_UNMAPPED'
+  | 'APPROVALS_PAUSED';
 
 /** A POINTS reversal refused because Gifsy must act first (409). `detail` goes to the audit row + the client. */
 export class ReversalAttentionException extends ConflictException {
@@ -39,6 +43,36 @@ export function walletNeedsAttentionMessage(outletCode: string, reason: string):
 /** Reason text for a wallet the backfill has never processed (status NULL, history present). */
 export const WALLET_NOT_YET_BACKFILLED_REASON = 'not yet prepared by the wallet backfill';
 
+/**
+ * The one-engine safety gate (2026-11-21): the receiving wallet has points history the wallet backfill has not
+ * sequenced. Names the program (tenant) and the outlet and says exactly what Gifsy must do. Nothing was changed.
+ */
+export function walletNotSequencedMessage(outletCode: string, program: string): string {
+  return (
+    `Can't reverse: the wallet of outlet ${outletCode} (program ${program}) has points history that has not been ` +
+    `prepared for reversals yet. Gifsy must run the wallet backfill for ${program} first, then retry. Nothing was ` +
+    `changed — earning and redeeming on this wallet keep working meanwhile.`
+  );
+}
+
+/** Readiness line (attention banner + daily ops digest) — plain words, both counts when present. */
+export function walletsNotSequencedReadinessMessage(unsequenced: number, blocked: number): string {
+  const parts: string[] = [];
+  if (unsequenced > 0) {
+    parts.push(
+      `${unsequenced} ${unsequenced === 1 ? 'wallet with points history is' : 'wallets with points history are'} not yet ` +
+        `prepared for reversals — Gifsy must run the wallet backfill for this program`,
+    );
+  }
+  if (blocked > 0) {
+    parts.push(
+      `${blocked} ${blocked === 1 ? 'wallet was' : 'wallets were'} blocked by the wallet backfill — Gifsy must fix ` +
+        `${blocked === 1 ? 'its' : 'their'} history and re-run it`,
+    );
+  }
+  return `${parts.join('; ')}. Points reversals on these wallets are refused until then.`;
+}
+
 /** Q5 (owner wording, verbatim + the start time). */
 export function approvalsPausedMessage(p: PointsReversalPause): string {
   if (p.malformed) {
@@ -58,20 +92,8 @@ export function pointsReversalLockKey(clientId: string): string {
 }
 
 /**
- * Fix round A, L4: take the SHARED engine lock (same key) at the START of a transaction that must run wholly on one
- * engine mode — a POINTS batch confirm — and read the mode after it. The dedicated mode endpoint
- * (WalletService.setReversalEngineMode) takes the EXCLUSIVE lock, so a flip waits for in-flight holders and later
- * holders see the new mode. Must be the transaction's first lock (before any wallet row lock): exclusive holders never
- * wait on row locks, so this can't deadlock.
- */
-export async function lockReversalEngineShared(tx: Prisma.TransactionClient, clientId: string): Promise<void> {
-  const key = pointsReversalLockKey(clientId);
-  await tx.$queryRaw`SELECT 1 AS ok FROM (SELECT pg_advisory_xact_lock_shared(hashtextextended(${key}, 0))) AS l`;
-}
-
-/**
- * The Q5 gate, run FIRST inside every POINTS reversal create / approve transaction (all engine modes — the backfill
- * runs while a tenant is still LEGACY). Takes the shared advisory lock, then reads the switch through the SAME `tx`.
+ * The Q5 gate, run FIRST inside every POINTS reversal create / approve transaction (every tenant — the backfill pauses
+ * approvals for its APPLY window). Takes the shared advisory lock, then reads the switch through the SAME `tx`.
  */
 export async function assertPointsReversalsNotPaused(
   tx: Prisma.TransactionClient,
