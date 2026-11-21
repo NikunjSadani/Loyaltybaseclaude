@@ -26,6 +26,7 @@ import { visibilityApi } from '@/lib/visibility';
 import { classifyVisibilityCapture, VISIBILITY_SUMMARY_BUCKET_LABELS, type VisibilitySummaryBucket } from '@/lib/visibility-types';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useOutletTypeLabels } from '@/lib/platform/use-outlet-type-labels';
+import { getOutletTargets, getSalesOutlets } from '@/lib/cached-reads';
 
 /* ─── Outlet roster ─────────────────────────────────────────────────────────── */
 
@@ -224,10 +225,9 @@ export default function SalesOutletsPage() {
   // Roster (real /api/sales/outlets)
   useEffect(() => {
     setRoleState(getRole());
-    fetch('/api/sales/outlets')
-      .then((r) => r.json())
+    getSalesOutlets<{ outlets?: Outlet[]; members?: any[] }>() // shared 2-min roster read (lib/cached-reads.ts)
       .then((body) => {
-        if (body.success) {
+        if (body?.success && body.data) {
           setOutlets(body.data.outlets ?? []);
           // Manager-only Team Member filter options (empty for a leaf rep → filter hidden).
           setTeamMembers((body.data.members ?? []).map((m: {
@@ -252,10 +252,10 @@ export default function SalesOutletsPage() {
   // Real per-outlet KPI target vs achievement for the selected month.
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/sales/outlet-targets?period=${encodeURIComponent(period)}`)
-      .then((r) => r.json())
+    // Shared with the outlet detail (lib/cached-reads.ts) — opening an outlet from this list reuses it.
+    getOutletTargets<{ kpiColumns?: KpiCol[]; rows?: { outletCode: string; kpis: OutletKpis }[] }>(period)
       .then((body) => {
-        if (body.success) {
+        if (body?.success && body.data) {
           setKpiColumns(body.data.kpiColumns ?? []);
           const map: Record<string, OutletKpis> = {};
           for (const row of (body.data.rows ?? []) as { outletCode: string; kpis: OutletKpis }[]) {

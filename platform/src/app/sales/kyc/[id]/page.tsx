@@ -3,6 +3,7 @@
 import { use, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import Link from '@/components/navigation/no-prefetch-link';
 import { OutletDetailSkeleton } from '@/components/sales/outlet-detail-skeleton';
+import { getOutletTargets } from '@/lib/cached-reads';
 import { useRouter } from 'next/navigation';
 import {
   ArrowLeft, Building2, Phone, MapPin, User, Users,
@@ -1074,8 +1075,8 @@ function TargetAchievementCard({ outletCode }: { outletCode: string }) {
   useEffect(() => {
     if (!outletCode) { setCols(null); return; }
     let cancelled = false;
-    fetch(`/api/sales/outlet-targets?period=${encodeURIComponent(istMonthKey(new Date()))}`)
-      .then((r) => r.json())
+    // Shared + de-duplicated (lib/cached-reads.ts): the sibling card asks for the same month.
+    getOutletTargets<OutletTargetsResponse>(istMonthKey(new Date()))
       .then((body) => {
         if (cancelled) return;
         if (!body?.success) { setCols(null); return; }
@@ -1194,8 +1195,8 @@ function OutletTrendCard({ outletCode }: { outletCode: string }) {
   useEffect(() => {
     if (!outletCode) { setKpiCols(null); return; }
     let cancelled = false;
-    fetch(`/api/sales/outlet-targets?period=${encodeURIComponent(istMonthKey(new Date()))}`)
-      .then((r) => r.json())
+    // Shared + de-duplicated (lib/cached-reads.ts): the sibling card asks for the same month.
+    getOutletTargets<OutletTargetsResponse>(istMonthKey(new Date()))
       .then((body) => {
         if (cancelled) return;
         if (!body?.success) { setKpiCols(null); return; }

@@ -16,6 +16,7 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { api } from '@/lib/api-client';
 import { useHydrated } from '@/lib/use-hydrated';
+import { getCached, invalidateCached } from '@/lib/session-cache';
 import type { GifsySettings } from '@/types';
 
 const SETTINGS_KEY = 'gifsy_settings_v1';
@@ -167,9 +168,17 @@ export function hydrateGifsySettings(srv: ServerSettings | null | undefined): vo
   writeCache(fromServer(srv, store));
 }
 
-/** Refresh from GET /v1/settings. Safe to call repeatedly. */
-export async function refreshGifsySettings(): Promise<void> {
-  const res = await api.get<ServerSettings>('/api/settings');
+export const SETTINGS_URL = '/api/settings';
+
+/**
+ * Refresh from GET /v1/settings. Safe to call repeatedly: served from the session read cache (lib/session-cache.ts —
+ * 5 min, one shared in-flight request, cleared by any API write incl. a settings save), so screens that mount
+ * useGifsySettings (outlet detail, ledger, Visibility) no longer re-ask on every open. `force` (the admin Settings
+ * editor, which must edit the latest saved values) always asks the server.
+ */
+export async function refreshGifsySettings(opts: { force?: boolean } = {}): Promise<void> {
+  if (opts.force) invalidateCached(SETTINGS_URL);
+  const res = await getCached(SETTINGS_URL, () => api.get<ServerSettings>(SETTINGS_URL), { shouldCache: (r) => r.success });
   // Guard `res.data`: a success response with an empty/absent body must NOT crash the
   // fire-and-forget refresh (fromServer dereferences srv) — it no-ops and keeps the cache.
   if (res.success && res.data) {

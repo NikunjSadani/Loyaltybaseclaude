@@ -22,16 +22,22 @@ import type { AppRouterInstance, PrefetchOptions } from 'next/dist/shared/lib/ap
 const prefetched = new Set<string>();
 /** Re-prefetches after a Next cache invalidation, per href per session (bounded). */
 export const MAX_REPREFETCH_PER_HREF = 10;
+/** An invalidation this soon after the last prefetch of an href does NOT re-prefetch it — the load-time
+ *  invalidations Next does on its own (e.g. a route-tree re-check) must not turn one prefetch into two. */
+export const REPREFETCH_COOLDOWN_MS = 60_000;
 const reprefetches = new Map<string, number>();
+const lastPrefetchAt = new Map<string, number>();
 
 /** router.prefetch with the docs' onInvalidate re-prefetch, bounded by MAX_REPREFETCH_PER_HREF. Exported for tests. */
 export function prefetchWithRefresh(router: Pick<AppRouterInstance, 'prefetch'>, href: string): void {
   const onInvalidate = () => {
     const n = reprefetches.get(href) ?? 0;
     if (n >= MAX_REPREFETCH_PER_HREF) return;
+    if (Date.now() - (lastPrefetchAt.get(href) ?? 0) < REPREFETCH_COOLDOWN_MS) return;
     reprefetches.set(href, n + 1);
     prefetchWithRefresh(router, href);
   };
+  lastPrefetchAt.set(href, Date.now());
   try {
     // `kind` is typed as required but optional at runtime (defaults to AUTO — app-router-instance.js); the docs'
     // own example passes only { onInvalidate }.
@@ -74,4 +80,5 @@ export function usePrefetchOnce(hrefs: readonly string[]): void {
 export function __resetPrefetchOnceForTests(): void {
   prefetched.clear();
   reprefetches.clear();
+  lastPrefetchAt.clear();
 }

@@ -29,6 +29,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import { fetchTargetTrend, type TargetTrendResult, type TargetTrendPoint } from '@/lib/sales-trend';
 import { istMonthKey } from '@/lib/ist-date';
+import { getOutletTargets } from '@/lib/cached-reads';
 import { formatInrCompact, formatCompact, isInrUnit } from '@/lib/format-inr';
 
 /* Minimal shapes of the outlet-targets response (same fields the detail page reads) — used ONLY
@@ -109,8 +110,8 @@ export function OutletTrendComparisonCard({ outletCode }: { outletCode: string }
   useEffect(() => {
     if (!outletCode) { setKpiCols(null); return; }
     let cancelled = false;
-    fetch(`/api/sales/outlet-targets?period=${encodeURIComponent(istMonthKey(new Date()))}`)
-      .then((r) => r.json())
+    // Shared + de-duplicated with the detail page's Target Achievement card (lib/cached-reads.ts).
+    getOutletTargets<OutletTargetsResponse>(istMonthKey(new Date()))
       .then((body) => {
         if (cancelled) return;
         if (!body?.success) { setKpiCols(null); return; }

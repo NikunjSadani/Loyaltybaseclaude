@@ -108,8 +108,12 @@ describe('4 — nav prefetch: onInvalidate re-prefetch, bounded', () => {
   it('re-prefetches the same href on each invalidation, at most MAX_REPREFETCH_PER_HREF times', () => {
     const calls: Array<{ href: string; onInvalidate?: () => void }> = [];
     const router = { prefetch: (href: string, opts?: { onInvalidate?: () => void }) => { calls.push({ href, onInvalidate: opts?.onInvalidate }); } };
+    const now = vi.spyOn(Date, 'now');
+    let t = 50_000_000;
+    now.mockImplementation(() => t);
     prefetchWithRefresh(router, '/sales/outlets');
-    for (let i = 0; i < MAX_REPREFETCH_PER_HREF + 5; i++) calls.at(-1)?.onInvalidate?.();
+    for (let i = 0; i < MAX_REPREFETCH_PER_HREF + 5; i++) { t += 61_000; calls.at(-1)?.onInvalidate?.(); }
+    now.mockRestore();
     expect(calls.every((c) => c.href === '/sales/outlets')).toBe(true);
     expect(calls).toHaveLength(1 + MAX_REPREFETCH_PER_HREF);
   });

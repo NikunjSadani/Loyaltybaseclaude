@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
+import { getSalesOutlets } from '@/lib/cached-reads';
 import Link from '@/components/navigation/no-prefetch-link';
 import {
   FileCheck, XCircle, ChevronRight, Clock, Bell, Tag,
@@ -308,13 +309,13 @@ export default function TasksPage() {
       schemeApi.listSalesEligible()
         .then((r) => { const list = r.success ? (r.data.schemes ?? []) : []; setSchemes(list); return list; })
         .catch(() => { setSchemes([]); return []; }),
-      fetch('/api/sales/outlets', { headers }).then((r) => r.json()),
+      getSalesOutlets(), // shared 2-min roster read (lib/cached-reads.ts)
       fetchTaskConfig(),
       // Approval/Rejected counts derive from SUBMISSIONS (shared buildKycSubRows)
       // so they match the dashboard + KYC list — incl. no-outlet submissions.
       fetch('/api/kyc', { headers }).then((r) => r.json()).catch(() => null),
     ]).then(([, oBody, config, kycResult]) => {
-      const apiOutlets: OutletRow[] = (oBody.data?.outlets ?? []).map(mapOutlet);
+      const apiOutlets: OutletRow[] = (oBody?.data?.outlets ?? []).map(mapOutlet);
       setOutlets(apiOutlets);
       setTaskConfig(config);
       setKycSubs(buildKycSubRows(kycResult));
