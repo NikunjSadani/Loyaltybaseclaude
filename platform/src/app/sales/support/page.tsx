@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { getSalesOutlets } from '@/lib/cached-reads';
 import {
   Plus, X, ChevronRight, MessageSquare,
   CheckCircle, Search, Building2, Loader2, User,
@@ -230,10 +231,11 @@ export default function SalesSupportPage() {
 
     Promise.all([
       fetch('/api/tickets').then((r) => r.json()),
-      fetch('/api/sales/outlets').then((r) => r.json()),
+      // The ticket outlet picker — shared 2-min roster read (lib/cached-reads.ts), not a fresh full list per visit.
+      getSalesOutlets(),
     ]).then(([tBody, oBody]) => {
       if (tBody.success) setTickets((tBody.data.tickets ?? []).map(mapDbTicket));
-      if (oBody.success) setOutlets((oBody.data.outlets ?? []).map((o: any) => ({ id: o.id, name: o.name, mobile: o.mobile ?? '' })));
+      if (oBody?.success && oBody.data) setOutlets((oBody.data.outlets ?? []).map((o: any) => ({ id: o.id, name: o.name, mobile: o.mobile ?? '' })));
     }).catch(() => {}).finally(() => setLoading(false));
 
     return () => window.removeEventListener('storage', onStorage);

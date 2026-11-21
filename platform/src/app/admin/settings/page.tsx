@@ -623,7 +623,8 @@ export default function SettingsPage() {
 
   useEffect(() => {
     let alive = true
-    refreshGifsySettings()
+    // The editor must start from the LATEST saved values — bypass the 5-min read cache.
+    refreshGifsySettings({ force: true })
       .catch(() => { /* keep the cached values */ })
       .finally(() => { if (alive) setSalesAppReady(true) })
     return () => { alive = false }

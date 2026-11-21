@@ -14,7 +14,7 @@ import { api, authHeader } from '@/lib/api-client';
 import { logout } from '@/lib/auth-client';
 import PwaAppSettings from '@/components/pwa/PwaAppSettings';
 import { useSalesFeatures } from '@/lib/sales-features-context';
-import { getAuthMe } from '@/lib/cached-reads';
+import { getAuthMe, getSalesOutlets } from '@/lib/cached-reads';
 
 interface SalesProfile {
   name: string;
@@ -116,11 +116,12 @@ export default function SalesProfilePage() {
       // Session-cached (lib/cached-reads.ts) — the profile is read-only here; any write clears the cache.
       getAuthMe<{ user: Parameters<typeof mapUserToProfile>[0] }>(),
       // Real outlet counts for the stat tiles (replaces the hardcoded 0s).
-      fetch('/api/sales/outlets', { headers: { ...authHeader() } }).then(r => r.json()).catch(() => null),
+      // Shared 2-min roster read (lib/cached-reads.ts) — only the counts are used here.
+      getSalesOutlets<{ outlets: { kycStatus?: string }[] }>(),
     ])
       .then(([meJson, outletJson]: [
         { success?: boolean; data?: { user: Parameters<typeof mapUserToProfile>[0] }; error?: string } | null,
-        { success: boolean; data?: { outlets: { kycStatus?: string }[] } } | null,
+        { success?: boolean; data?: { outlets: { kycStatus?: string }[] } } | null,
       ]) => {
         if (meJson?.success && meJson.data) {
           const p = mapUserToProfile(meJson.data.user, slug);

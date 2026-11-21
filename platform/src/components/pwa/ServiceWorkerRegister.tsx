@@ -74,10 +74,13 @@ export default function ServiceWorkerRegister({ tenantSlug }: { tenantSlug?: str
         // Registration failures must never break the app — swallow silently.
       });
 
-    // When the activated SW takes control, reload once so the new shell is live.
+    // When an UPDATED SW takes control, reload once so the new shell is live. NOT on the very first install: the SW's
+    // clientsClaim makes it take control of the page (controller null → SW) with nothing stale to replace, and that
+    // reload loaded the dashboard — and every one of its requests — twice on a rep's first login (staging, 2026-11-21).
+    const hadController = !!navigator.serviceWorker.controller;
     let reloaded = false;
     const onControllerChange = () => {
-      if (reloaded) return;
+      if (reloaded || !hadController) return;
       reloaded = true;
       window.location.reload();
     };

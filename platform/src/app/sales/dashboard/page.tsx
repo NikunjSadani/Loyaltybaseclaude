@@ -21,6 +21,7 @@ import { getGifsySettings } from '@/lib/gifsy-settings';
 import { fetchTaskConfigResult, type TaskConfig, type CustomTaskItem } from '@/lib/task-config';
 import { fetchBannersResult, getActiveSalesBanners, getBgStyle, type Banner } from '@/lib/banner';
 import { swr, peekCached, invalidateCached, DASHBOARD_REUSE_MS, DASH_PREFIX } from '@/lib/session-cache';
+import { getSalesOutlets } from '@/lib/cached-reads';
 import { schemeApi } from '@/lib/schemes';
 import type { EligibleScheme } from '@/lib/scheme-types';
 import { fetchOutletVisibilityStatuses, VISIBILITY_ELIGIBLE_OUTLET_TYPES, VISIBILITY_STATUS_LOAD_ERROR } from '@/lib/visibility-upload';
@@ -275,6 +276,9 @@ function VisibilitySummaryCard({ counts }: { counts: VisibilitySummaryCounts }) 
   );
 }
 
+/** Sales banners stay OFF until the owner decides (needs a sales-readable banners endpoint) — no request is made. */
+const SALES_BANNERS_ENABLED = false;
+
 /** Plain names for the dashboard parts in the "couldn't load" notice. */
 const CORE_PART_LABEL: Record<string, string> = {
   taskConfig: 'task settings',
@@ -357,18 +361,20 @@ export default function SalesDashboard() {
     // effect below, keyed on [outletTypeLabels.loading, showToggle, outletType] — so the toggle's
     // outlet-type scope can never be clobbered by a late-resolving unscoped mount request (audit
     // Finding 1). Deoleo/non-toggle tenants still issue exactly ONE no-param request there.
-    // ⚠️ Banners: /api/partner/banners is @Roles(SSS, WHOLESALER, SUB_STOCKIST) on the API, so this read is a 403 for
-    // every sales user and sales banners have never rendered (fetchBannersResult → empty). Making them show needs a
-    // sales-readable endpoint — an OWNER decision (banners already ticked "showInSalesApp" would start appearing).
-    // Until then the call stays as-is but rides the 2-min dashboard reuse below, so it repeats far less often.
+    // ⚠️ Banners: NOT requested (SALES_BANNERS_ENABLED = false). /api/partner/banners is @Roles(SSS, WHOLESALER,
+    // SUB_STOCKIST) on the API — a 403 + console error for every sales user on every load — and sales banners have
+    // never rendered. Enabling them needs a sales-readable endpoint and is an OWNER decision (banners already ticked
+    // "showInSalesApp" would start appearing). The render path below is kept for that day; until then: no call.
     //
     // Each part is cached ONLY when it succeeded (audit fix 3). A failed part keeps its previous good value (cached
     // or already on screen); with nothing to keep it is flagged in `coreErrors` → the Tasks card says which figures
     // could not load and offers Retry — never a silent 0.
     const parts = {
       taskConfig: () => fetchTaskConfigResult(),
-      banners:    () => fetchBannersResult(),
-      outlets:    () => fetch('/api/sales/outlets').then((r) => r.json()).catch(() => null),
+      banners:    () => (SALES_BANNERS_ENABLED
+        ? fetchBannersResult()
+        : Promise.resolve({ banners: [] as Banner[], popups: [], ok: true })),
+      outlets:    () => getSalesOutlets(),
       kyc:        () => fetch('/api/kyc').then((r) => r.json()).catch(() => null),
     } as const;
     type PartName = keyof typeof parts;
