@@ -1789,6 +1789,39 @@ export class WalletService {
   }
 
   /**
+   * HELD OPENING BALANCES — "Apply now" onto a wallet that ALREADY has activity (held-opening-balances.service):
+   * ONE opening-balance movement of the vendor closing, through the single write-path (applyMovement), so the
+   * one engine decides the path (sequenced / pristine → V2; un-sequenced history → the pre-engine path with the loud
+   * warning) and handles FIFO and counters. Credit → CREDIT_ADJUSTMENT / ADJUST lot,
+   * NON-EXPIRING (like the bulk-imported vendor lots). Debit (negative closing) → DEBIT_ADJUSTMENT, guarded: refused
+   * when the wallet doesn't hold enough (never floored — the caller marks the row FAILED with that reason).
+   * Caller's transaction; tenant scope is the caller's responsibility (internal primitive).
+   */
+  async postHeldOpeningAdjustment(
+    tx: Prisma.TransactionClient,
+    partnerId: string,
+    points: number,
+    opts: { description: string; sourceId: string; metadata: Prisma.InputJsonValue },
+  ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string }> {
+    if (!Number.isInteger(points) || points === 0) throw new BadRequestException('Opening balance must be a non-zero whole number');
+    const wallet = await this.requireWallet(tx, partnerId);
+    const isCredit = points > 0;
+    return this.applyMovement(tx, {
+      wallet,
+      walletTxType: isCredit ? 'CREDIT_ADJUSTMENT' : 'DEBIT_ADJUSTMENT',
+      ledgerType: PointsLedgerType.ADJUST,
+      points,
+      expiresAt: null,
+      description: opts.description,
+      sourceType: 'VENDOR_IMPORT',
+      sourceId: opts.sourceId,
+      metadata: opts.metadata,
+      requireSufficientRedeemable: !isCredit,
+      insufficientMessage: `The wallet holds fewer points than the negative opening balance (${points} pts) — not applied`,
+    });
+  }
+
+  /**
    * Owner decision 2026-11-19 (expired points are not recovered twice) — attach to each position E_X (points of its own
    * lot that EXPIRED from the balance: the lot's DEBIT_EXPIRY row, balanceBefore − balanceAfter — exact on both write
    * paths, and 0 for a debt-only expiry, whose excess already sits in O_X) and ε_X (Σ alreadyExpired of the position's

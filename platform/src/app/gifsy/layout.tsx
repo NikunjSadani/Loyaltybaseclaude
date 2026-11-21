@@ -6,7 +6,7 @@ import { usePathname } from 'next/navigation';
 import {
   LayoutGrid, Users, Settings, Building2,
   LogOut, Globe, ShoppingBag,
-  ShieldCheck, UserCog, Landmark, Bell, FolderDown, Ticket,
+  ShieldCheck, UserCog, Landmark, Bell, FolderDown, Ticket, Hourglass,
 } from 'lucide-react';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
@@ -22,6 +22,8 @@ const NAV = [
   { href: '/gifsy/roles',         label: 'Roles',          icon: ShieldCheck },
   { href: '/gifsy/staff',         label: 'Staff',          icon: UserCog     },
   { href: '/gifsy/tds-statutory', label: 'TDS Statutory',  icon: Landmark    },
+  // Held opening balances — vendor-migration closing balances parked until the outlet's wallet exists.
+  { href: '/gifsy/held-opening-balances', label: 'Held Balances', icon: Hourglass },
   { href: '/gifsy/notification-templates', label: 'Notifications', icon: Bell },
   // Voucher Dispersal — platform-level Gifsy-owner tool (buy Hubble vouchers + WhatsApp them for an
   // uploaded list). Not tenant-scoped; owner-only like the rest of this nav (GIFSY_STAFF gets no nav),

@@ -3,6 +3,7 @@ import { Readable } from 'node:stream';
 // Covers tenant scoping, the multi-level approval transitions, and role gates.
 // Run: npx jest src/kyc/kyc.service.spec.ts
 
+import * as heldApply from '../wallet/held-opening-balances/held-balance-apply';
 import { Test, TestingModule } from '@nestjs/testing';
 import {
   NOT_INTERESTED_BLOCKING_KYC_STATUSES,
@@ -55,14 +56,17 @@ const mockTx = {
   kycStatusHistory: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   user: { findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
-  channelPartner: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn(), delete: jest.fn() },
+  channelPartner: { findUnique: jest.fn(), findUniqueOrThrow: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), create: jest.fn(), delete: jest.fn() },
   userSession: { updateMany: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
+  // HELD OPENING BALANCES hook at approval (held-balance-apply): reads the partner's outlets + PENDING held rows
+  // (defaults: none → dormant) and, when the submission's partner snapshot lacks clientId, the partner's tenant.
+  heldOpeningBalance: { findMany: jest.fn() },
   // outlet.findFirst is used inside the tx by the partner-group helper's resolveGroupPan
   // (PAN golden-key resolution for a GROUPED outlet whose parent carries no PAN).
   // findUnique added for the W4 group-leave login-provisioning (reads the outlet's outletType.code
   // to derive the departing shop's owner role).
-  outlet: { update: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn() },
+  outlet: { update: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn() },
   // $executeRaw is the advisory-lock primitive acquireIdentityLocks issues inside create()'s
   // tx (partner-child owner groups) BEFORE the uniqueness check. A no-op mock here.
   $executeRaw: jest.fn(),
@@ -307,6 +311,10 @@ describe('KycService', () => {
     // Tests that assert a collision override these with mockResolvedValueOnce.
     mockTx.channelPartner.findFirst.mockResolvedValue(null);
     mockTx.channelPartner.findMany.mockResolvedValue([]);
+    // Held opening balances hook (approval): no held rows by default → dormant.
+    mockTx.outlet.findMany.mockResolvedValue([]);
+    mockTx.heldOpeningBalance.findMany.mockResolvedValue([]);
+    mockTx.channelPartner.findUniqueOrThrow.mockResolvedValue({ clientId: 'deoleo' });
     // ledger() now unions the outlet's payouts via buildPayoutStatement — default to no
     // payouts so ledger tests that don't exercise them still resolve (reset above wipes
     // definition-level defaults). Payout-specific tests override with mockResolvedValueOnce.
@@ -5656,6 +5664,30 @@ describe('KycService', () => {
       expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledWith(
         expect.objectContaining({ eventKey: 'KYC_APPROVED' }),
       );
+    });
+
+    it('HELD OPENING BALANCES: applied AFTER the approval commits (own transaction), never inside it; a failure never fails the approval', async () => {
+      seedApproveHappyPath();
+      const order: string[] = [];
+      mockTx.channelPartner.findUniqueOrThrow.mockResolvedValue({ clientId: 'bajaj' });
+      const realTx = mockPrisma.$transaction.getMockImplementation()!;
+      mockPrisma.$transaction.mockImplementationOnce(async (cb: any) => {
+        const r = await realTx(cb);
+        order.push('approval-committed');
+        return r;
+      });
+      const spy = jest.spyOn(heldApply, 'runHeldForPartner').mockImplementation(async (db) => {
+        order.push('held');
+        expect(db).toBe(mockPrisma); // its own transactions on the base client — never the approval's tx
+        throw new Error('held exploded');
+      });
+      try {
+        await expect(service.approve(gifsy, 's1')).resolves.toEqual({ message: 'KYC approved successfully' });
+        expect(spy).toHaveBeenCalledWith(mockPrisma, expect.objectContaining({ partnerId: 'p1', clientId: 'bajaj', trigger: 'KYC_APPROVAL', actorId: gifsy.sub }));
+        expect(order).toEqual(['approval-committed', 'held']);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('login-phone change on approval: syncs User.phone, STAMPS sessionsInvalidBefore (before) AND revokes the partner sessions', async () => {

@@ -1,4 +1,5 @@
 import type { Readable } from 'node:stream';
+import { runHeldForPartner } from '../wallet/held-opening-balances/held-balance-apply';
 import { negativeBalanceSignals } from '../wallet/negative-balance.helper';
 import {
   BadRequestException,
@@ -290,7 +291,13 @@ interface CommitNotifyIntent {
   phone?: string;
 }
 
-type CommitOutcome = BulkVerifySubmissionResult & { notification?: CommitNotifyIntent };
+/** The approved partner whose held opening balance (if any) is applied AFTER the approval commits. */
+interface HeldPartnerRef {
+  partnerId: string;
+  clientId: string;
+}
+
+type CommitOutcome = BulkVerifySubmissionResult & { notification?: CommitNotifyIntent; heldPartner?: HeldPartnerRef };
 
 /**
  * KYC & Enrollment — ported from platform/src/app/api/kyc/* onto /v1.
@@ -1655,6 +1662,20 @@ export class KycService {
         event: opts.event,
       })
       .catch((e) => this.logger.warn(`[kyc-notify] ${opts.event} fan-out failed: ${e}`));
+  }
+
+  /**
+   * HELD OPENING BALANCES — post-commit step after a KYC approval: apply the approved partner's held vendor balance
+   * in its OWN transaction (held-balance-apply.runHeldForPartner). Best effort by contract: it never throws into the
+   * approval response (a problem marks the row FAILED / leaves it for the retry sweep, loudly).
+   */
+  private async applyHeldAfterCommit(held: HeldPartnerRef | undefined, actorId: string): Promise<void> {
+    if (!held) return;
+    try {
+      await runHeldForPartner(this.prisma, { ...held, trigger: 'KYC_APPROVAL', actorId });
+    } catch (e) {
+      this.logger.warn(`[held-opening-balances] post-approval apply for partner ${held.partnerId} deferred to the sweep: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   /** Map a post-commit CommitNotifyIntent (its whatsapp* variables carry the owner context) to
@@ -4061,7 +4082,7 @@ export class KycService {
 
     const now = new Date();
 
-    const notifyIntent = await this.prisma.$transaction(async (tx) => {
+    const committed = await this.prisma.$transaction(async (tx) => {
       // ── (a) Re-assert PENDING_GIFSY + tenant inside the tx ────────────────
       const sub = await tx.kycSubmission.findFirst({
         where: { id, status: 'PENDING_GIFSY', ...this.kycTenantFilter(user) },
@@ -4158,13 +4179,14 @@ export class KycService {
 
       // ── (e) Apply side-effects via shared helper ──────────────────────────
       const applied = await this.applyBridgeOutcome(tx, sub, bridgeResult, 'PORTAL', user.sub, now);
-      return applied.notification ?? null;
+      return applied;
     });
 
     // B1: enqueue AFTER the tx commits (never inside the tx).
-    if (notifyIntent) {
-      await this.notify(this.intentToNotifyOpts(notifyIntent));
+    if (committed.notification) {
+      await this.notify(this.intentToNotifyOpts(committed.notification));
     }
+    await this.applyHeldAfterCommit(committed.heldPartner, user.sub);
 
     return { message: 'KYC approved successfully' };
   }
@@ -4256,7 +4278,7 @@ export class KycService {
       const bridgeResult = evaluateSubmission(allItems, submission);
 
       // ── (d) Apply bridge outcome (only fires if all 7 are terminal) ───────
-      let applied: { outcome: 'approved' | 'reupload' | 'recorded' | 'skipped'; notification?: CommitNotifyIntent } = { outcome: 'recorded' };
+      let applied: { outcome: 'approved' | 'reupload' | 'recorded' | 'skipped'; notification?: CommitNotifyIntent; heldPartner?: HeldPartnerRef } = { outcome: 'recorded' };
       // FIX 4 (no data-loss): when the grid is complete (bridge → APPROVED) but classification is
       // unset AND the owner group has no lock to inherit, we must NOT throw — that would roll back the
       // field decision just committed above in this shared tx. Instead pre-resolve the group lock
@@ -4293,6 +4315,7 @@ export class KycService {
       const n = result.applied.notification;
       await this.notify(this.intentToNotifyOpts(n));
     }
+    await this.applyHeldAfterCommit(result.applied.heldPartner, user.sub);
 
     return {
       submissionId: result.submissionId,
@@ -5401,6 +5424,7 @@ export class KycService {
           const n = outcome.notification;
           await this.notify(this.intentToNotifyOpts(n));
         }
+        await this.applyHeldAfterCommit(outcome.heldPartner, user.sub);
         if (outcome.outcome === 'approved') approved++;
         else if (outcome.outcome === 'reupload') reupload++;
         else if (outcome.outcome === 'recorded') recorded++;
@@ -5611,11 +5635,12 @@ export class KycService {
     source: KycFieldSource,
     actorId: string,
     now: Date,
-  ): Promise<{ outcome: 'approved' | 'reupload' | 'recorded' | 'skipped'; notification?: CommitNotifyIntent }> {
+  ): Promise<{ outcome: 'approved' | 'reupload' | 'recorded' | 'skipped'; notification?: CommitNotifyIntent; heldPartner?: HeldPartnerRef }> {
     const submissionId = submission.id;
     const sourceLabel = source === 'EXCEL' ? 'EXCEL_BULK' : 'PORTAL';
 
     if (bridgeResult.next === 'APPROVED') {
+      let heldPartner: HeldPartnerRef | undefined;
       // AUTO-INHERIT + one-per-org overwrite of classification from the owner-group lock (fills a null
       // classification / overwrites a divergent one), then the COMPULSORY GATE. This is the SINGLE
       // terminal-approve choke point — approve() and the bulk path reach APPROVED only through here and
@@ -6044,6 +6069,15 @@ export class KycService {
           const accountId = await ensureOutletAccount(tx, submission.partnerId);
           await tx.wallet.create({ data: { partnerId: submission.partnerId, accountId } });
         }
+        // HELD OPENING BALANCES (client migration): NOT applied in this transaction (fix round 2026-11-21) — the
+        // caller runs it right AFTER this approval commits, in its own transaction (applyHeldAfterCommit), so a
+        // held-balance error or slowness can never fail or slow the approval. The periodic sweep is the backstop.
+        heldPartner = {
+          partnerId: submission.partnerId,
+          clientId:
+            submission.partner?.clientId ??
+            (await tx.channelPartner.findUniqueOrThrow({ where: { id: submission.partnerId }, select: { clientId: true } })).clientId,
+        };
 
         // Activate the owning partner's outlet(s). Outlets are created PENDING
         // (isActive=false, see admin-outlets buildOutletCreate); KYC approval is the
@@ -6120,6 +6154,7 @@ export class KycService {
       // survive a rolled-back approval).
       return {
         outcome: 'approved',
+        heldPartner,
         notification: {
           userId: submission.userId,
           event: 'KYC_APPROVED',

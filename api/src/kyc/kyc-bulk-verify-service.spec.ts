@@ -94,10 +94,12 @@ const mockTx = {
   kycStatusHistory: { create: jest.fn() },
   auditLog: { create: jest.fn() },
   user: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
-  channelPartner: { findUnique: jest.fn(), update: jest.fn() },
+  channelPartner: { findUnique: jest.fn(), update: jest.fn(), findUniqueOrThrow: jest.fn().mockResolvedValue({ clientId: 'deoleo' }) },
   userSession: { updateMany: jest.fn() },
   wallet: { findFirst: jest.fn(), create: jest.fn() },
-  outlet: { update: jest.fn(), updateMany: jest.fn() },
+  // findMany + heldOpeningBalance: the held-opening-balance hook at approval (no rows → dormant).
+  outlet: { update: jest.fn(), updateMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
+  heldOpeningBalance: { findMany: jest.fn().mockResolvedValue([]) },
   // F2: the re-KYC apply row-locks the partner (SELECT … FOR UPDATE) and reads its payout columns.
   $queryRaw: jest.fn(),
 };

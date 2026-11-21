@@ -874,3 +874,59 @@ describe('buildDailyOpsDigest', () => {
     expect(fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n')).toBe(html.replace(/\r\n/g, '\n'));
   });
 });
+
+describe('Held opening balances (client migration) — digest line', () => {
+  const held = (over: Partial<import('./report.types').HeldBalancesSection> = {}) => ({
+    totalRows: 40,
+    appliedInWindow: 2,
+    appliedInWindowPoints: 3127,
+    waiting: 38,
+    waitingPoints: 119718,
+    waitingNeedsApplyNow: 0,
+    failed: 0,
+    failedPoints: 0,
+    ...over,
+  });
+
+  it('prints the owner line for a tenant with held rows; no section for tenants without (Deoleo)', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), heldBalances: ok(held()) };
+    const r = buildDailyOpsDigest(input([t, quietTenant('deoleo', 'Deoleo')]));
+    expect(r.html).toContain('Held opening balances: 2 applied since the last report (3,127 pts), 38 still waiting (1,19,718 pts), 0 failed.');
+    expect(r.html).not.toMatch(/applied today/);
+    expect(r.html.match(/Held opening balances:/g)).toHaveLength(1);
+    expect(attentionItems(t)).toEqual([]);
+  });
+
+  it('FAILED rows and rows waiting for an "Apply now" are attention items (never silent)', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), heldBalances: ok(held({ failed: 3, failedPoints: 812, waitingNeedsApplyNow: 1 })) };
+    expect(needsAttention(t)).toEqual([
+      '3 held opening balances FAILED (812 pts) — not posted; see Gifsy → Held Balances',
+      '1 held opening balance waits for a Gifsy "Apply now" (the outlet\'s wallet already has activity)',
+    ]);
+    const r = buildDailyOpsDigest(input([t]));
+    expect(r.html).toContain('3 failed (812 pts).');
+    expect(r.attentionItems).toBe(4);
+  });
+
+  it('splits the waiting rows by state and names the report window (no "today" claim)', () => {
+    const t = {
+      ...quietTenant('bajaj', 'Bajaj'),
+      heldBalances: ok(held({
+        windowLabel: 'Fri 20 Nov, 09:30 → Sat 21 Nov, 09:30 IST',
+        waitingByState: { NOT_ON_PORTAL: 30, AWAITING_KYC: 6, WALLET_EMPTY: 1, NEEDS_APPLY_NOW: 1, AMBIGUOUS_OUTLET: 0 },
+        waitingNeedsApplyNow: 1,
+        retrying: 1,
+      })),
+    };
+    const r = buildDailyOpsDigest(input([t]));
+    expect(r.html).toContain(
+      'applied since the last report (Fri 20 Nov, 09:30 – Sat 21 Nov, 09:30 IST) (3,127 pts), 38 still waiting (1,19,718 pts) [30 not on portal; 6 on portal awaiting first KYC; 1 wallet empty — applying; 1 wallet has activity — needs Apply now; 1 retrying after a temporary error], 0 failed.',
+    );
+  });
+
+  it('a section that failed to load is reported (degraded run), never hidden', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), heldBalances: { ok: false as const, error: 'db timeout' } };
+    expect(failedSections(input([t]))).toEqual([{ key: 'bajaj/heldBalances', label: 'Bajaj: Held opening balances' }]);
+    expect(needsAttention(t)).toEqual(["Couldn't load the Held opening balances section"]);
+  });
+});

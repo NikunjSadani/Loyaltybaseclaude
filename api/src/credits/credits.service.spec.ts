@@ -3,6 +3,7 @@
 // reversal flow, payout-file generation, and the UTR upload parse/apply branches.
 // Run: npx jest src/credits/credits.service.spec.ts
 
+import * as heldApply from '../wallet/held-opening-balances/held-balance-apply';
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -136,6 +137,8 @@ const mockPrisma = {
   programSetting: { findUnique: jest.fn().mockResolvedValue(null) },
   // WP5: listReversals attaches engine PAYOUT allocations — none on a LEGACY tenant.
   payoutReversalAllocation: { findMany: jest.fn().mockResolvedValue([]) },
+  // HELD OPENING BALANCES pre-confirm step: no PENDING rows on these fixtures → dormant (one count).
+  heldOpeningBalance: { count: jest.fn().mockResolvedValue(0) },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown, _opts?: { timeout?: number; maxWait?: number }) => cb(mockTx)),
 };
 
@@ -670,6 +673,38 @@ describe('CreditsService', () => {
         update: {},
       });
       expect(mockWalletService.creditEarn).toHaveBeenCalledTimes(1);
+    });
+
+    it('HELD OPENING BALANCES: the pre-step runs BEFORE the confirm transaction (history under the credit); its failure never blocks crediting', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({
+        id: 'b1', status: 'PENDING_CONFIRM', period: '2026-05', uploadedBy: 'admin1', totalOutlets: 1, totalPoints: 50,
+        totalPayoutPaise: BigInt(0),
+        rows: [{ outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' }],
+      });
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      const order: string[] = [];
+      const realTx = mockPrisma.$transaction.getMockImplementation()!;
+      mockPrisma.$transaction.mockImplementation(async (cb: any, o?: any) => {
+        order.push('confirm-tx');
+        return realTx(cb, o);
+      });
+      const spy = jest.spyOn(heldApply, 'prepareHeldBeforeCredit').mockImplementation(async (db, a) => {
+        order.push('held-pre-step');
+        expect(db).toBe(mockPrisma);
+        expect(a).toEqual(expect.objectContaining({ clientId: admin.clientId, outletCodes: ['O1'] }));
+        throw new Error('held exploded');
+      });
+      try {
+        const res = await service.confirmBatch(admin, 'b1');
+        expect(res.pointsCredited).toBe(1);
+        expect(order[0]).toBe('held-pre-step');
+        expect(order).toContain('confirm-tx');
+        // soft-deleted outlets never receive credits
+        expect(mockTx.outlet.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ deletedAt: null }) }));
+      } finally {
+        spy.mockRestore();
+        mockPrisma.$transaction.mockImplementation(realTx);
+      }
     });
 
     it('throws BadRequestException on a double-confirm (guarded claim returns count=0)', async () => {
