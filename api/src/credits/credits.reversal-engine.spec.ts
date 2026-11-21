@@ -147,6 +147,8 @@ function world(opts: WorldOpts = {}) {
   };
 
   const raw: Record<string, any> = {
+    // HELD OPENING BALANCES gate in confirmBatch — no held rows in these scenarios (dormant).
+    heldOpeningBalance: { count: async () => 0, findMany: async () => [] },
     wallet: {
       findFirst: find(T.wallets),
       findUniqueOrThrow: async ({ where }: any) => {

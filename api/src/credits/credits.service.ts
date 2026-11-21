@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { applyHeldOpeningBalancesForPartner } from '../wallet/held-opening-balances/held-balance-apply';
 import { CreditEntryStatus, Prisma, TdsMethodology, TdsSection } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
@@ -1729,6 +1730,11 @@ export class CreditsService {
       // naturally in the wallet aggregate via successive creditEarn calls.
       // We skip rather than throw if no outlet/partner/wallet exists, so a bad row
       // cannot abort the whole confirm.
+      // HELD OPENING BALANCES (client migration, owner 2026-11-21): a wallet born here (pre-KYC credit) gets its held
+      // vendor passbook posted BEFORE this batch credits it (so the dated history sits under the new credit). Gated
+      // once per confirm on the tenant having any PENDING row → dormant for every other tenant (Deoleo).
+      const heldPending =
+        pointsRows.length > 0 ? await tx.heldOpeningBalance.count({ where: { clientId: user.clientId, status: 'PENDING' } }) : 0;
       for (const r of pointsRows) {
         // Resolve outletCode → partnerId (tenant-scoped). A row that cannot resolve
         // to a partner is skipped WITH a reason (surfaced to the admin), never dropped
@@ -1772,6 +1778,15 @@ export class CreditsService {
           create: { partnerId: outlet.partnerId, accountId: walletAccountId },
           update: {},
         });
+        if (heldPending > 0) {
+          await applyHeldOpeningBalancesForPartner(tx, {
+            partnerId: outlet.partnerId,
+            clientId: user.clientId,
+            trigger: 'CREDIT_CONFIRM',
+            actorId: user.sub,
+            readMode: (c, db) => this.tenantSettings.getReversalEngineModeUncached(c, db),
+          });
+        }
 
         // r.amount is whole points for POINTS rows.
         await this.walletService.creditEarn(

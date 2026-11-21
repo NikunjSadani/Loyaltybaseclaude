@@ -1,4 +1,5 @@
 import type { Readable } from 'node:stream';
+import { applyHeldOpeningBalancesForPartner } from '../wallet/held-opening-balances/held-balance-apply';
 import { negativeBalanceSignals } from '../wallet/negative-balance.helper';
 import {
   BadRequestException,
@@ -6044,6 +6045,19 @@ export class KycService {
           const accountId = await ensureOutletAccount(tx, submission.partnerId);
           await tx.wallet.create({ data: { partnerId: submission.partnerId, accountId } });
         }
+        // HELD OPENING BALANCES (client migration, owner 2026-11-21): a vendor closing balance held for this
+        // partner's outlet(s) is posted into the (pristine) wallet in THIS transaction — dated passbook, FIFO lots,
+        // counters, V2 sequencing when due. Never aborts the approval: a held-balance problem rolls back to its own
+        // savepoint and marks the row FAILED (reason + bell). Dormant (2 reads) when the tenant has no held rows.
+        await applyHeldOpeningBalancesForPartner(tx, {
+          partnerId: submission.partnerId,
+          clientId:
+            submission.partner?.clientId ??
+            (await tx.channelPartner.findUniqueOrThrow({ where: { id: submission.partnerId }, select: { clientId: true } })).clientId,
+          trigger: 'KYC_APPROVAL',
+          actorId,
+          readMode: (c, db) => this.tenantSettings.getReversalEngineModeUncached(c, db),
+        });
 
         // Activate the owning partner's outlet(s). Outlets are created PENDING
         // (isActive=false, see admin-outlets buildOutletCreate); KYC approval is the

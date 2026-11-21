@@ -490,6 +490,40 @@ async function walletGuardState(tx: Prisma.TransactionClient, walletId: string):
   return s;
 }
 
+/**
+ * HELD OPENING BALANCES (held-opening-balances/held-balance-apply.ts): sequence ONE wallet inside the CALLER's
+ * transaction exactly as the backfill APPLY does (same loader, same pure planner, same guarded writes, same V0 guard),
+ * for a wallet whose only history is the held vendor passbook just posted (no credit-batch credits → an empty tenant
+ * context is exact). The caller holds the wallet row lock. Never writes a balance, counter or lot.
+ * Returns DONE (sequenced, backfillStatus = DONE), BLOCKED (marked with the planner's reason — the wallet keeps
+ * today's rules, exactly like a bulk-imported wallet the backfill blocked) or NOOP (nothing to sequence).
+ */
+export async function sequenceWalletInTx(
+  tx: Prisma.TransactionClient,
+  walletId: string,
+  clientId: string,
+  plan: (h: BfWalletHistory, ctx: BfTenantContext) => WalletPlan,
+  blockedReason: (p: WalletPlan) => string,
+): Promise<{ status: 'DONE' | 'BLOCKED' | 'NOOP'; reason?: string }> {
+  const [fresh] = await loadHistories(tx, clientId, [walletId]);
+  if (!fresh) throw new Error(`sequenceWalletInTx: wallet ${walletId} not found in tenant ${clientId}`);
+  const ctx: BfTenantContext = { clientId, batches: new Map(), reversals: new Map(), alreadyAllocatedReversalIds: new Set() };
+  const p = plan(fresh, ctx);
+  if (p.status === 'DONE' || p.status === 'NOOP') return { status: p.status === 'DONE' ? 'DONE' : 'NOOP' };
+  if (p.status === 'BLOCKED') {
+    const reason = blockedReason(p);
+    await tx.wallet.updateMany({
+      where: { id: walletId, movementSeq: 0 },
+      data: { backfillStatus: 'BLOCKED', backfillBlockedReason: reason, backfillCheckedAt: new Date() },
+    });
+    return { status: 'BLOCKED', reason };
+  }
+  const guardBefore = await walletGuardState(tx, walletId);
+  await writePlan(tx, p);
+  assertWalletGuard(walletId, guardBefore, await walletGuardState(tx, walletId));
+  return { status: 'DONE' };
+}
+
 /** Guarded writes for ONE planned wallet (caller holds the wallet row lock). Any guard miss throws → rollback. */
 async function writePlan(tx: Prisma.TransactionClient, plan: WalletPlan): Promise<void> {
   for (const u of plan.txUpdates) {

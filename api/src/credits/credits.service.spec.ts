@@ -3,6 +3,7 @@
 // reversal flow, payout-file generation, and the UTR upload parse/apply branches.
 // Run: npx jest src/credits/credits.service.spec.ts
 
+import * as heldApply from '../wallet/held-opening-balances/held-balance-apply';
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -95,6 +96,8 @@ const mockTx = {
   outlet: { findFirst: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   channelPartner: { findMany: jest.fn().mockResolvedValue([]) },
   wallet: { findFirst: jest.fn(), upsert: jest.fn().mockResolvedValue({ id: 'w1' }) },
+  // HELD OPENING BALANCES gate in confirmBatch (no PENDING rows on these fixtures → dormant).
+  heldOpeningBalance: { count: jest.fn().mockResolvedValue(0), findMany: jest.fn().mockResolvedValue([]) },
   // Visibility-payout TDS read + write targets (atomic with the download / confirm).
   tdsDeductionEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   tdsRecoveryEntry: { createMany: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
@@ -663,6 +666,38 @@ describe('CreditsService', () => {
         update: {},
       });
       expect(mockWalletService.creditEarn).toHaveBeenCalledTimes(1);
+    });
+
+    it('HELD OPENING BALANCES: a wallet born at confirm gets its held passbook BEFORE the batch credit (only when the tenant has PENDING rows)', async () => {
+      const batch = {
+        id: 'b1', status: 'PENDING_CONFIRM', period: '2026-05', uploadedBy: 'admin1', totalOutlets: 1, totalPoints: 50,
+        totalPayoutPaise: BigInt(0),
+        rows: [{ outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'Sales', amount: 50, narration: '', awardType: 'POINTS', status: 'OK' }],
+      };
+      mockPrisma.creditBatch.findFirst.mockResolvedValue(batch);
+      mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
+      const order: string[] = [];
+      const spy = jest.spyOn(heldApply, 'applyHeldOpeningBalancesForPartner').mockImplementation(async () => {
+        order.push('held');
+        return [];
+      });
+      mockWalletService.creditEarn.mockImplementation(async () => {
+        order.push('creditEarn');
+        return { transactionId: 't', newRedeemable: 50, ledgerId: 'l' };
+      });
+      try {
+        mockTx.heldOpeningBalance.count.mockResolvedValueOnce(0);
+        await service.confirmBatch(admin, 'b1');
+        expect(spy).not.toHaveBeenCalled(); // dormant: no PENDING rows for the tenant
+        order.length = 0;
+        mockPrisma.creditBatch.findFirst.mockResolvedValue({ ...batch });
+        mockTx.heldOpeningBalance.count.mockResolvedValueOnce(3);
+        await service.confirmBatch(admin, 'b1');
+        expect(spy).toHaveBeenCalledWith(mockTx, expect.objectContaining({ partnerId: 'p1', clientId: admin.clientId, trigger: 'CREDIT_CONFIRM' }));
+        expect(order).toEqual(['held', 'creditEarn']);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('throws BadRequestException on a double-confirm (guarded claim returns count=0)', async () => {

@@ -1725,6 +1725,38 @@ export class WalletService {
   }
 
   /**
+   * HELD OPENING BALANCES — "Apply now" onto a wallet that ALREADY has activity (held-opening-balances.service):
+   * ONE opening-balance movement of the vendor closing, through the single write-path (applyMovement), so the
+   * engine itself handles LEGACY vs V2 sequencing, FIFO and counters. Credit → CREDIT_ADJUSTMENT / ADJUST lot,
+   * NON-EXPIRING (like the bulk-imported vendor lots). Debit (negative closing) → DEBIT_ADJUSTMENT, guarded: refused
+   * when the wallet doesn't hold enough (never floored — the caller marks the row FAILED with that reason).
+   * Caller's transaction; tenant scope is the caller's responsibility (internal primitive).
+   */
+  async postHeldOpeningAdjustment(
+    tx: Prisma.TransactionClient,
+    partnerId: string,
+    points: number,
+    opts: { description: string; sourceId: string; metadata: Prisma.InputJsonValue },
+  ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string }> {
+    if (!Number.isInteger(points) || points === 0) throw new BadRequestException('Opening balance must be a non-zero whole number');
+    const wallet = await this.requireWallet(tx, partnerId);
+    const isCredit = points > 0;
+    return this.applyMovement(tx, {
+      wallet,
+      walletTxType: isCredit ? 'CREDIT_ADJUSTMENT' : 'DEBIT_ADJUSTMENT',
+      ledgerType: PointsLedgerType.ADJUST,
+      points,
+      expiresAt: null,
+      description: opts.description,
+      sourceType: 'VENDOR_IMPORT',
+      sourceId: opts.sourceId,
+      metadata: opts.metadata,
+      requireSufficientRedeemable: !isCredit,
+      insufficientMessage: `The wallet holds fewer points than the negative opening balance (${points} pts) — not applied`,
+    });
+  }
+
+  /**
    * Clawback previously-earned points on a credit-batch POINTS reversal (#16).
    * Writes DEBIT_ADJUSTMENT (WalletTransaction) + ADJUST (PointsLedger), inside the
    * supplied transaction so it is atomic with the reversal status update.
