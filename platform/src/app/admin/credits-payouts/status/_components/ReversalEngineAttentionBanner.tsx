@@ -177,7 +177,7 @@ export default function ReversalEngineAttentionBanner({ canLiftPause = false }: 
   const notReady = !!data.readiness && !data.readiness.ready;
   const readinessMessage = notReady
     ? data.readiness?.message ||
-      'Some wallets with points history are not yet prepared for reversals — Gifsy must prepare them before any points reversal'
+      'Some wallets with points history are not yet prepared for reversals — Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C'
     : null;
   if (!paused && parts.length === 0 && !readinessMessage) return null;
 

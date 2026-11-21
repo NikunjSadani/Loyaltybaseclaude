@@ -293,12 +293,12 @@ describe('needsAttention', () => {
     expect(needsAttention(t)).toEqual([]);
     t.points = ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 0, walletsNotSequenced: 12, walletsBlocked: 1 });
     expect(needsAttention(t)).toEqual([
-      '12 wallets with points history not yet prepared for reversals — run the wallet backfill',
+      '12 wallets with points history not yet prepared for reversals — Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C',
       '1 wallet blocked by the wallet backfill — fix the history and re-run it',
     ]);
     t.points = ok({ credited: 0, redeemed: 0, expired: 0, negativeWallets: 0, walletsNotSequenced: 1 });
     expect(needsAttention(t)).toEqual([
-      '1 wallet with points history not yet prepared for reversals — run the wallet backfill',
+      '1 wallet with points history not yet prepared for reversals — Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C',
     ]);
   });
 

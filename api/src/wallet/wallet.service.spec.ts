@@ -6,7 +6,13 @@
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ConflictException, ForbiddenException, Logger, NotFoundException } from '@nestjs/common';
-import { WalletService } from './wallet.service';
+import {
+  resetUnsequencedWarnings,
+  shouldWarnUnsequenced,
+  unsequencedMovementTotal,
+  WALLET_BUSY_MESSAGE,
+  WalletService,
+} from './wallet.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
@@ -1605,6 +1611,7 @@ describe('WalletService — every live write path sequences (no engine mode)', (
   });
 
   it('an UN-sequenced wallet WITH history keeps the pre-engine path (no seq) — earning and redeeming are never blocked', async () => {
+    resetUnsequencedWarnings(); // A2 rate limit is per wallet per process: start clean
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
       const h = buildHarness({
@@ -1624,6 +1631,7 @@ describe('WalletService — every live write path sequences (no engine mode)', (
   });
 
   it('BLOCKED wallet with history: same — pre-engine path, never blocked', async () => {
+    resetUnsequencedWarnings(); // A2 rate limit is per wallet per process: start clean
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
       const h = buildHarness({
@@ -1635,5 +1643,99 @@ describe('WalletService — every live write path sequences (no engine mode)', (
     } finally {
       warn.mockRestore();
     }
+  });
+});
+// ── Fix round 2026-11-21 (dual audit A2 / A4) ───────────────────────────────────────────────────────────
+describe('A2 — the "un-sequenced movement" warning is rate-limited (once per wallet per hour) + counted', () => {
+  beforeEach(() => resetUnsequencedWarnings());
+
+  it('2,300 movements on the SAME un-sequenced wallet (a big batch confirm) → exactly 1 warn line, counter 2,300', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const h = buildHarness({ wallet: { redeemablePoints: 100, earnedPoints: 100, lifetimeEarned: 100, movementSeq: 0 } });
+      for (let i = 0; i < 2300; i++) await h.service.creditEarn('cp1', 'deoleo', 1, {});
+      expect(h.wallet.redeemablePoints).toBe(2400); // every movement applied (pre-engine path, never blocked)
+      expect(h.wallet.movementSeq).toBe(0);
+      const lines = warn.mock.calls.filter((c) => /not sequenced/.test(String(c[0])));
+      expect(lines).toHaveLength(1);
+      expect(String(lines[0][0])).toMatch(/once per wallet per hour/);
+      expect(unsequencedMovementTotal()).toBe(2300);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a different wallet warns once on its own; the same wallet warns again only after more than an hour', () => {
+    const t0 = Date.now();
+    expect(shouldWarnUnsequenced('wA', t0)).toBe(true);
+    expect(shouldWarnUnsequenced('wA', t0 + 1)).toBe(false);
+    expect(shouldWarnUnsequenced('wB', t0 + 2)).toBe(true); // another wallet: its own first warning
+    expect(shouldWarnUnsequenced('wB', t0 + 3)).toBe(false);
+    expect(shouldWarnUnsequenced('wA', t0 + 59 * 60 * 1000)).toBe(false); // still within the hour
+    expect(shouldWarnUnsequenced('wA', t0 + 61 * 60 * 1000)).toBe(true); // > 1 h later → warns again
+    expect(unsequencedMovementTotal()).toBe(6); // every call is counted, logged or not
+  });
+});
+
+describe('A4 — a redemption on a wallet locked by a big batch confirm fails fast, in plain words', () => {
+  const sqlOf = (c: any[]) => (Array.isArray(c[0]) ? (c[0] as string[]).join('?') : String(c[0]));
+
+  it('takes the wallet row lock first under lock_timeout 5s, then restores the previous value; the redemption proceeds', async () => {
+    const h = buildHarness({ wallet: { redeemablePoints: 100 } });
+    (h.store.$queryRaw as jest.Mock).mockImplementation(async (strings: any) =>
+      sqlOf([strings]).includes('current_setting') ? [{ v: '0' }] : [],
+    );
+    await h.service.debitRedeem('cp1', 30, { referenceId: 'o1' });
+    const calls = (h.store.$queryRaw as jest.Mock).mock.calls;
+    const sql = calls.map(sqlOf);
+    const i = sql.indexOf("SELECT current_setting('lock_timeout') AS v");
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(sql.slice(i, i + 4)).toEqual([
+      "SELECT current_setting('lock_timeout') AS v",
+      "SELECT set_config('lock_timeout', ?, true)",
+      'SELECT id FROM wallets WHERE id = ? FOR UPDATE',
+      "SELECT set_config('lock_timeout', ?, true)",
+    ]);
+    expect(calls[i + 1][1]).toBe('5s'); // the short timeout…
+    expect(calls[i + 2][1]).toBe('w1');
+    expect(calls[i + 3][1]).toBe('0'); // …and the previous value restored
+    expect(h.wallet.redeemablePoints).toBe(70);
+  });
+
+  for (const err of [
+    Object.assign(new Error('canceling statement due to lock timeout'), {}),
+    Object.assign(new Error('Raw query failed'), { code: 'P2010', meta: { code: '55P03' } }),
+  ]) {
+    it(`lock timeout (${err.message}) → 409 "${WALLET_BUSY_MESSAGE.slice(0, 40)}…", nothing deducted, no movement written`, async () => {
+      const h = buildHarness({ wallet: { redeemablePoints: 100 } });
+      (h.store.$queryRaw as jest.Mock).mockImplementation(async (strings: any) => {
+        if (sqlOf([strings]).includes('FOR UPDATE')) throw err;
+        return [];
+      });
+      const before = h.walletTxns.length;
+      const e = await h.service.debitRedeem('cp1', 30, { referenceId: 'o1' }).catch((x) => x);
+      expect(e).toBeInstanceOf(ConflictException);
+      expect(e.message).toBe(WALLET_BUSY_MESSAGE);
+      expect(h.wallet.redeemablePoints).toBe(100);
+      expect(h.walletTxns).toHaveLength(before);
+      expect(h.ledger.filter((r) => r.transactionType === 'REDEEM')).toHaveLength(0);
+    });
+  }
+
+  it('any other error from the lock statement is rethrown unchanged (never disguised as "busy")', async () => {
+    const h = buildHarness({ wallet: { redeemablePoints: 100 } });
+    const boom = new Error('connection reset');
+    (h.store.$queryRaw as jest.Mock).mockImplementation(async (strings: any) => {
+      if (sqlOf([strings]).includes('FOR UPDATE')) throw boom;
+      return [];
+    });
+    await expect(h.service.debitRedeem('cp1', 30, { referenceId: 'o1' })).rejects.toBe(boom);
+    expect(h.wallet.redeemablePoints).toBe(100);
+  });
+
+  it('an insufficient balance is refused BEFORE any lock is taken (no lock statement at all)', async () => {
+    const h = buildHarness({ wallet: { redeemablePoints: 10 } });
+    await expect(h.service.debitRedeem('cp1', 30, { referenceId: 'o1' })).rejects.toBeInstanceOf(BadRequestException);
+    expect((h.store.$queryRaw as jest.Mock).mock.calls.map(sqlOf).some((s) => s.includes('lock_timeout'))).toBe(false);
   });
 });

@@ -310,6 +310,62 @@ export function unsequencedWithHistoryWhere(clientId: string): Prisma.WalletWher
   };
 }
 
+/**
+ * The client's human name for refusal messages: `branding.displayName` (e.g. "Bajaj Consumer Care Ltd"), else
+ * `internalName`, else the slug. Never throws (a message must not fail because the name could not be read).
+ */
+export async function clientDisplayName(db: Pick<Prisma.TransactionClient, 'client'>, clientId: string): Promise<string> {
+  try {
+    const c = await db.client.findFirst({ where: { id: clientId }, select: { internalName: true, branding: true } });
+    const b = c?.branding && typeof c.branding === 'object' && !Array.isArray(c.branding) ? (c.branding as Record<string, unknown>) : null;
+    const display = typeof b?.displayName === 'string' && b.displayName.trim() ? b.displayName.trim() : null;
+    return display ?? (c?.internalName?.trim() || clientId);
+  } catch {
+    return clientId;
+  }
+}
+
+/**
+ * Rate limit of the "un-sequenced movement" warning (audit A2): ONE log line per wallet per hour per process, plus a
+ * process-wide counter (every such movement, logged or not) — a 2,300-row batch confirm on un-backfilled wallets logs
+ * each wallet once, not 2,300 times. The readiness count (banner + digest) is the durable call-out.
+ */
+const UNSEQUENCED_WARN_INTERVAL_MS = 60 * 60 * 1000;
+const UNSEQUENCED_WARN_MAX_TRACKED = 50_000;
+const unsequencedWarnedAt = new Map<string, number>();
+let unsequencedMovementCount = 0;
+
+/** true ⇔ this wallet's warning should be logged now (and records it). Counts every call. */
+export function shouldWarnUnsequenced(walletId: string, now = Date.now()): boolean {
+  unsequencedMovementCount++;
+  const last = unsequencedWarnedAt.get(walletId);
+  if (last !== undefined && now - last < UNSEQUENCED_WARN_INTERVAL_MS) return false;
+  if (unsequencedWarnedAt.size >= UNSEQUENCED_WARN_MAX_TRACKED) unsequencedWarnedAt.clear(); // bounded memory
+  unsequencedWarnedAt.set(walletId, now);
+  return true;
+}
+
+/** Movements on un-sequenced wallets since process start (tests / diagnostics). */
+export function unsequencedMovementTotal(): number {
+  return unsequencedMovementCount;
+}
+
+/** Test hook: reset the rate limiter. */
+export function resetUnsequencedWarnings(): void {
+  unsequencedWarnedAt.clear();
+  unsequencedMovementCount = 0;
+}
+
+/** Postgres lock_timeout for a redemption's wallet lock (audit A4) — fail fast instead of waiting out a big confirm. */
+export const REDEEM_WALLET_LOCK_TIMEOUT = '5s';
+export const WALLET_BUSY_MESSAGE =
+  'Points are being updated for this wallet right now (a points upload is being processed) — please try again in a minute. Nothing was deducted.';
+
+function isLockTimeout(e: unknown): boolean {
+  const s = e && typeof e === 'object' ? JSON.stringify({ m: (e as Error).message, meta: (e as { meta?: unknown }).meta, code: (e as { code?: unknown }).code }) : String(e);
+  return /55P03|lock timeout|canceling statement due to lock timeout/i.test(s);
+}
+
 /** Per-tenant reversal readiness, plain words (attention banner + daily ops digest). */
 export interface ReversalReadiness {
   /** wallets with points history not yet sequenced by the wallet backfill (not BLOCKED) */
@@ -448,8 +504,9 @@ export class WalletService {
   }
 
   private warnUnsequencedMovement(w: Partial<Wallet> & { id: string }): void {
+    if (!shouldWarnUnsequenced(w.id)) return;
     this.logger.warn(
-      `[reversal-engine] wallet ${w.id} has points history that is not sequenced (${w.backfillStatus === 'BLOCKED' ? `BLOCKED: ${w.backfillBlockedReason ?? '?'}` : 'wallet backfill not yet run for it'}) — movement takes the pre-engine write path; points reversals on it are refused until Gifsy runs / fixes the wallet backfill`,
+      `[reversal-engine] wallet ${w.id} has points history that is not sequenced (${w.backfillStatus === 'BLOCKED' ? `BLOCKED: ${w.backfillBlockedReason ?? '?'}` : 'wallet backfill not yet run for it'}) — movement takes the pre-engine write path; points reversals on it are refused until Gifsy runs / fixes the wallet backfill (logged once per wallet per hour; ${unsequencedMovementTotal()} such movements since start)`,
     );
   }
 
@@ -1594,6 +1651,7 @@ export class WalletService {
       if (wallet.redeemablePoints < amount) {
         throw new BadRequestException('Insufficient wallet balance for redemption');
       }
+      await this.lockWalletForRedeem(t, wallet.id);
       return this.applyMovement(t, {
         wallet,
         walletTxType: 'DEBIT_REDEMPTION',
@@ -1607,6 +1665,26 @@ export class WalletService {
         insufficientMessage: 'Insufficient wallet balance for redemption',
       });
     });
+  }
+
+  /**
+   * Audit A4 (2026-11-21): a credit-batch confirm locks every target wallet up front (B9, ascending id) and keeps the
+   * locks for its whole all-or-nothing transaction (up to 180 s for a big CSV). A redemption on one of those wallets
+   * must not hang until a timeout: take the wallet row lock FIRST with a short lock_timeout (5 s, this statement only —
+   * the previous value is restored right after) and, if it can't be had, refuse in plain words ("points are being
+   * updated — try again in a minute"). Chosen over chunking the confirm: the confirm must stay atomic (a chunked confirm
+   * risks a partially-credited batch — see confirmBatch), while a refused redemption deducts nothing and can be retried.
+   */
+  private async lockWalletForRedeem(tx: Prisma.TransactionClient, walletId: string): Promise<void> {
+    const prev = await tx.$queryRaw<Array<{ v: string }>>`SELECT current_setting('lock_timeout') AS v`;
+    await tx.$queryRaw`SELECT set_config('lock_timeout', ${REDEEM_WALLET_LOCK_TIMEOUT}, true)`;
+    try {
+      await tx.$queryRaw`SELECT id FROM wallets WHERE id = ${walletId} FOR UPDATE`;
+    } catch (e) {
+      if (isLockTimeout(e)) throw new ConflictException(WALLET_BUSY_MESSAGE);
+      throw e;
+    }
+    await tx.$queryRaw`SELECT set_config('lock_timeout', ${(Array.isArray(prev) && prev[0]?.v) || '0'}, true)`;
   }
 
   /**
@@ -1811,19 +1889,26 @@ export class WalletService {
   /**
    * THE SAFETY GATE of the one-engine model (2026-11-21). A POINTS reversal (create AND approve) may only touch
    * SEQUENCED wallets. Every wallet that received this (batch, outlet, field)'s credit — per-credit metadata — and, when
-   * `includeCurrentPartner` (no credit position exists), the outlet's current partner's wallet, is checked:
+   * `includeLegacyCandidates` (no credit position exists — the request is refused anyway, this only picks the RIGHT
+   * reason) also the wallets that may have received a pre-metadata credit of the line: the outlet's current partner's
+   * wallet, plus every wallet holding a credit of this batch whose metadata has no outletCode (only {fieldId} of this
+   * field, or nothing) for exactly the amount of one of the batch's (outlet, field) rows — i.e. a previous partner of the
+   * outlet (there is no outlet→partner history table, so the batch row amount is the link). Each is checked:
    *  - movementSeq > 0, or pristine (nothing to sequence) → fine;
    *  - BLOCKED by the backfill → WALLET_NEEDS_ATTENTION with the backfill's reason (Gifsy fixes the history);
-   *  - history but not sequenced → WALLET_NOT_SEQUENCED naming the program and the outlet: Gifsy must run the wallet
-   *    backfill for that program first.
+   *  - history but not sequenced → WALLET_NOT_SEQUENCED naming the client and the outlet: Gifsy must run the wallet
+   *    backfill for that client first.
    * Read-only; throws before anything is written (the caller's transaction rolls back), and the caller audits the
    * refusal (REVERSAL_ENGINE_REFUSAL → the attention banner lists it). Never a partial apply.
    */
   private async assertReceivingWalletsSequenced(
     tx: Prisma.TransactionClient,
     key: CreditKey,
-    opts: { includeCurrentPartner?: boolean } = {},
+    opts: { includeLegacyCandidates?: boolean } = {},
   ): Promise<void> {
+    const metaOf = (m: Prisma.JsonValue | null | undefined) =>
+      m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : null;
+    const ids = new Set<string>();
     const credits =
       (await tx.walletTransaction.findMany({
         where: {
@@ -1834,13 +1919,12 @@ export class WalletService {
         },
         select: { walletId: true, metadata: true },
       })) ?? [];
-    const ids = new Set<string>();
     for (const c of credits) {
-      const m = c.metadata && typeof c.metadata === 'object' && !Array.isArray(c.metadata) ? (c.metadata as Record<string, unknown>) : null;
+      const m = metaOf(c.metadata);
       if (m && m.outletCode === key.outletCode && m.fieldId === key.fieldId) ids.add(c.walletId);
     }
-    if (opts.includeCurrentPartner) {
-      const batch = await tx.creditBatch.findFirst({ where: { id: key.batchId }, select: { clientId: true } });
+    if (opts.includeLegacyCandidates) {
+      const batch = await tx.creditBatch.findFirst({ where: { id: key.batchId }, select: { clientId: true, rows: true } });
       const outlet = batch
         ? await tx.outlet.findFirst({ where: { clientId: batch.clientId, outletCode: key.outletCode }, select: { partnerId: true } })
         : null;
@@ -1848,14 +1932,30 @@ export class WalletService {
         ? await tx.wallet.findFirst({ where: { partnerId: outlet.partnerId }, select: { id: true } })
         : null;
       if (current) ids.add(current.id);
+      // Pre-metadata credits of this batch (no outletCode recorded): the line's row amount(s) identify candidates.
+      const lineAmounts = new Set<number>();
+      for (const r of (Array.isArray(batch?.rows) ? batch!.rows : []) as Record<string, unknown>[]) {
+        if (r && r.awardType === 'POINTS' && r.status === 'OK' && r.outletId === key.outletCode && r.fieldId === key.fieldId &&
+          typeof r.amount === 'number' && r.amount > 0) lineAmounts.add(r.amount);
+      }
+      if (lineAmounts.size > 0) {
+        const all =
+          (await tx.walletTransaction.findMany({
+            where: { transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: key.batchId },
+            select: { walletId: true, points: true, metadata: true },
+          })) ?? [];
+        for (const c of all) {
+          const m = metaOf(c.metadata);
+          const legacyShaped = !m || (typeof m.outletCode !== 'string' && (m.fieldId === undefined || m.fieldId === key.fieldId));
+          if (legacyShaped && lineAmounts.has(c.points)) ids.add(c.walletId);
+        }
+      }
     }
     // Normally one or two wallets — read each (ascending id: a deterministic first refusal).
     for (const id of [...ids].sort()) {
       const w = await tx.wallet.findFirst({ where: { id } });
       if (!w || (w.movementSeq ?? 0) > 0) continue;
       if (!hasVisibleHistory(w) && (await this.isWalletPristine(tx, w))) continue;
-      const partner = await tx.channelPartner.findFirst({ where: { id: w.partnerId }, select: { clientId: true } });
-      const program = partner?.clientId ?? 'this program';
       if (w.backfillStatus === 'BLOCKED') {
         const reason = w.backfillBlockedReason ?? 'blocked by the wallet backfill';
         throw new ReversalAttentionException('WALLET_NEEDS_ATTENTION', walletNeedsAttentionMessage(key.outletCode, reason), {
@@ -1865,10 +1965,14 @@ export class WalletService {
           reason,
         });
       }
-      throw new ReversalAttentionException('WALLET_NOT_SEQUENCED', walletNotSequencedMessage(key.outletCode, program), {
+      const partner = await tx.channelPartner.findFirst({ where: { id: w.partnerId }, select: { clientId: true } });
+      const clientId = partner?.clientId ?? null;
+      const clientName = clientId ? await clientDisplayName(tx, clientId) : 'this client';
+      throw new ReversalAttentionException('WALLET_NOT_SEQUENCED', walletNotSequencedMessage(key.outletCode, clientName), {
         ...key,
         walletId: w.id,
-        program,
+        clientId,
+        clientName,
         backfillStatus: w.backfillStatus ?? null,
         reason: WALLET_NOT_YET_BACKFILLED_REASON,
       });
@@ -1958,7 +2062,7 @@ export class WalletService {
     // No position at all: the credit may sit on the outlet's CURRENT partner's wallet as an un-sequenced (pre-engine,
     // no per-credit metadata) row — if that wallet has history the backfill has not sequenced, say THAT (run the
     // backfill), not "unmapped".
-    await this.assertReceivingWalletsSequenced(tx, key, { includeCurrentPartner: true });
+    await this.assertReceivingWalletsSequenced(tx, key, { includeLegacyCandidates: true });
     const credits = await tx.walletTransaction.findMany({
       where: { transactionType: 'CREDIT_POINTS_EARNED', referenceType: 'CREDIT_BATCH', referenceId: key.batchId },
       select: { walletId: true, metadata: true },

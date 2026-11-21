@@ -241,15 +241,48 @@ function canonical(log: { op: string; args?: any }[]) {
   });
 }
 
+/**
+ * The ONE intended addition since origin/main (audit A4, 2026-11-21): a successful redemption first takes the wallet
+ * row lock under a 5 s lock_timeout and restores the previous value — exactly these 4 statements, right after the
+ * redemption's wallet read. They are removed here EXPLICITLY (and counted), never by loosening the comparison; a
+ * refused redemption (insufficient balance) is refused before the lock, so it adds none.
+ */
+const REDEEM_LOCK = [
+  "SELECT current_setting('lock_timeout') AS v",
+  "SELECT set_config('lock_timeout', ?, true)",
+  'SELECT id FROM wallets WHERE id = ? FOR UPDATE',
+  "SELECT set_config('lock_timeout', ?, true)",
+];
+function stripRedeemLock(log: { op: string; args?: any }[]): { log: { op: string; args?: any }[]; groups: number[] } {
+  const out: { op: string; args?: any }[] = [];
+  const groups: number[] = [];
+  for (let i = 0; i < log.length; i++) {
+    const isGroup = REDEEM_LOCK.every((sql, k) => log[i + k]?.op === '$queryRaw' && log[i + k]?.args === sql);
+    if (isGroup) {
+      groups.push(out.length); // position in the stripped log (= where origin/main continues)
+      i += REDEEM_LOCK.length - 1;
+      continue;
+    }
+    out.push(log[i]);
+  }
+  return { log: out, groups };
+}
+
 describe('L5 — un-sequenced wallet WITH history ≡ origin/main pre-engine path (statement-for-statement)', () => {
-  it('movements (batch credit, plain credit, redeem, refused redeem, refund, admin credit + debit): same statements, order, arguments and results as origin/main 2eb8271d', async () => {
+  it('movements (batch credit, plain credit, redeem, refused redeem, refund, admin credit + debit): same statements, order, arguments and results as origin/main 2eb8271d — plus ONLY the A4 redemption lock', async () => {
     const { log, movementStatements, movementsOut, h } = await scenario();
     const fixture = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
+    const stripped = stripRedeemLock(log.slice(0, movementStatements));
+    // exactly one lock group (the successful redeem), placed right after that redemption's wallet read
+    expect(stripped.groups).toHaveLength(1);
+    expect(stripped.log[stripped.groups[0] - 1]?.op).toBe('wallet.findFirst');
+    expect(log.slice(0, movementStatements).filter((e) => e.op === '$queryRaw')).toHaveLength(REDEEM_LOCK.length);
+    const prefix = stripped.log.length;
     // eslint-disable-next-line no-console
-    console.log(`[L5 parity] movement prefix: origin/main ${movementStatements} of ${fixture.log.length} statements compared`);
-    expect(canonical(log.slice(0, movementStatements))).toEqual(canonical(fixture.log.slice(0, movementStatements)));
+    console.log(`[L5 parity] movement prefix: origin/main ${prefix} of ${fixture.log.length} statements compared (+${REDEEM_LOCK.length} A4 lock statements)`);
+    expect(canonical(stripped.log)).toEqual(canonical(fixture.log.slice(0, prefix)));
     // the fixture continues with the (deleted) interim reversal gate — the prefix boundary is exact
-    expect(fixture.log[movementStatements]?.op).toBe('$transaction');
+    expect(fixture.log[prefix]?.op).toBe('$transaction');
     for (const k of ['credit1', 'credit2', 'redeem', 'refund', 'adjustCredit', 'adjustDebit', 'errors']) {
       expect(movementsOut[k]).toEqual(fixture.snapshot.out[k]);
     }
@@ -260,14 +293,17 @@ describe('L5 — un-sequenced wallet WITH history ≡ origin/main pre-engine pat
     expect(h.T.wallet[0].movementSeq).toBe(0);
   });
 
-  it('per-movement statement counts (the query-count proof, readable): identical to origin/main for the movement prefix', async () => {
+  it('per-movement statement counts (the query-count proof, readable): identical to origin/main for the movement prefix, plus exactly 4 raw lock statements (A4)', async () => {
     const { log, movementStatements } = await scenario();
     const fixture = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
     const counts = (l: { op: string }[]) => l.reduce<Record<string, number>>((m, e) => ((m[e.op] = (m[e.op] ?? 0) + 1), m), {});
-    expect(counts(log.slice(0, movementStatements))).toEqual(counts(fixture.log.slice(0, movementStatements)));
+    const prefix = movementStatements - REDEEM_LOCK.length;
+    const expected = counts(fixture.log.slice(0, prefix));
+    expect(expected.$queryRaw).toBeUndefined(); // origin/main issued no raw statement in these movements
+    expect(counts(log.slice(0, movementStatements))).toEqual({ ...expected, $queryRaw: REDEEM_LOCK.length });
     // no tenant lookup per movement (the retired engine-mode read needed one)
     expect(log.filter((e) => e.op === 'channelPartner.findFirst')).toHaveLength(
-      fixture.log.slice(0, movementStatements).filter((e: { op: string }) => e.op === 'channelPartner.findFirst').length,
+      fixture.log.slice(0, prefix).filter((e: { op: string }) => e.op === 'channelPartner.findFirst').length,
     );
   });
 

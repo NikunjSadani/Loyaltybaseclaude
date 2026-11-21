@@ -9,7 +9,7 @@ import { Prisma } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import * as XLSX from 'xlsx';
-import { CreditsService } from './credits.service';
+import { CreditsService, POINTS_REVERSAL_ENGINE_MARKER_ENTITY } from './credits.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
@@ -34,7 +34,7 @@ import {
 } from './dto/credits.dto';
 import { CreditAwardType } from '@prisma/client';
 import { PAYOUT_FILE_HEADERS } from './credits.helpers';
-import { ReversalAttentionException, walletNotSequencedMessage } from '../wallet/reversal-policy';
+import { RAISED_UNDER_OLD_ENGINE_MESSAGE, ReversalAttentionException, walletNotSequencedMessage } from '../wallet/reversal-policy';
 
 // ─── Mock wallet service ──────────────────────────────────────────────────────
 
@@ -111,7 +111,8 @@ const mockTx = {
   $executeRaw: jest.fn().mockResolvedValue(0),
   // WP5: engine PAYOUT allocations (approve/reject + download race check read them; every PAYOUT create reserves).
   payoutReversalAllocation: { findMany: jest.fn().mockResolvedValue([]), createMany: jest.fn().mockResolvedValue({ count: 1 }) },
-  auditLog: { create: jest.fn().mockResolvedValue({}) },
+  // findFirst: the audit-A1 one-engine marker of a POINTS reversal (default: present = raised under the one engine)
+  auditLog: { create: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockResolvedValue({ id: 'marker' }) },
 };
 
 const mockPrisma = {
@@ -229,6 +230,7 @@ describe('CreditsService', () => {
       ],
     });
     mockTx.creditReversal.findMany.mockResolvedValue([]);
+    mockTx.auditLog.findFirst.mockResolvedValue({ id: 'marker' });
     mockTx.$queryRaw.mockResolvedValue([]);
     mockTx.creditReversal.updateMany.mockResolvedValue({ count: 1 });
     mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r1', status: 'APPROVED' });
@@ -1006,9 +1008,11 @@ describe('CreditsService', () => {
     it('SAFETY GATE: a receiving wallet with un-sequenced history → 409 WALLET_NOT_SEQUENCED, nothing created, refusal audited (CREATE)', async () => {
       mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
       mockTx.creditReversal.findFirst.mockResolvedValue(null);
-      const msg = walletNotSequencedMessage('O1', 'bajaj');
+      const msg = walletNotSequencedMessage('O1', 'Bajaj Consumer Care Ltd');
       mockWalletService.v2PointsReversalCap.mockRejectedValueOnce(
-        new ReversalAttentionException('WALLET_NOT_SEQUENCED', msg, { batchId: 'b1', outletCode: 'O1', fieldId: 'f1', walletId: 'w9', program: 'bajaj' }),
+        new ReversalAttentionException('WALLET_NOT_SEQUENCED', msg, {
+          batchId: 'b1', outletCode: 'O1', fieldId: 'f1', walletId: 'w9', clientId: 'bajaj', clientName: 'Bajaj Consumer Care Ltd',
+        }),
       );
       (mockPrisma as any).auditLog = { create: jest.fn().mockResolvedValue({}) };
       const dto: CreateReversalDto = {
@@ -1020,15 +1024,21 @@ describe('CreditsService', () => {
       expect(err).toBeInstanceOf(ConflictException);
       expect(err.code).toBe('WALLET_NOT_SEQUENCED');
       expect(err.message).toBe(msg);
-      expect(err.message).toMatch(/Gifsy must run the wallet backfill for bajaj first/);
+      // B1: the client's display name + the exact next step (dry run, then APPLY) + where the steps are
+      expect(err.message).toMatch(/outlet O1 \(Bajaj Consumer Care Ltd\)/);
+      expect(err.message).toMatch(/dry run, then APPLY/);
+      expect(err.message).toMatch(/BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C/);
       expect(mockTx.creditReversal.create).not.toHaveBeenCalled();
+      // …and no one-engine marker (nothing was created)
+      expect(mockTx.auditLog.create).not.toHaveBeenCalled();
       // the refusal is audited AFTER the rolled-back tx, on the service's own client
       expect((mockPrisma as any).auditLog.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           action: 'REJECT',
           entityType: 'REVERSAL_ENGINE_REFUSAL',
           entityId: 'b1',
-          metadata: expect.objectContaining({ phase: 'CREATE', code: 'WALLET_NOT_SEQUENCED', walletId: 'w9', clientId: 'deoleo' }),
+          // the wallet's tenant (from the refusal detail) — in real use always the requester's own tenant
+          metadata: expect.objectContaining({ phase: 'CREATE', code: 'WALLET_NOT_SEQUENCED', walletId: 'w9', clientId: 'bajaj', clientName: 'Bajaj Consumer Care Ltd' }),
         }),
       });
       delete (mockPrisma as any).auditLog;
@@ -1265,16 +1275,16 @@ describe('CreditsService', () => {
         outletId: 'O1', fieldId: 'f1', batchId: 'b1',
       });
       stillPending();
-      const msg = walletNotSequencedMessage('O1', 'deoleo');
+      const msg = walletNotSequencedMessage('O1', 'Deoleo India');
       mockWalletService.v2PointsReversalCap.mockRejectedValueOnce(
-        new ReversalAttentionException('WALLET_NOT_SEQUENCED', msg, { batchId: 'b1', outletCode: 'O1', fieldId: 'f1', walletId: 'w7', program: 'deoleo' }),
+        new ReversalAttentionException('WALLET_NOT_SEQUENCED', msg, { batchId: 'b1', outletCode: 'O1', fieldId: 'f1', walletId: 'w7', clientId: 'deoleo', clientName: 'Deoleo India' }),
       );
       (mockPrisma as any).auditLog = { create: jest.fn().mockResolvedValue({}) };
       try {
         const err = await service.patchReversal(gifsy, 'r1', { action: ReversalAction.approve }).catch((e) => e);
         expect(err).toBeInstanceOf(ReversalAttentionException);
         expect(err.code).toBe('WALLET_NOT_SEQUENCED');
-        expect(err.message).toMatch(/^Can't reverse: the wallet of outlet O1 \(program deoleo\)/);
+        expect(err.message).toMatch(/^Can't reverse: the wallet of outlet O1 \(Deoleo India\)/);
         // nothing was flipped, nothing reached the wallet
         expect(mockTx.creditReversal.updateMany).not.toHaveBeenCalled();
         expect(mockWalletService.reverseCreditBatchPoints).not.toHaveBeenCalled();
@@ -1288,6 +1298,63 @@ describe('CreditsService', () => {
       } finally {
         delete (mockPrisma as any).auditLog;
       }
+    });
+
+    it('audit A1: a POINTS reversal raised under the OLD engine (no one-engine marker) → RAISED_UNDER_OLD_ENGINE before the cap / flip; audited (APPROVE)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r-old', status: 'PENDING_GIFSY', requestedPaise: BigInt(500), awardType: 'POINTS',
+        outletId: 'O1', fieldId: 'f1', batchId: 'b1', requestedAt: new Date(Date.now() - 86_400_000),
+      });
+      stillPending();
+      mockTx.auditLog.findFirst.mockResolvedValueOnce(null); // no marker
+      (mockPrisma as any).auditLog = { create: jest.fn().mockResolvedValue({}) };
+      try {
+        const err = await service.patchReversal(gifsy, 'r-old', { action: ReversalAction.approve }).catch((e) => e);
+        expect(err).toBeInstanceOf(ReversalAttentionException);
+        expect(err.code).toBe('RAISED_UNDER_OLD_ENGINE');
+        expect(err.message).toBe(RAISED_UNDER_OLD_ENGINE_MESSAGE);
+        expect(mockTx.auditLog.findFirst).toHaveBeenCalledWith({
+          where: { entityType: POINTS_REVERSAL_ENGINE_MARKER_ENTITY, entityId: 'r-old' },
+          select: { id: true },
+        });
+        expect(mockWalletService.v2PointsReversalCap).not.toHaveBeenCalled();
+        expect(mockTx.creditReversal.updateMany).not.toHaveBeenCalled();
+        expect(mockWalletService.reverseCreditBatchPoints).not.toHaveBeenCalled();
+        expect((mockPrisma as any).auditLog.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            entityType: 'REVERSAL_ENGINE_REFUSAL', entityId: 'r-old',
+            metadata: expect.objectContaining({ phase: 'APPROVE', code: 'RAISED_UNDER_OLD_ENGINE' }),
+          }),
+        });
+      } finally {
+        delete (mockPrisma as any).auditLog;
+      }
+    });
+
+    it('audit A1: reject of an old-engine POINTS reversal still works (no marker needed)', async () => {
+      mockPrisma.creditReversal.findFirst.mockResolvedValue({
+        id: 'r-old', status: 'PENDING_GIFSY', requestedPaise: BigInt(500), awardType: 'POINTS', outletId: 'O1', fieldId: 'f1', batchId: 'b1',
+      });
+      mockTx.auditLog.findFirst.mockResolvedValue(null);
+      mockTx.creditReversal.findFirst.mockResolvedValue({ id: 'r-old', status: 'REJECTED' });
+      await expect(service.patchReversal(gifsy, 'r-old', { action: ReversalAction.reject })).resolves.toMatchObject({ status: 'REJECTED' });
+      expect(mockTx.auditLog.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('audit A1: a POINTS create writes the one-engine marker in the SAME transaction', async () => {
+      mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1', status: 'CONFIRMED', period: '2026-05' });
+      mockTx.creditReversal.findFirst.mockResolvedValue(null);
+      mockTx.creditReversal.create.mockResolvedValue({ id: 'r-new' });
+      await service.createReversal(admin, 'b1', {
+        outletId: 'O1', outletName: 'A', fieldId: 'f1', fieldName: 'F',
+        awardType: CreditAwardType.POINTS, originalPaise: 300, requestedPaise: 100,
+      } as CreateReversalDto);
+      expect(mockTx.auditLog.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          action: 'CREATE', entityType: POINTS_REVERSAL_ENGINE_MARKER_ENTITY, entityId: 'r-new',
+          metadata: expect.objectContaining({ clientId: 'deoleo', batchId: 'b1', outletId: 'O1', fieldId: 'f1' }),
+        }),
+      });
     });
 
     it('POINTS approve never reads a reversal-engine setting (the mode is retired)', async () => {

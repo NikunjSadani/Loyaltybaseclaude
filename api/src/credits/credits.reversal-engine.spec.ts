@@ -8,7 +8,7 @@
 // the tables they touch, and compares the persisted result with the WP0 oracle (reversal-model.ts) — every approval
 // order. Dates: a fixed NOW with offsets; real-time stamps are normalised in snapshots (WAYS #10).
 
-import { CreditsService } from './credits.service';
+import { CreditsService, POINTS_REVERSAL_ENGINE_MARKER_ENTITY } from './credits.service';
 import { WalletService } from '../wallet/wallet.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -16,7 +16,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { CreditAwardType } from '@prisma/client';
 import { ReversalAction } from './dto/credits.dto';
 import { checkInvariants, ModelEvent, Movement, run } from '../wallet/reversal-model';
-import { ReversalAttentionException, walletNotSequencedMessage } from '../wallet/reversal-policy';
+import { RAISED_UNDER_OLD_ENGINE_MESSAGE, ReversalAttentionException, walletNotSequencedMessage } from '../wallet/reversal-policy';
 
 jest.mock('../common/reward-account.helper', () => ({
   ensureOutletAccount: jest.fn().mockResolvedValue('acc-x'),
@@ -87,6 +87,8 @@ interface WorldOpts {
   partners?: string[];
   outlets?: Record<string, string | null>; // outletCode → partnerId
   wallets?: Row[];
+  /** `clients` rows (id, internalName, branding) — B1 display name */
+  clients?: Row[];
 }
 
 function world(opts: WorldOpts = {}) {
@@ -98,6 +100,7 @@ function world(opts: WorldOpts = {}) {
     positions: [] as Row[],
     allocations: [] as Row[],
     auditLogs: [] as Row[],
+    clients: (opts.clients ?? []) as Row[],
     batches: [] as Row[],
     reversals: [] as Row[],
     partners: (opts.partners ?? ['cp1', 'cp2', 'cp3']).map((id) => ({ id, clientId: TENANT })),
@@ -212,7 +215,11 @@ function world(opts: WorldOpts = {}) {
         T.auditLogs.push(JSON.parse(JSON.stringify(data)));
         return data;
       },
+      // audit A1: patchReversal looks up the one-engine marker written at create
+      findFirst: find(T.auditLogs),
     },
+    // B1: the client's display name for the WALLET_NOT_SEQUENCED message
+    client: { findFirst: find(T.clients) },
     creditBatch: {
       findFirst: find(T.batches),
       updateMany: updateMany(T.batches),
@@ -416,7 +423,9 @@ describe('one engine for every tenant — a fresh (Deoleo-like) tenant, the safe
     expect(out.errors[2]).toBeNull(); // relinked outlet: the wallet that RECEIVED the credit (cp1) is the one reversed
     // the imported wallet with un-sequenced history: refused loudly, naming the program + outlet + what to do
     expect(out.errors[3]).toBe(`ReversalAttentionException: ${walletNotSequencedMessage('O4', TENANT)}`);
-    expect(out.errors[3]).toMatch(/Gifsy must run the wallet backfill for bajaj first/);
+    // B1: no clients row in this world → the slug; the exact next step + the runbook section
+    expect(out.errors[3]).toMatch(/outlet O4 \(bajaj\)/);
+    expect(out.errors[3]).toMatch(/Gifsy: run the wallet backfill \(dry run, then APPLY\) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C/);
     // …nothing was written for it: no reversal row, the wallet untouched by any reversal, still un-sequenced
     expect(h.T.reversals.filter((r) => r.batchId === 'B2')).toHaveLength(0);
     expect(h.w('cp3')).toMatchObject({ redeemablePoints: 400, movementSeq: 0 });
@@ -533,7 +542,9 @@ async function allOrdersV2(open: number, prefix: ModelEvent[], finals: ModelEven
       expect(r.balanceAfter).toBe(r.balanceBefore + r.pointsDelta);
       if (i > 0) expect(r.balanceBefore).toBe(rows[i - 1].balanceAfter);
     });
-    expect(h.T.auditLogs).toHaveLength(0); // V2 writes no shadow rows
+    // no shadow / refusal rows — only the A1 one-engine marker, one per reversal created
+    expect(h.T.auditLogs.filter((a) => a.entityType !== POINTS_REVERSAL_ENGINE_MARKER_ENTITY)).toHaveLength(0);
+    expect(h.T.auditLogs.map((a) => a.entityId).sort()).toEqual(h.T.reversals.map((r) => r.id).sort());
     results.push({
       B: oracle.model.state.B,
       D: oracle.model.state.D,
@@ -723,8 +734,12 @@ describe('WP4 — V2 attribution: relinked outlets (T-f1/f2), unresolved / unkno
     expect(clawback).toMatchObject({ walletId: 'w1', creditReversalId: r.id, reversedCreditTxId: h.T.positions[0].creditTxId });
   });
 
-  it('T-f2 / SAFETY GATE: the receiving wallet has un-sequenced history (or is BLOCKED) → 409 naming the program, outlet + what to do; audited; nothing written', async () => {
-    const h = world({ outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1', { redeemablePoints: 300 })] });
+  it('T-f2 / SAFETY GATE: the receiving wallet has un-sequenced history (or is BLOCKED) → 409 naming the client, outlet + what to do; audited; nothing written', async () => {
+    const h = world({
+      outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1', { redeemablePoints: 300 })],
+      // B1: the client's display name (branding.displayName) is what the admin reads, never the raw slug
+      clients: [{ id: TENANT, internalName: 'Bajaj Consumer Care', branding: { displayName: 'Bajaj Consumer Care Ltd' } }],
+    });
     h.T.batches.push({ id: 'B0', clientId: TENANT, status: 'CONFIRMED', period: '2026-04', rows: [] });
     // a pre-engine credit: metadata present, but no WalletCreditPosition (the backfill has not covered this wallet)
     h.T.walletTxns.push({
@@ -732,27 +747,34 @@ describe('WP4 — V2 attribution: relinked outlets (T-f1/f2), unresolved / unkno
       points: 300, balanceBefore: 0, balanceAfter: 300, metadata: { fieldId: 'F', outletCode: 'O1' }, createdAt: later(-9000),
     });
     expect(await errorOf(h.create('B0', 'O1', 100))).toBe(
-      "ReversalAttentionException: Can't reverse: the wallet of outlet O1 (program bajaj) has points history that has not been prepared for reversals yet. Gifsy must run the wallet backfill for bajaj first, then retry. Nothing was changed — earning and redeeming on this wallet keep working meanwhile.",
+      "ReversalAttentionException: Can't reverse: the wallet of outlet O1 (Bajaj Consumer Care Ltd) has points history that has not been prepared for reversals yet. Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C, then retry. Nothing was changed — earning and redeeming on this wallet keep working meanwhile.",
     );
     expect(h.T.reversals).toHaveLength(0);
     expect(h.T.auditLogs).toEqual([
       expect.objectContaining({
         action: 'REJECT', entityType: 'REVERSAL_ENGINE_REFUSAL', entityId: 'B0', actorId: 'client-admin',
-        metadata: expect.objectContaining({ phase: 'CREATE', code: 'WALLET_NOT_SEQUENCED', walletId: 'w1', outletId: 'O1', program: 'bajaj', reason: 'not yet prepared by the wallet backfill' }),
+        metadata: expect.objectContaining({
+          phase: 'CREATE', code: 'WALLET_NOT_SEQUENCED', walletId: 'w1', outletId: 'O1', clientId: 'bajaj',
+          clientName: 'Bajaj Consumer Care Ltd', reason: 'not yet prepared by the wallet backfill',
+        }),
       }),
     ]);
-    // the gate also holds at APPROVE: a request raised before the retirement (no position check at the time) is refused
-    // before the guarded flip — nothing flipped, nothing debited
+    // the gate also holds at APPROVE (a request carrying the one-engine marker): refused before the guarded flip —
+    // nothing flipped, nothing debited
     h.T.reversals.push({
-      id: 'R-old', clientId: TENANT, batchId: 'B0', outletId: 'O1', outletName: 'O1', fieldId: 'F', fieldName: 'Field',
+      id: 'R-new', clientId: TENANT, batchId: 'B0', outletId: 'O1', outletName: 'O1', fieldId: 'F', fieldName: 'Field',
       period: '2026-04', awardType: 'POINTS', status: 'PENDING_GIFSY', requestedPaise: 100n, originalPaise: 300n,
       approvedPaise: null, shortfallPaise: null,
     });
-    expect(await errorOf(h.approve('R-old'))).toMatch(/^ReversalAttentionException: Can't reverse: the wallet of outlet O1 \(program bajaj\)/);
-    expect(h.T.reversals.find((r) => r.id === 'R-old')!.status).toBe('PENDING_GIFSY');
+    h.T.auditLogs.push({ action: 'CREATE', entityType: POINTS_REVERSAL_ENGINE_MARKER_ENTITY, entityId: 'R-new', metadata: {} });
+    expect(await errorOf(h.approve('R-new'))).toMatch(/^ReversalAttentionException: Can't reverse: the wallet of outlet O1 \(Bajaj Consumer Care Ltd\)/);
+    expect(h.T.reversals.find((r) => r.id === 'R-new')!.status).toBe('PENDING_GIFSY');
     expect(h.w('cp1').redeemablePoints).toBe(300);
     expect(h.T.auditLogs.at(-1)!.metadata).toMatchObject({ phase: 'APPROVE', code: 'WALLET_NOT_SEQUENCED' });
     h.T.reversals.pop();
+    // B1 fallback: no branding.displayName → internalName
+    h.T.clients[0].branding = {};
+    expect(await errorOf(h.create('B0', 'O1', 100))).toMatch(/outlet O1 \(Bajaj Consumer Care\) has points history/);
     // BLOCKED by the backfill → the stored reason is what the admin sees
     Object.assign(h.T.wallets[0], { backfillStatus: 'BLOCKED', backfillBlockedReason: 'CHAIN_BROKEN: no row continues the balance chain' });
     expect(await errorOf(h.create('B0', 'O1', 100))).toMatch(/needs Gifsy attention \(CHAIN_BROKEN: no row continues the balance chain\)/);
@@ -799,7 +821,52 @@ describe('WP4 — V2 attribution: relinked outlets (T-f1/f2), unresolved / unkno
     );
     expect(h.T.reversals[0].status).toBe('PENDING_GIFSY');
     expect(h.w('cp1').redeemablePoints).toBe(300);
-    expect(h.T.auditLogs.map((a) => [a.entityType, a.entityId, a.metadata.phase])).toEqual([['REVERSAL_ENGINE_REFUSAL', r.id, 'APPROVE']]);
+    expect(h.T.auditLogs.map((a) => [a.entityType, a.entityId, a.metadata.phase])).toEqual([
+      [POINTS_REVERSAL_ENGINE_MARKER_ENTITY, r.id, undefined], // A1 marker written at create
+      ['REVERSAL_ENGINE_REFUSAL', r.id, 'APPROVE'],
+    ]);
+  });
+});
+
+describe('audit A1 — a POINTS reversal raised under the OLD engine is refused at approve (never a silent switch of rules)', () => {
+  it('no one-engine marker (requested before the retirement) → RAISED_UNDER_OLD_ENGINE, nothing flipped or written, audited; reject still works', async () => {
+    const h = world({ outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1')] });
+    await h.confirm('B1', [{ outlet: 'O1', amount: 300 }]);
+    // a pending request exactly as the LEGACY create left it: no marker row
+    h.T.reversals.push({
+      id: 'R-legacy', clientId: TENANT, batchId: 'B1', outletId: 'O1', outletName: 'O1', fieldId: 'F', fieldName: 'Field',
+      period: '2026-05', awardType: 'POINTS', status: 'PENDING_GIFSY', requestedPaise: 500n, originalPaise: 300n,
+      approvedPaise: null, shortfallPaise: null, requestedAt: later(-1000),
+    });
+    const before = JSON.stringify({ w: h.T.wallets, t: h.T.walletTxns, p: h.T.positions, a: h.T.allocations }, (_k, v) => (typeof v === 'bigint' ? String(v) : v));
+    const err = await errorOf(h.approve('R-legacy'));
+    expect(err).toBe(`ReversalAttentionException: ${RAISED_UNDER_OLD_ENGINE_MESSAGE}`);
+    expect(err).toMatch(/re-raise it/);
+    expect(h.T.reversals.find((r) => r.id === 'R-legacy')!.status).toBe('PENDING_GIFSY');
+    expect(JSON.stringify({ w: h.T.wallets, t: h.T.walletTxns, p: h.T.positions, a: h.T.allocations }, (_k, v) => (typeof v === 'bigint' ? String(v) : v))).toBe(before);
+    expect(h.T.auditLogs.filter((a) => a.entityType === 'REVERSAL_ENGINE_REFUSAL').map((a) => [a.entityId, a.metadata.phase, a.metadata.code])).toEqual([
+      ['R-legacy', 'APPROVE', 'RAISED_UNDER_OLD_ENGINE'],
+    ]);
+    // reject is never refused (it moves no points)
+    await expect(h.reject('R-legacy')).resolves.toMatchObject({ status: 'REJECTED' });
+  });
+
+  it('a reversal created now carries the marker (same transaction) and approves', async () => {
+    const h = world({ outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1')] });
+    await h.confirm('B1', [{ outlet: 'O1', amount: 300 }]);
+    const r = await h.create('B1', 'O1', 100);
+    expect(h.T.auditLogs.filter((a) => a.entityType === POINTS_REVERSAL_ENGINE_MARKER_ENTITY)).toEqual([
+      expect.objectContaining({ action: 'CREATE', entityId: r.id, actorId: 'client-admin', metadata: expect.objectContaining({ clientId: TENANT, batchId: 'B1', outletId: 'O1', fieldId: 'F' }) }),
+    ]);
+    await expect(h.approve(r.id)).resolves.toMatchObject({ status: 'APPROVED' });
+    expect(h.w('cp1').redeemablePoints).toBe(200);
+  });
+
+  it('a create refused by the gate leaves NO marker (rolled back with the transaction)', async () => {
+    const h = world({ outlets: { O1: 'cp1' }, wallets: [blankWallet('w1', 'cp1')] });
+    await h.confirm('B1', [{ outlet: 'O1', amount: 300 }]);
+    expect(await errorOf(h.create('B1', 'O1', 301))).toMatch(/exceeds/);
+    expect(h.T.auditLogs.filter((a) => a.entityType === POINTS_REVERSAL_ENGINE_MARKER_ENTITY)).toHaveLength(0);
   });
 });
 

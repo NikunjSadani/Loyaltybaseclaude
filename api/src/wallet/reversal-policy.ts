@@ -13,6 +13,7 @@ import type { PointsReversalPause, TenantSettingsService } from '../tenant/tenan
 export type ReversalAttentionCode =
   | 'WALLET_NEEDS_ATTENTION'
   | 'WALLET_NOT_SEQUENCED'
+  | 'RAISED_UNDER_OLD_ENGINE'
   | 'CREDIT_UNMAPPED'
   | 'APPROVALS_PAUSED';
 
@@ -43,17 +44,30 @@ export function walletNeedsAttentionMessage(outletCode: string, reason: string):
 /** Reason text for a wallet the backfill has never processed (status NULL, history present). */
 export const WALLET_NOT_YET_BACKFILLED_REASON = 'not yet prepared by the wallet backfill';
 
+/** The exact next step for Gifsy when wallets are not prepared for reversals (refusal, banner, digest). */
+export const BACKFILL_NEXT_STEP =
+  'Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C';
+
 /**
  * The one-engine safety gate (2026-11-21): the receiving wallet has points history the wallet backfill has not
- * sequenced. Names the program (tenant) and the outlet and says exactly what Gifsy must do. Nothing was changed.
+ * sequenced. Names the client (display name) and the outlet and says exactly what Gifsy must do. Nothing was changed.
  */
-export function walletNotSequencedMessage(outletCode: string, program: string): string {
+export function walletNotSequencedMessage(outletCode: string, clientName: string): string {
   return (
-    `Can't reverse: the wallet of outlet ${outletCode} (program ${program}) has points history that has not been ` +
-    `prepared for reversals yet. Gifsy must run the wallet backfill for ${program} first, then retry. Nothing was ` +
-    `changed — earning and redeeming on this wallet keep working meanwhile.`
+    `Can't reverse: the wallet of outlet ${outletCode} (${clientName}) has points history that has not been ` +
+    `prepared for reversals yet. ${BACKFILL_NEXT_STEP}, then retry. Nothing was changed — earning and redeeming on ` +
+    `this wallet keep working meanwhile.`
   );
 }
+
+/**
+ * Audit A1: a POINTS reversal REQUESTED before the old engine was retired is refused at approve (never silently
+ * switched to the new rules — e.g. an over-reversal now becomes debt instead of stopping at 0).
+ */
+export const RAISED_UNDER_OLD_ENGINE_MESSAGE =
+  'This points reversal was raised under the old reversal engine (before it was retired) and the rules have changed ' +
+  '— an over-reversal now becomes wallet debt instead of stopping at zero. Reject it and re-raise it so it follows ' +
+  'the current rules. Nothing was changed.';
 
 /** Readiness line (attention banner + daily ops digest) — plain words, both counts when present. */
 export function walletsNotSequencedReadinessMessage(unsequenced: number, blocked: number): string {
@@ -61,7 +75,7 @@ export function walletsNotSequencedReadinessMessage(unsequenced: number, blocked
   if (unsequenced > 0) {
     parts.push(
       `${unsequenced} ${unsequenced === 1 ? 'wallet with points history is' : 'wallets with points history are'} not yet ` +
-        `prepared for reversals — Gifsy must run the wallet backfill for this program`,
+        `prepared for reversals — ${BACKFILL_NEXT_STEP}`,
     );
   }
   if (blocked > 0) {

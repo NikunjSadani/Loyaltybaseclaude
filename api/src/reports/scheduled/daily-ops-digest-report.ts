@@ -17,6 +17,7 @@ import { isFastTrackRow, type KycFastTrackHistoryRow } from '../../kyc/kyc-fast-
 import { monthLabel } from '../../sales-import/months/month-state';
 import { emailShell, esc, intIN, rupees, sectionHeading, statRow, table } from './email-html';
 import { VISIBILITY_WORDS } from '../../visibility/visibility-report-labels';
+import { BACKFILL_NEXT_STEP } from '../../wallet/reversal-policy';
 
 /** Mirrors digest-run-state PERSISTENT_FAILURE_RUNS (kept here so this module stays import-cycle free). */
 const PERSISTENT_FAILURE_RUNS = 3;
@@ -196,7 +197,7 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
   const notSeq = t.points.ok ? t.points.data.walletsNotSequenced ?? 0 : 0;
   if (notSeq > 0) {
     push(
-      `${plural(notSeq, 'wallet', 'wallets')} with points history not yet prepared for reversals — run the wallet backfill`,
+      `${plural(notSeq, 'wallet', 'wallets')} with points history not yet prepared for reversals — ${BACKFILL_NEXT_STEP}`,
       notSeq,
     );
   }

@@ -138,7 +138,7 @@ describe('GET reversal-engine/attention (WalletService.reversalAttention)', () =
       blocked: 1,
       ready: false,
       message:
-        '4 wallets with points history are not yet prepared for reversals — Gifsy must run the wallet backfill for this program; ' +
+        '4 wallets with points history are not yet prepared for reversals — Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C; ' +
         '1 wallet was blocked by the wallet backfill — Gifsy must fix its history and re-run it. Points reversals on these wallets are refused until then.',
     });
   });
@@ -187,14 +187,15 @@ describe('reversal readiness (one engine since 2026-11-21)', () => {
   it('readinessOf / messages: plain words, singular and plural', () => {
     expect(readinessOf(0, 0)).toEqual({ unsequencedWithHistory: 0, blocked: 0, ready: true, message: null });
     expect(readinessOf(1, 0).message).toBe(
-      '1 wallet with points history is not yet prepared for reversals — Gifsy must run the wallet backfill for this program. Points reversals on these wallets are refused until then.',
+      '1 wallet with points history is not yet prepared for reversals — Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C. Points reversals on these wallets are refused until then.',
     );
     expect(readinessOf(0, 3)).toMatchObject({ ready: false });
     expect(walletsNotSequencedReadinessMessage(0, 3)).toBe(
       '3 wallets were blocked by the wallet backfill — Gifsy must fix their history and re-run it. Points reversals on these wallets are refused until then.',
     );
-    expect(walletNotSequencedMessage('O1', 'bajaj')).toBe(
-      "Can't reverse: the wallet of outlet O1 (program bajaj) has points history that has not been prepared for reversals yet. Gifsy must run the wallet backfill for bajaj first, then retry. Nothing was changed — earning and redeeming on this wallet keep working meanwhile.",
+    // B1: names the client by its display name and states the exact next step
+    expect(walletNotSequencedMessage('O1', 'Bajaj Consumer Care Ltd')).toBe(
+      "Can't reverse: the wallet of outlet O1 (Bajaj Consumer Care Ltd) has points history that has not been prepared for reversals yet. Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C, then retry. Nothing was changed — earning and redeeming on this wallet keep working meanwhile.",
     );
   });
 });

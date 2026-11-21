@@ -5,7 +5,10 @@ import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { WalletService } from '../wallet/wallet.service';
-import { assertPointsReversalsNotPaused, ReversalAttentionException } from '../wallet/reversal-policy';
+import { assertPointsReversalsNotPaused, RAISED_UNDER_OLD_ENGINE_MESSAGE, ReversalAttentionException } from '../wallet/reversal-policy';
+
+/** Audit entityType marking a POINTS reversal created under the one engine (audit A1) — entityId = the reversal id. */
+export const POINTS_REVERSAL_ENGINE_MARKER_ENTITY = 'POINTS_REVERSAL_ENGINE_MARKER';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import {
@@ -2060,7 +2063,7 @@ export class CreditsService {
         `Reversal exceeds the amount still reversible for this outlet and field in this batch (credited ${snap.credited} pts, already reversed ${snap.credited - snap.reversible} pts, pending ${snap.pending} pts, requested ${requested} pts)`,
       );
     }
-    return tx.creditReversal.create({
+    const created = await tx.creditReversal.create({
       data: {
         clientId: user.clientId,
         batchId,
@@ -2077,6 +2080,19 @@ export class CreditsService {
         ...(cleanRemarks(dto.remarks) ? { requestRemarks: cleanRemarks(dto.remarks) } : {}), // fix round B (D5)
       },
     });
+    // Audit A1 (2026-11-21): the marker that this request was raised under the current (one) engine — in the same
+    // transaction as the create. Approve refuses a POINTS reversal without it (RAISED_UNDER_OLD_ENGINE), so a request
+    // raised under the retired LEGACY rules is never silently approved under the new ones. No schema change.
+    await tx.auditLog.create({
+      data: {
+        action: 'CREATE',
+        entityType: POINTS_REVERSAL_ENGINE_MARKER_ENTITY,
+        entityId: created.id,
+        actorId: user.sub,
+        metadata: { engine: 'ONE_ENGINE_2026_11_21', clientId: user.clientId, batchId, outletId: dto.outletId, fieldId: dto.fieldId },
+      },
+    });
+    return created;
   }
 
   /**
@@ -4147,6 +4163,18 @@ export class CreditsService {
         );
         if (!cur || cur.status !== 'PENDING_GIFSY') {
           throw new BadRequestException('Reversal already processed');
+        }
+        // Audit A1: a POINTS reversal requested before the old engine was retired (no marker written by
+        // createPointsReversalV2) is refused — reject + re-raise, never a silent switch of rules. Reject stays allowed.
+        const marker = await tx.auditLog.findFirst({
+          where: { entityType: POINTS_REVERSAL_ENGINE_MARKER_ENTITY, entityId: id },
+          select: { id: true },
+        });
+        if (!marker) {
+          throw new ReversalAttentionException('RAISED_UNDER_OLD_ENGINE', RAISED_UNDER_OLD_ENGINE_MESSAGE, {
+            ...pointsKey,
+            requestedAt: reversal.requestedAt ?? null,
+          });
         }
         // Position-based approve cap + the safety gate (a receiving wallet with un-sequenced history → refused,
         // WALLET_NOT_SEQUENCED) — before the guarded flip, so a refusal writes nothing.

@@ -109,6 +109,7 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[] } = {}) {
   const outlets: Row[] = opts.outlets ?? [];
   const batches: Row[] = [];
   const reversals: Row[] = [];
+  const clients: Row[] = [{ id: 'bajaj', internalName: 'Bajaj (internal)', branding: { displayName: 'Bajaj Consumer Care Ltd' } }];
   const positionView = (p: Row) => {
     const c = walletTxns.find((t) => t.id === p.creditTxId);
     return { ...p, creditTx: { seq: c?.seq ?? null, createdAt: c?.createdAt ?? NOW } };
@@ -236,6 +237,8 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[] } = {}) {
     },
     pointExpiryConfig: { findFirst: async () => null },
     channelPartner: { findFirst: async ({ where }: any) => ({ id: where?.id, clientId: 'bajaj' }) },
+    // B1 (fix round 2026-11-21): refusals name the client's display name
+    client: { findFirst: async ({ where }: any) => clients.find((c) => c.id === where?.id) ?? null },
     $queryRaw: jest.fn(async () => []),
     $transaction: jest.fn(async (cb: any) => cb(models)),
   };
@@ -249,7 +252,7 @@ function harness(opts: { wallets?: Row[]; outlets?: Row[] } = {}) {
     },
   });
   const service = new WalletService(models as unknown as PrismaService, tenantSettings as unknown as TenantSettingsService);
-  return { service, models, wallets, walletTxns, ledger, positions, allocations, auditLogs, outlets, batches, reversals };
+  return { service, models, wallets, walletTxns, ledger, positions, allocations, auditLogs, outlets, batches, reversals, clients };
 }
 type H = ReturnType<typeof harness>;
 
@@ -1230,7 +1233,7 @@ describe('SAFETY GATE — a reversal never touches a wallet whose history is not
     });
 
   for (const status of [null, 'DONE'] as const) {
-    it(`history, movementSeq 0, backfillStatus ${status} → WALLET_NOT_SEQUENCED naming outlet + program + "run the wallet backfill"; NOTHING written`, async () => {
+    it(`history, movementSeq 0, backfillStatus ${status} → WALLET_NOT_SEQUENCED naming outlet + client display name + the exact next step; NOTHING written`, async () => {
       const h = harness({ outlets: linkedO1, wallets: [unsequenced({ backfillStatus: status })] });
       seedCredit(h);
       const before = snapshot(h);
@@ -1240,9 +1243,15 @@ describe('SAFETY GATE — a reversal never touches a wallet whose history is not
       ]) {
         const e = await call().catch((x: unknown) => x);
         expect(e).toBeInstanceOf(ReversalAttentionException);
-        expect(e).toMatchObject({ code: 'WALLET_NOT_SEQUENCED', detail: expect.objectContaining({ walletId: 'w1', program: 'bajaj', outletCode: 'O1' }) });
-        expect((e as Error).message).toMatch(/outlet O1 \(program bajaj\)/);
-        expect((e as Error).message).toMatch(/run the wallet backfill for bajaj/);
+        expect(e).toMatchObject({
+          code: 'WALLET_NOT_SEQUENCED',
+          detail: expect.objectContaining({ walletId: 'w1', clientId: 'bajaj', clientName: 'Bajaj Consumer Care Ltd', outletCode: 'O1' }),
+        });
+        expect((e as Error).message).toMatch(/outlet O1 \(Bajaj Consumer Care Ltd\)/);
+        expect((e as Error).message).toContain(
+          'Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C',
+        );
+        expect((e as Error).message).not.toMatch(/\bbajaj\b/); // never the raw slug when a name exists
         expect((e as Error).message).toMatch(/Nothing was changed/);
         expect((e as ReversalAttentionException).getStatus()).toBe(409);
       }
@@ -1270,6 +1279,58 @@ describe('SAFETY GATE — a reversal never touches a wallet whose history is not
     const e = await dispatchO1(h, 200).catch((x) => x);
     expect(e).toMatchObject({ code: 'WALLET_NOT_SEQUENCED', detail: expect.objectContaining({ walletId: 'w1' }) });
     expect(snapshot(h)).toBe(before);
+  });
+
+  it('client name falls back: no displayName → internalName; no client row → the slug', async () => {
+    for (const [clientRow, expected] of [
+      [{ id: 'bajaj', internalName: 'Bajaj Consumer Care', branding: {} }, 'Bajaj Consumer Care'],
+      [null, 'bajaj'],
+    ] as const) {
+      const h = harness({ outlets: linkedO1, wallets: [unsequenced()] });
+      h.clients.splice(0, h.clients.length, ...(clientRow ? [clientRow as Row] : []));
+      seedCredit(h);
+      const e = await dispatchO1(h, 200).catch((x) => x);
+      expect(e).toMatchObject({ code: 'WALLET_NOT_SEQUENCED', detail: expect.objectContaining({ clientName: expected }) });
+      expect(e.message).toContain(`(${expected})`);
+    }
+  });
+
+  it('A3: no position; a {fieldId}-only credit of the batch for the row amount on an un-sequenced wallet that is NOT the current partner (a previous partner) → WALLET_NOT_SEQUENCED names THAT wallet', async () => {
+    const h = harness({
+      outlets: [{ clientId: 'bajaj', outletCode: 'O1', partnerId: 'cp2' }], // relinked to cp2 (pristine wallet w2)
+      wallets: [unsequenced(), blankWallet('w2', 'cp2')],
+    });
+    h.batches.push({ id: 'B1', clientId: 'bajaj', rows: [{ outletId: 'O1', fieldId: 'F1', amount: 500, awardType: 'POINTS', status: 'OK' }] });
+    seedCredit(h, { fieldId: 'F1' }); // w1 (previous partner): fieldId-only metadata, 500 pts = the row amount
+    const before = snapshot(h);
+    const e = await dispatchO1(h, 200).catch((x) => x);
+    expect(e).toMatchObject({ code: 'WALLET_NOT_SEQUENCED', detail: expect.objectContaining({ walletId: 'w1', outletCode: 'O1' }) });
+    expect(snapshot(h)).toBe(before);
+  });
+
+  it('A3: a no-metadata credit of the batch for the row amount on a previous partner\'s un-sequenced wallet → WALLET_NOT_SEQUENCED', async () => {
+    const h = harness({ outlets: [{ clientId: 'bajaj', outletCode: 'O1', partnerId: 'cp2' }], wallets: [unsequenced(), blankWallet('w2', 'cp2')] });
+    h.batches.push({ id: 'B1', clientId: 'bajaj', rows: [{ outletId: 'O1', fieldId: 'F1', amount: 500, awardType: 'POINTS', status: 'OK' }] });
+    seedCredit(h, null);
+    const e = await dispatchO1(h, 200).catch((x) => x);
+    expect(e).toMatchObject({ code: 'WALLET_NOT_SEQUENCED', detail: expect.objectContaining({ walletId: 'w1' }) });
+  });
+
+  it('A3: a legacy credit of a DIFFERENT amount (or another field) is not a candidate → refused, but never as WALLET_NOT_SEQUENCED for that wallet', async () => {
+    for (const [meta, rowAmount, code] of [
+      [null, 777, 'CREDIT_UNMAPPED'], // no metadata, amount matches no row of the line → "unmapped"
+      [{ fieldId: 'F-OTHER' }, 500, undefined], // another field's credit → "no wallet received a credit" (400)
+    ] as const) {
+      const h = harness({ outlets: [{ clientId: 'bajaj', outletCode: 'O1', partnerId: 'cp2' }], wallets: [unsequenced(), blankWallet('w2', 'cp2')] });
+      h.batches.push({ id: 'B1', clientId: 'bajaj', rows: [{ outletId: 'O1', fieldId: 'F1', amount: rowAmount, awardType: 'POINTS', status: 'OK' }] });
+      seedCredit(h, meta as Row | null);
+      const before = snapshot(h);
+      const e = await dispatchO1(h, 200).catch((x) => x);
+      expect(e).toBeInstanceOf(Error);
+      expect((e as { code?: string }).code).toBe(code);
+      expect((e as { code?: string }).code).not.toBe('WALLET_NOT_SEQUENCED');
+      expect(snapshot(h)).toBe(before);
+    }
   });
 
   it('positions on the (sequenced) wallet that RECEIVED the credit; the outlet\'s CURRENT partner wallet is un-sequenced → NOT refused, only the receiving wallet moves', async () => {
@@ -1490,12 +1551,21 @@ describe('fix round A — L2 (positions ordered by seq, createdAt fallback)', ()
 describe('fix round A — L5 (un-sequenced wallet WITH history: pre-engine path, no lock / partner / setting read)', () => {
   const withHistory = () => blankWallet('w1', 'cp1', { redeemablePoints: 100, earnedPoints: 100, lifetimeEarned: 100 });
 
-  it('a wallet with history: no FOR UPDATE, no partner read, no tenant-setting read (the harness settings stub throws on any)', async () => {
+  it('a wallet with history: no FOR UPDATE on earn, only the redemption\'s fail-fast wallet lock (A4), no partner read, no tenant-setting read (the harness settings stub throws on any)', async () => {
     const h = harness({ wallets: [withHistory()] });
     const partner = jest.spyOn(h.models.channelPartner, 'findFirst');
     await h.service.creditEarn('cp1', 'bajaj', 50, { referenceType: 'CREDIT_BATCH', referenceId: 'B1', metadata: { fieldId: 'F1', outletCode: 'O1' } });
+    expect(h.models.$queryRaw).not.toHaveBeenCalled(); // earn: today's statements only
     await h.service.debitRedeem('cp1', 30, {});
-    expect(h.models.$queryRaw).not.toHaveBeenCalled();
+    // A4: debitRedeem takes the wallet row lock first under a 5 s lock_timeout, then restores the previous value —
+    // exactly these 4 statements, nothing else raw.
+    const sqls = (h.models.$queryRaw as jest.Mock).mock.calls.map((c) => (c[0] as string[]).join('?'));
+    expect(sqls).toEqual([
+      "SELECT current_setting('lock_timeout') AS v",
+      "SELECT set_config('lock_timeout', ?, true)",
+      'SELECT id FROM wallets WHERE id = ? FOR UPDATE',
+      "SELECT set_config('lock_timeout', ?, true)",
+    ]);
     expect(partner).not.toHaveBeenCalled();
     expect(h.wallets[0]).toMatchObject({ redeemablePoints: 120, movementSeq: 0 });
     expect(h.walletTxns.every((t) => t.seq === undefined)).toBe(true);
