@@ -17,8 +17,10 @@ let mockSettings: { visibilityEnabled?: boolean; visibilityCaptureMode?: string 
   visibilityEnabled: true,
   visibilityCaptureMode: 'PHOTO_APPROVAL',
 };
+const mockSettingsReady = { current: true };
 vi.mock('@/lib/gifsy-settings', () => ({
   useGifsySettings: () => mockSettings,
+  useGifsySettingsReady: () => mockSettingsReady.current,
 }));
 
 // Hoisted so the vi.mock factory (itself hoisted) can reference them. `searchState.outletId`
@@ -102,6 +104,7 @@ const MANAGER_RESP: SalesEligibleResponse = {
 
 beforeEach(() => {
   mockSettings = { visibilityEnabled: true, visibilityCaptureMode: 'PHOTO_APPROVAL' };
+  mockSettingsReady.current = true;
   getSalesEligible.mockReset();
   mockPush.mockReset();
   searchState.outletId = '';
@@ -155,6 +158,15 @@ describe('VIS — Sales Visibility list', () => {
     mockSettings = { visibilityEnabled: false, visibilityCaptureMode: 'PHOTO_APPROVAL' };
     render(<SalesVisibilityPage />);
     expect(await screen.findByText(/not enabled for your organization/i)).toBeInTheDocument();
+    expect(getSalesEligible).not.toHaveBeenCalled();
+  });
+
+  it('VIS3b: settings not applied yet (hydration) → skeleton, NOT the not-enabled panel, no fetch', () => {
+    mockSettingsReady.current = false;
+    mockSettings = { visibilityEnabled: false, visibilityCaptureMode: 'PHOTO_APPROVAL' };
+    render(<SalesVisibilityPage />);
+    expect(screen.getByTestId('visibility-settings-loading')).toBeInTheDocument();
+    expect(screen.queryByText(/not enabled for your organization/i)).not.toBeInTheDocument();
     expect(getSalesEligible).not.toHaveBeenCalled();
   });
 

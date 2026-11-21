@@ -49,12 +49,16 @@ function isSnoozed(): boolean {
 }
 
 export default function InstallPrompt({ tenantSlug }: { tenantSlug?: string }) {
-  const { canInstall, installed, promptInstall } = useInstallPrompt();
+  const { canInstall, installed, ready, promptInstall } = useInstallPrompt();
   // 'mode' is set once the mount-time gates pass; it also picks the banner copy
   // (android = custom install button, ios = manual Share instructions).
   const [mode, setMode] = useState<'android' | 'ios' | null>(null);
 
   useEffect(() => {
+    // Gate 0: never decide on the SSR-default install state (installed=false) during hydration.
+    if (!ready) return;
+    // Installed (incl. flipping true later) → no prompt; clear any mode already chosen.
+    if (installed) { setMode(null); return; }
     // Gate 1: the global flag OR the tenant being Bajaj. Other tenants stay flag-only
     // (default OFF) → byte-identical.
     const bajaj = (tenantSlug ?? '').trim().toLowerCase() === 'bajaj';
@@ -62,14 +66,13 @@ export default function InstallPrompt({ tenantSlug }: { tenantSlug?: string }) {
     if (typeof window === 'undefined') return;
     // Gate 2: only inside the /sales + /partner shells.
     if (!inScope(window.location.pathname)) return;
-    // Gate 3: already installed => the store's `installed` already suppresses.
-    if (installed) return;
+    // Gate 3 (already installed) is handled at Gate 0 above.
     // Gate 4: respect an active snooze.
     if (isSnoozed()) return;
 
     // iOS Safari never fires beforeinstallprompt — offer the manual instruction.
     setMode(isIosSafari() ? 'ios' : 'android');
-  }, [installed, tenantSlug]);
+  }, [installed, ready, tenantSlug]);
 
   const snooze = () => {
     try {

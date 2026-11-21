@@ -36,7 +36,7 @@ vi.mock('@/lib/admin-session', () => ({
   adminRoleLabel: (r: string) => r,
 }));
 vi.mock('@/lib/gifsy-settings', () => ({ useGifsySettings: () => ({ visibilityEnabled: false }) }));
-vi.mock('@/lib/use-assumed-context', () => ({ useAssumedContext: () => ({ assumed: true }) }));
+vi.mock('@/lib/use-assumed-context', () => ({ useAssumedContext: () => ({ brand: 'Bajaj', assumed: true, ready: true }) }));
 vi.mock('@/lib/auth-client', () => ({
   logout: vi.fn(),
   PORTAL_ROLES: { admin: ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER', 'GIFSY_STAFF'] },

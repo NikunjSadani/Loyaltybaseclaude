@@ -20,7 +20,7 @@
 
 import { useState } from 'react';
 import { Settings2, ClipboardList, Camera, BarChart3 } from 'lucide-react';
-import { useGifsySettings } from '@/lib/gifsy-settings';
+import { useGifsySettings, useGifsySettingsReady } from '@/lib/gifsy-settings';
 import { VisibilityConfigEditor } from '@/components/admin/VisibilityConfigEditor';
 import { VisibilityFormBuilder } from '@/components/admin/VisibilityFormBuilder';
 import { VisibilityCaptureQueue } from '@/components/admin/VisibilityCaptureQueue';
@@ -41,6 +41,17 @@ export default function VisibilityAdminPage() {
   const visibilityEnabled = settings.visibilityEnabled === true;
   const captureMode = settings.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
   const [tab, setTab] = useState<Tab>('config');
+  // false only while hydrating (settings = SSR defaults, Visibility OFF) — never show the
+  // "disabled" note on that default; render a neutral skeleton instead.
+  const settingsReady = useGifsySettingsReady();
+
+  if (!settingsReady) {
+    return (
+      <div className="py-20" data-testid="visibility-settings-loading" aria-busy="true">
+        <div className="mx-auto h-4 w-48 rounded bg-gray-100 animate-pulse" />
+      </div>
+    );
+  }
 
   if (!visibilityEnabled) {
     return (

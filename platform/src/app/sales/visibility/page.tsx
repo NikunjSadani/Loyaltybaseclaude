@@ -32,7 +32,7 @@ import {
   actionableStateLabel,
   type CaptureUiState, type SalesEligibleOutlet, type SalesEligibleResponse,
 } from '@/lib/visibility-types';
-import { useGifsySettings } from '@/lib/gifsy-settings';
+import { useGifsySettings, useGifsySettingsReady } from '@/lib/gifsy-settings';
 import { VisibilityCaptureSheet } from './VisibilityCaptureSheet';
 
 /* ─── Window-state presentation ──────────────────────────────────────────────── */
@@ -106,6 +106,8 @@ function FilterPill({
 
 function SalesVisibilityContent() {
   const settings = useGifsySettings();
+  // false only while hydrating (settings = SSR defaults) — see useGifsySettingsReady.
+  const settingsReady = useGifsySettingsReady();
   const captureMode = settings.visibilityCaptureMode ?? 'PHOTO_APPROVAL';
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -127,6 +129,8 @@ function SalesVisibilityContent() {
   const isPhotoMode = settings.visibilityEnabled === true && captureMode === 'PHOTO_APPROVAL';
 
   useEffect(() => {
+    // Never decide on the SSR-default settings (Visibility OFF) — wait for the client cache.
+    if (!settingsReady) return;
     if (!isPhotoMode) { setLoading(false); return; }
     let cancelled = false;
     setLoading(true);
@@ -141,7 +145,7 @@ function SalesVisibilityContent() {
       .catch(() => { if (!cancelled) setError('Failed to load visibility outlets.'); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [isPhotoMode]);
+  }, [isPhotoMode, settingsReady]);
 
   // Effective state — a fresh session capture overrides the server row; otherwise a
   // per-photo CHANGES_REQUESTED capture maps to the 'changes_requested' label (robust to
@@ -245,6 +249,16 @@ function SalesVisibilityContent() {
       )}
     </div>
   );
+
+  // Settings not applied yet (hydration render) → neutral skeleton, never the "not enabled" panel.
+  if (!settingsReady) {
+    return (
+      <div className="fade-in">
+        {header}
+        <div className="min-h-40 rounded-xl bg-gray-100 animate-pulse" data-testid="visibility-settings-loading" aria-busy="true" />
+      </div>
+    );
+  }
 
   // Master switch OFF → whole surface hidden.
   if (settings.visibilityEnabled !== true) {

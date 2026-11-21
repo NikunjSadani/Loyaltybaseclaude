@@ -13,8 +13,9 @@
 
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 import { api } from '@/lib/api-client';
+import { useHydrated } from '@/lib/use-hydrated';
 import type { GifsySettings } from '@/types';
 
 const SETTINGS_KEY = 'gifsy_settings_v1';
@@ -298,14 +299,50 @@ export async function saveGifsySettingsDetailed(partial: Partial<GifsySettings>)
   return allOk ? { ok: true } : { ok: false, ...(firstError ? { error: firstError } : {}) };
 }
 
+// ── useSyncExternalStore plumbing (hydration-safe) ────────────────────────────
+// The store is seeded from localStorage on the client but is DEFAULT_SETTINGS on the server, so
+// reading it during the HYDRATION render would make the first client render differ from the SSR
+// HTML (React error #418 — e.g. the admin nav's Visibility item). useSyncExternalStore renders the
+// SERVER snapshot during hydration and then re-renders with the client value; a component that
+// mounts after hydration (client navigation) gets the cached client value straight away.
+function subscribeGifsySettings(onChange: () => void): () => void {
+  listeners.add(onChange);
+  ensureCrossTabSync();
+  return () => { listeners.delete(onChange); };
+}
+
+// Cross-tab: another tab's writeCache fires a `storage` event here → re-seed the store from the
+// cache and notify, so a settings change (e.g. Visibility switched off) applies in every open tab.
+let crossTabAttached = false;
+function ensureCrossTabSync(): void {
+  if (crossTabAttached || typeof window === 'undefined') return;
+  crossTabAttached = true;
+  window.addEventListener('storage', (e: StorageEvent) => {
+    if (e.key !== SETTINGS_KEY && e.key !== null) return; // null = storage cleared
+    store = loadCache();
+    listeners.forEach((l) => l());
+  });
+}
+
+/** True once the client cache is applied (false during SSR + the hydration render, where the
+ *  hook returns DEFAULT_SETTINGS). Gate any "feature is OFF" panel / redirect / request on it. */
+export function useGifsySettingsReady(): boolean {
+  return useHydrated();
+}
+/** Client snapshot — the live store (replaced, never mutated, by writeCache → stable identity). */
+export function getGifsySettingsSnapshot(): GifsySettings { return store; }
+/** Server / hydration snapshot — exactly what the server renders (no localStorage there). */
+export function getGifsySettingsServerSnapshot(): GifsySettings { return DEFAULT_SETTINGS; }
+
 /** Reactive hook — re-renders on hydrate/save and refreshes from the server on mount. */
 export function useGifsySettings(): GifsySettings {
-  const [snapshot, setSnapshot] = useState<GifsySettings>(store);
+  const snapshot = useSyncExternalStore(
+    subscribeGifsySettings,
+    getGifsySettingsSnapshot,
+    getGifsySettingsServerSnapshot,
+  );
   useEffect(() => {
-    const sync = () => setSnapshot(store);
-    listeners.add(sync);
     void refreshGifsySettings();
-    return () => { listeners.delete(sync); };
   }, []);
   return snapshot;
 }
