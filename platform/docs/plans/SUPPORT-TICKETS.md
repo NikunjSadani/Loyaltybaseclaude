@@ -92,8 +92,7 @@ column, table layout, inline styles (mobile-friendly, no CSS grid). Subject:
 `Remarks needed: <TKT> · <Category> · Outlet <code>` (or `· no outlet linked`). Blocks, in order:
 
 1. **The ask** (highlighted): "<Gifsy person> (Gifsy support) needs your remarks:", the note verbatim, "Asked on
-   <IST>" (no "Asked: <admin>" line — removed by the owner 2026-11-21; shared readers see the admin's name in
-   "needs remarks from <admin>").
+   <IST>" (no "Asked: <admin>" line — removed by the owner 2026-11-21). Shared copies use neutral wording (below).
 2. **Open ticket & reply** button + "Please reply in the portal — replies to this email are not read." (true: the
    MSG91 SMTP sender has no inbound/reply processing anywhere in the codebase).
 3. **Ticket**: number · category · priority · status "Awaiting your remarks" · raised on <date> (N days ago).
@@ -136,8 +135,7 @@ and "Last changed by X on date" (audit log) sit under Save. Phone-width: chips w
   "Email sent to <to list> (client's ticket remarks inbox)[, cc <list>] — asked: <name>".
 - **To blank, CC set** → To the chosen admin's own email (as before; their address is dropped from CC if listed),
   Cc the CC list; note "Email sent to <name> (<their email>), cc <list>". If the admin has no email (owner decision
-  2026-11-21) the CC list receives it AS the To recipients (no Cc), body worded like the inbox case ("Hello," +
-  "needs remarks from <name>"), `emailRecipientKind: 'CC_ONLY'`, note "Email sent to the client's CC list <list> — <name> (the
+  2026-11-21) the CC list receives it AS the To recipients (no Cc), body = the neutral shared copy (below), `emailRecipientKind: 'CC_ONLY'`, note "Email sent to the client's CC list <list> — <name> (the
   admin asked) has no email address on file". No To, no CC, no admin email → NOT sent, as before.
 - **Both blank** (default — every tenant today incl. Deoleo) → byte-identical to before: the chosen admin's own email,
   no `cc` key on the send, "Hi <name>" greeting, outcome note "Email sent to <name> (<their email>)".
@@ -148,9 +146,12 @@ and "Last changed by X on date" (audit log) sit under Save. Phone-width: chips w
   the outcome is NOT sent (`emailSent: false`, `emailCcOnlyDelivered: true`, reason "NOT delivered to anyone in To;
   copied to CC only (…)") — note and toast say exactly that. Relay acceptance ≠ inbox delivery: a later bounce is not
   visible (no DLR for SMTP email).
-- **Email copy for shared readers** (inbox / CC / CC-only): "needs remarks from <asked or 'your team'>", "Ask
-  <asked> (or another client admin) to reply in the portal.", button "Open ticket (portal login needed)", status "Awaiting remarks from
-  <asked>". The chosen-admin-with-no-CC email (every tenant's default) keeps its personal copy unchanged. The
+- **Email copy for shared readers** (inbox To / any CC list — incl. To = the chosen admin WITH a CC — / CC-only): ONE
+  neutral copy for every recipient, To and Cc alike, that never refers a reader to themselves (audit fix 2026-11-21):
+  "Hello,", "<Gifsy person> (Gifsy support) needs remarks on this ticket:", "This ticket needs remarks from <client>.
+  Please reply in the portal (sign in as a client admin).", button "Open ticket (portal login needed)", status
+  "Awaiting remarks from <client>". <client> = `branding.displayName` → `Client.internalName` → "your team". The
+  chosen-admin-with-no-CC email (every tenant's default) keeps its personal copy unchanged ("Hi <name>", "your remarks"). The
   "Asked: <name>" meta line and the "If you received this as a Cc, you're copied for information." line were removed
   from ALL remarks emails (owner 2026-11-21).
 - **PUT semantics**: a key that is absent leaves that list unchanged (`{ to }` alone keeps CC and vice versa); `[]`
