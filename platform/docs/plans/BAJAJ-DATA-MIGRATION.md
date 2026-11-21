@@ -5,6 +5,12 @@
 DB `gifsy_staging`. Prod is a later, owner-gated step.
 **Last updated:** 2026-11-02.
 
+> **Client-migration rule (2026-11-21, every migrating client):** after importing points history, run the wallet
+> backfill (DRY RUN → backup → APPLY → VERIFY — `WALLET-REVERSAL-ENGINE-DESIGN.md` §9.1) **before the client's first
+> points reversal**. The credits screen's readiness line and the Daily Ops Digest show "N wallets … not yet prepared
+> for reversals" until it is done, and every reversal touching such a wallet is refused (`WALLET_NOT_SEQUENCED`) —
+> the LEGACY engine that used to accept them is retired (`WALLET-REVERSAL-ENGINE-DESIGN.md` §0).
+
 > ⚠️ **TENANT-SAFETY RULE (learned the hard way):** on 2026-10-30 a Bajaj hierarchy file was
 > bulk-uploaded into the **Deoleo** staging tenant by mistake (1,048 rows; cleaned up 2026-10-31).
 > EVERY import in this effort MUST assert the target tenant is `bajaj` before any write. Never run a

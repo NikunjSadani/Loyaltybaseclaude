@@ -12,7 +12,8 @@
 > Anything marked **UNVERIFIED — needs check** could not be proven from the repo.
 
 **Classification:** all three are **TENANT-SCOPED** (Bajaj only). Deoleo: no flag change, no content, no backfill
-(owner 2026-11-16: Deoleo stays LEGACY with no backfill). Every run below uses `TENANTS=bajaj` / slug `bajaj` only.
+(owner 2026-11-16: Deoleo stays LEGACY with no backfill — superseded 2026-11-21: LEGACY is retired for every tenant;
+Deoleo still needs no backfill, it has no wallet history to sequence). Every run below uses `TENANTS=bajaj` / slug `bajaj` only.
 
 **Common conventions**
 - Ops identity (keyless): append `--account=<owner> --impersonate-service-account=gifsy-ops@gifsy-platform.iam.gserviceaccount.com --project=gifsy-platform`
@@ -179,6 +180,16 @@ poster objects are deleted from the bucket). Or switch `helpVideos` off (all mem
 
 ## C. Bajaj prod wallet backfill → VERIFY → switch reversal engine LEGACY → V2
 
+> **⚠️ UPDATE 2026-11-21 — C6 is OBSOLETE.** The backfill (C1–C5) was APPLIED on Bajaj prod (2,281 wallets sequenced,
+> 0 blocked, 0 un-sequenced with history, 8 debt wallets 3,549 pts). The owner then retired the LEGACY engine for every
+> tenant (branch `feat/retire-legacy-wallet-engine`, WALLET-REVERSAL-ENGINE-DESIGN.md §0): once that release is on
+> prod, every tenant runs the one engine and **the `reversal-engine/mode` endpoint no longer exists — do NOT run C6**.
+> Deoleo has nothing to backfill. Instead, before the first Bajaj credit reversal after that deploy: open Credits →
+> Payout Status as Gifsy (Bajaj) and check the readiness line ("N wallets … not yet prepared for reversals"); if it
+> shows any, re-run C1–C5 for Bajaj (wallets created or credited between the backfill and the deploy were written
+> un-sequenced while prod was still LEGACY). A reversal on such a wallet is refused (`WALLET_NOT_SEQUENCED`) — never
+> applied the old way. The C6 / rollback text below is kept as history only.
+
 ### What it does (plain words)
 The Wallet Reversal Engine (V2) needs every Bajaj wallet's history numbered in order and each credit's "how much debt
 did it repay" recorded. The **backfill** writes that bookkeeping only — movement sequence numbers, ledger links, credit
@@ -292,7 +303,8 @@ SELECT count(*) FROM wallets w JOIN channel_partners cp ON cp.id = w."partnerId"
 WHERE cp."clientId" = 'deoleo' AND (w."movementSeq" > 0 OR w."debtPoints" <> 0 OR w."backfillStatus" IS NOT NULL);
 ```
 
-**C6. Switch Bajaj to V2** (owner, GIFSY_ADMIN). There is **no console button** for this — the only write path is
+**C6. Switch Bajaj to V2** — ⚠️ OBSOLETE (engine retired 2026-11-21 — see the update box at the top of §C; the
+endpoint below is removed in `feat/retire-legacy-wallet-engine`). History: (owner, GIFSY_ADMIN). There is **no console button** for this — the only write path is
 `POST /v1/admin/credits/reversal-engine/mode` (GIFSY_ADMIN + `credits:approve_reversal`; the generic settings upsert
 refuses the key). The FE proxies `/api/*` → `/v1/*`, so from a logged-in prod console tab (browser DevTools console):
 ```js
