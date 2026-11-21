@@ -7,7 +7,8 @@
  *                                                      identical OR every change is explained by movement rows added
  *                                                      since ("live activity since the APPLY baseline: +X earned /
  *                                                      −Y redeemed — explained"); an unexplained change FAILS]
- *   [NEVER_NEGATIVE_TENANTS=deoleo]                  ← default "deoleo" (V5)
+ *   [NEVER_NEGATIVE_TENANTS=<tenant,…>]              ← V5; NO default (owner 2026-11-21: Deoleo wallets may go
+ *                                                      negative too) — V5 checks only the tenants named here
  *   [EXPECTED_NEGATIVE_BALANCES='{"bajaj":{"<walletId>":-840,…}}']  ← V6b, by wallet id (or the legacy list of values
  *     '{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}'); compared with each wallet's balance at the CUTOVER
  *     node dist/wallet/backfill/verify.main.js
@@ -51,7 +52,8 @@ export function verifyConfigFromEnv(env: NodeJS.ProcessEnv): VerifyConfig {
     expectedDb: env.EXPECTED_DB?.trim() || undefined,
     tenants: list(env.TENANTS),
     v0Baseline: baseline,
-    neverNegativeTenants: new Set(list(env.NEVER_NEGATIVE_TENANTS) ?? ['deoleo']),
+    // No default (owner 2026-11-21): any tenant's wallets may go negative now; V5 only for tenants named explicitly.
+    neverNegativeTenants: new Set(list(env.NEVER_NEGATIVE_TENANTS) ?? []),
     expectedNegatives: negatives,
   };
 }

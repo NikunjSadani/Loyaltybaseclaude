@@ -1653,9 +1653,11 @@ model HeldOpeningBalance {
   createdBy       String?
   updatedAt       DateTime                 @updatedAt
 
-  // + partial unique index held_opening_balances_one_live_per_outlet (clientId, outletCode) WHERE status IN
-  //   ('PENDING','FAILED','APPLIED') — migration 20261121100000 (Prisma can't express partial indexes): ONE live
-  //   held balance per outlet, enforced by the database (no double posting via reloads / Apply now).
+  // ⚠️ DO NOT DROP: partial unique index held_opening_balances_one_live_per_outlet (clientId, outletCode) WHERE status
+  //   IN ('PENDING','FAILED','APPLIED') lives in migration 20261121100000 (Prisma can't express partial indexes, so
+  //   `migrate dev` / `migrate diff` will propose dropping it — never accept that). ONE live held balance per outlet,
+  //   enforced by the database (no double posting via reloads / Apply now). Existence tested in
+  //   held-balances.pglite.spec.ts; rule in platform/docs/plans/MIGRATIONS.md.
   @@unique([clientId, outletCode, source])
   @@index([clientId, status])
   @@index([clientId, outletCode])

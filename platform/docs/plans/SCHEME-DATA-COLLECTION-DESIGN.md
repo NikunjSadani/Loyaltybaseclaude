@@ -438,3 +438,14 @@ columns (`SchemeOutlet.prefillValues`, unioned + de-collided), Outlet Name falli
 Tagged + a "Submitted By (Employee)" employeeCode column, ABSOLUTE media links (from `x-forwarded-host`) that open from
 the file, grouped columns + a "Columns" legend sheet. Backend `scheme-report.service.exportEnrollments` + controller
 `@Req`.
+
+## §18 — Scheme media access ("Open photo" links, 2026-11-21, owner-approved platform-wide) — in `release/next2`
+Scheme Excel exports carry signed-in **"Open photo" / "Open file"** links (`/schemes/photo?key=…` →
+`GET /v1/schemes/media/file?key=`; no tokens minted; the old `/v1/schemes/media/view?token=` stays for earlier
+downloads). Who can open a scheme media file (`scheme-media/<tenant>/<YYYY-MM>/<name>`):
+- **CLIENT_ADMIN of the tenant, and GIFSY_ADMIN / granted GIFSY_STAFF working inside the tenant (assumed)** — EVERY
+  scheme media file of that tenant (tenant-wide, like the admin scheme screens and exports; `schemes:read`).
+- **SALES_* logins** — only media held by a LIVE enrollment / submitted version on a non-removed roster row in their
+  reach (tagged in their downline, submitted by self / team, or the matched outlet / partner assigned in the team).
+- **Partner logins** — only an operable partner's own records / own submissions.
+- Another tenant's key → 403 (no existence leak); anything outside the reach above → 403.

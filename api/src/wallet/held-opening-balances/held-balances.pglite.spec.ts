@@ -96,10 +96,24 @@ describe('auto apply (post-commit KYC / sweep) — real Postgres', () => {
     expect(await prisma.walletTransaction.count({ where: { walletId: 'w_cp1' } })).toBe(4);
   });
 
-  it('a DB error mid-posting rolls the WHOLE transaction back (nothing partial), keeps the row PENDING for retry, then FAILED after the attempt cap', async () => {
+  it('a deterministic DB error mid-posting (not connectivity / serialization) rolls back and is FAILED at once — no 5 retries', async () => {
     await partner('cp1', 'bajaj', ['50100001'], true);
     const h = await held('50100001');
-    await q(`CREATE OR REPLACE FUNCTION held_fail_fn() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'disk full (test)'; END $$ LANGUAGE plpgsql`);
+    await q(`CREATE OR REPLACE FUNCTION held_fail_fn() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'guard tripped (test)'; END $$ LANGUAGE plpgsql`);
+    await q(`CREATE TRIGGER held_fail BEFORE INSERT ON points_ledger FOR EACH ROW EXECUTE FUNCTION held_fail_fn()`);
+    const r = await applyHeldRow(prisma, h.id, { trigger: 'SWEEP', allowedFrom: ['PENDING'] });
+    expect(r.status).toBe('FAILED');
+    expect(await prisma.walletTransaction.count()).toBe(0);
+    const row = await prisma.heldOpeningBalance.findUniqueOrThrow({ where: { id: h.id } });
+    expect([row.status, row.attempts]).toEqual(['FAILED', 0]);
+    expect(row.failureReason).toMatch(/guard tripped/);
+    expect(await prisma.notificationQueue.count({ where: { userId: 'gadmin', channel: 'IN_APP' } })).toBe(1);
+  });
+
+  it('a TRANSIENT DB error (serialization failure 40001) rolls the WHOLE transaction back, keeps the row PENDING for retry, then FAILED after the attempt cap', async () => {
+    await partner('cp1', 'bajaj', ['50100001'], true);
+    const h = await held('50100001');
+    await q(`CREATE OR REPLACE FUNCTION held_fail_fn() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'could not serialize access (test)' USING ERRCODE = '40001'; END $$ LANGUAGE plpgsql`);
     await q(`CREATE TRIGGER held_fail BEFORE INSERT ON points_ledger FOR EACH ROW EXECUTE FUNCTION held_fail_fn()`);
     const first = await applyHeldRow(prisma, h.id, { trigger: 'SWEEP', allowedFrom: ['PENDING'] });
     expect(first.status).toBe('RETRYING');
@@ -107,11 +121,11 @@ describe('auto apply (post-commit KYC / sweep) — real Postgres', () => {
     expect((await w('w_cp1')).redeemablePoints).toBe(0);
     let row = await prisma.heldOpeningBalance.findUniqueOrThrow({ where: { id: h.id } });
     expect([row.status, row.attempts]).toEqual(['PENDING', 1]);
-    expect(row.lastError).toMatch(/disk full/);
+    expect(row.lastError).toMatch(/write conflict or a deadlock|serialize/);
     for (let i = 1; i < HELD_MAX_ATTEMPTS; i++) await applyHeldRow(prisma, h.id, { trigger: 'SWEEP', allowedFrom: ['PENDING'] });
     row = await prisma.heldOpeningBalance.findUniqueOrThrow({ where: { id: h.id } });
     expect(row.status).toBe('FAILED');
-    expect(row.failureReason).toMatch(/gave up after 5 attempts — last error: .*disk full/);
+    expect(row.failureReason).toMatch(/gave up after 5 attempts — last error: [\s\S]*(write conflict or a deadlock|serialize)/);
     expect(await prisma.notificationQueue.count({ where: { userId: 'gadmin', channel: 'IN_APP' } })).toBe(1);
   });
 
@@ -146,6 +160,31 @@ describe('auto apply (post-commit KYC / sweep) — real Postgres', () => {
     await held('50100002');
     const out = await sweepHeldOpeningBalances(prisma);
     expect(out.map((o) => [o.outletCode, o.status])).toEqual([['50100001', 'APPLIED']]);
+  });
+
+  it('A1: the sweep pages through ALL eligible rows by cursor; any number of rows waiting for KYC can never starve them', async () => {
+    for (let i = 0; i < 30; i++) await held(`NOPORTAL${String(i).padStart(3, '0')}`); // never selected (no outlet / wallet)
+    for (let i = 0; i < 5; i++) await partner(`cpS${i}`, 'bajaj', [`5020000${i}`], true);
+    for (let i = 0; i < 5; i++) await held(`5020000${i}`);
+    const out = await sweepHeldOpeningBalances(prisma, { pageSize: 2 });
+    expect(out.map((o) => o.status)).toEqual(['APPLIED', 'APPLIED', 'APPLIED', 'APPLIED', 'APPLIED']);
+    expect(await prisma.heldOpeningBalance.count({ where: { status: 'PENDING' } })).toBe(30);
+  });
+
+  it('A4: ONE pristine predicate — a wallet with only a ledger row (all figures 0) is NOT empty: never auto-applied', async () => {
+    await partner('cp1', 'bajaj', ['50100001'], true);
+    await q(`INSERT INTO points_ledger (id,"walletId","transactionType",points,"updatedAt") VALUES ('plx','w_cp1','LOCK',0,now())`);
+    await held('50100001');
+    expect(await sweepHeldOpeningBalances(prisma)).toEqual([]);
+    const r = await runHeldForPartner(prisma, { partnerId: 'cp1', clientId: 'bajaj', trigger: 'KYC_APPROVAL' });
+    expect(r[0].status).toBe('NOT_PREPARED');
+    expect((await svc.list(GIFSY, {})).rows[0].state).toBe('WALLET_NOT_PREPARED');
+  });
+
+  it('B4: the partial unique index exists after the migration (do-not-drop rule)', async () => {
+    const r = await q(`SELECT indexdef FROM pg_indexes WHERE indexname = 'held_opening_balances_one_live_per_outlet'`);
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0].indexdef).toMatch(/UNIQUE INDEX .*\("clientId", "outletCode"\) WHERE .*PENDING.*FAILED.*APPLIED/);
   });
 
   it('outlet codes match after normalising (trim / upper-case / internal spaces) — leading zeros are NOT stripped', async () => {
@@ -214,15 +253,16 @@ describe('Apply now (console) — real WalletService', () => {
     expect((await w('w_cp1')).redeemablePoints).toBe(640);
   });
 
-  it('V2-only: an active wallet that is NOT sequenced → FAILED with the reason, rolled back (never applied-but-unsequenced)', async () => {
+  it('B5: an active wallet that is NOT sequenced → nothing written, the row stays PENDING "Wallet not prepared" (amber, not FAILED)', async () => {
     await partner('cp1', 'bajaj', ['50100001'], true);
     await unsequencedHistory('w_cp1', 40); // history the wallet backfill has not sequenced yet
     expect(await prisma.wallet.count({ where: unsequencedWithHistoryWhere('bajaj') })).toBe(1); // counted until the backfill runs
     const h = await held('50100001');
-    expect((await svc.preview(GIFSY, h.id)).blockedReason).toMatch(/not sequenced/);
-    const r = await svc.applyNow(GIFSY, h.id);
-    expect(r.status).toBe('FAILED');
-    expect(r.failureReason).toMatch(/not sequenced for the V2 engine/);
+    expect((await svc.preview(GIFSY, h.id)).blockedReason).toMatch(/Wallet not prepared — run the wallet backfill, then Apply now/);
+    await expect(svc.applyNow(GIFSY, h.id)).rejects.toThrow(/Wallet not prepared — run the wallet backfill, then Apply now/);
+    const row = await prisma.heldOpeningBalance.findUniqueOrThrow({ where: { id: h.id } });
+    expect([row.status, row.failureReason]).toEqual(['PENDING', null]);
+    expect((await svc.list(GIFSY, {})).rows[0]).toEqual(expect.objectContaining({ state: 'WALLET_NOT_PREPARED', stateLabel: 'Wallet not prepared — run the wallet backfill, then Apply now' }));
     expect((await w('w_cp1')).redeemablePoints).toBe(40);
     expect(await prisma.walletTransaction.count({ where: { walletId: 'w_cp1' } })).toBe(1);
   });
@@ -262,7 +302,8 @@ describe('credit confirm ordering — the held passbook lands BEFORE the credit'
       outletCodes: ['50100001'],
       ensureWallet: async (pid) => { await prisma.wallet.upsert({ where: { partnerId: pid }, create: { id: `w_${pid}`, partnerId: pid }, update: {} }); },
     });
-    expect(out[0].status).toBe('APPLIED');
+    expect(out.blocking).toEqual([]);
+    expect(out.outcomes[0].status).toBe('APPLIED');
     await wallet.creditEarn('cp1', 'bajaj', 50, { referenceType: 'MANUAL' });
     const txs = await prisma.walletTransaction.findMany({ where: { walletId: 'w_cp1' }, orderBy: { seq: 'asc' } });
     expect(txs.map((t) => t.seq)).toEqual([1, 2, 3, 4, 5]);
@@ -271,7 +312,22 @@ describe('credit confirm ordering — the held passbook lands BEFORE the credit'
 
   it('dormant: a tenant without PENDING rows is one count and nothing else', async () => {
     await partner('cp1', 'bajaj', ['50100001'], false);
-    expect(await prepareHeldBeforeCredit(prisma, { clientId: 'bajaj', outletCodes: ['50100001'], ensureWallet: async () => { throw new Error('must not run'); } })).toEqual([]);
+    expect(await prepareHeldBeforeCredit(prisma, { clientId: 'bajaj', outletCodes: ['50100001'], ensureWallet: async () => { throw new Error('must not run'); } })).toEqual({ outcomes: [], blocking: [] });
+  });
+
+  it('A2: a held balance that does NOT post (FAILED now, or FAILED earlier) BLOCKS the credit for that outlet — the wallet stays empty', async () => {
+    await partner('cp1', 'bajaj', ['50100001'], false);
+    await partner('cp2', 'bajaj', ['50100002'], true);
+    await held('50100001', { closingPoints: 601 }); // passbook does not tie out → FAILED in the pre-step
+    await held('50100002', { status: 'FAILED', failureReason: 'earlier problem' });
+    const out = await prepareHeldBeforeCredit(prisma, {
+      clientId: 'bajaj',
+      outletCodes: ['50100001', '50100002'],
+      ensureWallet: async (pid) => { await prisma.wallet.upsert({ where: { partnerId: pid }, create: { id: `w_${pid}`, partnerId: pid }, update: {} }); },
+    });
+    expect(out.blocking.map((b) => b.outletCode).sort()).toEqual(['50100001', '50100002']);
+    expect(out.blocking.find((b) => b.outletCode === '50100002')!.reason).toMatch(/FAILED — earlier problem/);
+    expect(await prisma.walletTransaction.count()).toBe(0);
   });
 });
 
@@ -336,7 +392,7 @@ describe('digest figures (real Postgres)', () => {
     const f = await heldDigestFigures(prisma, 'bajaj', { startMs: now - 3600_000, endMs: now + 3600_000, label: 'Fri 20 Nov, 09:30 → Sat 21 Nov, 09:30 IST' });
     expect(f).toEqual(expect.objectContaining({
       waiting: 3, waitingPoints: 1800, appliedInWindow: 0,
-      waitingByState: { NOT_ON_PORTAL: 1, AWAITING_KYC: 1, WALLET_EMPTY: 1, NEEDS_APPLY_NOW: 0, AMBIGUOUS_OUTLET: 0 },
+      waitingByState: { NOT_ON_PORTAL: 1, AWAITING_KYC: 1, WALLET_EMPTY: 1, NEEDS_APPLY_NOW: 0, WALLET_NOT_PREPARED: 0, AMBIGUOUS_OUTLET: 0 },
     }));
   });
 });

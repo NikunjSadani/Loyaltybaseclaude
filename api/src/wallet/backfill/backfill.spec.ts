@@ -1425,7 +1425,9 @@ describe('WP6 verify V0–V9', () => {
       V0_BASELINE_JSON: JSON.stringify([await s.snapshotV0('bajaj')]),
     };
     expect((await runVerify(s, { ...verifyConfigFromEnv(env), expectedDb: 'gifsy_prod' }, silent)).exitCode).toBe(2);
-    const c = verifyConfigFromEnv(env);
+    // No default any more (owner 2026-11-21: Deoleo wallets may go negative) — V5 only for tenants named explicitly.
+    expect(verifyConfigFromEnv(env).neverNegativeTenants.size).toBe(0);
+    const c = verifyConfigFromEnv({ ...env, NEVER_NEGATIVE_TENANTS: 'deoleo' });
     expect(c.neverNegativeTenants.has('deoleo')).toBe(true);
     expect((await runVerify(s, c, silent)).exitCode).toBe(0);
     s.tenants.get('deoleo')!.histories.get('W-D1')!.wallet.debtPoints = 1;

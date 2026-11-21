@@ -26,7 +26,7 @@ export type { HeldDigestFigures };
 type Actor = { sub: string; clientId: string; role?: string; assumed?: boolean };
 
 const STATUSES: HeldOpeningBalanceStatus[] = ['PENDING', 'APPLIED', 'FAILED', 'CANCELLED'];
-const WAIT_STATES: HeldRowState[] = ['NOT_ON_PORTAL', 'AWAITING_KYC', 'WALLET_EMPTY', 'NEEDS_APPLY_NOW', 'AMBIGUOUS_OUTLET'];
+const WAIT_STATES: HeldRowState[] = ['NOT_ON_PORTAL', 'AWAITING_KYC', 'WALLET_EMPTY', 'NEEDS_APPLY_NOW', 'WALLET_NOT_PREPARED', 'AMBIGUOUS_OUTLET'];
 
 @Injectable()
 export class HeldOpeningBalancesService {
@@ -148,7 +148,7 @@ export class HeldOpeningBalancesService {
     const active = walletHasActivity(f.wallet);
     const before = f.wallet.redeemablePoints;
     if (active && f.wallet.movementSeq === 0) {
-      return blocked('The wallet is not sequenced for the V2 engine (not prepared by the wallet backfill) — run the backfill first.');
+      return blocked(HELD_STATE_LABEL.WALLET_NOT_PREPARED + ' (its history is not sequenced yet).');
     }
     if (active && row.closingPoints < 0 && before < -row.closingPoints) {
       return blocked(`The wallet holds ${before} pts — fewer than the negative opening balance (${row.closingPoints} pts). Resolve with the client first.`);
@@ -174,6 +174,7 @@ export class HeldOpeningBalancesService {
     const r = await applyHeldRow(this.prisma, row.id, { trigger: 'MANUAL', actorId: actor.sub, allowedFrom: ['PENDING', 'FAILED'], adjust: this.adjust, note: reason?.trim() || null });
     if (r.status === 'NO_WALLET') throw new ConflictException(`Nothing was changed: ${r.reason} — it is applied automatically at KYC approval.`);
     if (r.status === 'SKIPPED') throw new ConflictException(`Nothing was changed: ${r.reason}.`);
+    if (r.status === 'NOT_PREPARED') throw new ConflictException(`Nothing was changed: ${HELD_STATE_LABEL.WALLET_NOT_PREPARED}.`);
     const after = await this.prisma.heldOpeningBalance.findUnique({ where: { id } });
     return {
       id,

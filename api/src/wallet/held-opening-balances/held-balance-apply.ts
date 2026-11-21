@@ -9,19 +9,22 @@
  *  - credit confirm → credits.service runs `prepareHeldBeforeCredit` BEFORE its confirm transaction: a held row whose
  *    outlet has no wallet / an empty wallet is applied FIRST (wallet created if needed), so the dated history always
  *    sits UNDER the new credit. (The alternative — inserting a back-dated passbook below credits that already landed —
- *    would rewrite existing balance chains and is not done.) If that apply fails, the credit still lands and the row
- *    is FAILED with its reason (loud) → Gifsy fixes it and uses Apply now;
- *  - the periodic sweep (HeldOpeningBalancesSweepWorker) → every PENDING row whose wallet exists and is EMPTY
- *    (a missed post-commit trigger, a row loaded after approval, a transient error being retried);
+ *    would rewrite existing balance chains and is not done.) If that apply does NOT post (RETRYING / FAILED / the
+ *    check itself errored), the confirm is REFUSED (409, nothing credited, the batch stays PENDING_CONFIRM) and names
+ *    the outlets — a credit never lands on an empty wallet over a not-yet-posted held passbook (audit A2);
+ *  - the periodic sweep (HeldOpeningBalancesSweepWorker) → EVERY PENDING row whose outlet has a wallet that is EMPTY,
+ *    paged by a cursor over exactly those rows (rows still waiting for KYC are never selected, so they can't starve
+ *    the rest — audit A1): a missed post-commit trigger, a row loaded after approval, a transient error being retried;
  *  - Gifsy "Apply now" (held-opening-balances.service) → MANUAL, also onto a wallet with activity (adjustment).
  *
  * Guarantees:
  *  - ONE transaction per row: lock the wallet row, then the held row (FOR UPDATE); validate; post; verify (balance =
  *    closing, counters, row counts, FIFO); SEQUENCE the wallet with the WP6 backfill planner (V2 is the only engine —
  *    a BLOCKED plan is a failure); claim the row. Any problem → the whole transaction rolls back (nothing partial);
- *  - deterministic problems (HeldApplyError) → FAILED with the reason, audit + bell to every active Gifsy admin;
- *    transient errors (DB / timeout) → the row stays PENDING with `lastError`, retried by the sweep, and becomes
- *    FAILED after HELD_MAX_ATTEMPTS;
+ *  - deterministic problems (HeldApplyError, and every error that is NOT a database connectivity / timeout /
+ *    serialization / lock error — e.g. a planner or guard error) → FAILED at once with the reason, audit + bell to
+ *    every active Gifsy admin; only isTransientDbError errors keep the row PENDING with `lastError`, retried by the
+ *    sweep, FAILED after HELD_MAX_ATTEMPTS (audit A3);
  *  - never twice: the DB allows ONE live (PENDING/FAILED/APPLIED) row per outlet, a wallet that already received a
  *    held balance is refused, and the wallet must be pristine under its row lock for the full passbook.
  */
@@ -29,7 +32,7 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { blockedReasonOf, planWallet } from '../backfill/backfill-plan';
 import { sequenceWalletInTx } from '../backfill/backfill-prisma-store';
 import { HELD_METADATA_SRC, HELD_SOURCE_TYPE, planHeldPassbook } from './held-balance-events';
-import { heldOutletFacts, normOutletCode, walletHasActivity } from './held-balance-facts';
+import { HELD_WALLET_SELECT, heldOutletFacts, normOutletCode, walletHasActivity, walletIsPristine } from './held-balance-facts';
 
 export type HeldTrigger = 'KYC_APPROVAL' | 'CREDIT_CONFIRM' | 'SWEEP' | 'MANUAL';
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -43,10 +46,25 @@ const TX_OPTS = { timeout: 60_000, maxWait: 15_000 };
 /** A deterministic held-balance problem (the row becomes FAILED with this message). */
 export class HeldApplyError extends Error {}
 
+/**
+ * Audit A3: ONLY these are temporary (retried): connection / pool / transaction timeouts, serialization failures,
+ * deadlocks, lock timeouts, a cancelled statement. Everything else (planner, guard, constraint, tenant errors) is
+ * deterministic → FAILED at once.
+ */
+export function isTransientDbError(e: unknown): boolean {
+  if (e instanceof HeldApplyError) return false;
+  const o = (e && typeof e === 'object' ? e : {}) as { code?: unknown; message?: unknown; meta?: unknown; name?: unknown };
+  const code = typeof o.code === 'string' ? o.code : '';
+  if (['P1001', 'P1002', 'P1008', 'P1017', 'P2024', 'P2028', 'P2034'].includes(code)) return true;
+  if (['40001', '40P01', '55P03', '57014', '57P01', '08000', '08003', '08006', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT'].includes(code)) return true;
+  const text = `${String(o.message ?? e)} ${JSON.stringify(o.meta ?? {})}`;
+  return /\b(40001|40P01|55P03|57014)\b|could not serialize|deadlock detected|lock timeout|canceling statement|Connection terminated|ECONNRESET|ECONNREFUSED|ETIMEDOUT|Transaction already closed|Unable to start a transaction|Timed out fetching a new connection|transaction (timeout|expired)/i.test(text);
+}
+
 export interface HeldApplyOutcome {
   heldId: string;
   outletCode: string;
-  status: 'APPLIED' | 'FAILED' | 'NEEDS_APPLY_NOW' | 'NO_WALLET' | 'RETRYING' | 'SKIPPED';
+  status: 'APPLIED' | 'FAILED' | 'NEEDS_APPLY_NOW' | 'NOT_PREPARED' | 'NO_WALLET' | 'RETRYING' | 'SKIPPED';
   reason?: string;
   walletId?: string;
   applyMode?: 'FULL_PASSBOOK' | 'OPENING_ADJUSTMENT';
@@ -150,18 +168,10 @@ async function recordTransient(prisma: TxRunner, row: { id: string; clientId: st
   return 'RETRYING' as const;
 }
 
-async function isPristine(tx: Prisma.TransactionClient, walletId: string): Promise<{ pristine: boolean; redeemable: number }> {
-  const w = await tx.wallet.findUniqueOrThrow({ where: { id: walletId } });
-  const figures = [
-    w.redeemablePoints, w.debtPoints, w.earnedPoints, w.lockedPoints, w.redeemedPoints, w.expiredPoints,
-    w.lifetimeEarned, w.lifetimeRedeemed, w.lifetimeExpired, w.movementSeq,
-  ];
-  if (figures.some((n) => (n ?? 0) !== 0)) return { pristine: false, redeemable: w.redeemablePoints };
-  const [t, l] = await Promise.all([
-    tx.walletTransaction.findFirst({ where: { walletId }, select: { id: true } }),
-    tx.pointsLedger.findFirst({ where: { walletId }, select: { id: true } }),
-  ]);
-  return { pristine: !t && !l, redeemable: w.redeemablePoints };
+/** Re-read under the wallet row lock with the SAME predicate the console / sweep / pre-step use (audit A4). */
+async function isPristine(tx: Prisma.TransactionClient, walletId: string): Promise<{ pristine: boolean; redeemable: number; movementSeq: number }> {
+  const w = await tx.wallet.findUniqueOrThrow({ where: { id: walletId }, select: HELD_WALLET_SELECT });
+  return { pristine: walletIsPristine(w), redeemable: w.redeemablePoints, movementSeq: w.movementSeq };
 }
 
 type LiveRow = { id: string; clientId: string; outletCode: string; source: string; closingPoints: number; events: Prisma.JsonValue; eventTotals: Prisma.JsonValue | null; status: string; asOfDate: Date | null };
@@ -297,6 +307,10 @@ export async function applyHeldRow(
         sequencing = await postFullPassbook(tx, row, walletId);
         applyMode = 'FULL_PASSBOOK';
       } else {
+        if (state.movementSeq === 0) {
+          // B5: history the wallet backfill has not sequenced yet — nothing written, the row stays PENDING (amber).
+          return { heldId, outletCode: row.outletCode, status: 'NOT_PREPARED' as const, walletId, balanceBefore: before, reason: 'Wallet not prepared — run the wallet backfill, then Apply now' };
+        }
         if (a.trigger !== 'MANUAL' || !a.adjust) {
           return { heldId, outletCode: row.outletCode, status: 'NEEDS_APPLY_NOW' as const, walletId, balanceBefore: before, reason: 'the wallet already has activity — needs a Gifsy "Apply now"' };
         }
@@ -313,6 +327,7 @@ export async function applyHeldRow(
             metadata: { src: HELD_METADATA_SRC, batch: row.source, ref: sid, heldOpeningBalanceId: row.id, mode: 'OPENING_ADJUSTMENT' },
           });
         } catch (e) {
+          if (isTransientDbError(e)) throw e;
           throw new HeldApplyError(e instanceof Error ? e.message : String(e));
         }
         const w = await tx.wallet.findUniqueOrThrow({ where: { id: walletId }, select: { redeemablePoints: true, movementSeq: true } });
@@ -357,7 +372,7 @@ export async function applyHeldRow(
     }, TX_OPTS);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (e instanceof HeldApplyError) {
+    if (!isTransientDbError(e)) {
       await markHeldFailed(prisma, [row0], msg, { trigger: a.trigger, actorId: a.actorId, allowedFrom: a.allowedFrom });
       return { heldId, outletCode: row0.outletCode, status: 'FAILED', reason: msg };
     }
@@ -389,48 +404,85 @@ export async function runHeldForPartner(
   return [await applyHeldRow(prisma, rows[0].id, { trigger: a.trigger, actorId: a.actorId, allowedFrom: ['PENDING'] })];
 }
 
-/** Credit-confirm PRE-STEP: for the batch's target partners, make sure a live held balance lands BEFORE the credit. */
+export interface HeldCreditBlock {
+  outletCode: string;
+  reason: string;
+}
+
+/**
+ * Credit-confirm PRE-STEP (audit A2): for the batch's target partners, a live held balance must be POSTED before the
+ * credit lands. Returns the outcomes and the BLOCKING outlets — a partner whose wallet is missing / still empty while
+ * a live (PENDING / FAILED) held row remains unposted. The caller refuses the confirm when `blocking` is non-empty.
+ */
 export async function prepareHeldBeforeCredit(
   prisma: TxRunner,
   a: { clientId: string; outletCodes: string[]; actorId?: string | null; ensureWallet: (partnerId: string) => Promise<void> },
-): Promise<HeldApplyOutcome[]> {
-  const pendingAny = await prisma.heldOpeningBalance.count({ where: { clientId: a.clientId, status: 'PENDING' } });
-  if (pendingAny === 0 || a.outletCodes.length === 0) return []; // dormant
-  const out: HeldApplyOutcome[] = [];
+): Promise<{ outcomes: HeldApplyOutcome[]; blocking: HeldCreditBlock[] }> {
+  const live = { in: ['PENDING', 'FAILED'] as Array<'PENDING' | 'FAILED'> };
+  const anyLive = await prisma.heldOpeningBalance.count({ where: { clientId: a.clientId, status: live } });
+  if (anyLive === 0 || a.outletCodes.length === 0) return { outcomes: [], blocking: [] }; // dormant
+  const outcomes: HeldApplyOutcome[] = [];
+  const blocking: HeldCreditBlock[] = [];
   const facts = await heldOutletFacts(prisma, a.clientId, a.outletCodes);
   const partners = [...new Set([...facts.values()].map((f) => f.partnerId).filter((p): p is string => !!p))].sort();
   for (const partnerId of partners) {
     const f = [...facts.values()].find((x) => x.partnerId === partnerId)!;
-    if (f.wallet && walletHasActivity(f.wallet)) continue; // nothing to protect: history can't go under prior activity
+    if (f.wallet && walletHasActivity(f.wallet)) continue; // history can't go under prior activity → Apply now (adjustment)
     const outlets = await prisma.outlet.findMany({ where: { partnerId, clientId: a.clientId, deletedAt: null }, select: { outletCode: true } });
-    const live = await prisma.heldOpeningBalance.count({
-      where: { clientId: a.clientId, status: 'PENDING', outletCode: { in: outlets.map((o) => normOutletCode(o.outletCode)) } },
-    });
-    if (live === 0) continue;
-    if (!f.wallet) await a.ensureWallet(partnerId);
-    out.push(...(await runHeldForPartner(prisma, { partnerId, clientId: a.clientId, trigger: 'CREDIT_CONFIRM', actorId: a.actorId })));
+    const codes = outlets.map((o) => normOutletCode(o.outletCode));
+    const liveRows = await prisma.heldOpeningBalance.findMany({ where: { clientId: a.clientId, status: live, outletCode: { in: codes } }, select: { outletCode: true, status: true, failureReason: true } });
+    if (liveRows.length === 0) continue;
+    if (liveRows.some((r) => r.status === 'PENDING')) {
+      if (!f.wallet) await a.ensureWallet(partnerId);
+      outcomes.push(...(await runHeldForPartner(prisma, { partnerId, clientId: a.clientId, trigger: 'CREDIT_CONFIRM', actorId: a.actorId })));
+    }
+    // still unposted? (RETRYING / FAILED / a FAILED row from earlier) → this partner's credit must not land first
+    const left = await prisma.heldOpeningBalance.findMany({ where: { clientId: a.clientId, status: live, outletCode: { in: codes } }, select: { outletCode: true, status: true, failureReason: true, lastError: true } });
+    for (const r of left) {
+      blocking.push({
+        outletCode: r.outletCode,
+        reason: r.status === 'FAILED' ? `held opening balance FAILED — ${r.failureReason ?? 'see Gifsy → Held Balances'}` : `held opening balance not posted yet${r.lastError ? ` (temporary error: ${r.lastError})` : ''}`,
+      });
+    }
   }
-  return out;
+  return { outcomes, blocking };
 }
 
-/** Periodic sweep: every PENDING row whose wallet exists and is EMPTY is applied now. Returns per-row outcomes. */
-export async function sweepHeldOpeningBalances(prisma: TxRunner, opts: { limit?: number } = {}): Promise<HeldApplyOutcome[]> {
-  const rows = await prisma.heldOpeningBalance.findMany({
-    where: { status: 'PENDING' },
-    orderBy: [{ lastAttemptAt: { sort: 'asc', nulls: 'first' } }, { id: 'asc' }],
-    take: opts.limit ?? 500,
-    select: { id: true, clientId: true, outletCode: true },
-  });
+/**
+ * Periodic sweep (audit A1): EVERY PENDING row whose outlet (normalised code, live, same tenant) has a wallet, paged
+ * by an id cursor over exactly those rows — rows still waiting for an outlet / KYC are never selected, so however many
+ * there are they cannot starve the rest. Rows whose wallet has activity are skipped (they need Apply now).
+ */
+export async function sweepHeldOpeningBalances(prisma: TxRunner, opts: { pageSize?: number; maxRows?: number } = {}): Promise<HeldApplyOutcome[]> {
+  const pageSize = opts.pageSize ?? 500;
+  const maxRows = opts.maxRows ?? 50_000;
   const out: HeldApplyOutcome[] = [];
-  const byTenant = new Map<string, typeof rows>();
-  for (const r of rows) byTenant.set(r.clientId, [...(byTenant.get(r.clientId) ?? []), r]);
-  for (const [clientId, list] of byTenant) {
-    const facts = await heldOutletFacts(prisma, clientId, list.map((r) => r.outletCode));
-    for (const r of list) {
-      const f = facts.get(normOutletCode(r.outletCode));
-      if (!f?.wallet || f.ambiguous || walletHasActivity(f.wallet)) continue;
-      out.push(await applyHeldRow(prisma, r.id, { trigger: 'SWEEP', allowedFrom: ['PENDING'] }));
+  let cursor = '';
+  let seen = 0;
+  for (;;) {
+    const page = await prisma.$queryRaw<Array<{ id: string; clientId: string; outletCode: string }>>`
+      SELECT h.id, h."clientId", h."outletCode" FROM held_opening_balances h
+       WHERE h.status = 'PENDING' AND h.id > ${cursor}
+         AND EXISTS (
+           SELECT 1 FROM outlets o JOIN wallets w ON w."partnerId" = o."partnerId"
+            WHERE o."clientId" = h."clientId" AND o."deletedAt" IS NULL
+              AND upper(regexp_replace(o."outletCode", '\\s', '', 'g')) = h."outletCode")
+       ORDER BY h.id
+       LIMIT ${pageSize}`;
+    if (page.length === 0) break;
+    cursor = page[page.length - 1].id;
+    seen += page.length;
+    const byTenant = new Map<string, typeof page>();
+    for (const r of page) byTenant.set(r.clientId, [...(byTenant.get(r.clientId) ?? []), r]);
+    for (const [clientId, list] of byTenant) {
+      const facts = await heldOutletFacts(prisma, clientId, list.map((r) => r.outletCode));
+      for (const r of list) {
+        const f = facts.get(normOutletCode(r.outletCode));
+        if (!f?.wallet || f.ambiguous || walletHasActivity(f.wallet)) continue;
+        out.push(await applyHeldRow(prisma, r.id, { trigger: 'SWEEP', allowedFrom: ['PENDING'] }));
+      }
     }
+    if (page.length < pageSize || seen >= maxRows) break;
   }
   return out;
 }

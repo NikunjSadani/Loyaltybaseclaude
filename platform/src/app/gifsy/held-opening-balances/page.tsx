@@ -41,9 +41,9 @@ interface HeldRow {
 }
 
 type HeldState =
-  | 'NOT_ON_PORTAL' | 'AWAITING_KYC' | 'WALLET_EMPTY' | 'NEEDS_APPLY_NOW' | 'AMBIGUOUS_OUTLET'
+  | 'NOT_ON_PORTAL' | 'AWAITING_KYC' | 'WALLET_EMPTY' | 'NEEDS_APPLY_NOW' | 'WALLET_NOT_PREPARED' | 'AMBIGUOUS_OUTLET'
   | 'FAILED' | 'APPLIED' | 'CANCELLED';
-type PendingState = 'NOT_ON_PORTAL' | 'AWAITING_KYC' | 'WALLET_EMPTY' | 'NEEDS_APPLY_NOW' | 'AMBIGUOUS_OUTLET';
+type PendingState = 'NOT_ON_PORTAL' | 'AWAITING_KYC' | 'WALLET_EMPTY' | 'NEEDS_APPLY_NOW' | 'WALLET_NOT_PREPARED' | 'AMBIGUOUS_OUTLET';
 
 interface Bucket { count: number; points: number }
 
@@ -64,6 +64,7 @@ const PENDING_STATES: { key: PendingState; label: string; warn: boolean }[] = [
   { key: 'AWAITING_KYC',     label: 'Awaiting KYC',        warn: false },
   { key: 'WALLET_EMPTY',     label: 'Wallet empty',        warn: false },
   { key: 'NEEDS_APPLY_NOW',  label: 'Needs Apply now',     warn: true  },
+  { key: 'WALLET_NOT_PREPARED', label: 'Wallet not prepared (run backfill)', warn: true },
   { key: 'AMBIGUOUS_OUTLET', label: 'Ambiguous outlet',    warn: true  },
 ];
 
@@ -569,7 +570,11 @@ function StatusBadge({ status }: { status: HeldStatus }) {
 function StateInfo({ row }: { row: HeldRow }) {
   return (
     <div className="mt-1 space-y-0.5 min-w-0" data-testid={`state-${row.id}`}>
-      {row.stateLabel && <p className="text-xs text-white/80 break-words">{row.stateLabel}</p>}
+      {row.stateLabel && (
+        <p className={`text-xs break-words ${row.state === 'WALLET_NOT_PREPARED' ? 'text-amber-300' : 'text-white/80'}`}>
+          {row.stateLabel}
+        </p>
+      )}
       {row.nextStep && <p className="text-[11px] text-white/40 break-words">{row.nextStep}</p>}
       {row.status === 'PENDING' && row.lastError && (
         <p className="text-[11px] text-amber-300 break-words" data-testid={`retrying-${row.id}`}>

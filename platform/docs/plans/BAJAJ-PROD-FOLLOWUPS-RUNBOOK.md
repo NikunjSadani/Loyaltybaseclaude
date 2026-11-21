@@ -1,4 +1,4 @@
-# Bajaj prod follow-ups — runbook for owner approval (A flags · B Help content · C wallet backfill → V2)
+# Bajaj prod follow-ups — runbook for owner approval (A flags · B Help content · C wallet backfill → V2 · D held opening balances)
 
 > **Status (2026-11-21): part A partly DONE by the owner — `requireLocation` and `wholesalerPayoutInclActivation`
 > are ON for Bajaj prod (verified read-only, see A "Read-back"); `helpVideos` still OFF. Parts B and C: NOTHING
@@ -418,6 +418,84 @@ owed. Deoleo's credits screen: unchanged (no banner). Next Daily Ops Digest: "8 
   straight LEGACY → V2 without a SHADOW period (consistent with "Bajaj → V2 first", design §9 rollout step 5).
 
 ---
+
+## D. Bajaj held opening balances — load the 40 outlets (⚠️ prod write — owner go per step)
+
+### What it does (plain words)
+40 Bajaj outlets had a non-zero vendor closing on 11 Nov 2026 but were not in the 2,281-wallet import (not on the
+portal yet / no wallet). Their closing (Σ 1,22,843 pts posted; vendor raw 1,22,845.47) and dated passbook are loaded
+as PENDING **held opening balances**; each is posted automatically, in its own transaction and V2-sequenced, when the
+outlet's wallet is created (after KYC approval, before a credit confirm, or by the 10-minute sweep). The loader itself
+never touches a wallet. Design + reconciliation: [`CLIENT-MIGRATION-PLAYBOOK.md`](CLIENT-MIGRATION-PLAYBOOK.md).
+The 293 File-1-only outlets (2,22,995.55 pts, absent from the 11-Nov report) are **not** loaded — owner decision
+2026-11-21.
+
+### REQUIRED ORDER
+1. **Deploy** the release containing held opening balances (migration `20261121100000_held_opening_balances` runs in
+   the deploy's migrate job).
+2. **§C-POST readiness / backfill re-run for Bajaj** (and the Deoleo check) — Bajaj `not_sequenced 0, blocked 0`
+   before anything is posted (a held apply onto an already-active, un-sequenced wallet is refused anyway).
+3. **Held loader DRY RUN** (below) → go/no-go.
+4. **Backup.**
+5. **Held APPLY.**
+6. **Verify** (rows, totals, states).
+7. **Sweep** (applies any row whose outlet already has an empty wallet).
+
+### Prerequisites
+- The 40-outlet manifest uploaded (operator) to **`gs://gifsy-platform-files/migrations/held/bajaj-held-opening-balances-2026-11-11-v1.json`** (a NEW object name — never overwrite an
+  earlier migrations object). Local source: the builder output
+  `bajaj-held-opening-balances-2026-11-11.json` (`api/scripts/bajaj-held-opening-balances-manifest.mjs`, run on File 1
+  + File 2 + the 2,281 import manifest; prints 40 outlets, Σ 1,22,843, 293 excluded / 2,22,995.55).
+- `$OPS` = the keyless ops identity (RESUME §7/§8).
+
+### D1. DRY RUN (read-only)
+```bash
+gcloud run jobs execute gifsy-migrate --region asia-south1 $OPS --wait \
+  --args=node,dist/wallet/held-opening-balances/held-balances-load.main.js \
+  --update-env-vars="EXPECTED_DB=gifsy_prod,TENANT=bajaj,SOURCE=vendor-earnburn-2026-11-11,MANIFEST=gs://gifsy-platform-files/migrations/held/bajaj-held-opening-balances-2026-11-11-v1.json,EXPECTED_ROWS=40,EXPECTED_TOTAL=122843,AS_OF=2026-11-11"
+```
+Go/no-go (job log): `manifest rows: 40  Σ closing: 1,22,843 pts  Σ event deltas: 1,22,843 pts`; plan
+`INSERT + INSERT_APPLY_NOW = 40`, **0 REFUSED_EXISTING, 0 REFUSED_IMPORTED, 0 INVALID**; exit 0. Any
+INSERT_APPLY_NOW row (outlet already has an active wallet) is listed — it will need a Gifsy "Apply now" after load.
+
+### D2. Backup
+```bash
+gcloud sql backups create --instance=gifsy-db $OPS --description="pre-held-opening-balances bajaj <date>"
+```
+
+### D3. APPLY (inserts 40 PENDING rows only — one transaction, all or nothing)
+```bash
+gcloud run jobs execute gifsy-migrate --region asia-south1 $OPS --wait \
+  --args=node,dist/wallet/held-opening-balances/held-balances-load.main.js \
+  --update-env-vars="EXPECTED_DB=gifsy_prod,TENANT=bajaj,SOURCE=vendor-earnburn-2026-11-11,MANIFEST=gs://gifsy-platform-files/migrations/held/bajaj-held-opening-balances-2026-11-11-v1.json,EXPECTED_ROWS=40,EXPECTED_TOTAL=122843,AS_OF=2026-11-11,HELD_APPLY=true,HELD_CONFIRM=APPLY gifsy_prod,CREATED_BY=<owner name>"
+```
+Expected: `=== APPLIED === inserted 40 PENDING row(s).` exit 0. Re-running the DRY RUN afterwards → 40 ALREADY_LOADED.
+
+### D4. Verify (read-only)
+```sql
+SELECT current_database();  -- must be gifsy_prod
+SELECT status, count(*), sum("closingPoints") FROM held_opening_balances WHERE "clientId" = 'bajaj' GROUP BY status;
+-- expect PENDING 40 / 122843 (APPLIED rows appear only after a wallet exists)
+SELECT indexname FROM pg_indexes WHERE indexname = 'held_opening_balances_one_live_per_outlet';  -- 1 row
+```
+Screen: Gifsy console → **Held Balances** → client Bajaj: 40 rows, every row with an explicit state ("Not on portal",
+"On portal — awaiting first KYC", "Wallet exists and empty", "Wallet has activity — needs Apply now", "Wallet not
+prepared"), totals Σ 1,22,843. The next Daily Ops Digest shows the "Held opening balances" line.
+
+### D5. Sweep
+Gifsy console → Held Balances → **Run sweep now** (or wait ≤ 10 min). Rows whose outlet already has an EMPTY wallet
+become APPLIED (passbook posted, wallet sequenced). "Needs Apply now" rows: owner decides per row (Apply now = one
+opening-balance adjustment dated today; or Cancel with a reason).
+
+### Rollback
+Before any row is APPLIED: Cancel the rows in the console (audited) — or restore the D2 backup. An APPLIED row has
+posted real points; reverse it only with an explicit, audited wallet adjustment (never by deleting rows).
+
+### Risks
+- A credit confirm for one of these outlets is REFUSED (409, nothing credited) while its held balance is not posted —
+  by design; it names the outlets. Fix / Apply now / Cancel the held row, then retry the confirm.
+- Outlet codes are matched exactly after trim / upper-case / space removal (leading zeros kept); a code that differs
+  on the portal shows as "Not on portal" — correct the code, never guess.
 
 ## Decisions the owner must make
 1. ~~A: switch `requireLocation` ON for Bajaj prod~~ — **DONE 2026-11-21** by the owner (Gifsy console → Clients →

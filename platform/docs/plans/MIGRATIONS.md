@@ -66,6 +66,12 @@ Full procedure: [`runbooks/PROD-DB-MIGRATION.md`](runbooks/PROD-DB-MIGRATION.md)
 - **Never `db push` to staging or prod.** `db push` is a dev-loop tool with no ledger.
 - **Partial indexes / anything Prisma can't model** → hand-add to the migration SQL **and** add a
   guard (the upload service's P2002 catch + a test) so a future regression is loud.
+- **Hand-added partial indexes are NOT in `schema.prisma`, so `prisma migrate dev` / `migrate diff` will propose
+  `DROP INDEX` for them — never accept that.** Each one is recorded in a "do not drop" comment on its model and has a
+  test that it exists after the migrations run. Current list: `wallets_negative_balance_idx`
+  (20261119124600), `held_opening_balances_one_live_per_outlet` (20261121100000 — ONE live PENDING / FAILED / APPLIED
+  held opening balance per (clientId, outletCode); tested in `held-balances.pglite.spec.ts`), plus the TDS re-upload
+  dedup indexes in the baseline.
 - **Staging mirrors prod's mechanism** — both use `migrate deploy` via the job. That is the point
   of staging.
 

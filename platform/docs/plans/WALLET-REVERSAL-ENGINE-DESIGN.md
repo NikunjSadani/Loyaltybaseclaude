@@ -823,7 +823,7 @@ Same API image, Cloud Run Job, `--command=node`. Every DB step needs the owner's
    un-sequenced without being listed BLOCKED-with-reason** (message names the count + sample wallet ids). BLOCKED wallets
    are allowed (P-A1) and their count is returned. Rollback: same endpoint, `"mode":"LEGACY"` — always allowed.
 3. **VERIFY** (read-only): args `dist/wallet/backfill/verify.main.js`, env `EXPECTED_DB`, `TENANTS`,
-   `V0_BASELINE_JSON='[…the "V0 before" objects APPLY printed…]'`, `NEVER_NEGATIVE_TENANTS=deoleo` (default),
+   `V0_BASELINE_JSON='[…the "V0 before" objects APPLY printed…]'`, `NEVER_NEGATIVE_TENANTS=<tenants>` (NO default since 2026-11-21 — owner: Deoleo wallets may go negative; V5 checks only tenants named),
    prod only: `EXPECTED_NEGATIVE_BALANCES='{"bajaj":[-840,-612,-520,-360,-360,-297,-280,-280]}'`. Exit 0 = no FAIL, 5 = a FAIL.
    (`TENANTS=bajaj` only — Deoleo is not backfilled, see the owner decision above.)
    V0 here is the TENANT-level cross-check vs that baseline (which now carries `txCount / txIn / txOut`): PASS when

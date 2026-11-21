@@ -359,7 +359,7 @@ export function resetUnsequencedWarnings(): void {
 /** Postgres lock_timeout for a redemption's wallet lock (audit A4) — fail fast instead of waiting out a big confirm. */
 export const REDEEM_WALLET_LOCK_TIMEOUT = '5s';
 export const WALLET_BUSY_MESSAGE =
-  'Points are being updated for this wallet right now (a points upload is being processed) — please try again in a minute. Nothing was deducted.';
+  'Points for this wallet are being updated right now — try again in a minute. Nothing was deducted.';
 
 function isLockTimeout(e: unknown): boolean {
   const s = e && typeof e === 'object' ? JSON.stringify({ m: (e as Error).message, meta: (e as { meta?: unknown }).meta, code: (e as { code?: unknown }).code }) : String(e);

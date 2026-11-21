@@ -48,16 +48,22 @@ outlet** — a reload or a double Apply now can never post twice.
   must still be empty; the passbook is posted, verified (balance = closing, counters, row counts, FIFO lots) and the
   wallet is **sequenced for the V2 engine** by the backfill's own planner (`backfillStatus = DONE`). Any problem rolls
   the whole transaction back — nothing partial. A deterministic problem (passbook doesn't tie out, sequencing
-  BLOCKED, two rows would pool into one wallet, the wallet already received a held balance) → `FAILED` with the
-  reason + a bell to Gifsy admins; a temporary DB error → stays `PENDING` with the error shown, retried by the sweep,
-  `FAILED` after 5 attempts. A KYC approval or credit confirm is never failed or slowed by it.
+  BLOCKED, two rows would pool into one wallet, the wallet already received a held balance, any non-connectivity
+  error) → `FAILED` at once with the reason + a bell to Gifsy admins; only a temporary DB error (connection / timeout /
+  serialization / lock) stays `PENDING` with the error shown, retried by the sweep, `FAILED` after 5 attempts. A KYC
+  approval is never failed or slowed by it. A **credit confirm is REFUSED** (409, nothing credited, batch still
+  waiting) while a target outlet's held balance is not posted onto its empty wallet — a credit never lands over a
+  not-yet-posted passbook; the message names the outlets. The sweep pages through every waiting row whose outlet has
+  a wallet (rows waiting for KYC cannot starve it).
 - **Every waiting row has an explicit state** (console + digest): Not on portal (no outlet with this code) · On
   portal — awaiting first KYC · Wallet exists and empty — will apply now / applying · Wallet has activity — needs
-  Apply now · Failed — <reason>.
+  Apply now · Wallet not prepared — run the wallet backfill, then Apply now (amber: history the backfill has not
+  sequenced; nothing is written) · Failed — <reason>.
 - **Wallet already has activity** → explicit **Gifsy → Held Balances → Apply now** (GIFSY_ADMIN, audited, confirm
   dialog shows balance before → after): ONE opening-balance adjustment of the closing, shown to the retailer as
   "Opening balance from previous programme (as of <date>)" (the dated vendor history stays on the held record). The
-  wallet must already be sequenced for V2; a negative closing larger than the wallet's balance is refused.
+  wallet must already be sequenced (else the row stays PENDING "Wallet not prepared"); a negative closing larger than
+  the wallet's balance is refused.
 - **Cancel** (audited, reason required) for a row that must never be posted (outlet closed, client instruction).
 - **Loud reporting**: the Daily Ops Digest shows, for every tenant with rows, "Held opening balances: N applied since
   the last report (<window> IST) (pts), M still waiting (pts) [by state], K failed"; FAILED rows, rows needing Apply
@@ -94,7 +100,8 @@ outlet** — a reload or a double Apply now can never post twice.
 4. After each KYC approval wave: Gifsy → Held Balances shows the rows APPLIED with the wallet; the outlet's passbook
    shows the dated history; wallet balance = the row's points. The digest line moves from "waiting" to "applied".
 5. Rows still waiting with an active wallet → Apply now; FAILED rows → read the reason, fix, Apply now (or Cancel).
-6. V2 tenants: no applied wallet stays un-sequenced (`movementSeq = 0` with history) — the V2 switch guard confirms.
+6. No applied wallet stays un-sequenced (`movementSeq = 0` with history) — the readiness line on the credits screen
+   (and the Daily Ops Digest) shows 0 wallets "not yet prepared for reversals".
 
 ### 5. Bajaj example (vendor 11 Nov 2026 closing)
 
@@ -115,6 +122,8 @@ the FY26-27 report — carry-forward + monthly earn/burn; 348 events; 1 history 
 closing). Builder: `api/scripts/bajaj-held-opening-balances-manifest.mjs` (args: File 1, File 2, the 2,281 import
 manifest, output path; `--expect-outlets 40`). Load: `TENANT=bajaj SOURCE=vendor-earnburn-2026-11-11
 EXPECTED_ROWS=40 EXPECTED_TOTAL=122843 AS_OF=2026-11-11`. **Not loaded yet** — needs the owner's go (prod write).
+
+Prod load steps (exact commands, required order): `BAJAJ-PROD-FOLLOWUPS-RUNBOOK.md` §D.
 
 **Owner decision 2026-11-21 (Bajaj):** the 293 File-1 outlets not on prod whose File-1 closing (Σ 2,22,995.55 pts)
 has no line in File 2 (the vendor's 11-Nov report) are **IGNORED — the 11-Nov report is final**; the builder prints,

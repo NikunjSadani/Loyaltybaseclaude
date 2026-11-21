@@ -1624,26 +1624,45 @@ export class CreditsService {
     // sum per partner so a partner credited under several fields gets one push.
     const creditedByPartner = new Map<string, number>();
 
-    // HELD OPENING BALANCES (client migration; fix round 2026-11-21): BEFORE this confirm's transaction, a held vendor
-    // balance for a target outlet whose wallet is missing or still EMPTY is applied in its OWN transaction (the wallet
-    // is created first if needed) — so the dated history always sits UNDER this credit, and a held-balance problem can
-    // never fail or slow the confirm (it marks the row FAILED, loudly). Dormant (one indexed count) for every tenant
-    // without PENDING held rows. A failure here never blocks crediting.
+    // HELD OPENING BALANCES (client migration): BEFORE this confirm's transaction, a held vendor balance for a target
+    // outlet whose wallet is missing or still EMPTY is applied in its OWN transaction (the wallet is created first if
+    // needed) — so the dated history always sits UNDER this credit. Audit A2: if a held balance does NOT post (it is
+    // RETRYING / FAILED, or the check itself errored), the confirm is REFUSED with the outlets and reasons — nothing
+    // is credited, the batch stays PENDING_CONFIRM, and the admin retries once Gifsy fixes / applies / cancels the held
+    // row. A credit never lands on an empty wallet over a not-yet-posted held passbook. Dormant (one indexed count)
+    // for every tenant without live held rows.
     if (pointsRows.length > 0) {
+      let blocking: { outletCode: string; reason: string }[] = [];
       try {
-        await prepareHeldBeforeCredit(this.prisma, {
-          clientId: user.clientId,
-          outletCodes: [...new Set(pointsRows.map((r) => r.outletId))],
-          actorId: user.sub,
-          ensureWallet: async (partnerId) => {
-            await this.prisma.$transaction(async (tx) => {
-              const accountId = await ensureOutletAccount(tx, partnerId);
-              await tx.wallet.upsert({ where: { partnerId }, create: { partnerId, accountId }, update: {} });
-            });
-          },
-        });
+        blocking = (
+          await prepareHeldBeforeCredit(this.prisma, {
+            clientId: user.clientId,
+            outletCodes: [...new Set(pointsRows.map((r) => r.outletId))],
+            actorId: user.sub,
+            ensureWallet: async (partnerId) => {
+              await this.prisma.$transaction(async (tx) => {
+                const accountId = await ensureOutletAccount(tx, partnerId);
+                await tx.wallet.upsert({ where: { partnerId }, create: { partnerId, accountId }, update: {} });
+              });
+            },
+          })
+        ).blocking;
       } catch (e) {
-        this.logger.warn(`[held-opening-balances] pre-confirm apply skipped (the sweep retries): ${e instanceof Error ? e.message : String(e)}`);
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.warn(`[held-opening-balances] pre-confirm check failed for batch ${id}: ${msg}`);
+        throw new ConflictException(
+          `Held opening balance must post first — the check could not run (${msg}). Nothing was credited; retry the confirm in a minute.`,
+        );
+      }
+      if (blocking.length > 0) {
+        throw new ConflictException({
+          message:
+            `Held opening balance must post first — ${blocking.length} outlet(s) in this batch have a vendor opening balance that is not posted yet: ` +
+            blocking.slice(0, 10).map((b) => `${b.outletCode} (${b.reason})`).join('; ') +
+            (blocking.length > 10 ? `; …and ${blocking.length - 10} more` : '') +
+            '. Nothing was credited and the batch is still waiting — retry after Gifsy posts or cancels them (Gifsy → Held Balances).',
+          heldBlocking: blocking,
+        });
       }
     }
 

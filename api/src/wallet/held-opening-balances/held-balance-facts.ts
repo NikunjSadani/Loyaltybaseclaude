@@ -21,6 +21,7 @@ export type HeldRowState =
   | 'AWAITING_KYC'
   | 'WALLET_EMPTY'
   | 'NEEDS_APPLY_NOW'
+  | 'WALLET_NOT_PREPARED'
   | 'AMBIGUOUS_OUTLET'
   | 'FAILED'
   | 'APPLIED'
@@ -31,20 +32,44 @@ export const HELD_STATE_LABEL: Record<HeldRowState, string> = {
   AWAITING_KYC: 'On portal — awaiting first KYC',
   WALLET_EMPTY: 'Wallet exists and empty — will apply now / applying',
   NEEDS_APPLY_NOW: 'Wallet has activity — needs Apply now',
+  WALLET_NOT_PREPARED: 'Wallet not prepared — run the wallet backfill, then Apply now',
   AMBIGUOUS_OUTLET: 'More than one outlet matches this code — Gifsy must fix the outlet codes',
   FAILED: 'Failed',
   APPLIED: 'Applied',
   CANCELLED: 'Cancelled',
 };
 
+/** Every wallet figure the ONE pristine/activity predicate looks at (selected by heldOutletFacts AND the apply). */
+export const HELD_WALLET_SELECT = {
+  id: true,
+  partnerId: true,
+  redeemablePoints: true,
+  debtPoints: true,
+  earnedPoints: true,
+  lockedPoints: true,
+  redeemedPoints: true,
+  expiredPoints: true,
+  lifetimeEarned: true,
+  lifetimeRedeemed: true,
+  lifetimeExpired: true,
+  movementSeq: true,
+  _count: { select: { transactions: true, pointsLedger: true } },
+} as const;
+
 export type HeldWalletFacts = {
   id: string;
   partnerId: string;
   redeemablePoints: number;
+  debtPoints: number;
   earnedPoints: number;
+  lockedPoints: number;
   redeemedPoints: number;
+  expiredPoints: number;
+  lifetimeEarned: number;
+  lifetimeRedeemed: number;
+  lifetimeExpired: number;
   movementSeq: number;
-  _count: { transactions: number };
+  _count: { transactions: number; pointsLedger: number };
 };
 
 export interface HeldOutletFacts {
@@ -55,8 +80,21 @@ export interface HeldOutletFacts {
   ambiguous: boolean;
 }
 
+/**
+ * THE single "empty wallet" predicate (audit A4) — used by the console state, the digest, the sweep, the
+ * credit-confirm pre-step, the loader AND the apply itself (re-read under the wallet row lock): every balance /
+ * counter / lifetime figure is 0, movementSeq is 0, and there is no wallet_transactions row and no points_ledger row.
+ */
+export function walletIsPristine(w: HeldWalletFacts): boolean {
+  const figures = [
+    w.redeemablePoints, w.debtPoints, w.earnedPoints, w.lockedPoints, w.redeemedPoints, w.expiredPoints,
+    w.lifetimeEarned, w.lifetimeRedeemed, w.lifetimeExpired, w.movementSeq,
+  ];
+  return figures.every((n) => (n ?? 0) === 0) && w._count.transactions === 0 && w._count.pointsLedger === 0;
+}
+
 export function walletHasActivity(w: HeldWalletFacts): boolean {
-  return w._count.transactions > 0 || w.redeemablePoints !== 0 || w.earnedPoints !== 0 || w.redeemedPoints !== 0 || w.movementSeq > 0;
+  return !walletIsPristine(w);
 }
 
 /** Outlet + wallet facts for a set of (normalised) outlet codes of ONE tenant, keyed by normalised code. */
@@ -72,10 +110,7 @@ export async function heldOutletFacts(db: Db, clientId: string, codes: string[])
   const wallets: HeldWalletFacts[] = partnerIds.length
     ? await db.wallet.findMany({
         where: { partnerId: { in: partnerIds } },
-        select: {
-          id: true, partnerId: true, redeemablePoints: true, earnedPoints: true, redeemedPoints: true, movementSeq: true,
-          _count: { select: { transactions: true } },
-        },
+        select: HELD_WALLET_SELECT,
       })
     : [];
   const wBy = new Map(wallets.map((w) => [w.partnerId, w]));
@@ -97,7 +132,8 @@ export function heldRowState(status: string, f: HeldOutletFacts | undefined): He
   if (!f) return 'NOT_ON_PORTAL';
   if (f.ambiguous) return 'AMBIGUOUS_OUTLET';
   if (!f.partnerId || !f.wallet) return 'AWAITING_KYC';
-  return walletHasActivity(f.wallet) ? 'NEEDS_APPLY_NOW' : 'WALLET_EMPTY';
+  if (walletIsPristine(f.wallet)) return 'WALLET_EMPTY';
+  return f.wallet.movementSeq === 0 ? 'WALLET_NOT_PREPARED' : 'NEEDS_APPLY_NOW';
 }
 
 /** Plain next step for a row (FAILED rows: depends on whether the wallet exists yet). */
@@ -111,6 +147,8 @@ export function heldNextStep(state: HeldRowState, f: HeldOutletFacts | undefined
       return 'Applied automatically within minutes (sweep) — or Apply now.';
     case 'NEEDS_APPLY_NOW':
       return 'Gifsy: Apply now (one opening-balance adjustment) or Cancel.';
+    case 'WALLET_NOT_PREPARED':
+      return 'The wallet has history the wallet backfill has not sequenced yet — run the wallet backfill for this program, then Apply now.';
     case 'AMBIGUOUS_OUTLET':
       return 'Fix the duplicate outlet codes, then Apply now.';
     case 'FAILED':
@@ -129,7 +167,7 @@ export interface HeldDigestFigures {
   waiting: number;
   waitingPoints: number;
   /** of `waiting`, by what they are waiting for */
-  waitingByState: Record<'NOT_ON_PORTAL' | 'AWAITING_KYC' | 'WALLET_EMPTY' | 'NEEDS_APPLY_NOW' | 'AMBIGUOUS_OUTLET', number>;
+  waitingByState: Record<'NOT_ON_PORTAL' | 'AWAITING_KYC' | 'WALLET_EMPTY' | 'NEEDS_APPLY_NOW' | 'WALLET_NOT_PREPARED' | 'AMBIGUOUS_OUTLET', number>;
   /** = waitingByState.NEEDS_APPLY_NOW (kept for the attention item) */
   waitingNeedsApplyNow: number;
   /** PENDING rows whose last automatic attempt hit a transient error (being retried) */
@@ -161,7 +199,7 @@ export async function heldDigestFigures(
     _sum: { closingPoints: true },
   });
   const pending = await db.heldOpeningBalance.findMany({ where: { clientId, status: 'PENDING' }, select: { outletCode: true, lastError: true } });
-  const waitingByState = { NOT_ON_PORTAL: 0, AWAITING_KYC: 0, WALLET_EMPTY: 0, NEEDS_APPLY_NOW: 0, AMBIGUOUS_OUTLET: 0 };
+  const waitingByState = { NOT_ON_PORTAL: 0, AWAITING_KYC: 0, WALLET_EMPTY: 0, NEEDS_APPLY_NOW: 0, WALLET_NOT_PREPARED: 0, AMBIGUOUS_OUTLET: 0 };
   for (let i = 0; i < pending.length; i += 1000) {
     const chunk = pending.slice(i, i + 1000);
     const facts = await heldOutletFacts(db, clientId, chunk.map((p) => p.outletCode));
