@@ -12,7 +12,8 @@
  * Permissions API where available (older Safari lacks it → we rely on the request's own result).
  *
  * No network request is made here (geolocation is on-device), so nothing needs the X-Background tag.
- * Used ONLY when the tenant's `features.requireLocation` is ON — Deoleo / every other tenant never calls it.
+ * Used ONLY when the location gate is on — DEFAULT ON for every tenant since 2026-11-21; a tenant whose setting loaded as
+ * an explicit false (console emergency off) never calls it.
  */
 
 /**

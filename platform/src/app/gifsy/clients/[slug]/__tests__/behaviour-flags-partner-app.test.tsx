@@ -286,7 +286,7 @@ describe('Partner app tabs (B3)', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
   // ── requireLocation: DEFAULT ON (owner 2026-11-21); the switch is an explicit emergency off ──
-  it('BF5: requireLocation ABSENT → shows ON (no note); switching OFF PATCHes an explicit false with NO confirm + shows the emergency-off note', async () => {
+  it('BF5: requireLocation ABSENT → shows ON (no note); switching OFF asks first (Cancel saves nothing), then PATCHes an explicit false + shows the emergency-off note', async () => {
     const patchSpy = vi.fn();
     vi.stubGlobal('fetch', mockFetch(makeConfig({}), (body) => {
       patchSpy(body);
@@ -297,8 +297,17 @@ describe('Partner app tabs (B3)', () => {
     const toggle = await within(row).findByRole('switch');
     expect(toggle).toHaveAttribute('aria-checked', 'true');
     expect(screen.queryByTestId('behaviour-flag-requireLocation-note')).not.toBeInTheDocument();
+    // Audit #8: OFF disables a compliance control → confirm, naming the tenant.
     fireEvent.click(toggle);
-    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+    expect(await screen.findByText('Switch off location for Bajaj Consumer Care Ltd?')).toBeInTheDocument();
+    fireEvent.click(within(screen.getByTestId('behaviour-flag-confirm')).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
+    expect(patchSpy).not.toHaveBeenCalled();
+    expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(within(row).getByRole('switch'));
+    const dialog = await screen.findByTestId('behaviour-flag-confirm');
+    expect(within(dialog).getByText(/Reps will be able to submit KYC and visibility without a phone location/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, switch off location' }));
     await waitFor(() => expect(patchSpy).toHaveBeenCalledTimes(1));
     expect(patchSpy.mock.calls[0][0]).toEqual({ features: { requireLocation: false } });
     await waitFor(() => expect(within(row).getByRole('switch')).toHaveAttribute('aria-checked', 'false'));

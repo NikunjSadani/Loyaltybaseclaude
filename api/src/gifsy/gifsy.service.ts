@@ -20,7 +20,7 @@ import { AdminCoreService } from '../admin-core/admin-core.service';
 import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { sniffFileType } from '../common/file-signature';
-import { isLocationRequired } from '../common/location-gate.helper';
+import { isLocationRequired, LOCATION_REQUIRED_FEATURE } from '../common/location-gate.helper';
 import {
   BRANDING_ASSET_MIME,
   brandingAssetRouteUrl,
@@ -197,9 +197,25 @@ export function diffFeatureKeys(
         continue;
       }
     }
-    if (!same(before[k], after[k])) out[k] = { before: norm(before[k]), after: norm(after[k]) };
+    if (!same(before[k], after[k])) out[k] = { before: effectiveBefore(k, before[k]), after: norm(after[k]) };
   }
   return out;
+}
+
+/**
+ * The audited "before" of a key. requireLocation is DEFAULT ON (owner 2026-11-21): an absent key was effectively
+ * `true`, so the first emergency off is recorded as true → false (not null → false). Every other key: as stored.
+ */
+function effectiveBefore(k: string, v: unknown): unknown {
+  if (k === LOCATION_REQUIRED_FEATURE && v === undefined) return true;
+  return v === undefined ? null : v;
+}
+
+/** Audit metadata note when requireLocation had no stored value (its "before" is the default, not a stored value). */
+export function requireLocationDefaultNote(before: Record<string, unknown>, changedKeys: string[]): Record<string, string> {
+  return changedKeys.includes(LOCATION_REQUIRED_FEATURE) && before[LOCATION_REQUIRED_FEATURE] === undefined
+    ? { requireLocationBefore: 'default ON (no stored value)' }
+    : {};
 }
 
 function assertValidFeatures(
@@ -1051,7 +1067,10 @@ export class GifsyService {
               entityId: slug,
               oldValues: Object.fromEntries(changedKeys.map((k) => [k, changes[k].before])) as Prisma.InputJsonValue,
               newValues: Object.fromEntries(changedKeys.map((k) => [k, changes[k].after])) as Prisma.InputJsonValue,
-              metadata: { slug, changedKeys, actorRole: user.role } as Prisma.InputJsonValue,
+              metadata: {
+                slug, changedKeys, actorRole: user.role,
+                ...requireLocationDefaultNote(featuresAudit.before, changedKeys),
+              } as Prisma.InputJsonValue,
             },
           });
         } catch (err: unknown) {

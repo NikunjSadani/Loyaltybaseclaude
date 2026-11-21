@@ -3,7 +3,8 @@
 /**
  * useLocationGate — the React side of the location gate (docs/plans/LOCATION-GATE.md).
  *
- *   enabled=false (features.requireLocation OFF — Deoleo, every other tenant) → status 'off', NOTHING runs:
+ *   enabled=false (the tenant's setting LOADED as an explicit false — console emergency off; DEFAULT is ON for every
+ *     tenant since 2026-11-21, see useLocationSetting.gateEnabled) → status 'off', NOTHING runs:
  *     no permission query, no geolocation call, no listener. Byte-identical page.
  *   enabled=true → checks once on mount (status 'checking' → 'ok' | 'blocked'), re-checks when the browser reports
  *     the permission changed (Permissions API `change`, where available), and exposes:

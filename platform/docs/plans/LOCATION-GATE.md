@@ -10,10 +10,10 @@ client — built on branch `feat/require-location-default` (in the next batch `r
 at that deploy with no data change — Deoleo heads-up needed first** (their reps will need location allowed + a fix for
 KYC / visibility). The 200 m blocking is unaffected (it stays driven only by `outletMasterGeo` / the visibility
 `geoFence`). Real-phone check (Android + iPhone) still not recorded.
-**Scope:** in the shipped prod code the gate, the Location Report (tile + API) and the Daily Ops Digest "Location" line
-appear only for tenants with `requireLocation` ON (code paths shared — owner-approved 2026-11-18). From the default-ON
-release: every tenant not switched off gets them. Older notes below that say "Deoleo OFF / byte-identical" then describe
-an **emergency-off** tenant (explicit `false`), which stays byte-identical to the pre-gate behaviour.
+**Scope:** every tenant not switched off gets the gate; the Location Report (tile + API) and the Daily Ops Digest
+"Location" line are available for EVERY tenant (an emergency-off tenant sees them with a "switched off" banner/note).
+Superseded: the 403 "only for switch-on programmes" (audit #4 of 2026-11-19). Older notes below that say "Deoleo OFF / byte-identical" now describe an **emergency-off** tenant
+(explicit `false`), which stays byte-identical to the pre-gate behaviour.
 
 ## Default ON (2026-11-21, `feat/require-location-default`)
 
@@ -29,8 +29,23 @@ an **emergency-off** tenant (explicit `false`), which stays byte-identical to th
   ⚠️ Copy check for the owner: a KYC without location is recorded `UNVERIFIABLE` only on `outletMasterGeo` tenants, and a
   visibility capture only when that tenant's fence is on — on a tenant with neither (Deoleo today) a fix-less
   submission is saved with no location but NOT labelled Unverifiable.
-- Phone: a settings-load FAILURE keeps the phone gate open (as before — features are then only defaults; the server
-  enforces the real setting).
+- Phone (audit fix round 2026-11-21, `useLocationSetting`): the phone gate is OFF only when the setting **LOADED** as an
+  explicit `false`. A settings-load FAILURE → gate ON (guide up front — a rep never fills a whole KYC that the server then
+  refuses) + the "location may be required" note. While loading → ON (camera held ≤ 5 s) unless the last-known value is
+  `false`; the last-known cache moved to a **v2 key** so pre-deploy '0' values (written while the default was OFF) are
+  ignored. The visibility form is told `requireLocation` unless the LOADED value is off (never `false` while loading /
+  after a failure).
+- Console: switching OFF now asks first ("Switch off location for <tenant>?" — reps will be able to submit KYC and
+  visibility without a phone location); switching back ON keeps its confirm too (it blocks fix-less reps at once).
+  The audit row of the first emergency off records `before: true` (+ metadata `requireLocationBefore: "default ON (no
+  stored value)"`), not null.
+- Emergency off never hides history: the Location report (+ `/enabled`) is available for every existing tenant; when
+  the setting is off it shows an amber banner "Location is currently switched off for this client (emergency off since
+  <date from the console audit, if known>) — new submissions may have no location." (same text in the Excel "About").
+  The digest loads the Location section for every tenant; an emergency-off tenant shows it when the window had activity,
+  with a "switched OFF" note. Digest capture counts are sales-rep submissions only (match the KYC counts).
+- e2e: the `sales` / `salesManager` Playwright projects grant geolocation + a fixed position (`e2e/fixtures/geo.ts`);
+  API-level KYC creates send a fresh `boardPhotoGeo` (`e2eBoardPhotoGeo()`).
 - Data trap checked: the console never wrote every flag on save (detail page PATCHes one key; the backend merges; the
   wizard only added switched-ON behaviour flags), so no tenant got an accidental stored `false`. Any stored `false`
   can only come from someone switching it off.

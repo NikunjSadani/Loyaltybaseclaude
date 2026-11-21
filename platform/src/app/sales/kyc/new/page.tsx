@@ -450,12 +450,11 @@ export default function NewKYCPage() {
    * Explicit false (console emergency off): the hook does nothing. ON: the rep
    * cannot START the KYC (the wizard is replaced by a "location needed" guide) until location is allowed AND a
    * real fix arrives, and cannot SUBMIT without passing a fresh check (the API refuses a fix-less KYC too).
-   * A settings-load FAILURE keeps the gate open on the phone (features are then only defaults; the server still
-   * enforces the real setting) — same as before the default flipped. */
-  const locationGate = useLocationGate(features.requireLocation && !featuresLoading && !featuresError, { serverSkewMs, recheckClock: refetchClock });
-  // Last-known setting (browser storage): only drives the settings-failure note for reps whose programme required
-  // location last time. Deoleo reps (last-known false) never see it.
+   * The gate is OFF only when the setting LOADED as an explicit false: a settings-load FAILURE turns it ON (the guide
+   * shows up front — never a full wizard that the server then refuses), and while loading it is ON unless the
+   * last-known (freshly loaded, v2 cache) value is false. See useLocationSetting. */
   const locationSetting = useLocationSetting(features.requireLocation, featuresLoading, featuresError);
+  const locationGate = useLocationGate(locationSetting.gateEnabled, { serverSkewMs, recheckClock: refetchClock });
   // Round-3 #2/#6: a ticking clock so a board-photo fix that ages past 55 minutes shows "Retry location" + its line on
   // its own (no network; only on gate tenants with a board fix in hand).
   const [geoClockMs, setGeoClockMs] = useState(() => Date.now());

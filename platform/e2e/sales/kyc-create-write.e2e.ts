@@ -30,8 +30,11 @@ import { cookieToken, requestAs } from '../helpers/write';
  */
 test.describe('@sales kyc-create write (W16)', () => {
   test('/sales/kyc/new FE page renders (outlets load, outlet picker appears)', async ({ page }) => {
+    // Location gate (DEFAULT ON since 2026-11-21): the sales project grants geolocation + a fixed position
+    // (playwright.config.ts SALES_GEO), so the wizard shows instead of the location guide.
     await page.goto('/sales/kyc/new');
     await expect(page).toHaveURL(/\/sales\/kyc\/new/);
+    await expect(page.getByTestId('location-gate-blocked')).toHaveCount(0);
 
     // The first step is "Select Outlet" — the page always renders a search/dropdown.
     // Wait for the outlets to load (the page fetches /api/sales/outlets on mount).

@@ -5,6 +5,7 @@ import {
   LOCATION_REPORT_OFF_MESSAGE,
   LOCATION_TIMEOUT_MESSAGE,
   locationAggregateSql,
+  locationSwitchedOffBanner,
   pageOfLocationReport,
   resolveLocationParams,
   type LocationAggRow,
@@ -82,7 +83,7 @@ function fakePrisma(fx = fixtures()) {
     $executeRawUnsafe: jest.fn(async () => 0),
     $transaction: jest.fn(async (fn: any) => fn(ref)),
     $queryRaw: jest.fn(async (sql: any) => (sql.values[0] === 'bajaj' ? fx.agg : [])),
-    auditLog: { create: jest.fn().mockResolvedValue({}) },
+    auditLog: { create: jest.fn().mockResolvedValue({}), findFirst: jest.fn().mockResolvedValue(null) },
   };
   ref = prisma;
   return prisma;
@@ -133,7 +134,7 @@ describe('buildLocationReport', () => {
       reps: 2, kycs: 5, visibilityCaptures: 6, noGps: 1, poorAccuracy: 2, unverifiable: 1, blockedOutside: 3,
       medianAccuracyM: 12, medianLockMs: 1500,
     });
-    expect(r.setting).toEqual({ requireLocation: true, fenceOn: true, outletMasterFence: true });
+    expect(r.setting).toEqual({ requireLocation: true, switchedOffSince: null, fenceOn: true, outletMasterFence: true });
   });
 
   it('role / region filters shrink the rep ids sent to SQL (totals follow the filter)', async () => {
@@ -161,9 +162,41 @@ describe('buildLocationReport', () => {
     expect(r.setting.requireLocation).toBe(true);
   });
 
-  it('AUDIT #4: Deoleo (switch off — explicit false) → 403 with a clear message, before any roster read', async () => {
+  it('AUDIT 2026-11-21 #4: emergency off (explicit false) → report STILL available; setting OFF + switchedOffSince from the console audit', async () => {
     const prisma = fakePrisma();
-    await expect(buildLocationReport(prisma as any, 'deoleo', params(), NOW)).rejects.toThrow(
+    prisma.auditLog.findFirst.mockResolvedValueOnce({ createdAt: new Date('2026-11-21T05:00:00.000Z') });
+    const r = await buildLocationReport(prisma as any, 'deoleo', params(), NOW);
+    expect(r.setting).toMatchObject({ requireLocation: false, switchedOffSince: '2026-11-21T05:00:00.000Z' });
+    expect(prisma.user.findMany.mock.calls[0][0].where.clientId).toBe('deoleo'); // history is read, not hidden
+    expect(prisma.auditLog.findFirst.mock.calls[0][0].where).toEqual({
+      entityType: 'ClientFeatures', entityId: 'deoleo', newValues: { path: ['requireLocation'], equals: false },
+    });
+    expect(locationSwitchedOffBanner(r.setting.switchedOffSince)).toBe(
+      'Location is currently switched off for this client (emergency off since 21 Nov 2026) — new submissions may have no location.',
+    );
+  });
+
+  it('emergency off with no audit row / a failed audit read → switchedOffSince null ("since" omitted)', async () => {
+    const prisma = fakePrisma();
+    prisma.auditLog.findFirst.mockRejectedValueOnce(new Error('db down'));
+    const r = await buildLocationReport(prisma as any, 'deoleo', params(), NOW);
+    expect(r.setting.switchedOffSince).toBeNull();
+    expect(locationSwitchedOffBanner(null)).toBe(
+      'Location is currently switched off for this client (emergency off) — new submissions may have no location.',
+    );
+  });
+
+  it('ON → no switched-off lookup at all', async () => {
+    const prisma = fakePrisma();
+    const r = await buildLocationReport(prisma as any, 'bajaj', params(), NOW);
+    expect(r.setting.switchedOffSince).toBeNull();
+    expect(prisma.auditLog.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('unknown tenant (no client row) → 403 before any roster read', async () => {
+    const prisma = fakePrisma();
+    prisma.client.findUnique.mockResolvedValueOnce(null as any);
+    await expect(buildLocationReport(prisma as any, 'ghost', params(), NOW)).rejects.toThrow(
       new ForbiddenException(LOCATION_REPORT_OFF_MESSAGE),
     );
     expect(prisma.user.findMany).not.toHaveBeenCalled();
@@ -264,12 +297,15 @@ describe('locationAggregateSql — real Postgres', () => {
 });
 
 describe('ReportsService.locationCompliance + export kind', () => {
-  it('ROUND 3 #1: /enabled answers per tenant (bajaj on, absent key on, deoleo explicit-false off, no tenant → off)', async () => {
-    const svc = new ReportsService(fakePrisma() as any, {} as any);
-    await expect(svc.locationComplianceEnabled({ clientId: 'bajaj' } as any)).resolves.toEqual({ enabled: true });
-    await expect(svc.locationComplianceEnabled({ clientId: 'acme' } as any)).resolves.toEqual({ enabled: true });
-    await expect(svc.locationComplianceEnabled({ clientId: 'deoleo' } as any)).resolves.toEqual({ enabled: false });
-    await expect(svc.locationComplianceEnabled({ clientId: ' ' } as any)).resolves.toEqual({ enabled: false });
+  it('/enabled: every existing tenant gets the report (emergency off keeps its history); requireLocation tells the state', async () => {
+    const prisma = fakePrisma();
+    const svc = new ReportsService(prisma as any, {} as any);
+    await expect(svc.locationComplianceEnabled({ clientId: 'bajaj' } as any)).resolves.toEqual({ enabled: true, requireLocation: true });
+    await expect(svc.locationComplianceEnabled({ clientId: 'acme' } as any)).resolves.toEqual({ enabled: true, requireLocation: true });
+    await expect(svc.locationComplianceEnabled({ clientId: 'deoleo' } as any)).resolves.toEqual({ enabled: true, requireLocation: false });
+    await expect(svc.locationComplianceEnabled({ clientId: ' ' } as any)).resolves.toEqual({ enabled: false, requireLocation: false });
+    prisma.client.findUnique.mockResolvedValueOnce(null as any);
+    await expect(svc.locationComplianceEnabled({ clientId: 'ghost' } as any)).resolves.toEqual({ enabled: false, requireLocation: false });
   });
 
   it('JSON: one page + totals for the caller tenant', async () => {

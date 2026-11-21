@@ -18,6 +18,7 @@ import { LocationComplianceQueryDto } from '../../../reports/dto/location-compli
 import {
   buildLocationReport,
   LOCATION_NOTES,
+  locationSwitchedOffBanner,
   requireLocationTenant,
   resolveLocationParams,
   type LocationParams,
@@ -89,7 +90,7 @@ export function locationAboutRows(report: LocationReport, p: LocationParams, now
       'Require location',
       report.setting.requireLocation
         ? 'ON — reps cannot start or submit a KYC or visibility capture without a location fix.'
-        : 'OFF for this programme — captures without a location are still accepted.',
+        : locationSwitchedOffBanner(report.setting.switchedOffSince),
     ],
     ['What is counted', LOCATION_NOTES.sources],
     ['Accuracy', LOCATION_NOTES.accuracy],

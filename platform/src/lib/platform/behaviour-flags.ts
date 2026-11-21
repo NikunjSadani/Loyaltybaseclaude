@@ -15,6 +15,8 @@ import { isLocationRequired } from '@/lib/location-required';
 
 export type BehaviourFlagKey = keyof Pick<FeatureFlags, 'outletMasterGeo' | 'soDeclarationKyc' | 'allowPayoutWithoutPan' | 'gifsyRejectFastTrack' | 'requireLocation'>;
 
+export interface BehaviourFlagConfirmCopy { title: string; points: string[]; confirmLabel: string }
+
 export interface BehaviourFlagMeta {
   label: string;
   description: string;
@@ -23,7 +25,12 @@ export interface BehaviourFlagMeta {
    * Switching it OFF never asks. Used for flags that change who gets paid / what tax the company bears, or
    * who checks a KYC before GIFSY (gifsyRejectFastTrack).
    */
-  confirmOn?: { title: string; points: string[]; confirmLabel: string };
+  confirmOn?: BehaviourFlagConfirmCopy;
+  /**
+   * When set, switching the flag OFF first asks (a default-ON compliance control: requireLocation). `{tenant}` in the
+   * title is replaced with the tenant's name.
+   */
+  confirmOff?: BehaviourFlagConfirmCopy;
   /** ON when the tenant has no stored value (absent key); OFF only on an explicit stored `false`. */
   defaultOn?: boolean;
   /** Shown under the switch (amber) — e.g. what switching a default-ON flag off means. */
@@ -86,6 +93,17 @@ export const BEHAVIOUR_FLAG_META: Record<BehaviourFlagKey, BehaviourFlagMeta> = 
         'Refusals for being more than 200 m from the outlet are recorded for the Location report.',
       ],
       confirmLabel: 'Yes, require location',
+    },
+    // Audit 2026-11-21 #8: switching OFF disables a compliance control → confirm. Switching back ON keeps its confirm
+    // too (it blocks reps without a fix at once — the dialog says so).
+    confirmOff: {
+      title: 'Switch off location for {tenant}?',
+      points: [
+        'Reps will be able to submit KYC and visibility without a phone location.',
+        'Use this only as an emergency off — switch it back on as soon as the problem is fixed.',
+        'The Location report and the daily digest stay available, with a "switched off" banner.',
+      ],
+      confirmLabel: 'Yes, switch off location',
     },
     // Owner 2026-11-21: ON by default for every client (incl. Deoleo + every new client); the switch is only an
     // explicit emergency off.

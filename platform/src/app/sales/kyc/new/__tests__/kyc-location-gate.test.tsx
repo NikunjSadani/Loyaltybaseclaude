@@ -4,7 +4,7 @@
  * KLG1: ON + permission denied → the wizard is replaced by the location guide (with a way back to the KYC list).
  * KLG2: ON + a fix → the wizard (outlet step) shows.
  * KLG3: explicit false (emergency off) → the wizard shows straight away and no location check runs.
- * KLG4: DEFAULT ON (owner 2026-11-21) — no stored key → gated.  KLG5: settings failure → phone gate open.
+ * KLG4: DEFAULT ON (owner 2026-11-21) — no stored key → gated.  KLG5: settings failure → gate ON up front.
  */
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -110,13 +110,15 @@ describe('KYC-LG — KYC wizard location gate', () => {
     expect(screen.getByTestId('kyc-flow').hidden).toBe(true);
   });
 
-  it('KLG5: settings load FAILED → the phone gate stays open (server enforces), no location check', async () => {
+  it('KLG5: settings load FAILED → treated as ON: the guide shows UP FRONT (never a full wizard the server then refuses) + the note', async () => {
     FEATURES_ERROR = true;
+    getCurrentPosition.mockImplementation(denied);
     try {
       render(<NewKYCPage />);
-      expect(screen.getByTestId('kyc-new-root')).toBeTruthy();
-      expect(screen.queryByTestId('kyc-flow')).toBeNull();
-      expect(getCurrentPosition).not.toHaveBeenCalled();
+      expect(await screen.findByTestId('location-gate-blocked')).toBeTruthy();
+      expect(screen.getByTestId('kyc-flow').hidden).toBe(true);
+      expect(getCurrentPosition).toHaveBeenCalled();
+      expect(screen.getByText(/Couldn't load programme settings — location may be required/)).toBeTruthy();
     } finally {
       FEATURES_ERROR = false;
     }

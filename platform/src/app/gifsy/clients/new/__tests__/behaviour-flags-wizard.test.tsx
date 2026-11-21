@@ -95,13 +95,17 @@ describe('New-client wizard — behaviour flags', () => {
     expect(postSpy.mock.calls[0][0].features).not.toHaveProperty('requireLocation');
   });
 
-  it('W8: switching requireLocation OFF (no confirm) shows the emergency-off note and sends an EXPLICIT false', async () => {
+  it('W8: switching requireLocation OFF asks first (audit #8), then shows the emergency-off note and sends an EXPLICIT false', async () => {
     const postSpy = vi.fn();
     stubFetch(postSpy);
     await walkToFeatures();
     const sw = await screen.findByTestId('wizard-behaviour-flag-requireLocation');
     fireEvent.click(sw);
-    expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument();
+    const dialog = await screen.findByTestId('behaviour-flag-confirm');
+    expect(screen.getByText('Switch off location for NewCo Ltd?')).toBeInTheDocument();
+    expect(sw).toHaveAttribute('aria-checked', 'true'); // nothing changes until confirmed
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Yes, switch off location' }));
+    await waitFor(() => expect(screen.queryByTestId('behaviour-flag-confirm')).not.toBeInTheDocument());
     expect(sw).toHaveAttribute('aria-checked', 'false');
     expect(screen.getByTestId('wizard-behaviour-flag-requireLocation-off-note').textContent).toBe(
       'Emergency off — KYC and visibility photos can then be submitted without a phone location (no location check for them)',
