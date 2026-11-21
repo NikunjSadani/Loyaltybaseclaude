@@ -38,6 +38,11 @@ const PAYLOAD = {
   },
   installed: {
     users: 64,
+    devices: 71,
+    byRole: [
+      { role: 'SALES_SO', users: 50 },
+      { role: 'WHOLESALER', users: 14 },
+    ],
     byPlatform: [
       { platform: 'ANDROID', users: 40 },
       { platform: 'IOS', users: 24 },
@@ -77,14 +82,29 @@ describe('Admin App Adoption page — real data', () => {
     mockFetchOk(PAYLOAD);
     render(<AppAdoptionPage />);
     expect(await screen.findByText('PARTNER')).toBeInTheDocument();
-    expect(await screen.findByText('Android')).toBeInTheDocument();
+    // 'Android' now appears in BOTH cards (notifications By OS + installed By OS).
+    expect((await screen.findAllByText('Android')).length).toBeGreaterThanOrEqual(1);
   });
 
-  it('AD3: renders installed user count + a platform breakdown row', async () => {
+  it('AD3: installed card mirrors the notifications card — devices, by role, by OS (friendly OS names)', async () => {
     mockFetchOk(PAYLOAD);
     render(<AppAdoptionPage />);
     expect(await screen.findByText('64')).toBeInTheDocument();
-    expect(await screen.findByText('ANDROID')).toBeInTheDocument();
+    expect(await screen.findByText('across 71 devices')).toBeInTheDocument();
+    expect(await screen.findByText('SALES_SO')).toBeInTheDocument();
+    expect(await screen.findByText('WHOLESALER')).toBeInTheDocument();
+    expect(screen.getAllByText('By role')).toHaveLength(2);
+    expect(screen.getAllByText('By OS')).toHaveLength(2);
+    expect(screen.queryByText('ANDROID')).not.toBeInTheDocument();
+    expect(screen.queryByText('By platform')).not.toBeInTheDocument();
+  });
+
+  it('AD3b: an older API without devices/byRole still renders the installed card', async () => {
+    mockFetchOk({ ...PAYLOAD, installed: { users: 65, byPlatform: [{ platform: 'ANDROID', users: 65 }] } });
+    render(<AppAdoptionPage />);
+    expect((await screen.findAllByText('65')).length).toBeGreaterThanOrEqual(1);
+    // Only the notifications card has a devices line when the API omits installed.devices.
+    expect(screen.getAllByText(/^across .* devices$/)).toHaveLength(1);
   });
 
   it('AD4: shows the empty state when all counts are zero', async () => {

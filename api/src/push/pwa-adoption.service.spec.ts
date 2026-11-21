@@ -116,16 +116,24 @@ describe('PwaAdoptionService', () => {
       const { service, prisma } = makeService();
       prisma.pushSubscription.findMany.mockResolvedValue([]);
       prisma.pwaInstall.findMany.mockResolvedValue([
-        { userId: 'u1', platform: 'ANDROID' },
-        { userId: 'u2', platform: 'ANDROID' },
-        { userId: 'u3', platform: 'IOS' },
+        { userId: 'u1', platform: 'ANDROID', user: { role: 'SALES_SO' } },
+        { userId: 'u2', platform: 'ANDROID', user: { role: 'SALES_ISR' } },
+        { userId: 'u3', platform: 'IOS', user: { role: 'SALES_SO' } },
+        { userId: 'u3', platform: 'DESKTOP', user: { role: 'SALES_SO' } },
       ]);
       const r = await service.adoption('deoleo');
       expect(r.installed.users).toBe(3);
+      // Same shape as the notifications card (owner 2026-11-21): devices + by-role (distinct users per role).
+      expect(r.installed.devices).toBe(4);
+      expect(r.installed.byRole).toEqual([
+        { role: 'SALES_SO', users: 2 },
+        { role: 'SALES_ISR', users: 1 },
+      ]);
       expect(r.installed.byPlatform).toEqual(
         expect.arrayContaining([
           { platform: 'ANDROID', users: 2 },
           { platform: 'IOS', users: 1 },
+          { platform: 'DESKTOP', users: 1 },
         ]),
       );
     });
