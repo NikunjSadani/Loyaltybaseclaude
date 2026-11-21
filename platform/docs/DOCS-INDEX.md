@@ -93,6 +93,7 @@ verify. Working agreements: root [`CLAUDE.md`](../../CLAUDE.md). Last updated 20
 | [`A-DOMAIN-PLAN.md`](plans/A-DOMAIN-PLAN.md) · [`A-DOMAIN-P0-DESIGN.md`](plans/A-DOMAIN-P0-DESIGN.md) | DB-driven tenant domain routing + branding |
 | [`APPLIES-TO-TARGETING-PLAN.md`](plans/APPLIES-TO-TARGETING-PLAN.md) | KPI + visibility scope by outlet type / program / sub-program (in prod) |
 | [`BAJAJ-DATA-MIGRATION.md`](plans/BAJAJ-DATA-MIGRATION.md) | Bajaj staging data migration from the prior provider |
+| [`CLIENT-MIGRATION-PLAYBOOK.md`](plans/CLIENT-MIGRATION-PLAYBOOK.md) | **Generic client-migration playbook** — existing points programme: vendor closing + dated passbook, **held opening balances** for outlets without a wallet (auto-apply at KYC approval, Gifsy Apply now / Cancel, digest line), reconciliation template, Bajaj numbers |
 | [`BAJAJ-ENROLLMENT-IMPORTER.md`](plans/BAJAJ-ENROLLMENT-IMPORTER.md) · [`BAJAJ-HIERARCHY-RENAME.md`](plans/BAJAJ-HIERARCHY-RENAME.md) | Bajaj enrollment importer; ISR/SM/ZH naming |
 | [`CREDIT-BATCH-EVIDENCE-B1.md`](plans/CREDIT-BATCH-EVIDENCE-B1.md) | Audit-evidence attachments on credit/payout batches |
 | [`DATA-VISIBILITY.md`](plans/DATA-VISIBILITY.md) | What each role sees on each page (E2E spec) |
