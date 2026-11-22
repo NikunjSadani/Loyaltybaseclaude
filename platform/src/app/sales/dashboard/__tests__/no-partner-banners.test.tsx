@@ -40,8 +40,14 @@ beforeEach(() => {
       : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(GENERIC) }));
 });
 afterEach(() => {
+  // Unmount FIRST so no effect starts a new read, then restore spies. restoreAllMocks also wipes fetchMock's
+  // implementation (→ returns undefined), and a dashboard read already queued by the session cache can still run a
+  // microtask later — so put a harmless fetch back. Without this, a late `fetch(url).then` hit undefined and Vitest
+  // failed the WHOLE run on the unhandled rejection (CI 2026-11-22: 502 files passed, 1 error → staging deploy skipped).
+  cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  fetchMock.mockImplementation(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(GENERIC) }));
 });
 
 describe('sales dashboard banners', () => {
