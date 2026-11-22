@@ -112,6 +112,11 @@ fence-block audit rows written while ON stay (they are history).
 
 ## B. Help & Guides content load (Help & videos guides for Bajaj prod)
 
+> ✅ **DONE 2026-11-22** (owner-approved): the 15 staging guides + 8 videos were COPIED to prod by a one-off job instead of
+> console typing (see `HELP-VIDEOS.md` §3 "Bajaj status"; backup `1795324819610`). Remaining: owner switches
+> **Feature Flags → "Help & videos"** ON, then a read-only check that reps/retailers see the list. The steps below stay
+> as the reference for a client whose guides are typed in the console.
+
 ### What it does (plain words)
 Creates Bajaj's how-to guides (title, short description, 3–6 numbered steps, optional MP4 video ≤ 50 MB + poster) in
 the `help_topics` table, uploads the videos/posters to OUR uploads bucket under `help-videos/bajaj/<topicId>/…`, and

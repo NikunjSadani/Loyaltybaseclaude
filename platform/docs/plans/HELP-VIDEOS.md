@@ -112,7 +112,15 @@ transaction** as the change.
 
 ## 3. Seed content (enter via the console after deploy — NOT seeded into the DB)
 
-Steps follow the real screens as of `f5abb310`. Bajaj-only screens are noted. Keep each step to one line.
+Steps follow the real screens as of `13f5c555` (every quoted label re-checked against the source 2026-11-22). Bajaj-only
+screens are noted. Keep each step to one line.
+
+**Bajaj status (2026-11-22):** all 15 guides below (10 SALES incl. "Allow camera access", 5 PARTNER; 8 with video) are
+LIVE on Bajaj STAGING and were COPIED to Bajaj PRODUCTION (owner-approved; backup `1795324819610`; job
+`help-copy-prod.job.js` = server-side copy of each video/poster to a new `help-videos/bajaj/<prodTopicId>/` key + rows +
+`AuditLog` CREATE rows in one transaction; verified 15 rows / 15 published / 15 audit rows / 16 objects OK). The prod
+`helpVideos` flag is switched on by the owner (Gifsy console → Clients → Bajaj → Feature Flags → "Help & videos").
+Known nit: the catalogue VIDEO was recorded on staging (Cash Payout tab visible); Bajaj prod has Cash Payout OFF.
 Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 
 ### SALES (Sales app)
@@ -172,11 +180,11 @@ Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 **7. Visibility capture** *(Bajaj)*
 *Send POSM photos for your outlets.*
 1. On the Dashboard, open the "Visibility" card ("View visibility").
-2. Find the outlet (search or filters); rows marked "Due" need a capture.
+2. Find the outlet (search or filters); rows marked "Not captured yet" need a capture.
 3. Tap "Capture" and take each photo with "Capture photo" ("Retake" to redo).
 4. Allow location if asked — photos need it.
 5. Tap "Submit capture" — you'll see "Capture submitted".
-6. If a capture is "Rejected" or "Changes requested", tap "Recapture" and submit again.
+6. If a capture is "Rejected" or "Needs re-take", tap "Recapture" and submit again.
 
 **8. Check outlets & targets**
 *See your outlets and how they are doing against target.*
@@ -230,7 +238,7 @@ Video ideas: a 30–90 s screen recording on a real phone, in portrait.
 **4. Catalogue & wishlist**
 *Browse rewards and save the ones you want.*
 1. Tap "Redeem" in the bottom bar to open the "Rewards Catalogue".
-2. Switch between "Physical", "Vouchers" and "Cash Payout"; use search or "Within my points".
+2. Switch between "Physical" and "Vouchers"; use search or "Within my points". *(Bajaj: Cash Payout is OFF — add "and \"Cash Payout\"" only for a client with that channel on.)*
 3. Tap any item to see its details.
 4. Tap the ♥ heart to add it to your wishlist.
 5. Tap "Wishlist" next to your balance to see saved items.
