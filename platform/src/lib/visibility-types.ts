@@ -600,6 +600,8 @@ export interface OutletStatusResponse {
   inScope: boolean;
   /** Plain words why the outlet is not in scope (null / absent when it is). Shown instead of the capture button. */
   notInScopeReason?: string | null;
+  /** Visibility never applies to this outlet (its type / programme is not covered) — the card is hidden. */
+  notApplicable?: boolean;
   canCapture: boolean;
   windows: OutletStatusWindow[];
 }

@@ -974,7 +974,9 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
         if (cancelled) return;
         if (r.success) {
           setInScope(r.data.inScope);
-          setNotInScopeReason(r.data.inScope ? null : r.data.notInScopeReason ?? null);
+          // Not applicable at all (e.g. a wholesaler — type / programme never covered): hide the card entirely
+          // (owner 2026-11-21). Temporary blocks (KYC pending, parked…) still show their reason.
+          setNotInScopeReason(r.data.inScope || r.data.notApplicable ? null : r.data.notInScopeReason ?? null);
           setCanCapture(r.data.canCapture);
           setWindows(r.data.windows ?? []);
         } else {

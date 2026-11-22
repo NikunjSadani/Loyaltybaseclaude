@@ -63,6 +63,7 @@ import { SubmitCaptureDto, ResubmitCaptureDto } from './dto/visibility-capture.d
 import {
   OUT_OF_SCOPE_REASON_SELECT,
   visibilityOutOfScopeReason,
+  visibilityNotApplicable,
   visibilityUniverseBase,
   visibilityUniverseWhere,
   withVisibilityProgramWhere,
@@ -459,6 +460,8 @@ export class VisibilityCaptureService {
       inScope,
       /** Plain words why this outlet is not in scope (null when it is) — shown instead of the capture button. */
       notInScopeReason,
+      /** Visibility never applies to this outlet (type / programme not covered) — the sales app hides the card. */
+      notApplicable: !inScope && visibilityNotApplicable(outlet, config),
       canCapture: levelAllowed && inScope,
       windows: windowKeys.map((key) => {
         const { startDay, endDay } = windowBoundsForKey(key, freq);

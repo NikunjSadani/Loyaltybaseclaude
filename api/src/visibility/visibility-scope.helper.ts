@@ -162,6 +162,20 @@ export const OUT_OF_SCOPE_REASON_SELECT = {
 } as const;
 
 /**
+ * True when visibility can NEVER apply to this outlet as it stands — its outlet type is not in the programme's
+ * outlet scope, or its programme / sub-programme is not covered (owner 2026-11-21: "if something is not applicable,
+ * hide it" — e.g. wholesalers). Checked independently of the temporary states (KYC pending, parked, deactivated…),
+ * so a wholesaler whose KYC is pending is still "not applicable", not "capture once KYC is approved".
+ */
+export function visibilityNotApplicable(
+  outlet: { programName?: string | null; programCategory?: string | null; outletType?: { code: string } | null },
+  cfg: VisibilityProgramScopeLike & { outletScope: ReadonlyArray<string> },
+): boolean {
+  if (!outlet.outletType?.code || !cfg.outletScope.includes(outlet.outletType.code)) return true;
+  return !visibilityProgramMatches(cfg, { program: outlet.programName ?? null, subProgram: outlet.programCategory ?? null });
+}
+
+/**
  * WHY an outlet is not in visibility scope, in plain words — for the 400 a rep gets and the reason shown instead of
  * the "Capture Visibility" button. This only EXPLAINS a decision: whether an outlet is in scope is always decided by
  * the database query on {@link visibilityUniverseWhere}. Checks run in the rule's order; null = no rule fails here.
