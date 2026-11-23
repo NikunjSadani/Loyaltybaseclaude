@@ -208,7 +208,9 @@ describe('fund engine — statement', () => {
   it('no opening balance → all history counts (openingDate null)', () => {
     const stmt = buildFundStatement({ rates, entries: [], items: [item({ key: 'x', type: 'CASH_REDEMPTION', facePaise: 1_000n, committedAt: day(-400) })] });
     expect(stmt.openingDate).toBeNull();
-    expect(stmt.totals.balancePaise).toBe(-1_100n);
+    // Committed before the first fee rate → no fee (flagged), charged at face.
+    expect(stmt.totals.balancePaise).toBe(-1_000n);
+    expect(stmt.flagCounts.NO_FEE_RATE).toBe(1);
   });
 
   it('the opening line always leads even when spend is on the same day', () => {

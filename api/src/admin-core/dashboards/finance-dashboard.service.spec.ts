@@ -198,7 +198,7 @@ describe('FinanceDashboardService', () => {
     // OFF / not in this FY → no key at all (the C1 tests above assert the exact 3-field tile).
   });
 
-  it('fund block = the fund reconciliation engine for the caller''s (assumed) tenant, in ₹', async () => {
+  it('fund block = the fund reconciliation engine for the caller’s (assumed) tenant, in ₹', async () => {
     const out = await service.finance(assumedGifsy);
     expect(out.fund).toEqual({
       receivedRupees: 150_000, // opening + receipts
@@ -220,7 +220,7 @@ describe('FinanceDashboardService', () => {
     expect(mockLoadFund).toHaveBeenCalledWith(mockPrisma, 'deoleo');
   });
 
-  it('fund block for an un-assumed Gifsy owner (no client context) is all zero — never another tenant''s numbers', async () => {
+  it('fund block for an un-assumed Gifsy owner (no client context) is all zero — never another tenant’s numbers', async () => {
     const out = await service.finance(admin);
     expect(out.fund).toMatchObject({ balanceRupees: 0, receivedRupees: 0, hasSettings: false, lowBalance: false });
     expect(mockLoadFund).not.toHaveBeenCalled();
