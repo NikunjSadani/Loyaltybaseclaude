@@ -690,7 +690,7 @@ describe('target-vs-sales — hand-computed buckets + Pace %, and more card ⇔ 
     for (const h of HAND) {
       const r = byCode(sheet, h.code);
       expect({ code: h.code, band: r[BUCKET_COL], pace: r[TOTAL_PACE] ?? '', volPace: r[VOL_PACE] ?? '' }).toEqual({
-        code: h.code, band: h.band, pace: h.pace === '' ? null : h.pace, volPace: h.volPace === '' ? null : h.volPace,
+        code: h.code, band: h.band, pace: h.pace, volPace: h.volPace, // blank cells read back as null → ''
       });
       if (h.band === TVS_BUCKET_NOT_LIVE) expect(labels.has(h.code)).toBe(false);
       else expect({ code: h.code, card: labels.get(h.code) }).toEqual({ code: h.code, card: h.band });
