@@ -20,7 +20,17 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 
 ---
 
-## 1. Where things stand (2026-11-21)
+## 1. Where things stand (2026-11-23)
+
+> **2026-11-23 — PROD = main = develop = `9bda3b71`** (owner deploy run 45229559935; verified: api / frontend /
+> `gifsy-sales-import` on 9bda3b71, migration `20261123120000_sales_import_processed_roster` applied, 0 errors / 0 5xx,
+> hosts 200). Contents (release/next3): Sales Import roster-only aggregates (staging real 178 MB file: worker memory
+> 63% → 20%, 6.5 → 3.8 min, identical roster results; rollback rule = runbook §E) · Target vs Sales report columns /
+> billing bucket / filters + Overview download (`TARGET-VS-SALES-REPORT.md`) · adoption Excel Employee ID + rank 1–5
+> level ID columns (`PWA-PLAN.md`) · visibility review State / Zone. Earlier on 2026-11-22: prod `13f5c555` (held
+> balances loaded 40 / 1,22,843 pts PENDING; 15 Bajaj help guides + 8 videos copied; Help & videos ON). In progress:
+> fund reconciliation (`FUND-RECONCILIATION-DESIGN.md`, branch `feat/fund-reconciliation`, not on staging/prod).
+> The table below is the 2026-11-21 snapshot (history).
 
 | | SHA | Since | Notes |
 |---|---|---|---|
