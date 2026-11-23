@@ -4,6 +4,7 @@ import { istMonthKey } from '../../../common/ist-date';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import type { PrismaService } from '../../../prisma/prisma.service';
 import { TargetsService } from '../../../targets/targets.service';
+import { ReportsService } from '../../../admin-programs/reports.service';
 import {
   buildTargetVsSalesRows,
   targetVsSalesHeaderKeys,
@@ -190,6 +191,9 @@ function fixture() {
   });
 }
 
+
+const byCode = (sheet: unknown[][], code: string) => sheet.find((r) => r[0] === code)!;
+
 async function render(prisma: ReturnType<typeof db>, raw: Row, user: JwtPayload = ADMIN) {
   const params = TARGET_VS_SALES_KIND.parseParams(raw, user);
   const out = await renderKind(TARGET_VS_SALES_KIND, ctxFor(user, prisma), params);
@@ -331,7 +335,6 @@ describe('target-vs-sales — new columns (2026-11-23)', () => {
     });
   }
 
-  const byCode = (sheet: unknown[][], code: string) => sheet.find((r) => r[0] === code)!;
 
   it('headers: new columns after Outlet Type, before Month — in the tenant’s own level names (Bajaj XSR → ISR)', async () => {
     const { sheet } = await render(hierarchyWorld(), { fromMonth: M, toMonth: M });
@@ -342,11 +345,11 @@ describe('target-vs-sales — new columns (2026-11-23)', () => {
     ]);
   }, XLSX_TIMEOUT);
 
-  it('multi-rep outlet: distinct people joined with ", ", names and IDs in the same order; master fields trimmed', async () => {
+  it('multi-rep outlet: distinct people joined with " | ", names and IDs in the same order; master fields trimmed', async () => {
     const { sheet } = await render(hierarchyWorld(), { fromMonth: M, toMonth: M });
     const r = byCode(sheet, 'MULTI');
     expect(r.slice(3, 7)).toEqual(['Gold', 'Urban', 'West', 'Maharashtra']);
-    expect(r.slice(7, 13)).toEqual(['Asha', 'E-asm1', 'Arun, Bina', 'E-so2, E-so1', 'Xia, Zed', 'E-isr3, E-isr1']);
+    expect(r.slice(7, 13)).toEqual(['Asha', 'E-asm1', 'Arun | Bina', 'E-so2 | E-so1', 'Xia | Zed', 'E-isr3 | E-isr1']);
     // Child outlet inherits the parent group's rep.
     expect(byCode(sheet, 'CHILD').slice(7, 13)).toEqual(['Asha', 'E-asm1', 'Bina', 'E-so1', 'Yan', 'E-isr2']);
   }, XLSX_TIMEOUT);
@@ -377,7 +380,7 @@ describe('target-vs-sales — new columns (2026-11-23)', () => {
       'Area Sales Manager Name', 'Area Sales Manager Employee ID', 'Sales Officer Name', 'Sales Officer Employee ID', 'ISR Name', 'ISR Employee ID',
     ]);
     expect(sheet[1].slice(7, 13)).toEqual(['Name d-asm', 'E-d-asm', 'Name d-so', 'E-d-so', 'Not set', 'Not set']);
-    expect(about.map((r) => r[1]).join('\n')).toMatch(/has no ISR level, so that column pair reads "Not set"/);
+    expect(about.map((r) => r[1]).join('\n')).toMatch(/This client's sales hierarchy has no ISR level, so that column pair reads "Not set"/);
   }, XLSX_TIMEOUT);
 
   it('billing bucket per row: the card’s labels incl. no target, not covered, not live, not in master; no KPI', async () => {
@@ -588,3 +591,220 @@ describe('Overview billing card ⇔ Target vs Sales billing bucket — the same 
   }
 });
 
+describe('target-vs-sales — hand-computed buckets + Pace %, and more card ⇔ report cases (audit round 2026-11-23)', () => {
+  const PREV = monthOffset(-1);
+  const CUR = monthOffset(0);
+
+  // VOL = an unscoped second KPI with the same numbers (its Pace % is floored but never clamped into a band).
+  // TOTAL = the card's KPI (flagged primary), scoped to RETAIL.
+  const VOL_PACE = 17;
+  const TOTAL_PACE = 20;
+
+  /** Every value hand-computed from the card's rules (BILLING_BUCKETS, isMet ±0.005, floor to 1 dp). */
+  const HAND: Array<{ code: string; t: number | null; a: number | null; type?: string; band: string; pace: number | ''; volPace: number | '' }> = [
+    { code: 'H01', t: 100, a: 0, band: 'Not started', pace: 0, volPace: 0 },
+    { code: 'H02', t: 100, a: -5, band: 'Not started', pace: -5, volPace: -5 },
+    { code: 'H03', t: 100, a: 19.95, band: 'Under 20%', pace: 19.9, volPace: 19.9 },
+    { code: 'H04', t: 100, a: 19.96, band: 'Under 20%', pace: 19.9, volPace: 19.9 },
+    { code: 'H05', t: 100, a: 20, band: '20–39%', pace: 20, volPace: 20 },
+    { code: 'H06', t: 100, a: 29, band: '20–39%', pace: 29, volPace: 29 }, // 29/100 is 28.999… in binary — still 29.0
+    { code: 'H07', t: 100, a: 39.96, band: '20–39%', pace: 39.9, volPace: 39.9 },
+    { code: 'H08', t: 100, a: 99.96, band: '80–99%', pace: 99.9, volPace: 99.9 },
+    { code: 'H09', t: 100, a: 99.996, band: 'Achieved (100%+)', pace: 100, volPace: 99.9 }, // met within 0.005
+    { code: 'H10', t: 100, a: 100, band: 'Achieved (100%+)', pace: 100, volPace: 100 },
+    { code: 'H11', t: 100, a: 250, band: 'Achieved (100%+)', pace: 250, volPace: 250 },
+    { code: 'H12', t: 1_000_000, a: 999_999.99, band: '80–99%', pace: 99.9, volPace: 99.9 }, // 0.01 short → not met
+    { code: 'H13', t: 1_000_000, a: 199_960, band: 'Under 20%', pace: 19.9, volPace: 19.9 },
+    { code: 'H14', t: 0, a: 50, band: 'No target', pace: '', volPace: '' },
+    { code: 'H15', t: null, a: 30, band: 'No target', pace: '', volPace: '' },
+    { code: 'H16', t: 100, a: 50, type: 'WHOLESALE', band: 'Not covered by the KPI target', pace: '', volPace: 50 },
+    // Direct rep isrIn is INACTIVE (not removed): hierarchy columns ignore them, the card's manager filter does not.
+    { code: 'HINACT', t: 100, a: 70, band: '60–79%', pace: 70, volPace: 70 },
+    { code: 'HPARK', t: 100, a: 50, band: TVS_BUCKET_NOT_LIVE, pace: 50, volPace: 50 },
+    { code: 'HDEL', t: 100, a: 10, band: TVS_BUCKET_NOT_LIVE, pace: 10, volPace: 10 },
+    { code: 'HGHOST', t: 100, a: 5, band: TVS_BUCKET_NOT_LIVE, pace: 5, volPace: 5 },
+  ];
+
+  /** `months[i]` gets achieved × factors[i] (so a multi-month range has different bands per month). */
+  function handWorld(months: string[], factors: number[] = months.map(() => 1), kpis?: Row[]) {
+    const outlets: Row[] = [];
+    const targets: Row[] = [];
+    const sales: Row[] = [];
+    const assignments: Row[] = [];
+    HAND.forEach((h, i) => {
+      if (h.code !== 'HGHOST') {
+        const rep = h.code === 'HINACT' ? 'isrIn' : 'isr1';
+        outlets.push({
+          id: `ho-${i}`,
+          clientId: 'bajaj',
+          outletCode: h.code,
+          outletType: { code: h.type ?? 'RETAIL' },
+          programName: 'Gold',
+          kycIntent: h.code === 'HPARK' ? 'PARKED' : null,
+          deletedAt: h.code === 'HDEL' ? new Date() : null,
+          salesAssignments: [{ salesUserId: rep }],
+        });
+        assignments.push({ salesUserId: rep, outletId: `ho-${i}` });
+      }
+      months.forEach((m, mi) => {
+        const tv: Row = {};
+        if (h.t !== null) Object.assign(tv, { TOTAL: h.t, VOL: h.t });
+        targets.push({ clientId: 'bajaj', outletCode: h.code, month: m, outletName: h.code, targetValues: tv });
+        if (h.a !== null) sales.push({ clientId: 'bajaj', outletCode: h.code, month: m, kpiValues: { TOTAL: h.a * factors[mi], VOL: h.a * factors[mi] } });
+      });
+    });
+    return db({
+      kpis: kpis ?? [
+        { clientId: 'bajaj', code: 'VOL', label: 'Vol', unit: null, order: 0 },
+        { clientId: 'bajaj', code: 'TOTAL', label: 'Total', unit: 'INR', order: 1, isPrimary: true, outletTypes: ['RETAIL'] },
+      ],
+      levels: BAJAJ_LEVELS,
+      salesUsers: [
+        su('rsm', 'RSM', null), su('asm1', 'ASM', 'rsm'), su('so1', 'SO', 'asm1'),
+        su('isr1', 'XSR', 'so1'), su('isrIn', 'XSR', 'so1', { isActive: false }),
+      ],
+      outlets,
+      assignments,
+      targets,
+      sales,
+    });
+  }
+
+  async function card(prisma: ReturnType<typeof db>, month: string, f: Partial<BillingProgressFilters> = {}) {
+    const d = await loadBillingProgress(prisma as unknown as PrismaService, 'bajaj', {
+      month, program: null, outletType: null, managerId: null, ...f,
+    }, new Date());
+    const labels = new Map<string, string>();
+    for (const r of d.inScope) labels.set(r.outletCode, BILLING_BUCKETS.find((b) => b.key === r.bucket)!.label);
+    for (const r of d.noTarget) labels.set(r.outletCode, billingListLabel('NO_TARGET'));
+    for (const r of d.notCovered) labels.set(r.outletCode, billingListLabel('NOT_COVERED'));
+    return { d, labels };
+  }
+
+  it('every band, Pace % and edge matches the HAND-COMPUTED value — and the card says the same', async () => {
+    const prisma = handWorld([PREV]);
+    const { sheet } = await render(prisma, { fromMonth: PREV, toMonth: PREV });
+    expect(sheet[0][VOL_PACE]).toBe('Vol Pace %');
+    expect(sheet[0][TOTAL_PACE]).toBe('Total Pace %');
+    const { labels } = await card(prisma, PREV);
+    for (const h of HAND) {
+      const r = byCode(sheet, h.code);
+      expect({ code: h.code, band: r[BUCKET_COL], pace: r[TOTAL_PACE] ?? '', volPace: r[VOL_PACE] ?? '' }).toEqual({
+        code: h.code, band: h.band, pace: h.pace === '' ? null : h.pace, volPace: h.volPace === '' ? null : h.volPace,
+      });
+      if (h.band === TVS_BUCKET_NOT_LIVE) expect(labels.has(h.code)).toBe(false);
+      else expect({ code: h.code, card: labels.get(h.code) }).toEqual({ code: h.code, card: h.band });
+    }
+    // Soft-deleted / not-in-master outlets: master + hierarchy cells "Not set", type blank (unchanged column).
+    for (const c of ['HDEL', 'HGHOST']) {
+      const r = byCode(sheet, c);
+      expect(r[2]).toBeNull();
+      expect(r.slice(3, 13)).toEqual(Array(10).fill('Not set'));
+    }
+  }, 60_000);
+
+  it('the CURRENT month agrees with the card too', async () => {
+    const prisma = handWorld([CUR]);
+    const { sheet } = await render(prisma, { fromMonth: CUR, toMonth: CUR });
+    const { labels } = await card(prisma, CUR);
+    for (const h of HAND.filter((x) => x.band !== TVS_BUCKET_NOT_LIVE)) {
+      expect({ code: h.code, band: byCode(sheet, h.code)[BUCKET_COL] }).toEqual({ code: h.code, band: labels.get(h.code) });
+    }
+  }, 60_000);
+
+  it('a multi-month range: each month’s rows agree with the card for THAT month', async () => {
+    const prisma = handWorld([PREV, CUR], [1, 0.5]);
+    const { sheet } = await render(prisma, { fromMonth: PREV, toMonth: CUR });
+    for (const m of [PREV, CUR]) {
+      const { labels } = await card(prisma, m);
+      for (const h of HAND.filter((x) => x.band !== TVS_BUCKET_NOT_LIVE)) {
+        const row = sheet.find((r) => r[0] === h.code && r[MONTH_COL] === m)!;
+        expect({ code: h.code, m, band: row[BUCKET_COL] }).toEqual({ code: h.code, m, band: labels.get(h.code) });
+      }
+    }
+    // Halved in the second month: H10 (100 → 50) moves from Achieved to 40–59%.
+    expect(sheet.find((r) => r[0] === 'H10' && r[MONTH_COL] === CUR)![BUCKET_COL]).toBe('40–59%');
+  }, 60_000);
+
+  it('manager filter with an INACTIVE direct rep: card and report both keep the outlet; its hierarchy cells read "Not set"', async () => {
+    const prisma = handWorld([PREV]);
+    const { sheet } = await render(prisma, { fromMonth: PREV, toMonth: PREV, managerId: 'so1' });
+    const { d } = await card(prisma, PREV, { managerId: 'so1' });
+    expect(d.inScope.map((r) => r.outletCode)).toContain('HINACT');
+    const r = byCode(sheet, 'HINACT');
+    expect(r[BUCKET_COL]).toBe('60–79%');
+    expect(r.slice(7, 13)).toEqual(Array(6).fill('Not set'));
+    // Every bucketed outlet on the card under this filter is in the report with the same band.
+    for (const c of d.inScope) {
+      expect({ code: c.outletCode, band: byCode(sheet, c.outletCode)[BUCKET_COL] }).toEqual({
+        code: c.outletCode, band: BILLING_BUCKETS.find((b) => b.key === c.bucket)!.label,
+      });
+    }
+  }, 60_000);
+
+  it('"No KPI set up": no enabled KPI → the card has no KPI and no lists; every report row says so', async () => {
+    const prisma = handWorld([PREV], [1], []);
+    const { d } = await card(prisma, PREV);
+    expect(d.kpi).toBeNull();
+    expect([...d.inScope, ...d.noTarget, ...d.notCovered]).toEqual([]);
+    const { sheet, about } = await render(prisma, { fromMonth: PREV, toMonth: PREV });
+    expect(new Set(sheet.slice(1).map((r) => r[BUCKET_COL]))).toEqual(new Set([TVS_BUCKET_NO_KPI]));
+    expect(about.map((r) => r[1]).join('\n')).toContain('this client has no enabled KPI');
+  }, 60_000);
+
+  it('About explains the manager filter vs the hierarchy columns', async () => {
+    const { about } = await render(handWorld([PREV]), { fromMonth: PREV, toMonth: PREV });
+    const line = about.find((r) => r[0] === 'Sales manager filter vs hierarchy columns');
+    expect(line?.[1]).toBe(
+      "The sales-manager filter (like the Overview card) uses the outlet's own current assignments, while the ASM / SO / ISR columns follow assignments to the outlet, its owner or its parent group — so the two can differ when reps are assigned by owner or group.",
+    );
+    expect(about.find((r) => r[0] === 'KPI columns')?.[1]).toMatch(/cut \(never rounded up\) to 1 decimal/);
+  }, 60_000);
+});
+
+describe('target-vs-sales — header collisions (tenant level names)', () => {
+  const M = monthOffset(-1);
+  function world(levelNames: Record<string, string>) {
+    return db({
+      kpis: [{ clientId: 'bajaj', code: 'TOTAL', label: 'Total', unit: null, order: 1, isPrimary: true }],
+      levels: [
+        { clientId: 'bajaj', code: 'XSR', name: levelNames.XSR, level: 1 },
+        { clientId: 'bajaj', code: 'SO', name: levelNames.SO, level: 2 },
+        { clientId: 'bajaj', code: 'ASM', name: levelNames.ASM, level: 3 },
+      ],
+      salesUsers: [su('a', 'ASM', null, { name: 'Anil' }), su('s', 'SO', 'a', { name: 'Sita' }), su('i', 'XSR', 's', { name: 'Ira' })],
+      outlets: [{ id: 'oc', clientId: 'bajaj', outletCode: 'C1', name: 'Corner Shop', outletType: { code: 'RETAIL' } }],
+      assignments: [{ salesUserId: 'i', outletId: 'oc' }],
+      targets: [{ clientId: 'bajaj', outletCode: 'C1', month: M, outletName: 'Corner Shop', targetValues: { TOTAL: 10 } }],
+      sales: [],
+    });
+  }
+
+  it('a level named "Outlet" and two levels with the same name never overwrite a column (Excel + JSON preview)', async () => {
+    const prisma = world({ ASM: 'Outlet', SO: 'Sales Officer', XSR: 'Sales Officer' });
+    const { sheet } = await render(prisma, { fromMonth: M, toMonth: M });
+    expect(sheet[0].slice(7, 13)).toEqual([
+      'Outlet Name (ASM)', 'Outlet Employee ID', 'Sales Officer Name', 'Sales Officer Employee ID',
+      'Sales Officer Name (XSR)', 'Sales Officer Employee ID (XSR)',
+    ]);
+    expect(new Set(sheet[0]).size).toBe(sheet[0].length);
+    expect(sheet[1].slice(0, 2)).toEqual(['C1', 'Corner Shop']);
+    expect(sheet[1].slice(7, 13)).toEqual(['Anil', 'E-a', 'Sita', 'E-s', 'Ira', 'E-i']);
+
+    const preview = (await new ReportsService(prisma as unknown as PrismaService).targetVsSales(ADMIN, { fromMonth: M, toMonth: M })) as {
+      columns: string[];
+      rows: Record<string, unknown>[];
+    };
+    expect(new Set(preview.columns).size).toBe(preview.columns.length);
+    expect(Object.keys(preview.rows[0])).toHaveLength(preview.columns.length);
+    expect(preview.rows[0]['Outlet Name']).toBe('Corner Shop');
+    expect(preview.rows[0]['Outlet Name (ASM)']).toBe('Anil');
+    expect(preview.rows[0]['Sales Officer Name']).toBe('Sita');
+    expect(preview.rows[0]['Sales Officer Name (XSR)']).toBe('Ira');
+  }, XLSX_TIMEOUT);
+
+  it('Deoleo prod naming (XSR named "XSR") → "XSR Name"; Bajaj (named "ISR") → "ISR Name"', async () => {
+    expect((await render(world({ ASM: 'ASM', SO: 'SO', XSR: 'XSR' }), { fromMonth: M, toMonth: M })).sheet[0].slice(11, 13)).toEqual(['XSR Name', 'XSR Employee ID']);
+    expect((await render(world({ ASM: 'ASM', SO: 'SO', XSR: 'ISR' }), { fromMonth: M, toMonth: M })).sheet[0].slice(11, 13)).toEqual(['ISR Name', 'ISR Employee ID']);
+  }, XLSX_TIMEOUT);
+});
