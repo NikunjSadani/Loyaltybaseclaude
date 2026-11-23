@@ -20,8 +20,9 @@
  * Invalid lines are skipped with a reason (≤ SALES_IMPORT_MAX_ERROR_SAMPLES samples kept, all counted).
  * Fully blank rows are ignored silently (trailing empty rows in an export).
  * Memory is bounded (S4): more than SALES_IMPORT_MAX_DISTINCT_CODES customer codes (ALL codes, roster or not),
- * MAX_AGGREGATE_KEYS aggregate keys (roster outlets only) or MAX_UNMATCHED_KEYS unmatched keys → AggregatorLimitError
- * (the processor shows its message).
+ * MAX_DISTINCT_PRODUCTS product combinations (ALL lines — the mis-mapped-dimension guard), MAX_AGGREGATE_KEYS aggregate
+ * keys (roster outlets only) or MAX_UNMATCHED_KEYS unmatched keys → AggregatorLimitError (the processor shows its
+ * message). The quantity bound (MAX_AGGREGATE_CASES) applies to roster aggregates AND unmatched customer totals.
  */
 import {
   SALES_IMPORT_MAX_DIMENSION_COMBOS,
@@ -155,6 +156,13 @@ export const TRACKED_COMBOS = 50_000;
 export const MAX_AGGREGATE_KEYS = 1_500_000;
 export const MAX_UNMATCHED_KEYS = 900_000;
 export const MAX_TRACKED_ENTRIES = 1_800_000; // aggregates + unmatched, combined
+/**
+ * Mapping-mistake guard (roster-only aggregates, 2026-11-23): distinct product combinations (dimKeys) over ALL valid lines.
+ * When every customer was aggregated, MAX_AGGREGATE_KEYS also caught a dimension column that is really an invoice / line
+ * number (every line a new "product"). Non-roster lines no longer make aggregates, so this keeps that failure loud.
+ * A real DMS file has a few hundred (Bajaj 2026-11: 94); a mis-mapped column on a 5-lakh-line file has ~ one per line.
+ */
+export const MAX_DISTINCT_PRODUCTS = 200_000;
 /** Customer names kept for unmatched.csv are truncated to this many characters (memory bound). */
 export const UNMATCHED_NAME_CHARS = 80;
 /** |Σ quantity| of one aggregate row must fit the BIGINT pico-cases column (±9.2e18 / 1e12). */
@@ -220,6 +228,9 @@ export class SalesAggregator {
   private readonly headers: Record<string, string>;
   private readonly dimHeaders: Record<string, string> = {};
   private readonly maxCodes: number;
+  private readonly maxProducts: number;
+  /** Every distinct dimKey seen on a valid line (roster or not) — the mapping-mistake guard. */
+  private readonly allDimKeys = new Set<string>();
   private readonly maxAggregates: number;
   private readonly maxUnmatched: number;
   private readonly maxTracked: number;
@@ -235,11 +246,12 @@ export class SalesAggregator {
     /** Decimal separator of TEXT amount/quantity cells (L1). */
     private readonly decimal: DecimalSeparator = '.',
     /** Overridable memory bounds (tests use small ones). */
-    limits: Partial<{ maxCodes: number; maxAggregates: number; maxUnmatched: number; maxTracked: number }> = {},
+    limits: Partial<{ maxCodes: number; maxAggregates: number; maxUnmatched: number; maxTracked: number; maxProducts: number }> = {},
     /** 'auto' decimal mode: record evidence from text measure cells so the processor can decide once per file. */
     opts: { collectDecimalEvidence?: boolean } = {},
   ) {
     this.maxCodes = limits.maxCodes ?? SALES_IMPORT_MAX_DISTINCT_CODES;
+    this.maxProducts = limits.maxProducts ?? MAX_DISTINCT_PRODUCTS;
     this.maxAggregates = limits.maxAggregates ?? MAX_AGGREGATE_KEYS;
     this.maxUnmatched = limits.maxUnmatched ?? MAX_UNMATCHED_KEYS;
     this.maxTracked = limits.maxTracked ?? MAX_TRACKED_ENTRIES;
@@ -325,6 +337,14 @@ export class SalesAggregator {
     const dimKey = stableDimKey(dims);
 
     // Bounds first, so a rejected file never half-updates the counters.
+    if (!this.allDimKeys.has(dimKey)) {
+      if (this.allDimKeys.size >= this.maxProducts) {
+        throw new AggregatorLimitError(
+          `The file has more than ${fmt(this.maxProducts)} distinct product combinations. Check the dimension columns (one may be an invoice or line number), or split the file.`,
+        );
+      }
+      this.allDimKeys.add(dimKey);
+    }
     if (!this.codes.has(code)) {
       if (this.codes.size >= this.maxCodes) {
         throw new AggregatorLimitError(
@@ -395,12 +415,19 @@ export class SalesAggregator {
         u.amountPaise += paise;
         u.qtyPico += pico;
         u.lines++;
+        // Same quantity bound as an aggregate (audit A L1): a garbage quantity column still fails loudly.
+        if (u.qtyPico > MAX_PICO || u.qtyPico < -MAX_PICO) {
+          throw new AggregatorLimitError(`Row ${rowNo}: one customer's quantity in a month exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
+        }
         if (!u.name && name) u.name = name;
       } else {
         if (this.unmatchedCount >= this.maxUnmatched) {
           throw new AggregatorLimitError(
             `The file has more than ${fmt(this.maxUnmatched)} unmatched customer × month entries. Check the outlet-code column mapping.`,
           );
+        }
+        if (pico > MAX_PICO || pico < -MAX_PICO) {
+          throw new AggregatorLimitError(`Row ${rowNo}: the quantity exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
         }
         if (this.aggregateCount + this.unmatchedCount >= this.maxTracked) throw this.tooMany();
         this.unmatchedCount++;
