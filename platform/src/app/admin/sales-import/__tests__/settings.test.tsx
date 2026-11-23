@@ -142,6 +142,18 @@ describe('KPI editor — product set', () => {
     expect(chips[2]).toHaveTextContent('P 999 never appears in the latest file');
   });
 
+  it('roster-only import (2026-11-23): the tester states the outlets whose sales are not in the totals; absent → nothing shown', async () => {
+    apiMock.testKpi.mockResolvedValue(ok({
+      months: [{ month: '2026-10', totalAmountRupees: 165, totalQuantity: 1.75, outletsNonZero: 3 }],
+      unmatchedEntries: { anyOf: [], noneOf: [] }, redundantEntries: { anyOf: [] }, matchedLines: 9, outletsNotIncluded: 2,
+    }));
+    renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'P' }] } } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Test against latest import/ })); });
+    expect(screen.getByTestId('kpi-test-not-included')).toHaveTextContent(
+      '2 outlets were not in the programme when this file was processed; any sales they have in this file are not included. The totals below don't include them.',
+    );
+  });
+
   it('Test with no reply (empty 504) says it didn’t finish and is safe to repeat — never an empty error', async () => {
     apiMock.testKpi.mockResolvedValue({ success: false, error: '', status: 504 });
     renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'P' }] } } });
