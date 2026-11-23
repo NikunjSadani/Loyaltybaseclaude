@@ -678,7 +678,7 @@ describe('SalesImportUploadService — reprocess as a new import (re-audit M3)',
     const h = harness();
     const id = await appliedImport(h);
     h.setProfile(MAP_A);
-    await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/has not changed/);
+    await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/Neither the column mapping nor the programme outlets changed/);
     h.setProfile(MAP_B);
     await expect(h.svc.reprocessAsNew(OTHER, id)).rejects.toBeInstanceOf(NotFoundException);
     h.setApplies([]);
