@@ -13,7 +13,7 @@
  *          vacant territory, never skip to the next manager up);
  *        – passed a MORE senior level without meeting the rung (e.g. the ISR column for an outlet whose rep is an SO),
  *          no manager, a dangling link or a cycle → nothing from this rep.
- *   3. Several reps → the DISTINCT (name, ID) pairs, sorted by name, joined with ", " — the Name and ID cells list
+ *   3. Several reps → the DISTINCT (name, ID) pairs, sorted by name, joined with " | " (names can contain commas) — the Name and ID cells list
  *      the pairs in the SAME order, so the n-th name belongs to the n-th ID.
  *   4. Nothing found → "Not set" in both cells.
  *   5. A tenant whose hierarchy has NO level with that code (e.g. a tenant without an ISR level) → "Not set" in
@@ -44,6 +44,9 @@ export const OUTLET_HIERARCHY_RUNGS = [
   { code: 'SO', fallback: 'SO' },
   { code: 'XSR', fallback: 'ISR' },
 ] as const;
+
+/** Joins several people in one cell — not ", " because a name can contain a comma. */
+export const OUTLET_HIERARCHY_SEPARATOR = ' | ';
 
 export interface OutletHierarchyOutlet {
   id: string;
@@ -164,7 +167,7 @@ export function buildOutletHierarchyResolver(
       }
       const pairs = [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
       if (!pairs.length) cells.push(AREA_NOT_SET, AREA_NOT_SET);
-      else cells.push(pairs.map((p) => p.name).join(', '), pairs.map((p) => p.id).join(', '));
+      else cells.push(pairs.map((p) => p.name).join(OUTLET_HIERARCHY_SEPARATOR), pairs.map((p) => p.id).join(OUTLET_HIERARCHY_SEPARATOR));
     }
     cellMemo.set(outletId, cells);
     return cells;
@@ -172,12 +175,12 @@ export function buildOutletHierarchyResolver(
 
   const L = (code: string) => labels[code];
   const notes = [
-    `${L('ASM')} / ${L('SO')} / ${L('XSR')} (name and employee ID): taken from the sales hierarchy. We find every active sales rep covering the outlet (assigned to the outlet itself, to its owner, or to its parent group) and walk up each rep's reporting line to that level; a rep who is themselves at that level counts as their own. Several reps → every distinct person, separated by commas (the n-th name goes with the n-th ID).`,
+    `${L('ASM')} / ${L('SO')} / ${L('XSR')} (name and employee ID): taken from the sales hierarchy. We find every active sales rep covering the outlet (assigned to the outlet itself, to its owner, or to its parent group) and walk up each rep's reporting line to that level; a rep who is themselves at that level counts as their own. Several reps → every distinct person, separated by " | " (the n-th name goes with the n-th ID).`,
     `"Vacant (code)" = that position is vacant in the uploaded hierarchy (we show the vacant position, not the next manager up). "${AREA_NOT_SET}" = no active rep covers the outlet, or no one at that level in the reps' reporting line.`,
   ];
   if (missingRungs.length) {
     notes.push(
-      `This programme's sales hierarchy has no ${missingRungs.join(' / ')} level, so ${missingRungs.length === 1 ? 'that column pair reads' : 'those column pairs read'} "${AREA_NOT_SET}" on every row.`,
+      `This client's sales hierarchy has no ${missingRungs.join(' / ')} level, so ${missingRungs.length === 1 ? 'that column pair reads' : 'those column pairs read'} "${AREA_NOT_SET}" on every row.`,
     );
   }
 

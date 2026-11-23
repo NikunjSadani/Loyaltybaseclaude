@@ -36,6 +36,8 @@ import { TargetVsSalesQueryDto } from '../../../admin-programs/dto/reports.dto';
 import { targetVsSalesKpiHeaders, targetVsSalesMonthList } from '../../../admin-programs/reports/report-helpers';
 import {
   BILLING_BUCKETS,
+  displayPct,
+  floorPct1,
   billingKpiValue,
   billingListLabel,
   classifyBillingOutlet,
@@ -47,7 +49,11 @@ import {
 import { liveOutletWhere, normalizeFilterParam } from '../../../admin-core/dashboards/dashboard-program-filter';
 import { kpiOutletPredicate } from '../../../sales/outlet-kpi-scope.helper';
 import { AREA_NOT_SET } from '../../../reports/area/user-area';
-import { loadOutletHierarchyResolver, type OutletHierarchyResolver } from '../../../reports/area/outlet-hierarchy';
+import {
+  OUTLET_HIERARCHY_RUNGS,
+  loadOutletHierarchyResolver,
+  type OutletHierarchyResolver,
+} from '../../../reports/area/outlet-hierarchy';
 import type { PrismaService } from '../../../prisma/prisma.service';
 import { kpiScopeEnforced } from '../../../targets/targets.service';
 import { kpiCodeKeys } from '../../../targets/targets.helpers';
@@ -79,9 +85,29 @@ export interface TargetVsSalesParams {
   bucket: BillingBucketKey | null;
 }
 
-/** pace ratio → percentage rounded to 1 decimal (same as report-helpers' paceToPct). */
-function paceToPct(pace: number): number {
-  return Math.round(pace * 1000) / 10;
+/**
+ * Report headers that never change — a tenant's level name may not take one of these (nor another level's header);
+ * see `uniqueHierarchyHeaders`.
+ */
+export const TVS_FIXED_HEADERS = [
+  'Outlet Code', 'Outlet Name', 'Outlet Type', 'Programme', 'Sub-programme', 'Zone', 'State', 'Month', 'Billing bucket',
+] as const;
+
+/**
+ * The hierarchy headers made unique: a header equal (case-insensitive) to a fixed column or to an earlier hierarchy
+ * header gets its internal level code appended — e.g. a level named "Outlet" → "Outlet Name (ASM)", two levels both
+ * named "Sales Officer" → "Sales Officer Name" and "Sales Officer Name (XSR)". Columns are keyed by header in the JSON
+ * preview, so a clash would silently overwrite another column.
+ */
+export function uniqueHierarchyHeaders(headers: readonly string[], codes: readonly string[]): string[] {
+  const used = new Set<string>(TVS_FIXED_HEADERS.map((h) => h.toLowerCase()));
+  return headers.map((h, i) => {
+    let out = h;
+    if (used.has(out.toLowerCase())) out = `${h} (${codes[Math.floor(i / 2)]})`;
+    for (let n = 2; used.has(out.toLowerCase()); n++) out = `${h} (${codes[Math.floor(i / 2)]} ${n})`;
+    used.add(out.toLowerCase());
+    return out;
+  });
 }
 
 /** Validate the optional `bucket` filter (same 400 style as the dashboard). */
@@ -181,9 +207,10 @@ export async function runTargetVsSales(
   const { downline, managerName } = resolveBillingManagerScope(hierarchy.salesUsers, p.managerId);
   const outletFiltered = !!(p.program || p.outletType || p.managerId);
 
+  const hierarchyHeaders = uniqueHierarchyHeaders(hierarchy.headers, OUTLET_HIERARCHY_RUNGS.map((r) => r.code));
   const leadHeaders = [
     'Outlet Code', 'Outlet Name', 'Outlet Type', 'Programme', 'Sub-programme', 'Zone', 'State',
-    ...hierarchy.headers, 'Month', 'Billing bucket',
+    ...hierarchyHeaders, 'Month', 'Billing bucket',
   ];
   // KPI headers keep the old rule: a repeated KPI label collapses to its first position.
   const kpiHeaders = [...new Set(kpiDefs.flatMap((k) => targetVsSalesKpiHeaders(k.label)))];
@@ -309,7 +336,17 @@ export async function runTargetVsSales(
           }
           kpiRow[tHdr] = included && target !== null ? (target as XlsxCell) : '';
           kpiRow[aHdr] = included && achieved !== null ? (achieved as XlsxCell) : '';
-          kpiRow[pHdr] = included && pace !== null ? paceToPct(pace) : '';
+          // Pace % is FLOORED to 1 dp (the card's convention — never rounded up, so 19.96 reads 19.9 next to
+          // "Under 20%"). On the bucket KPI of a bucketed row it is the card's own displayPct, clamped into the band,
+          // so it can never contradict the Billing bucket cell (e.g. a target met within 0.005 reads 100.0).
+          let pct: XlsxCell = '';
+          if (included && pace !== null) {
+            pct =
+              bucketKey && bucketKpi && def.code === bucketKpi.code
+                ? displayPct(billingKpiValue(targetValues, def.code), billingKpiValue(kpiValues, def.code), bucketKey)
+                : floorPct1(pace * 100);
+          }
+          kpiRow[pHdr] = pct;
         }
         await sink.row([code, name, type, ...masterCells, month, bucketCell, ...kpiHeaders.map((h) => kpiRow[h])]);
         rowCount++;
@@ -352,7 +389,7 @@ export function targetVsSalesAbout(
           `"${billingListLabel('NOT_COVERED')}" = the outlet is outside that KPI's programme / outlet-type scope. ` +
           `"${TVS_BUCKET_NOT_LIVE}" = the outlet is deleted, deactivated, parked or not interested, so the Overview does not count it. ` +
           'Note: the Overview\'s "No target" count also includes live outlets with no target and no sales row at all — those outlets never appear in this report.'
-        : `"${TVS_BUCKET_NO_KPI}" — this programme has no enabled KPI, so there is nothing to bucket (the Overview card is hidden too).`,
+        : `"${TVS_BUCKET_NO_KPI}" — this client has no enabled KPI, so there is nothing to bucket (the Overview card is hidden too).`,
     ],
     [
       'Filters',
@@ -360,7 +397,17 @@ export function targetVsSalesAbout(
         'the sales manager = outlets assigned directly to that manager or to anyone below them. The billing bucket filter keeps only the ' +
         'rows (outlet × month) in that bucket. When any outlet filter is set, outlets missing from the outlet master are left out.',
     ],
-    ['KPI columns', 'Blank = nothing uploaded for that outlet, month and KPI (a real 0 shows as 0). Pace % = achieved ÷ target × 100.'],
+    [
+      'Sales manager filter vs hierarchy columns',
+      `The sales-manager filter (like the Overview card) uses the outlet's own current assignments, while the ${h.ASM} / ${h.SO} / ${h.XSR} ` +
+        'columns follow assignments to the outlet, its owner or its parent group — so the two can differ when reps are assigned by owner or group.',
+    ],
+    [
+      'KPI columns',
+      'Blank = nothing uploaded for that outlet, month and KPI (a real 0 shows as 0). Pace % = achieved ÷ target × 100, ' +
+        'cut (never rounded up) to 1 decimal — the Overview card\'s convention, so 19.96% reads 19.9 next to "Under 20%". ' +
+        'On the Billing bucket KPI the Pace % always agrees with the bucket (a target met to within 0.005 reads 100.0).',
+    ],
   ];
 }
 

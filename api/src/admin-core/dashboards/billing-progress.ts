@@ -76,13 +76,23 @@ export function bucketOf(target: number, achieved: number): BillingBucketKey {
 }
 
 /**
+ * A percentage FLOORED to 1 dp (never rounded up). Binary float noise is removed first (12 significant digits), so an
+ * exact 29 / 100 — which JS computes as 28.999999999999996 — shows 29.0, not 28.9, while 19.96 → 19.9 and
+ * 99.96 → 99.9 as intended. Shared by the billing card and the Target vs Sales report's Pace % columns.
+ */
+export function floorPct1(rawPct: number): number {
+  const v = Math.floor(Number((rawPct * 10).toPrecision(12))) / 10;
+  return Object.is(v, -0) ? 0 : v;
+}
+
+/**
  * The pct SHOWN for a bucketed outlet (1 dp): floored (99.96 → 99.9, never rounded up to a misleading 100.0),
  * then clamped into the bucket's display range — so "100%+" appears only for Achieved, a started outlet never
  * reads 0.0%, and float noise at a band edge can't print a value from the neighbouring band.
  */
 export function displayPct(target: number, achieved: number, bucket: BillingBucketKey): number {
   const raw = (achieved / target) * 100;
-  const floored = Math.floor(raw * 10) / 10;
+  const floored = floorPct1(raw);
   const b = BILLING_BUCKETS.find((x) => x.key === bucket)!;
   const v = Math.min(b.hi, Math.max(b.lo, floored));
   return Object.is(v, -0) ? 0 : v;
