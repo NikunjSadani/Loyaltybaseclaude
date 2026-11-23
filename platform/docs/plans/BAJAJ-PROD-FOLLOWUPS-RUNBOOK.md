@@ -515,3 +515,16 @@ posted real points; reverse it only with an explicit, audited wallet adjustment 
 6. C: if C1 shows anything different from the 2026-11-20 baseline (blocked wallets, anomalies, other debt wallets) — stop,
    or proceed with BLOCKED wallets listed (they keep today's rules; reversals on them refused)?
 7. C: who performs C6 and how (DevTools fetch from the console vs the method used on staging).
+
+## E. Sales Import roster-only aggregates (`feat/sales-import-roster-only`, owner decision 2026-11-23) — deploy order + rollback
+
+- **Order:** run migration `20261123120000_sales_import_processed_roster` (adds ONE nullable JSONB column
+  `sales_imports."processedRosterCodes"`; no rewrite, no backfill, `lock_timeout 5s`) BEFORE deploying the API and the
+  sales-import worker.
+- **After deploy:** existing imports stay as they are (column NULL = old behaviour). Imports processed from now on keep
+  product lines for programme outlets only; outlets added to the programme after a file was processed are reported as
+  "not included" on the preview / apply result (Reprocess, or "Read again as a new import" once applied).
+- **Rollback past this change:** any import processed by the new code (`processedRosterCodes IS NOT NULL`) has lines for
+  the roster outlets of its processing time only. Before applying from such an import on the old code, read it again
+  (Reprocess, or "Read again as a new import" if a month was applied from it). The column can stay (the old code ignores
+  it). Detail: `SALES-IMPORT-PIPELINE-PLAN.md` §10d.

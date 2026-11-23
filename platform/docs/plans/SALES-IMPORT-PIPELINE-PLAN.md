@@ -1101,12 +1101,33 @@ cleared on re-queue. NULL = a LEGACY import (processed before this change; aggre
 apply keep the old M6 behaviour, no new warning, and the old blue "they are included" note (`rosterOutletsAddedSinceProcessing`).
 
 **Outlets added after processing (the trade-off) — never silent.** Preview: `rosterOutletsNotIncluded` = outlets on the
-roster NOW whose normalized code is not in `processedRosterCodes` → amber banner "N outlets were added to the programme
-after this file was processed — their sales in this file are not included (they get 0). Reprocess the file (or upload
-the next file) to include them." with Reprocess / Read again as a new import. Apply: counted again under the month lock,
-returned as `ApplyMonthResult.outletsNotIncluded` (shown on the result card) and written to the audit row. Not blocking.
+roster NOW whose normalized code is not in `processedRosterCodes` → amber banner (role=status). ONE wording source
+(`platform/src/app/admin/sales-import/_components/not-included-notice.tsx`): "N outlets were not in the programme when
+this file was processed; any sales they have in this file are not included." + the action for the import's state — not
+applied yet: "Reprocess the file to include them." (Reprocess button); already applied: "Read the file again as a new
+import, then apply the month again to include them." (Read again button); no upload rights: "Someone who can upload sales
+files needs to …". Banner buttons are disabled while an apply of the file is queued / running (and the API refuses
+reprocess / read-again with 409 then — controller `assertNoActiveJobForImport`). The apply confirm repeats the count.
+Apply: counted again under the month lock, returned as `ApplyMonthResult.outletsNotIncluded` (shown on the result cards,
+incl. background-job cards) and written to the audit row. The KPI tester returns / shows `outletsNotIncluded` too. Not
+blocking.
 Preview unmatched figures for a roster-only import = frozen unmatched (incl. added outlets) + aggregates of outlets
-removed since. Reprocess re-reads the roster and includes them (refused once a month was applied → read again as new).
+removed since.
+**Recovery.** Not applied yet → Reprocess (re-reads the roster). Once a month was applied, Reprocess is refused (the
+applied aggregates are the record), so "Read again as a new import" (reprocess-as-new) is allowed when the mapping
+changed OR the roster now has outlets missing from `processedRosterCodes`; the new import is processed with today's
+roster and previewed / applied normally (same guards: READY, not purged, one live re-import, tenant scope, audit row).
+
+**Guards kept (audit A L1).** The quantity bound also applies to each unmatched customer-month total, and
+`MAX_DISTINCT_PRODUCTS` (200,000) bounds distinct product combinations over ALL valid lines, so a mis-mapped dimension
+column (invoice / line number) still fails loudly although non-roster lines no longer make aggregates.
+
+**Rollback (deploy order + going back).** Run the migration BEFORE deploying the API / worker (the new code reads and
+writes `processedRosterCodes`). If the code is rolled back past this change, any import processed by the new code holds
+aggregates for roster outlets only, and the old code would treat it as covering every customer (an outlet added since
+would silently get 0, with the old "they are included" note): read every such import again (Reprocess, or "Read again
+as a new import" if applied) before applying from it. They are the imports with `processedRosterCodes IS NOT NULL`. The
+column itself is harmless to the old code (it never reads it).
 
 **Other consumers.** Month history / combos were already programme-only (2026-11-18): unchanged. Focus catalogue and the
 KPI tester's "entry matches no line" also read the frozen `dimensionCombos` of a roster-only import, so they match the
