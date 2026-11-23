@@ -2,9 +2,11 @@
  * App Adoption → "Download installed users (Excel)" — GET /v1/push/adoption/installed-users (owner 2026-11-16).
  *
  * One row per user who has ≥ 1 `pwa_install` row (i.e. opened the app as an installed/home-screen app), newest first
- * install first. Columns: Name · Phone · Role · Role Group · ASM (tenant's level name) · Zone · State · City · Employee
- * ID · Outlet Code · Outlet Name · Platforms Installed · First Installed · Last Seen · Notifications Enabled · User Status, plus an
- * "About" sheet explaining the area columns (reports/area/user-area.ts — owner 2026-11-20).
+ * install first. Columns: Name · Phone · Role · Role Group · Zone · State · City · Employee ID · <level> ID × (≤ 5, the
+ * tenant's levels ranked 1..5 by `level`, lowest first — Bajaj: ISR · SO · ASM · SM · ZH) · Outlet Code · Outlet Name ·
+ * Platforms Installed · First Installed · Last Seen · Notifications Enabled · User Status, plus an "About" sheet explaining
+ * the area and level-ID columns (reports/area/user-area.ts — owner 2026-11-20). Owner 2026-11-23 (platform-wide): the
+ * ASM (name) column was REMOVED and replaced by the employee-ID-only level columns (`UserAreaResolver.resolveIds`).
  *
  * Population — the SAME as the App Adoption page's "Installed to home screen" number (`tenantInstallWhere` in
  * push/pwa-adoption.service.ts is the one definition both use), so the page number and the unfiltered file's row
@@ -52,6 +54,7 @@ import {
   areasFullRow,
   loadUserAreaResolver,
   type AreaPrisma,
+  type HierarchyIdLevel,
   type UserAreaResolver,
 } from '../../../reports/area/user-area';
 
@@ -62,15 +65,15 @@ export interface InstalledUsersParams {
 }
 
 /**
- * Column headers. 'ASM' is the DEFAULT header of the area column — the written file uses the tenant's own name for
- * that level (installedUsersHeaders(asmHeader)). Area columns (owner 2026-11-20) sit right after the role columns.
+ * The FIXED column headers. The level-ID columns ("<level> ID", one per tenant level ranked 1..5) are inserted right
+ * after 'Employee ID' by installedUsersHeaders(idLevels). Area columns (owner 2026-11-20) sit right after the role
+ * columns; the ASM (name) column was removed 2026-11-23.
  */
 export const INSTALLED_USERS_HEADERS = [
   'Name',
   'Phone',
   'Role',
   'Role Group',
-  'ASM',
   'Zone',
   'State',
   'City',
@@ -86,9 +89,35 @@ export const INSTALLED_USERS_HEADERS = [
   'User Status',
 ] as const;
 
-/** The headers as written: the ASM column carries the tenant's own name for the ASM level. */
-export function installedUsersHeaders(asmHeader: string): string[] {
-  return INSTALLED_USERS_HEADERS.map((h) => (h === 'ASM' ? asmHeader : h));
+/** Index of the first level-ID column (right after 'Employee ID'). */
+export const INSTALLED_USERS_ID_COL = INSTALLED_USERS_HEADERS.indexOf('Employee ID') + 1;
+
+/**
+ * The level-ID headers: "<tenant level name> ID". A header equal (case-insensitive) to a fixed column or to an earlier
+ * level header gets the internal level code appended — e.g. a level named "Employee" → "Employee ID (SO)" (never two
+ * "Employee ID" columns).
+ */
+export function installedUsersIdHeaders(idLevels: readonly HierarchyIdLevel[]): string[] {
+  const used = new Set<string>(INSTALLED_USERS_HEADERS.map((h) => h.toLowerCase()));
+  return idLevels.map((l) => {
+    const base = `${l.label} ID`;
+    let out = base;
+    for (let n = 1; used.has(out.toLowerCase()); n++) out = n === 1 ? `${base} (${l.code})` : `${base} (${l.code} ${n})`;
+    used.add(out.toLowerCase());
+    return out;
+  });
+}
+
+/** The headers as written: the fixed columns with the level-ID columns after 'Employee ID'. */
+export function installedUsersHeaders(idLevels: readonly HierarchyIdLevel[]): string[] {
+  const fixed: string[] = [...INSTALLED_USERS_HEADERS];
+  return [...fixed.slice(0, INSTALLED_USERS_ID_COL), ...installedUsersIdHeaders(idLevels), ...fixed.slice(INSTALLED_USERS_ID_COL)];
+}
+
+/** Column widths matching installedUsersHeaders (ID columns 14 wide). */
+export function installedUsersWidths(idCount: number): number[] {
+  const fixed = [26, 14, 16, 10, 16, 18, 18, 14, 16, 30, 22, 18, 18, 12, 14];
+  return [...fixed.slice(0, INSTALLED_USERS_ID_COL), ...Array.from({ length: idCount }, () => 14), ...fixed.slice(INSTALLED_USERS_ID_COL)];
 }
 
 export const INSTALLED_USERS_ABOUT_SHEET = 'About';
@@ -210,7 +239,7 @@ async function buildRows(
     .sort((a, b) => b.first.getTime() - a.first.getTime() || a.userId.localeCompare(b.userId));
   if (!ordered.length) return { rows: [], fullAreas: [], area: null };
 
-  // Area columns (ASM / Zone / State / City): the tenant's hierarchy + outlet geography, read ONCE (4 queries)
+  // Area columns (Zone / State / City) + level-ID columns: the tenant's hierarchy + outlet geography, read ONCE (4 queries)
   // whatever the row count — see reports/area/user-area.ts.
   const area = await loadUserAreaResolver(prisma as unknown as AreaPrisma, clientId);
 
@@ -283,11 +312,11 @@ async function buildRows(
         phone,
         role,
         group ? GROUP_LABEL[group] : 'Other',
-        areaCell(a.asm), // full lists (above-ASM City / State = counts; full lists on the "Areas (full)" sheet)
-        areaCell(a.zone),
+        areaCell(a.zone), // full lists (above-ASM City / State = counts; full lists on the "Areas (full)" sheet)
         areaCell(a.state),
         areaCell(a.city),
         (u.salesUser?.employeeCode ?? '').trim(),
+        ...area.resolveIds({ id: u.id, role: u.role }), // level IDs (same tenant-wide load — no extra query)
         outlet?.outletCode ?? (group === 'partner' ? u.channelPartner?.partnerCode ?? '' : ''),
         outlet?.name ?? '',
         platformsLabel(platforms.get(u.id) ?? new Set()),
@@ -330,18 +359,22 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
   });
 
   // 4. Only now write the workbook.
-  const sheet = await out.addSheet('Installed users', installedUsersHeaders(area.asmHeader), {
-    widths: [26, 14, 16, 10, 24, 16, 18, 18, 14, 16, 30, 22, 18, 18, 12, 14],
+  const sheet = await out.addSheet('Installed users', installedUsersHeaders(area.idLevels), {
+    widths: installedUsersWidths(area.idLevels.length),
   });
   for (const r of rows) await sheet.addRow(r);
 
   // 5. "About" — how to read the area columns (not data rows; not counted).
   const about = await out.addSheet(INSTALLED_USERS_ABOUT_SHEET, ['About this report', ''], { widths: [22, 120] });
-  const [asmNote, geoNote, blankNote] = area.notes;
-  await about.addRow([area.asmHeader, asmNote]);
+  const [, geoNote, blankNote] = area.notes;
   await about.addRow(['Zone / State / City', geoNote]);
   await about.addRow(['Not set / Not in hierarchy', blankNote]);
   await about.addRow(['"N cities" / "N states"', area.notes[3] ?? '']);
+  const idHeaders = installedUsersIdHeaders(area.idLevels);
+  const [idWhat, ...idRows] = area.idNotes;
+  await about.addRow([idHeaders.length ? idHeaders.join(' · ') : 'Level ID columns', idWhat ?? '']);
+  const idLabels = ['Level IDs — sales users', 'Level IDs — retailers / wholesalers', 'Level IDs — admin / Gifsy / vendor'];
+  for (let i = 0; i < idRows.length; i++) await about.addRow([idLabels[i] ?? 'Level IDs', idRows[i]]);
 
   // 6. Full State / City lists of the rows summarised above (only when there are any; not counted).
   if (fullAreas.length) {
