@@ -358,6 +358,7 @@ export interface MonthPreviewKpi {
  * Live, per GET. The matched/unmatched figures inherited from MonthSummary (matchedOutlets, matchedAmountRupees,
  * matchedQuantity, unmatchedCustomers, unmatchedAmountRupees, unmatchedQuantity) are RECOMPUTED against the roster
  * current at preview time (apply uses the roster current at apply time). firstDate/lastDate/lines are the file's.
+ * Roster-only imports: an outlet added after processing stays in the unmatched figures (its sales are not applied).
  */
 export interface MonthPreview extends MonthSummary {
   monthState: SalesMonthState;
@@ -383,8 +384,17 @@ export interface SalesImportPreview {
   processingVersion: number;
   /** The column mapping changed since this file was processed: every month is blocked until it is reprocessed. */
   mappingChanged: boolean;
-  /** Informational: live roster outlets created after this file was processed (they ARE included in preview/apply). */
+  /**
+   * Informational, LEGACY imports only (processed before roster-only aggregates, 2026-11-23): live roster outlets created
+   * after this file was processed — they ARE included there. Always 0 for a roster-only import (see below).
+   */
   rosterOutletsAddedSinceProcessing: number;
+  /**
+   * Roster-only imports (2026-11-23): outlets on the roster NOW that were NOT on it when this file was processed. The
+   * file kept no product lines for them, so their sales in this file are NOT included (preview and apply give them 0).
+   * The page must say so loudly; Reprocess (or the next file) includes them. 0 for legacy imports.
+   */
+  rosterOutletsNotIncluded: number;
   months: MonthPreview[];
 }
 
@@ -424,6 +434,11 @@ export interface ApplyMonthResult {
   error?: string;
   /** Present on ok:true (tenants with features.salesImport only). */
   dayData?: SalesDayDataResult;
+  /**
+   * APPLY of a roster-only import (ok:true): outlets on the roster at apply time that were NOT on it when the file was
+   * processed — their sales in this file were NOT included (written as 0). Absent for legacy imports and recalculate.
+   */
+  outletsNotIncluded?: number;
 }
 export interface ApplyResult {
   results: ApplyMonthResult[];

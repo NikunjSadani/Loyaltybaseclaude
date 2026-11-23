@@ -1,11 +1,14 @@
 /**
  * Programme roster for an import (plan §7.1 step 4).
  *
- * SINGLE SOURCE for "which outlets are on the roster" and "how a file's customer code finds its outlet". Since the
- * audit fix round (M6) the worker aggregates EVERY customer code (keyed by normalizeOutletCode of the file cell) and
- * the roster is applied at PREVIEW / APPLY time with `normalizedRosterIndex` — so an outlet added after processing is
- * still written, and there is no roster-hash block any more. The worker uses the roster only for its frozen
- * matched/unmatched summary and unmatched.csv.
+ * SINGLE SOURCE for "which outlets are on the roster" and "how a file's customer code finds its outlet".
+ * Roster-only aggregates (owner decision 2026-11-23, replacing M6 "aggregate every customer code"): the worker keeps
+ * per-product aggregates ONLY for codes on the roster at processing time (keyed by normalizeOutletCode of the file
+ * cell) and records that roster on the import (SalesImport.processedRosterCodes). Preview / apply still map the
+ * aggregates onto the roster as it is THEN with `normalizedRosterIndex` (an outlet removed since is not written), and
+ * count the outlets on today's roster that were NOT on the processing-time roster (`outletsMissingFromProcessing`):
+ * their sales in the file are not included, and both screens say so. NULL processedRosterCodes = an import processed
+ * before this change: its aggregates cover every customer, so nothing is missing (the old M6 behaviour).
  */
 import type { PrismaService } from '../../prisma/prisma.service';
 import { normalizeOutletCode } from './normalize';
@@ -37,4 +40,39 @@ export interface Roster {
 export async function loadRoster(prisma: Pick<PrismaService, 'outlet'>, clientId: string): Promise<Roster> {
   const rows = await prisma.outlet.findMany({ where: rosterOutletWhere(clientId), select: { outletCode: true } });
   return { byNormalizedCode: normalizedRosterIndex(rows.map((r) => r.outletCode)) };
+}
+
+/** The processing-time roster to store on the import (SalesImport.processedRosterCodes): sorted normalized codes. */
+export function processedRosterCodesOf(byNormalizedCode: ReadonlyMap<string, string>): string[] {
+  return [...byNormalizedCode.keys()].sort();
+}
+
+/**
+ * SalesImport.processedRosterCodes → the set, or null for an import processed BEFORE roster-only aggregates (column
+ * NULL / absent: its aggregates cover every customer code). A malformed value is treated as an EMPTY roster (every
+ * outlet then counts as missing — loud, never a silent "nothing missing").
+ */
+export function processedRosterSet(value: unknown): Set<string> | null {
+  if (value === null || value === undefined) return null;
+  if (!Array.isArray(value)) return new Set();
+  return new Set(value.filter((v): v is string => typeof v === 'string'));
+}
+
+/**
+ * How many outlets on the roster NOW were NOT on the roster when the import was processed (so the import has no
+ * aggregates for them: their sales in the file are not included). `currentIndex` = normalizedRosterIndex of today's
+ * roster. null = a legacy import (every customer was aggregated) → nothing is missing.
+ */
+export function outletsMissingFromProcessing(processed: ReadonlySet<string> | null, currentIndex: ReadonlyMap<string, string>): number | null {
+  if (processed === null) return null;
+  let n = 0;
+  for (const code of currentIndex.keys()) if (!processed.has(code)) n++;
+  return n;
+}
+
+/** The warning shown in preview and in the apply result when outlets were added after processing (never silent). */
+export function outletsMissingText(n: number): string {
+  return `${n.toLocaleString('en-IN')} outlet${n === 1 ? ' was' : 's were'} added to the programme after this file was processed — ` +
+    `${n === 1 ? 'its' : 'their'} sales in this file are not included (${n === 1 ? 'it gets' : 'they get'} 0). ` +
+    'Reprocess the file (or upload the next file) to include them.';
 }

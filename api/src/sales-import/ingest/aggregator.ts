@@ -2,10 +2,16 @@
  * SalesAggregator (plan §7.1 step 8 / task I-5). Pure, in-memory, BigInt.
  *
  * One pass over the data rows of the file. Per valid line (outlet code, date, amount and/or quantity):
- *  - EVERY customer code   → aggregate[month][normalizedCode][dimKey] += {paise, pico, lines}. The roster is applied
- *                            at PREVIEW / APPLY time (M6), so an outlet added after processing is not lost;
- *  - not on the roster NOW → also unmatched[month][code] (with the name) for unmatched.csv + the frozen summary;
- *  - every valid line      → month summary counters, dimension values, dimension combos.
+ *  - code ON the roster at processing time → aggregate[month][normalizedCode][dimKey] += {paise, pico, lines} (+ day split);
+ *  - code NOT on the roster                → ONLY unmatched[month][code] (one total per customer × month, with the
+ *                                            name) for unmatched.csv + the frozen summary — no per-product aggregate;
+ *  - every valid line                      → month summary counters, dimension values, dimension combos.
+ * Roster-only aggregates (owner decision 2026-11-23, option B — replaces the old "M6: aggregate EVERY customer code"):
+ * on the real Bajaj file only 4.5 % of the 507 k aggregates were programme outlets; the rest dominated worker memory and
+ * the sales_import_aggregates table. Trade-off: an outlet ADDED to the roster after processing has no aggregates, so its
+ * sales in this file are NOT included — preview and apply say so loudly (SalesImport.processedRosterCodes holds the
+ * processing-time roster; the fix is Reprocess). An outlet REMOVED since processing still has aggregates; preview /
+ * apply map onto the roster as it is NOW, so it is simply not written.
  * Day level (sales-day-level, 2026-11-18): each aggregate also carries its split by IST invoice DAY (`days`, summing
  * exactly to the row). Memory (S5): a row whose lines all fall on ONE day (the common case) costs one small integer; a
  * second distinct day allocates ONE flat array per row ([day, paise, pico, lines, …] — no Map, no per-day objects),
@@ -13,8 +19,9 @@
  * other aggregator allocation. ⚠️ Re-measure the real file's heap peak (plan §7.1 step 11).
  * Invalid lines are skipped with a reason (≤ SALES_IMPORT_MAX_ERROR_SAMPLES samples kept, all counted).
  * Fully blank rows are ignored silently (trailing empty rows in an export).
- * Memory is bounded (S4): more than SALES_IMPORT_MAX_DISTINCT_CODES customer codes, MAX_AGGREGATE_KEYS aggregate keys
- * or MAX_UNMATCHED_KEYS unmatched keys → AggregatorLimitError (the processor shows its message).
+ * Memory is bounded (S4): more than SALES_IMPORT_MAX_DISTINCT_CODES customer codes (ALL codes, roster or not),
+ * MAX_AGGREGATE_KEYS aggregate keys (roster outlets only) or MAX_UNMATCHED_KEYS unmatched keys → AggregatorLimitError
+ * (the processor shows its message).
  */
 import {
   SALES_IMPORT_MAX_DIMENSION_COMBOS,
@@ -30,6 +37,7 @@ import {
 } from '../sales-import.contract';
 import type { ColumnIndex } from './header';
 import { dayOfDate, type DaySlice } from '../days/day-slices';
+import { processedRosterCodesOf } from './roster';
 import {
   QTY_SCALE,
   normalizeDim,
@@ -56,7 +64,7 @@ export interface AggRow extends AggValue {
   month: string;
   /** The row split by IST invoice day (sorted; sums exactly to the row). */
   days: DaySlice[];
-  /** normalizeOutletCode(file cell) — NOT necessarily a roster code (M6). */
+  /** normalizeOutletCode(file cell) — a code that was on the roster at processing time (roster-only aggregates). */
   outletCode: string;
   dims: Record<string, string>;
   dimKey: string;
@@ -141,7 +149,8 @@ export const TRACKED_COMBOS = 50_000;
  * Hard memory bounds (S4; budget in plan §7.1 step 11): exceeding one fails the import with a readable message long
  * before the 1.5 GB heap is at risk. Measured ≈ 0.4 KB of heap per tracked entry (aggregate or unmatched) incl. Map
  * overhead and BigInts; 1.8 M entries ≈ 720 MB + exceljs shared strings (≤ ~350 MB) + the code set (≤ ~50 MB).
- * The real 205 MB file needs ≈ 0.6 M aggregate + 0.4 M unmatched entries and ≈ 0.2 M codes.
+ * Aggregates are kept for ROSTER outlets only (2026-11-23): the real 178 MB file of 2026-11-23 needs ≈ 23 k aggregate
+ * entries (507 k when every customer was aggregated) + one unmatched entry per non-roster customer × month.
  */
 export const MAX_AGGREGATE_KEYS = 1_500_000;
 export const MAX_UNMATCHED_KEYS = 900_000;
@@ -172,6 +181,8 @@ export interface AggregatorResult {
   dimensionCombos: SalesDimensionCombo[];
   dimensionsTruncated: boolean;
   aggregateCount: number;
+  /** The roster the file was processed against (sorted normalized codes) → SalesImport.processedRosterCodes. */
+  processedRosterCodes: string[];
   aggregates(): Iterable<AggRow>;
   unmatched(): Iterable<UnmatchedRow>;
   /** Test/inspection accessor (totals only). */
@@ -258,7 +269,7 @@ export class SalesAggregator {
 
   private tooMany(): AggregatorLimitError {
     return new AggregatorLimitError(
-      `The file is too large to process in one go (more than ${fmt(this.maxTracked)} month × customer × product and unmatched-customer entries). Split the file by month, or check the dimension / outlet-code columns.`,
+      `The file is too large to process in one go (more than ${fmt(this.maxTracked)} month × programme outlet × product and unmatched-customer entries). Split the file by month, or check the dimension / outlet-code columns.`,
     );
   }
 
@@ -337,38 +348,38 @@ export class SalesAggregator {
     if (date < m.firstDate) m.firstDate = date;
     if (date > m.lastDate) m.lastDate = date;
 
-    // Every customer code is aggregated (M6), keyed by its NORMALIZED code.
-    let byCode = this.aggs.get(month);
-    if (!byCode) this.aggs.set(month, (byCode = new Map()));
-    let byDim = byCode.get(code);
-    if (!byDim) byCode.set(code, (byDim = new Map()));
-    const a = byDim.get(dimKey);
-    if (a) {
-      addDay(a, day, paise, pico);
-      a.amountPaise += paise;
-      a.qtyPico += pico;
-      a.lines++;
-      if (a.qtyPico > MAX_PICO || a.qtyPico < -MAX_PICO) {
-        throw new AggregatorLimitError(`Row ${rowNo}: one outlet's quantity for a product in a month exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
-      }
-    } else {
-      if (this.aggregateCount >= this.maxAggregates) {
-        throw new AggregatorLimitError(
-          `The file has more than ${fmt(this.maxAggregates)} distinct month × customer × product combinations. Check the dimension columns, or split the file.`,
-        );
-      }
-      if (pico > MAX_PICO || pico < -MAX_PICO) {
-        throw new AggregatorLimitError(`Row ${rowNo}: the quantity exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
-      }
-      if (this.aggregateCount + this.unmatchedCount >= this.maxTracked) throw this.tooMany();
-      byDim.set(dimKey, { amountPaise: paise, qtyPico: pico, lines: 1, day0: day, split: null });
-      this.aggregateCount++;
-      if (!this.dimsByKey.has(dimKey)) this.dimsByKey.set(dimKey, dims);
-    }
-
-    // Matched / unmatched against the roster AT PROCESSING TIME (frozen summary + unmatched.csv only).
+    // Matched / unmatched against the roster AT PROCESSING TIME. Only roster outlets get per-product aggregates
+    // (roster-only aggregates, 2026-11-23); every other customer keeps one total per month in `unmatchedMap`.
     const rosterCode = this.roster.get(code);
     if (rosterCode !== undefined) {
+      // Keyed by the NORMALIZED code (preview / apply map it onto the roster as it is then).
+      let byCode = this.aggs.get(month);
+      if (!byCode) this.aggs.set(month, (byCode = new Map()));
+      let byDim = byCode.get(code);
+      if (!byDim) byCode.set(code, (byDim = new Map()));
+      const a = byDim.get(dimKey);
+      if (a) {
+        addDay(a, day, paise, pico);
+        a.amountPaise += paise;
+        a.qtyPico += pico;
+        a.lines++;
+        if (a.qtyPico > MAX_PICO || a.qtyPico < -MAX_PICO) {
+          throw new AggregatorLimitError(`Row ${rowNo}: one outlet's quantity for a product in a month exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
+        }
+      } else {
+        if (this.aggregateCount >= this.maxAggregates) {
+          throw new AggregatorLimitError(
+            `The file has more than ${fmt(this.maxAggregates)} distinct month × programme outlet × product combinations. Check the dimension columns, or split the file.`,
+          );
+        }
+        if (pico > MAX_PICO || pico < -MAX_PICO) {
+          throw new AggregatorLimitError(`Row ${rowNo}: the quantity exceeds ${fmt(MAX_AGGREGATE_CASES)} cases. Check the quantity column.`);
+        }
+        if (this.aggregateCount + this.unmatchedCount >= this.maxTracked) throw this.tooMany();
+        byDim.set(dimKey, { amountPaise: paise, qtyPico: pico, lines: 1, day0: day, split: null });
+        this.aggregateCount++;
+        if (!this.dimsByKey.has(dimKey)) this.dimsByKey.set(dimKey, dims);
+      }
       m.matchedOutlets.add(rosterCode);
       m.matchedPaise += paise;
       m.matchedPico += pico;
@@ -483,6 +494,7 @@ export class SalesAggregator {
       dimensionCombos,
       dimensionsTruncated: this.truncated,
       aggregateCount: this.aggregateCount,
+      processedRosterCodes: processedRosterCodesOf(this.roster),
       *aggregates() {
         for (const [month, byCode] of aggs) {
           for (const [outletCode, byDim] of byCode) {

@@ -3354,6 +3354,9 @@ model SalesImport {
   monthSummaries   Json? // MonthSummary[] (plan §6.3)
   dimensionValues  Json? // {dimKey: [{value, lines, amountPaise}]} top 200 per dim
   dimensionCombos  Json? // [{dims, lines, amountRupees, quantity}] (contract shape) distinct full combos (≤ 2,000 by |₹|)
+  // Roster-only aggregates (owner 2026-11-23): the normalized roster codes at processing time (sorted string[]). Only
+  // these codes have aggregates. NULL = processed before that change (aggregates for EVERY customer code).
+  processedRosterCodes Json?
   error            String?
   attempts         Int       @default(0)
   heartbeatAt      DateTime?

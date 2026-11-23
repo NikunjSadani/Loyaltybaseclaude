@@ -781,6 +781,9 @@ export class SalesImportProcessorService {
             monthSummaries: result.monthSummaries as unknown as Prisma.InputJsonValue,
             dimensionValues: result.dimensionValues as unknown as Prisma.InputJsonValue,
             dimensionCombos: result.dimensionCombos as unknown as Prisma.InputJsonValue,
+            // Roster-only aggregates (2026-11-23): the roster these aggregates were built for (preview / apply warn
+            // about outlets added since — their sales in this file are not included).
+            processedRosterCodes: result.processedRosterCodes as unknown as Prisma.InputJsonValue,
           },
         });
       },

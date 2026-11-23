@@ -31,6 +31,7 @@ import {
 } from '../kpi/sales-import-data';
 import { filterDimKeys, type KpiDefLite } from '../kpi/sales-kpi.helper';
 import { mappingFingerprint } from '../ingest/mapping-fingerprint';
+import { outletsMissingFromProcessing, processedRosterSet } from '../ingest/roster';
 import { paiseToRupees } from '../ingest/normalize';
 import { lockImportRow } from '../ingest/import-lock';
 import { SQL_NOW_UTC, sqlUtc } from '../sql-time';
@@ -385,7 +386,14 @@ export class SalesApplyService {
         const comp = await computeMonthRows(importPager(tx, importId, month, { withDays }), focus?.evalDefs ?? defs, roster, {
           collectDays: withDays,
         });
-        const snap = await tx.salesImport.findFirst({ where: { id: importId, clientId }, select: { mappingSnapshot: true } });
+        const snap = await tx.salesImport.findFirst({
+          where: { id: importId, clientId },
+          select: { mappingSnapshot: true, processedRosterCodes: true },
+        });
+        // Roster-only aggregates (2026-11-23): outlets on the roster NOW that were not on it at processing time have no
+        // lines in this import — they are written as 0. Counted under the lock and reported loudly (result + audit).
+        // null = a legacy import (every customer was aggregated) → nothing is missing.
+        const outletsNotIncluded = outletsMissingFromProcessing(processedRosterSet(snap?.processedRosterCodes), rosterIndexOf(roster));
         const res = await this.writeMonth(tx, user, {
           month,
           source: 'IMPORT',
@@ -404,6 +412,7 @@ export class SalesApplyService {
             fingerprint: imp.mappingFingerprint,
             dimensionKeys: ((snap?.mappingSnapshot as unknown as SalesColumnMapping | null)?.dimensions ?? []).map((d) => d.key),
           },
+          ...(outletsNotIncluded !== null ? { outletsNotIncluded } : {}),
         });
         await hooks?.inTx?.(tx, res);
         return res;
@@ -440,6 +449,8 @@ export class SalesApplyService {
       focusFingerprint?: string;
       /** IMPORT only: the mapping the lines were parsed with (stored on the history set header). */
       mapping?: { fingerprint: string | null; dimensionKeys: string[] };
+      /** IMPORT of a roster-only import: roster outlets not on the processing-time roster (their sales not included). */
+      outletsNotIncluded?: number;
     },
   ): Promise<ApplyMonthResult> {
     const clientId = user.clientId;
@@ -602,12 +613,16 @@ export class SalesApplyService {
           totals,
           dayData,
           ...(w.focusFingerprint ? { focusFingerprint: w.focusFingerprint } : {}),
+          ...(w.outletsNotIncluded !== undefined ? { outletsNotIncluded: w.outletsNotIncluded } : {}),
         } as unknown as Prisma.InputJsonValue,
         metadata: { clientId, applyId: applyRow.id, batchId: batch.id, source: w.source },
       },
     });
 
-    return { month, ok: true, applyId: applyRow.id, outletsWritten: rowsToWrite.length, outletsZeroFilled, dayData };
+    return {
+      month, ok: true, applyId: applyRow.id, outletsWritten: rowsToWrite.length, outletsZeroFilled, dayData,
+      ...(w.outletsNotIncluded !== undefined ? { outletsNotIncluded: w.outletsNotIncluded } : {}),
+    };
   }
 
   // ─── Recalculate a month from its stored history (owner decision 2026-11-10) ─────────────────────────────────

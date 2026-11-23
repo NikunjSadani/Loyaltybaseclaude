@@ -16,13 +16,14 @@ import {
   loadRosterMeta,
   mappingChangedSince,
   resolveReadyImport,
+  rosterIndexOf,
   type RosterOutlet,
 } from '../kpi/sales-import-data';
 import type { KpiDefLite } from '../kpi/sales-kpi.helper';
-import { rosterOutletWhere } from '../ingest/roster';
+import { outletsMissingFromProcessing, processedRosterSet, rosterOutletWhere } from '../ingest/roster';
 import { paiseToRupees } from '../ingest/normalize';
 import { monthLabel, resolveMonthState } from '../months/month-state';
-import { computeMonthRows, sumOwnedValues, unitsToNumber } from './month-compute';
+import { computeMonthRows, sumOwnedValues, unitsToNumber, type MonthRosterSplit } from './month-compute';
 import { loadLastApplied } from './last-applied';
 import { loadFocusCatalogue } from '../kpi/focus-data';
 import { focusBlockedReason, lazyCatalogue, reconcileMonth, runMonthFocus } from './month-focus';
@@ -50,8 +51,36 @@ export function monthSummariesOf(imp: Pick<SalesImport, 'monthSummaries'>): Mont
 }
 
 /**
+ * The preview's matched / unmatched figures for a month.
+ *  - Legacy import (processed before roster-only aggregates; `rosterOnly` false): its aggregates cover EVERY customer,
+ *    so the split computed over them against today's roster IS the answer (M6, unchanged).
+ *  - Roster-only import: the aggregates cover only the processing-time roster. Matched = the computed split (outlets on
+ *    both rosters). Unmatched = the frozen unmatched figures (every customer not on the roster at processing time —
+ *    including any outlet ADDED since, whose sales are therefore not applied) + the aggregates of outlets REMOVED from
+ *    the roster since (the computed split's unmatched part). The two sets are disjoint, so counts and amounts add.
+ */
+export function previewSplit(
+  summary: Pick<MonthSummary, 'unmatchedCustomers' | 'unmatchedAmountRupees' | 'unmatchedQuantity'>,
+  split: MonthRosterSplit,
+  rosterOnly: boolean,
+): Pick<MonthSummary, 'matchedOutlets' | 'unmatchedCustomers' | 'matchedAmountRupees' | 'matchedQuantity' | 'unmatchedAmountRupees' | 'unmatchedQuantity'> {
+  const frozenPaise = rosterOnly ? BigInt(Math.round((summary.unmatchedAmountRupees ?? 0) * 100)) : 0n;
+  const frozenThousandths = rosterOnly ? BigInt(Math.round((summary.unmatchedQuantity ?? 0) * 1000)) : 0n;
+  return {
+    matchedOutlets: split.matchedOutlets,
+    unmatchedCustomers: split.unmatchedCustomers + (rosterOnly ? (summary.unmatchedCustomers ?? 0) : 0),
+    matchedAmountRupees: paiseToRupees(split.matchedPaise),
+    matchedQuantity: unitsToNumber(split.matchedQtyThousandths, 'QUANTITY'),
+    unmatchedAmountRupees: paiseToRupees(split.unmatchedPaise + frozenPaise),
+    unmatchedQuantity: unitsToNumber(split.unmatchedQtyThousandths + frozenThousandths, 'QUANTITY'),
+  };
+}
+
+/**
  * Per-month live preview of a READY import (plan §5.2 GET :id/preview, §6.3 warnings; task K-5). OWNER: Lane K.
- * The numbers come from computeMonthRows — the SAME function apply writes with — over the roster as it is NOW (M6).
+ * The numbers come from computeMonthRows — the SAME function apply writes with — over the roster as it is NOW. Since
+ * roster-only aggregates (2026-11-23) an outlet added after processing has no lines here: `rosterOutletsNotIncluded`
+ * says how many (the page shows it loudly); legacy imports (processedRosterCodes NULL) behave as before.
  */
 @Injectable()
 export class SalesPreviewService {
@@ -65,7 +94,12 @@ export class SalesPreviewService {
     const { defs, hash } = await this.kpiDefs.enabled(clientId);
     const roster = await loadRosterMeta(this.prisma, clientId);
     const mappingChanged = await mappingChangedSince(this.prisma, clientId, imp);
-    const rosterOutletsAddedSinceProcessing = imp.finishedAt
+    // Roster-only aggregates (2026-11-23): outlets on today's roster that were NOT on the processing-time roster have no
+    // aggregates — their sales in this file are not included. null = a legacy import (every customer aggregated).
+    const missing = outletsMissingFromProcessing(processedRosterSet(imp.processedRosterCodes), rosterIndexOf(roster));
+    const rosterOnly = missing !== null;
+    // Legacy imports only: outlets created since processing ARE included there (informational, as before).
+    const rosterOutletsAddedSinceProcessing = !rosterOnly && imp.finishedAt
       ? await this.prisma.outlet.count({ where: { ...rosterOutletWhere(clientId), createdAt: { gt: imp.finishedAt } } })
       : 0;
     const summaries = monthSummariesOf(imp);
@@ -90,6 +124,7 @@ export class SalesPreviewService {
     for (const summary of summaries) {
       out.push(
         await this.previewMonth(clientId, imp, summary, defs, roster, mappingChanged, current, {
+          rosterOnly,
           status: statusOf.get(summary.month) ?? null,
           labelOf,
           catalogue,
@@ -104,6 +139,7 @@ export class SalesPreviewService {
       processingVersion: imp.processingVersion,
       mappingChanged,
       rosterOutletsAddedSinceProcessing,
+      rosterOutletsNotIncluded: missing ?? 0,
       months: out,
     };
   }
@@ -117,6 +153,8 @@ export class SalesPreviewService {
     mappingChanged: boolean,
     current: string,
     ctx: {
+      /** The import has roster-only aggregates (see previewSplit). */
+      rosterOnly?: boolean;
       status: { state: string } | null;
       labelOf: Map<string, string>;
       catalogue: () => Promise<FocusCatalogue>;
@@ -165,13 +203,8 @@ export class SalesPreviewService {
 
     return {
       ...summary,
-      // M6: matched / unmatched against the roster as it is NOW (the frozen summary used the processing-time roster).
-      matchedOutlets: comp.split.matchedOutlets,
-      unmatchedCustomers: comp.split.unmatchedCustomers,
-      matchedAmountRupees: paiseToRupees(comp.split.matchedPaise),
-      matchedQuantity: unitsToNumber(comp.split.matchedQtyThousandths, 'QUANTITY'),
-      unmatchedAmountRupees: paiseToRupees(comp.split.unmatchedPaise),
-      unmatchedQuantity: unitsToNumber(comp.split.unmatchedQtyThousandths, 'QUANTITY'),
+      // Matched / unmatched against the roster as it is NOW (the frozen summary used the processing-time roster).
+      ...previewSplit(summary, comp.split, ctx.rosterOnly === true),
       monthState: state.state,
       canApply: blockedReason === null,
       ...(blockedReason ? { blockedReason } : {}),

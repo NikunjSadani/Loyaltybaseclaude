@@ -189,12 +189,28 @@ export async function loadFocusCatalogue(
            AND EXISTS (SELECT 1 FROM "sales_imports" i WHERE i."id" = ${opts.importId} AND i."clientId" = ${clientId})
          ORDER BY a."dimKey"`)
     : [];
+  // Roster-only aggregates (2026-11-23): a roster-only import's aggregates hold only programme outlets' products, so
+  // also take the file's frozen product combos (SalesImport.dimensionCombos: every valid line, top
+  // SALES_IMPORT_MAX_DIMENSION_COMBOS by |₹|). The catalogue is then the same as when every customer was aggregated
+  // whenever the file has ≤ that many distinct combos. A legacy import (processedRosterCodes NULL) is unchanged.
+  const frozen = opts.importId ? await frozenImportCombos(db, clientId, opts.importId) : [];
   const combos: Record<string, string>[] = [];
-  for (const r of [...history, ...fromImport]) {
+  for (const r of [...history, ...fromImport, ...frozen]) {
     const d = parseDims(r.dims);
     if (d) combos.push(d);
   }
   return buildFocusCatalogue(dimensionKeys, combos);
+}
+
+/** A ROSTER-ONLY import's frozen product combos as `dims` rows ([] for a legacy import or none). Tenant-checked. */
+export async function frozenImportCombos(db: Db, clientId: string, importId: string): Promise<Array<{ dims: unknown }>> {
+  const imp = await db.salesImport.findFirst({
+    where: { id: importId, clientId },
+    select: { dimensionCombos: true, processedRosterCodes: true },
+  });
+  if (!imp || imp.processedRosterCodes === null || imp.processedRosterCodes === undefined) return [];
+  const list = Array.isArray(imp.dimensionCombos) ? (imp.dimensionCombos as Array<{ dims?: unknown } | null>) : [];
+  return list.filter((c) => c && c.dims && typeof c.dims === 'object').map((c) => ({ dims: c!.dims }));
 }
 
 /** `${kpiCode}|${key}` → who accepted it (for MonthFocusInput.acceptances). */

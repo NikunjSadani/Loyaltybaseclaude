@@ -25,6 +25,7 @@ import {
   type KpiDefLite,
 } from './sales-kpi.helper';
 import { forEachAggregatePage, loadRosterMeta, resolveReadyImport, rosterIndexOf } from './sales-import-data';
+import { frozenImportCombos } from './focus-data';
 import { storedUnits, unitsToNumber } from '../apply/month-compute';
 import type { KpiScopeLike } from '../../common/applies-to/applies-to';
 
@@ -418,6 +419,21 @@ export class SalesKpiDefService {
         acc.add(code, a, a.dimKey);
       }
     });
+    // Roster-only aggregates (2026-11-23): a roster-only import's aggregates hold only programme outlets' products, so
+    // "matches no line of the file" also checks the file's frozen product combos (every valid line; top
+    // SALES_IMPORT_MAX_DIMENSION_COMBOS by |₹|) — the same answer as before whenever the file has ≤ that many combos.
+    // Totals are unchanged (they only ever counted roster outlets). Legacy imports: no frozen combos are read.
+    if (anyHit.includes(false) || noneHit.includes(false)) {
+      for (const r of await frozenImportCombos(this.prisma, clientId, imp.id)) {
+        const dims = r.dims as Record<string, string>;
+        rawAny.forEach((e, i) => {
+          if (!anyHit[i] && entryMatches(dims, e)) anyHit[i] = true;
+        });
+        rawNone.forEach((e, i) => {
+          if (!noneHit[i] && entryMatches(dims, e)) noneHit[i] = true;
+        });
+      }
+    }
 
     let matchedLines = 0;
     const months: SalesKpiTestResult['months'] = [];
