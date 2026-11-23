@@ -57,7 +57,7 @@ function month(over: Partial<MonthPreview> = {}): MonthPreview {
 
 function preview(months: MonthPreview[], over: Partial<SalesImportPreview> = {}): SalesImportPreview {
   return {
-    importId: 'imp1', definitionsHash: 'h1', processingVersion: 7, mappingChanged: false, rosterOutletsAddedSinceProcessing: 0,
+    importId: 'imp1', definitionsHash: 'h1', processingVersion: 7, mappingChanged: false, rosterOutletsAddedSinceProcessing: 0, rosterOutletsNotIncluded: 0,
     months, ...over,
   };
 }
@@ -217,6 +217,47 @@ describe('import detail — preview + apply', () => {
     expect(warn).toHaveTextContent('Daily figures not stored for October 2026: This file was processed before day-by-day sales were stored. Reprocess the file and apply it again to store it.');
     expect(warn.textContent).not.toContain('..');
     expect(screen.queryByTestId('day-data-missing-2026-11')).not.toBeInTheDocument();
+  });
+
+  // Roster-only aggregates (owner 2026-11-23): outlets added after processing are NOT in the file's figures — never silent.
+  it('roster-only import: outlets added after processing → amber "not included" banner with Reprocess (not the blue "included" note)', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()], { rosterOutletsNotIncluded: 3, rosterOutletsAddedSinceProcessing: 0 })));
+    render(<Page />);
+    const b = await screen.findByTestId('sales-import-roster-not-included');
+    expect(b).toHaveTextContent(
+      '3 outlets were added to the programme after this file was processed — their sales in this file are not included (they get 0). Reprocess the file (or upload the next file) to include them.',
+    );
+    expect(within(b).getByRole('alert')).toBeInTheDocument();
+    expect(within(b).getByRole('button', { name: /Reprocess/ })).toBeInTheDocument();
+    expect(screen.queryByTestId('sales-import-roster-added')).not.toBeInTheDocument();
+  });
+
+  it('no outlets left out (or a legacy import) → no "not included" banner', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    render(<Page />);
+    await screen.findByTestId('sales-import-preview');
+    expect(screen.queryByTestId('sales-import-roster-not-included')).not.toBeInTheDocument();
+  });
+
+  it('an apply result reports the outlets not included (singular wording), a result without it shows nothing', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month(), month({ month: '2026-11', firstDate: '2026-11-01', lastDate: '2026-11-30' })])));
+    apiMock.apply.mockResolvedValue(ok({ results: [
+      { month: '2026-10', ok: true, applyId: 'a1', outletsWritten: 3, outletsZeroFilled: 1, outletsNotIncluded: 1 },
+      { month: '2026-11', ok: true, applyId: 'a2', outletsWritten: 2, outletsZeroFilled: 0, outletsNotIncluded: 0 },
+    ] }));
+    render(<Page />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Apply November 2026' }));
+    for (const ack of screen.queryAllByRole('checkbox', { name: /replaces the whole of/ })) fireEvent.click(ack);
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
+    await screen.findByTestId('sales-import-apply-results');
+    const n = screen.getByTestId('not-included-2026-10');
+    expect(n).toHaveAttribute('role', 'alert');
+    expect(n).toHaveTextContent('1 outlet was added to the programme after this file was processed — its sales in this file are not included (it gets 0).');
+    expect(screen.queryByTestId('not-included-2026-11')).not.toBeInTheDocument();
   });
 
   it('an older file needs the older-file ack', async () => {

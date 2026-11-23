@@ -41,6 +41,7 @@ import {
   MonthReconciliationPanel, reconciliationNeedsAttention, useDimensionLabels, useOutletTypeNames, type OutletTypeNames,
 } from '../_components/month-reconciliation-panel';
 import { DayDataNotice } from '../_components/day-data-notice';
+import { NotIncludedNotice, notIncludedText } from '../_components/not-included-notice';
 
 const POLL_MS = 2000;
 const UPLOADING_POLL_MS = 5000;
@@ -702,6 +703,28 @@ function PreviewSection({
           )}
         </Banner>
       )}
+      {(preview.rosterOutletsNotIncluded ?? 0) > 0 && (
+        <Banner tone="amber" testId="sales-import-roster-not-included">
+          <span className="inline-flex items-start gap-1.5" role="alert">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+            <span>
+              {notIncludedText(preview.rosterOutletsNotIncluded)}
+              {canAct && canReprocess && (
+                <Button size="sm" variant="outline" className="ml-2" onClick={onReprocess} loading={reprocessing}
+                  data-testid="sales-import-reprocess-not-included">
+                  <RefreshCw className="w-3.5 h-3.5" /> Reprocess
+                </Button>
+              )}
+              {canAct && !canReprocess && canReprocessAsNew && onReprocessAsNew && (
+                <Button size="sm" variant="outline" className="ml-2" onClick={onReprocessAsNew} loading={reprocessingAsNew}
+                  data-testid="sales-import-reprocess-as-new-not-included">
+                  <Copy className="w-3.5 h-3.5" /> Read again as a new import
+                </Button>
+              )}
+            </span>
+          </span>
+        </Banner>
+      )}
       {preview.rosterOutletsAddedSinceProcessing > 0 && (
         <Banner tone="blue" testId="sales-import-roster-added">
           <span className="inline-flex items-start gap-1.5">
@@ -889,6 +912,7 @@ function PreviewSection({
                       : ` ${lj.result?.error ?? 'No reason was given.'}`}
                   </p>
                   {ok && <DayDataNotice month={month} dayData={lj.result?.dayData} />}
+                  {ok && <NotIncludedNotice month={month} count={lj.result?.outletsNotIncluded} />}
                 </div>
               );
             })}
@@ -912,6 +936,7 @@ function PreviewSection({
                     cards and dashboards now show these numbers.
                   </p>
                   <DayDataNotice month={r.month} dayData={r.dayData} />
+                  <NotIncludedNotice month={r.month} count={r.outletsNotIncluded} />
                 </>
               ) : (
                 <p className="text-xs text-red-700 mt-1">{r.error ?? 'Unknown error'}</p>

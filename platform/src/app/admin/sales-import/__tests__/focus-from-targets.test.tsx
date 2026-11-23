@@ -381,7 +381,7 @@ function month(over: Partial<MonthPreview> = {}): MonthPreview {
   };
 }
 function preview(months: MonthPreview[]): SalesImportPreview {
-  return { importId: 'imp1', definitionsHash: 'h1', processingVersion: 7, mappingChanged: false, rosterOutletsAddedSinceProcessing: 0, months };
+  return { importId: 'imp1', definitionsHash: 'h1', processingVersion: 7, mappingChanged: false, rosterOutletsAddedSinceProcessing: 0, rosterOutletsNotIncluded: 0, months };
 }
 
 describe('import preview — focus reconciliation', () => {
