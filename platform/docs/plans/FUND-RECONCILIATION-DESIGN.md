@@ -18,6 +18,12 @@ redemptions and never debits its own ledger. Production has 0 receipts, 0 ledger
 | 7 | Low balance → **alerts only**; Gifsy decides case by case; nothing is ever blocked. |
 | 8 | **Gifsy manages; the client admin can view** (read-only). |
 | 9 | **No GST** on the portal. |
+| 10 | **Voucher Dispersal campaigns** (even when "billed to" a client) are **NOT** on this ledger — settled separately. |
+| 11 | **GST held back on visibility payouts** and released later is **NOT** on this ledger. |
+| 12 | **TDS:** only TDS **Gifsy pays — 194C** (gross-up on visibility / target payouts under 194C) comes off the advance. **194R is paid by the client — no impact** on this ledger. |
+| 13 | The **agency fee applies to all three payout types**: cash redemptions, target payouts, visibility payouts. |
+| 14 | The **voucher discount is set per client per voucher brand** (e.g. Amazon 3% for Bajaj, 2% for Deoleo) and applies to every voucher of that brand, Hubble or manual. A brand with no rate set is charged at face value and **flagged** on the statement. |
+| 15 | Go-live = an **opening balance as of a date** per client; only spend after that date is tracked. |
 
 ## 2. Inputs
 
@@ -26,7 +32,7 @@ redemptions and never debits its own ledger. Production has 0 receipts, 0 ledger
 | **Advance received** | Gifsy records it: amount, date received, UTR / reference, bank, note. | Corrections are new entries (a reversing receipt or an adjustment), never edits — full audit trail. |
 | **Opening balance** | Gifsy records it once per client at go-live ("balance as of <date>"). | For money already deposited/spent before tracking starts. |
 | **Manual adjustment** | Gifsy, with a mandatory reason (e.g. "recovered ₹X for reversed payout", "Hubble credit note"). | ± amount; audited. |
-| **Per-client rates** (effective-dated) | Gifsy console → client → Fund settings: voucher discount %; agency fee type (% / flat ₹) + value; low-balance alert threshold ₹; alert recipients. | Each change has an *effective from* date; spend is always charged at the rate in force on its commit date, so a rate change never rewrites history. |
+| **Per-client rates** (effective-dated) | Gifsy console → client → Fund settings: voucher discount % per brand; agency fee type (% / flat ₹) + value; low-balance alert threshold ₹; alert recipients. | Each change has an *effective from* date; spend is always charged at the rate in force on its commit date, so a rate change never rewrites history. |
 | **Spend events** | Read from the existing records (no new hooks in the money paths — see §5). | Vouchers, voucher-dispersal campaigns billed to the client, cash redemptions, credit/target payouts, visibility payouts, gross-up TDS. |
 
 ## 3. What counts, how much, and when
@@ -35,16 +41,16 @@ Amounts in ₹; *face* = the value the outlet receives.
 
 | Spend | Committed when | Paid when | Returned to the advance when | Amount charged to the advance |
 |---|---|---|---|---|
-| **Voucher (Hubble, partner redemption)** | Order CONFIRMED (points debited) | DELIVERED (code issued) | FAILED / refunded / cancelled / returned | face × (1 − voucher discount %) |
-| **Voucher dispersal campaign** billed to the client | Row QUEUED (campaign confirmed) | Row BOUGHT | Row released (rejected / marked not bought / cancelled) | face × (1 − voucher discount %) — *see open question Q1* |
+| **Voucher (partner redemption — Hubble or manual)** | Order CONFIRMED (points debited) | DELIVERED (code issued) | FAILED / refunded / cancelled / returned | face × (1 − discount % for that **client × brand**); no rate set → face value, flagged |
 | **Cash redemption (UPI / bank)** | Order CONFIRMED (payout created) | UTR PAID | UTR FAILED (points refunded) | face + agency fee |
 | **Target / credit payout (cash)** | Batch CONFIRMED (entry created) | UTR PAID | Entry FAILED-and-not-re-banked, or REVERSED before payment | gross award + agency fee |
-| **Visibility payout** | as credit payout | as credit payout | as credit payout | gross award + agency fee (+ held GST released later — *Q2*) |
-| **Gross-up TDS** (Gifsy pays TDS on top) | with its payout | with its payout | with its payout | the TDS amount (e.g. ₹1,000 at 10% gross-up → ₹111.11) — *Q3* |
+| **Visibility payout** | as credit payout | as credit payout | as credit payout | gross award + agency fee |
+| **194C gross-up TDS** (Gifsy pays the TDS on top) | with its payout | with its payout | with its payout | the TDS amount Gifsy bears (e.g. ₹1,000 at 2% gross-up → ₹20.41) |
 
 Not counted: **points credits** (credited to wallets — the money leaves only when the outlet redeems, via the voucher /
-cash rows above); **physical gifts** (off-portal); **DEDUCT-method TDS** (the outlet bears it — it is part of the gross
-award, not an extra cost).
+cash rows above); **physical gifts** (off-portal); **Voucher Dispersal campaigns**; **GST held back on visibility
+payouts and released later**; **194R TDS** (paid by the client itself); **DEDUCT-method TDS** (the outlet bears it — it
+is part of the gross award, not an extra cost).
 
 Already-paid payouts that are later **reversed** become a *receivable* (recovered off-platform). The ledger shows them
 as "to recover"; when Gifsy recovers the money it records a manual adjustment, which credits the advance.
@@ -76,16 +82,13 @@ One line per client: balance, committed, and "LOW" when under threshold.
 - Why: **no new code inside the money paths** (redeem / confirm / UTR / reversal) — nothing that can break a payout or double-count, and the ledger is always consistent with the source records. Volumes (tens of thousands of rows per client) are fine to compute per view; the Excel uses the existing Downloads background job.
 - Alternative (not recommended): write a ledger row at every spend event — needs hooks in ~10 money paths, back-filling, and a reconciliation job to catch drift.
 
-## 6. Open questions (need the owner before build)
+## 6. Open questions — ALL RESOLVED 2026-11-23 (decisions 10–15 above)
 
-| # | Question | Recommendation |
-|---|---|---|
-| **Q1** | Do **voucher dispersal campaigns** with "billed to client = Bajaj" come off Bajaj's advance? | Yes — they are vouchers bought for the client. |
-| **Q2** | Visibility payouts to GST-registered outlets: GST is held back and **released later as a separate payment**. Does that release come off the advance? | Yes — it is money paid to the outlet for the client (charged when released). |
-| **Q3** | **194R TDS on redemptions** (vouchers / cash) is deposited **by the client itself** today (it is the client's TDS). Should only TDS that **Gifsy** pays (gross-up on credit / visibility payouts, 194C) come off the advance? | Yes — only TDS Gifsy actually pays; the client's own 194R deposits stay off this ledger (shown for information). |
-| **Q4** | Does the **agency fee** also apply to cash redemptions (points → bank), or only to target / visibility payouts? | Apply to all three payout types (decision 2 calls them all payouts). |
-| **Q5** | Does the **voucher discount** apply to Hubble vouchers only, or also to manually-issued vouchers? | Every voucher, whoever issues it. |
-| **Q6** | **Opening balance** for Bajaj: what was deposited and spent before tracking starts (date + amount)? | Gifsy enters one opening entry per client at go-live. |
+Q1 dispersal → not on the ledger · Q2 GST release → not on the ledger · Q3 TDS → only Gifsy-paid 194C; 194R no impact ·
+Q4 agency fee → all three payout types · Q5 voucher discount → per client per brand · Q6 → opening balance as of a date.
+
+**Data to collect from the owner before go-live (not blocking the build):** per client — opening balance + its date;
+agency fee type and value; the voucher brand discount table; low-balance threshold + alert recipients.
 
 ## 7. Build plan (after the answers)
 
