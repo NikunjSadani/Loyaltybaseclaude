@@ -33,6 +33,8 @@ import { useDashboardProgram, dashboardProgramStorageKey } from '@/lib/dashboard
 
 const DASHBOARD_PROGRAM_STORAGE_KEY = dashboardProgramStorageKey('bajaj', 'u1');
 import { formatISTDate, istMonthKey } from '@/lib/ist-date';
+import { __resetPermissionsForTests } from '@/lib/use-permissions';
+import { canDownloadTargetVsSales } from '@/lib/target-vs-sales';
 
 function Harness() {
   const programState = useDashboardProgram();
@@ -129,6 +131,9 @@ function mockFetch(
     }
     if (u.startsWith(BILLING_COMPARISON_URL)) {
       return { ok: true, status: 200, json: async () => ({ success: true, data: (opts.comparison ?? noDayData)() }) };
+    }
+    if (u.startsWith('/api/admin/reports/target-vs-sales?')) {
+      return { ok: true, status: 202, json: async () => ({ success: true, data: { exportRequestId: 'tvs1', message: 'Queued for you.' } }) };
     }
     if (u.startsWith('/api/admin/dashboard/billing-progress/outlets/export')) {
       return { ok: true, status: 202, json: async () => ({ success: true, data: { exportRequestId: 'x1', message: 'Queued for you.' } }) };
@@ -627,5 +632,101 @@ describe('BillingProgressCard', () => {
     expect(opts).toHaveLength(13);
     expect(opts[0]).toBe(CUR_MONTH);
     expect(opts[12]).toBe(shiftMonth(CUR_MONTH, -12));
+  });
+});
+
+/* ─── BP21–BP24: "Download Target vs Sales (Excel)" (2026-11-23) ───────────────────────────── */
+
+function signInAs(role: string) {
+  window.localStorage.setItem('user', JSON.stringify({ id: 'u1', clientId: 'bajaj', role, name: 'Tester' }));
+}
+
+describe('BillingProgressCard — Target vs Sales download', () => {
+  afterEach(() => {
+    window.localStorage.removeItem('user');
+    __resetPermissionsForTests();
+  });
+
+  it('BP21: an admin sees the button; it downloads the CURRENT month + filters and says which', async () => {
+    signInAs('CLIENT_ADMIN');
+    window.sessionStorage.setItem(DASHBOARD_PROGRAM_STORAGE_KEY, 'Gold');
+    const fn = mockFetch(() => payload());
+    render(<Harness />);
+    await screen.findByTestId('billing-totals');
+    const prev = shiftMonth(CUR_MONTH, -1);
+    fireEvent.change(await screen.findByTestId('billing-month'), { target: { value: prev } });
+    fireEvent.change(await screen.findByTestId('billing-outlet-type'), { target: { value: 'RETAIL' } });
+    fireEvent.change(await screen.findByTestId('billing-manager'), { target: { value: 'm1' } });
+
+    const btn = await screen.findByTestId('billing-tvs-download');
+    expect(btn).toHaveTextContent('Download Target vs Sales (Excel)');
+    const forText = `${monthWords(prev)} · Programme: Gold · Outlet type: RETAIL · Sales manager: Asha ASM (and team)`;
+    expect(screen.getByTestId('billing-tvs-download-for')).toHaveTextContent(`For: ${forText}`);
+    expect(btn).toHaveAttribute('title', `Target vs Sales report for: ${forText}`);
+
+    fireEvent.click(btn);
+    await waitFor(() => expect(calls(fn, '/api/admin/reports/target-vs-sales?').length).toBe(1));
+    expect(calls(fn, '/api/admin/reports/target-vs-sales?')[0]).toBe(
+      `/api/admin/reports/target-vs-sales?fromMonth=${prev}&toMonth=${prev}&format=xlsx&program=Gold&outletType=RETAIL&managerId=m1`,
+    );
+  });
+
+  it('BP22: no filters → only the month is sent ("All programmes · All outlet types · Everyone")', async () => {
+    signInAs('GIFSY_ADMIN');
+    const fn = mockFetch(() => payload());
+    render(<Harness />);
+    const btn = await screen.findByTestId('billing-tvs-download');
+    expect(screen.getByTestId('billing-tvs-download-for')).toHaveTextContent(
+      `For: ${monthWords(CUR_MONTH)} · All programmes · All outlet types · Everyone`,
+    );
+    fireEvent.click(btn);
+    await waitFor(() => expect(calls(fn, '/api/admin/reports/target-vs-sales?').length).toBe(1));
+    expect(calls(fn, '/api/admin/reports/target-vs-sales?')[0]).toBe(
+      `/api/admin/reports/target-vs-sales?fromMonth=${CUR_MONTH}&toMonth=${CUR_MONTH}&format=xlsx`,
+    );
+  });
+
+  it('BP23: an open bucket list offers that bucket too; non-band lists (behind pace) do not', async () => {
+    signInAs('CLIENT_ADMIN');
+    const fn = mockFetch(() => payload());
+    render(<Harness />);
+    fireEvent.click(await screen.findByTestId('billing-bucket-P20_40'));
+    const bucketBtn = await screen.findByTestId('billing-tvs-download-bucket');
+    expect(bucketBtn).toHaveTextContent('Download Target vs Sales for this bucket (Excel)');
+    expect(screen.getByTestId('billing-tvs-download-bucket-for')).toHaveTextContent('Billing bucket: 20–39%');
+    fireEvent.click(bucketBtn);
+    await waitFor(() => expect(calls(fn, '/api/admin/reports/target-vs-sales?').length).toBe(1));
+    expect(calls(fn, '/api/admin/reports/target-vs-sales?')[0]).toBe(
+      `/api/admin/reports/target-vs-sales?fromMonth=${CUR_MONTH}&toMonth=${CUR_MONTH}&format=xlsx&bucket=P20_40`,
+    );
+  });
+
+  it('BP23b: the behind-pace list has no Target vs Sales bucket button', async () => {
+    signInAs('CLIENT_ADMIN');
+    mockFetch(() => payload());
+    render(<Harness />);
+    fireEvent.click(await screen.findByTestId('billing-behind-pace'));
+    await screen.findByTestId('billing-drilldown');
+    expect(screen.queryByTestId('billing-tvs-download-bucket')).not.toBeInTheDocument();
+  });
+
+  it.each(['MIS_USER', 'SALES_ASM'])('BP24: %s (cannot download the report) never sees the button', async (role) => {
+    signInAs(role);
+    mockFetch(() => payload());
+    render(<Harness />);
+    await screen.findByTestId('billing-totals');
+    expect(screen.queryByTestId('billing-tvs-download')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId('billing-bucket-P20_40'));
+    await screen.findByTestId('billing-drilldown');
+    expect(screen.queryByTestId('billing-tvs-download-bucket')).not.toBeInTheDocument();
+  });
+
+  it('BP24b: permission rule — admins yes; Gifsy staff only with targets:read; everyone else no', () => {
+    expect(canDownloadTargetVsSales('CLIENT_ADMIN')).toBe(true);
+    expect(canDownloadTargetVsSales('GIFSY_ADMIN')).toBe(true);
+    expect(canDownloadTargetVsSales('GIFSY_STAFF', ['targets:read'])).toBe(true);
+    expect(canDownloadTargetVsSales('GIFSY_STAFF', ['reports:read'])).toBe(false);
+    expect(canDownloadTargetVsSales('MIS_USER', ['targets:read'])).toBe(false);
+    expect(canDownloadTargetVsSales(null)).toBe(false);
   });
 });

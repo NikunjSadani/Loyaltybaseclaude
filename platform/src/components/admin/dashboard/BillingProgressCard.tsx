@@ -28,6 +28,10 @@ import { type DashboardProgram, PROGRAM_URL_PARAM } from '@/lib/dashboard-progra
 import { Modal } from '@/components/ui/modal';
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
+import { usePermissions } from '@/lib/use-permissions';
+import {
+  TVS_REPORT_URL, canDownloadTargetVsSales, describeTvsFilters, isTvsBucketKey, tvsQueryString,
+} from '@/lib/target-vs-sales';
 
 /** Backend: BILLING_PROGRESS_OUTLETS_KIND_ID (api/src/exports/kinds/batch2/billing-progress.kind.ts). */
 export const BILLING_PROGRESS_EXPORT_KIND = 'billing-progress-outlets';
@@ -213,6 +217,72 @@ function bucketStyle(key: BillingBucketKey): React.CSSProperties {
   return { backgroundColor: BUCKET_COLORS[key] ?? '#6b7280' };
 }
 
+/* ─── Target vs Sales download (card + bucket list) ────────────────────────── */
+
+/**
+ * "Download Target vs Sales (Excel)" for the card's CURRENT month + filters (+ the open bucket, when given) — the
+ * Reports page's export kind via the same Downloads mechanism (one month → streams instantly; the hook also handles
+ * a 202 → Downloads page). The filters the file covers are shown next to the button and in its tooltip; the Excel's
+ * About sheet repeats them.
+ */
+export function TargetVsSalesDownload({
+  filters, managerName, bucket, testId,
+}: {
+  filters: Filters;
+  managerName: string | null;
+  bucket?: { key: string; label: string } | null;
+  testId: string;
+}) {
+  const action = useDownloadAction();
+  const run = action.run;
+  const forText = describeTvsFilters({
+    period: monthWords(filters.month),
+    program: filters.program,
+    outletType: filters.outletType,
+    managerId: filters.managerId,
+    managerName,
+    bucketLabel: bucket?.label ?? null,
+  });
+  const onClick = useCallback(() => {
+    const qs = tvsQueryString({
+      fromMonth: filters.month,
+      toMonth: filters.month,
+      format: 'xlsx',
+      program: filters.program,
+      outletType: filters.outletType,
+      managerId: filters.managerId,
+      bucket: bucket?.key ?? null,
+    });
+    void run(`${TVS_REPORT_URL}?${qs}`, {
+      fallbackFileName: `target-vs-sales-${filters.month}-to-${filters.month}${bucket ? `-${bucket.key.toLowerCase().replace(/_/g, '-')}` : ''}.xlsx`,
+      init: { headers: { ...authHeader() } },
+    });
+  }, [filters, bucket, run]);
+  const label = bucket ? 'Download Target vs Sales for this bucket (Excel)' : 'Download Target vs Sales (Excel)';
+  return (
+    <div className="flex flex-col items-start gap-1 min-w-0">
+      <div className="flex flex-wrap items-center gap-2 min-w-0">
+        <button
+          type="button"
+          onClick={onClick}
+          disabled={action.blocked}
+          title={`Target vs Sales report for: ${forText}`}
+          aria-describedby={`${testId}-for`}
+          data-testid={testId}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+        >
+          {action.busy ? <RefreshCw className="h-3 w-3 animate-spin" aria-hidden="true" /> : <Download className="h-3 w-3" aria-hidden="true" />}
+          {downloadButtonLabel(action, label)}
+        </button>
+        <span id={`${testId}-for`} className="text-[11px] text-gray-500 break-words" data-testid={`${testId}-for`}>
+          For: {forText}
+        </span>
+      </div>
+      <DownloadActionStatus action={action} />
+    </div>
+  );
+}
+
 /* ─── Card ─────────────────────────────────────────────────────────────────── */
 
 export function BillingProgressCard({ programState }: { programState: DashboardProgram }) {
@@ -236,6 +306,9 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
   const [noKpi, setNoKpi] = useState(false);
 
   const filters: Filters = useMemo(() => ({ month, program, outletType, managerId }), [month, program, outletType, managerId]);
+  // Only roles that can already download the Target vs Sales report see its button (backend guard mirrored).
+  const perms = usePermissions();
+  const canTvs = perms.ready && canDownloadTargetVsSales(perms.role, perms.permissions);
 
   useEffect(() => {
     if (!programReady) return;
@@ -372,6 +445,10 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
         )}
       </div>
 
+      {canTvs && data && kpi && !error && (
+        <TargetVsSalesDownload filters={filters} managerName={managerName} testId="billing-tvs-download" />
+      )}
+
       {/* Body */}
       {loading && !data ? (
         <div className="flex items-center justify-center gap-2 py-12 text-gray-400" data-testid="billing-progress-loading">
@@ -416,6 +493,7 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
           monthLabel={titleMonth}
           managerName={managerName}
           unit={unit}
+          canTvs={canTvs}
           onClose={() => setDrill(null)}
         />
       )}
@@ -680,7 +758,7 @@ function BucketButton({
 /* ─── Drill-down ───────────────────────────────────────────────────────────── */
 
 function BillingDrillDown({
-  filters, listKey, listLabel, monthLabel, managerName, unit, onClose,
+  filters, listKey, listLabel, monthLabel, managerName, unit, canTvs, onClose,
 }: {
   filters: Filters;
   listKey: BillingListKey;
@@ -688,6 +766,8 @@ function BillingDrillDown({
   monthLabel: string;
   managerName: string | null;
   unit: string;
+  /** The caller may download the Target vs Sales report (offered for a progress-band list only). */
+  canTvs?: boolean;
   onClose: () => void;
 }) {
   const [page, setPage] = useState(1);
@@ -781,6 +861,16 @@ function BillingDrillDown({
           </button>
         </div>
         <DownloadActionStatus action={exportAction} />
+        {canTvs && isTvsBucketKey(listKey) && (
+          // A progress band is a per-row state of the Target vs Sales report too (its `bucket` filter). The
+          // "behind pace" / "no target" / "not covered" lists are not — they get the outlet-list Excel above only.
+          <TargetVsSalesDownload
+            filters={filters}
+            managerName={managerName}
+            bucket={{ key: listKey, label: listLabel }}
+            testId="billing-tvs-download-bucket"
+          />
+        )}
 
         {error ? (
           <div role="alert" data-testid="billing-drilldown-error" className="flex flex-wrap items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-3 text-xs text-red-700">
