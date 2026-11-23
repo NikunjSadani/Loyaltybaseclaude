@@ -9,7 +9,7 @@
  * behind pace" + what "behind pace" means), and every outlet that isn't bucketed called out: no target,
  * not covered by the KPI's applies-to scope, and target rows for outlets outside the live roster.
  * Clicking a bucket / "behind pace" / "no target" / "not covered" opens the outlet list
- * (GET …/billing-progress/outlets, paginated) with a Download Excel button (…/billing-progress/outlets/export,
+ * (GET …/billing-progress/outlets, paginated) with a "Download outlet list (Excel)" button (…/billing-progress/outlets/export,
  * export kind `billing-progress-outlets` — streams instantly, or 202 → Downloads page via useDownloadAction).
  *
  * Program: follows the Overview page's program filter (no dropdown on the card itself); the subtitle names it.
@@ -226,12 +226,16 @@ function bucketStyle(key: BillingBucketKey): React.CSSProperties {
  * About sheet repeats them.
  */
 export function TargetVsSalesDownload({
-  filters, managerName, bucket, testId,
+  filters, managerName, bucket, testId, disabled = false, note,
 }: {
   filters: Filters;
   managerName: string | null;
   bucket?: { key: string; label: string } | null;
   testId: string;
+  /** True while the card refetches (its numbers are stale) — the file would not match what is on screen. */
+  disabled?: boolean;
+  /** Optional plain-English line under the button. */
+  note?: string;
 }) {
   const action = useDownloadAction();
   const run = action.run;
@@ -265,7 +269,7 @@ export function TargetVsSalesDownload({
         <button
           type="button"
           onClick={onClick}
-          disabled={action.blocked}
+          disabled={action.blocked || disabled}
           title={`Target vs Sales report for: ${forText}`}
           aria-describedby={`${testId}-for`}
           data-testid={testId}
@@ -278,10 +282,23 @@ export function TargetVsSalesDownload({
           For: {forText}
         </span>
       </div>
+      {note && (
+        <p className="text-[11px] text-gray-500 break-words" data-testid={`${testId}-note`}>{note}</p>
+      )}
       <DownloadActionStatus action={action} />
     </div>
   );
 }
+
+/** Under the card-level button: why the file's rows need not match the card's outlet counts. */
+export const TVS_CARD_NOTE =
+  'The file also lists outlets that are not on the live outlet list (marked as such), and leaves out live outlets ' +
+  'with no target and no sales — so its rows can differ from the outlet counts on this card.';
+
+/** In the Behind pace / Missed target, No target and Not covered lists (not progress buckets). */
+export const TVS_NOT_FOR_LIST =
+  'A Target vs Sales file isn’t available for this list — “Download outlet list (Excel)” gives these outlets; ' +
+  'the Target vs Sales file can only be filtered by a progress bucket.';
 
 /* ─── Card ─────────────────────────────────────────────────────────────────── */
 
@@ -446,7 +463,13 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
       </div>
 
       {canTvs && data && kpi && !error && (
-        <TargetVsSalesDownload filters={filters} managerName={managerName} testId="billing-tvs-download" />
+        <TargetVsSalesDownload
+          filters={filters}
+          managerName={managerName}
+          testId="billing-tvs-download"
+          disabled={refetching}
+          note={TVS_CARD_NOTE}
+        />
       )}
 
       {/* Body */}
@@ -494,6 +517,7 @@ export function BillingProgressCard({ programState }: { programState: DashboardP
           managerName={managerName}
           unit={unit}
           canTvs={canTvs}
+          cardRefetching={refetching}
           onClose={() => setDrill(null)}
         />
       )}
@@ -758,7 +782,7 @@ function BucketButton({
 /* ─── Drill-down ───────────────────────────────────────────────────────────── */
 
 function BillingDrillDown({
-  filters, listKey, listLabel, monthLabel, managerName, unit, canTvs, onClose,
+  filters, listKey, listLabel, monthLabel, managerName, unit, canTvs, cardRefetching = false, onClose,
 }: {
   filters: Filters;
   listKey: BillingListKey;
@@ -768,6 +792,8 @@ function BillingDrillDown({
   unit: string;
   /** The caller may download the Target vs Sales report (offered for a progress-band list only). */
   canTvs?: boolean;
+  /** The card behind the modal is refetching — the Target vs Sales button waits for fresh numbers. */
+  cardRefetching?: boolean;
   onClose: () => void;
 }) {
   const [page, setPage] = useState(1);
@@ -857,19 +883,24 @@ function BillingDrillDown({
             className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
           >
             {exportAction.busy ? <RefreshCw className="h-3 w-3 animate-spin" aria-hidden="true" /> : <Download className="h-3 w-3" aria-hidden="true" />}
-            {downloadButtonLabel(exportAction, 'Download Excel')}
+            {downloadButtonLabel(exportAction, 'Download outlet list (Excel)')}
           </button>
         </div>
         <DownloadActionStatus action={exportAction} />
         {canTvs && isTvsBucketKey(listKey) && (
-          // A progress band is a per-row state of the Target vs Sales report too (its `bucket` filter). The
-          // "behind pace" / "no target" / "not covered" lists are not — they get the outlet-list Excel above only.
+          // A progress band is a per-row state of the Target vs Sales report too (its `bucket` filter).
           <TargetVsSalesDownload
             filters={filters}
             managerName={managerName}
             bucket={{ key: listKey, label: listLabel }}
             testId="billing-tvs-download-bucket"
+            disabled={cardRefetching}
           />
+        )}
+        {canTvs && !isTvsBucketKey(listKey) && (
+          // "Behind pace" / "Missed target", "No target" and "Not covered" are not per-row bands of the report —
+          // say so plainly instead of silently offering no Target vs Sales file.
+          <p className="text-[11px] text-gray-600" data-testid="billing-tvs-not-for-list">{TVS_NOT_FOR_LIST}</p>
         )}
 
         {error ? (

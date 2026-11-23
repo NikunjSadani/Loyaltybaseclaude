@@ -660,7 +660,7 @@ describe('BillingProgressCard — Target vs Sales download', () => {
 
     const btn = await screen.findByTestId('billing-tvs-download');
     expect(btn).toHaveTextContent('Download Target vs Sales (Excel)');
-    const forText = `${monthWords(prev)} · Programme: Gold · Outlet type: RETAIL · Sales manager: Asha ASM (and team)`;
+    const forText = `${monthWords(prev)} · Program: Gold · Outlet type: RETAIL · Manager: Asha ASM (and team)`;
     expect(screen.getByTestId('billing-tvs-download-for')).toHaveTextContent(`For: ${forText}`);
     expect(btn).toHaveAttribute('title', `Target vs Sales report for: ${forText}`);
 
@@ -677,7 +677,7 @@ describe('BillingProgressCard — Target vs Sales download', () => {
     render(<Harness />);
     const btn = await screen.findByTestId('billing-tvs-download');
     expect(screen.getByTestId('billing-tvs-download-for')).toHaveTextContent(
-      `For: ${monthWords(CUR_MONTH)} · All programmes · All outlet types · Everyone`,
+      `For: ${monthWords(CUR_MONTH)} · All programs · All outlet types · Everyone`,
     );
     fireEvent.click(btn);
     await waitFor(() => expect(calls(fn, '/api/admin/reports/target-vs-sales?').length).toBe(1));
@@ -701,13 +701,64 @@ describe('BillingProgressCard — Target vs Sales download', () => {
     );
   });
 
-  it('BP23b: the behind-pace list has no Target vs Sales bucket button', async () => {
+  it.each([
+    ['billing-behind-pace', 'Behind pace'],
+    ['billing-no-target', 'No Sales target'],
+    ['billing-not-covered', 'Not covered by the Sales target'],
+  ])('BP23b: the %s list has no Target vs Sales button and SAYS why; its button reads "Download outlet list (Excel)"', async (testId) => {
+    signInAs('CLIENT_ADMIN');
+    mockFetch(() => payload({ outletsNotCovered: 7 }));
+    render(<Harness />);
+    fireEvent.click(await screen.findByTestId(testId));
+    await screen.findByTestId('billing-drilldown');
+    expect(screen.queryByTestId('billing-tvs-download-bucket')).not.toBeInTheDocument();
+    expect(screen.getByTestId('billing-tvs-not-for-list')).toHaveTextContent(
+      'A Target vs Sales file isn’t available for this list — “Download outlet list (Excel)” gives these outlets; the Target vs Sales file can only be filtered by a progress bucket.',
+    );
+    expect(screen.getByTestId('billing-download-excel')).toHaveTextContent('Download outlet list (Excel)');
+  });
+
+  it('BP23c: a bucket list shows no "not available" line', async () => {
     signInAs('CLIENT_ADMIN');
     mockFetch(() => payload());
     render(<Harness />);
-    fireEvent.click(await screen.findByTestId('billing-behind-pace'));
-    await screen.findByTestId('billing-drilldown');
-    expect(screen.queryByTestId('billing-tvs-download-bucket')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId('billing-bucket-P20_40'));
+    await screen.findByTestId('billing-tvs-download-bucket');
+    expect(screen.queryByTestId('billing-tvs-not-for-list')).not.toBeInTheDocument();
+  });
+
+  it('BP25: the card-level button explains why the file rows can differ from the card counts', async () => {
+    signInAs('CLIENT_ADMIN');
+    mockFetch(() => payload());
+    render(<Harness />);
+    expect(await screen.findByTestId('billing-tvs-download-note')).toHaveTextContent(
+      'The file also lists outlets that are not on the live outlet list (marked as such), and leaves out live outlets with no target and no sales — so its rows can differ from the outlet counts on this card.',
+    );
+  });
+
+  it('BP26: the Target vs Sales button is disabled while the card refetches, and re-enabled after', async () => {
+    signInAs('CLIENT_ADMIN');
+    let release: (() => void) | null = null;
+    let hold = false;
+    const base = mockFetch(() => payload());
+    const inner = base.getMockImplementation()!;
+    base.mockImplementation(async (url: string) => {
+      if (hold && String(url).startsWith('/api/admin/dashboard/billing-progress?')) {
+        await new Promise<void>((r) => { release = r; });
+      }
+      return inner(url);
+    });
+    render(<Harness />);
+    const btn = await screen.findByTestId('billing-tvs-download');
+    expect(btn).toBeEnabled();
+    hold = true;
+    fireEvent.change(await screen.findByTestId('billing-month'), { target: { value: shiftMonth(CUR_MONTH, -1) } });
+    expect(await screen.findByTestId('billing-progress-refetching')).toBeInTheDocument();
+    expect(screen.getByTestId('billing-tvs-download')).toBeDisabled();
+    hold = false;
+    release!();
+    await waitFor(() => expect(screen.queryByTestId('billing-progress-refetching')).not.toBeInTheDocument());
+    expect(screen.getByTestId('billing-tvs-download')).toBeEnabled();
   });
 
   it.each(['MIS_USER', 'SALES_ASM'])('BP24: %s (cannot download the report) never sees the button', async (role) => {

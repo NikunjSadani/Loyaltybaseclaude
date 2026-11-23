@@ -12,6 +12,17 @@ export const TVS_FILTERS_URL = '/api/admin/reports/target-vs-sales/filters';
 export const TVS_BUCKET_KEYS = ['NOT_STARTED', 'P0_20', 'P20_40', 'P40_60', 'P60_80', 'P80_100', 'ACHIEVED'] as const;
 export type TvsBucketKey = (typeof TVS_BUCKET_KEYS)[number];
 
+/** The bands with their card labels — fixed, so the bucket filter works even if the filter lists fail to load. */
+export const TVS_BUCKETS: ReadonlyArray<{ key: TvsBucketKey; label: string }> = [
+  { key: 'NOT_STARTED', label: 'Not started' },
+  { key: 'P0_20', label: 'Under 20%' },
+  { key: 'P20_40', label: '20–39%' },
+  { key: 'P40_60', label: '40–59%' },
+  { key: 'P60_80', label: '60–79%' },
+  { key: 'P80_100', label: '80–99%' },
+  { key: 'ACHIEVED', label: 'Achieved (100%+)' },
+];
+
 export function isTvsBucketKey(v: string | null | undefined): v is TvsBucketKey {
   return !!v && (TVS_BUCKET_KEYS as readonly string[]).includes(v);
 }
@@ -49,7 +60,11 @@ export function tvsQueryString(q: TvsQuery): string {
   return sp.toString();
 }
 
-/** Plain-English filter line, e.g. "November 2026 · Programme: Gold · Sales manager: Asha (and team)". */
+/**
+ * Plain-English filter line — the SAME words as the billing card's subtitle / drill-down ("Program:", "Outlet type:",
+ * "Manager: X (and team)") and its dropdowns ("All outlet types", "Everyone"), e.g.
+ * "November 2026 · Program: Gold · All outlet types · Manager: Asha (and team)".
+ */
 export function describeTvsFilters(parts: {
   period: string;
   program?: string | null;
@@ -59,9 +74,9 @@ export function describeTvsFilters(parts: {
   bucketLabel?: string | null;
 }): string {
   const out = [parts.period];
-  out.push(parts.program ? `Programme: ${parts.program}` : 'All programmes');
+  out.push(parts.program ? `Program: ${parts.program}` : 'All programs');
   out.push(parts.outletType ? `Outlet type: ${parts.outletType}` : 'All outlet types');
-  if (parts.managerId) out.push(`Sales manager: ${parts.managerName ?? 'selected manager'} (and team)`);
+  if (parts.managerId) out.push(`Manager: ${parts.managerName ?? 'selected manager'} (and team)`);
   else out.push('Everyone');
   if (parts.bucketLabel) out.push(`Billing bucket: ${parts.bucketLabel}`);
   return out.join(' · ');
