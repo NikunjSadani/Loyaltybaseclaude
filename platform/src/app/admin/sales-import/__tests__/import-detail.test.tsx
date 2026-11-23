@@ -220,17 +220,39 @@ describe('import detail — preview + apply', () => {
   });
 
   // Roster-only aggregates (owner 2026-11-23): outlets added after processing are NOT in the file's figures — never silent.
-  it('roster-only import: outlets added after processing → amber "not included" banner with Reprocess (not the blue "included" note)', async () => {
+  const NOT_INCLUDED_3 = '3 outlets were not in the programme when this file was processed; any sales they have in this file are not included.';
+  it('roster-only, NOT applied: amber status banner (count + "Reprocess the file"), Reprocess button outside the live text; no blue note', async () => {
     apiMock.get.mockResolvedValue(ok(detail()));
     apiMock.preview.mockResolvedValue(ok(preview([month()], { rosterOutletsNotIncluded: 3, rosterOutletsAddedSinceProcessing: 0 })));
     render(<Page />);
     const b = await screen.findByTestId('sales-import-roster-not-included');
-    expect(b).toHaveTextContent(
-      '3 outlets were added to the programme after this file was processed — their sales in this file are not included (they get 0). Reprocess the file (or upload the next file) to include them.',
-    );
-    expect(within(b).getByRole('alert')).toBeInTheDocument();
-    expect(within(b).getByRole('button', { name: /Reprocess/ })).toBeInTheDocument();
+    const text = within(b).getByTestId('sales-import-roster-not-included-text');
+    expect(text).toHaveAttribute('role', 'status');
+    expect(text).toHaveTextContent(`${NOT_INCLUDED_3} Reprocess the file to include them.`);
+    expect(within(text).queryByRole('button')).not.toBeInTheDocument(); // buttons are not inside the live text
+    expect(within(b).queryByRole('alert')).not.toBeInTheDocument();
+    expect(within(b).getByTestId('sales-import-reprocess-not-included')).toBeEnabled();
     expect(screen.queryByTestId('sales-import-roster-added')).not.toBeInTheDocument();
+  });
+
+  it('roster-only, ALREADY applied: "read again as a new import, then apply the month again" + that button (Reprocess is refused)', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ applied: true, canReprocess: false, canReprocessAsNew: true })));
+    apiMock.preview.mockResolvedValue(ok(preview([month()], { rosterOutletsNotIncluded: 1 })));
+    render(<Page />);
+    const b = await screen.findByTestId('sales-import-roster-not-included');
+    expect(b).toHaveTextContent('1 outlet was not in the programme when this file was processed; any sales it has in this file are not included. Read the file again as a new import, then apply the month again to include it.');
+    expect(within(b).getByTestId('sales-import-reprocess-as-new-not-included')).toBeEnabled();
+    expect(within(b).queryByTestId('sales-import-reprocess-not-included')).not.toBeInTheDocument();
+  });
+
+  it('roster-only, no upload rights: says who needs to act, no buttons', async () => {
+    perms.granted = false;
+    apiMock.get.mockResolvedValue(ok(detail({ applied: true, canReprocess: false, canReprocessAsNew: true })));
+    apiMock.preview.mockResolvedValue(ok(preview([month()], { rosterOutletsNotIncluded: 3 })));
+    render(<Page />);
+    const b = await screen.findByTestId('sales-import-roster-not-included');
+    expect(b).toHaveTextContent(`${NOT_INCLUDED_3} Someone who can upload sales files needs to read the file again as a new import, then apply the month again.`);
+    expect(within(b).queryByRole('button')).not.toBeInTheDocument();
   });
 
   it('no outlets left out (or a legacy import) → no "not included" banner', async () => {
@@ -241,7 +263,18 @@ describe('import detail — preview + apply', () => {
     expect(screen.queryByTestId('sales-import-roster-not-included')).not.toBeInTheDocument();
   });
 
-  it('an apply result reports the outlets not included (singular wording), a result without it shows nothing', async () => {
+  it('the apply confirm states the count before anything is written', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()], { rosterOutletsNotIncluded: 3 })));
+    (window.confirm as unknown as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    render(<Page />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Apply October 2026' }));
+    await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining(`${NOT_INCLUDED_3} They get 0.`));
+    expect(apiMock.apply).not.toHaveBeenCalled();
+  });
+
+  it('an apply result reports the outlets not included (applied wording, singular), a result without it shows nothing', async () => {
     apiMock.get.mockResolvedValue(ok(detail()));
     apiMock.preview.mockResolvedValue(ok(preview([month(), month({ month: '2026-11', firstDate: '2026-11-01', lastDate: '2026-11-30' })])));
     apiMock.apply.mockResolvedValue(ok({ results: [
@@ -255,8 +288,8 @@ describe('import detail — preview + apply', () => {
     await act(async () => { fireEvent.click(screen.getByTestId('sales-import-apply')); });
     await screen.findByTestId('sales-import-apply-results');
     const n = screen.getByTestId('not-included-2026-10');
-    expect(n).toHaveAttribute('role', 'alert');
-    expect(n).toHaveTextContent('1 outlet was added to the programme after this file was processed — its sales in this file are not included (it gets 0).');
+    expect(n).toHaveAttribute('role', 'status');
+    expect(n).toHaveTextContent('1 outlet was not in the programme when this file was processed; any sales it has in this file are not included. Read the file again as a new import, then apply the month again to include it.');
     expect(screen.queryByTestId('not-included-2026-11')).not.toBeInTheDocument();
   });
 
@@ -746,6 +779,28 @@ describe('import detail — dual-audit fixes (background jobs)', () => {
       expect(b).toBeDisabled();
       expect(b).toHaveAttribute('aria-describedby', 'sales-import-held-why');
     }
+  });
+
+  it('roster-only: the "not included" banner buttons are held too while an apply of this file runs', async () => {
+    apiMock.get.mockResolvedValue(ok(detail({ canReprocess: true })));
+    apiMock.preview.mockResolvedValue(ok(preview([month({ activeJob: active(), canApply: false, blockedReason: 'busy' })], { rosterOutletsNotIncluded: 2 })));
+    apiMock.getApplyJob.mockResolvedValue(ok(job({ id: 'job9', status: 'RUNNING', requestedBy: 'Ravi' }, [{ status: 'RUNNING' }])));
+    render(<Page />);
+    await screen.findByTestId('sales-import-held-why');
+    const btn = await screen.findByTestId('sales-import-reprocess-not-included');
+    await waitFor(() => expect(btn).toBeDisabled());
+    expect(btn).toHaveAttribute('aria-describedby', 'sales-import-held-why');
+  });
+
+  it('roster-only: a BACKGROUND-JOB result card carries the "not included" notice', async () => {
+    apiMock.get.mockResolvedValue(ok(detail()));
+    apiMock.preview.mockResolvedValue(ok(preview([month()])));
+    const done = { status: 'DONE' as const, result: { month: '2026-10', ok: true, applyId: 'a1', outletsWritten: 3, outletsZeroFilled: 2, outletsNotIncluded: 2 } };
+    apiMock.apply.mockResolvedValue(ok({ job: job({ status: 'DONE' }, [done]), results: [] }));
+    render(<Page />);
+    await clickApply();
+    await screen.findByTestId('sales-import-apply-results');
+    expect(screen.getByTestId('not-included-2026-10')).toHaveTextContent('2 outlets were not in the programme when this file was processed; any sales they have in this file are not included.');
   });
 
   it('B-L1: a job handed back after a restart says it will continue, not "queued"', async () => {
