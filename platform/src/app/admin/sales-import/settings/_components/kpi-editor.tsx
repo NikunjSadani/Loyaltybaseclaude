@@ -22,6 +22,7 @@ import { ProductSetBuilder } from './product-set-builder';
 import { ScopeMultiSelect, sameScopeValue } from '@/components/admin/scope-multi-select';
 import type { AppliesTo } from '@/lib/applies-to';
 import { kpiScopeOf } from '@/lib/kpi-scope-core';
+import { notIncludedCountText } from '../../_components/not-included-notice';
 
 export interface TenantKpi {
   code: string; label: string; unit: string; enabled: boolean;
@@ -403,6 +404,12 @@ export function KpiEditor({
         {freshTest && (
           <div className="space-y-1" data-testid="kpi-test-result">
             <p className="text-xs text-gray-600">{formatCount(freshTest.matchedLines)} invoice lines match.</p>
+            {(freshTest.outletsNotIncluded ?? 0) > 0 && (
+              <p role="status" data-testid="kpi-test-not-included" className="text-xs text-amber-700 flex items-start gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />
+                <span>{notIncludedCountText(freshTest.outletsNotIncluded!)} The totals below don&apos;t include them.</span>
+              </p>
+            )}
             {freshTest.months.length > 0 && (
               <table className="text-xs">
                 <thead><tr className="text-left text-gray-500"><th className="pr-4">Month</th><th className="pr-4 text-right">₹</th><th className="pr-4 text-right">Cases</th>{showProducts && <th className="pr-4 text-right">Products (all outlets added up)</th>}<th className="text-right">Outlets &gt; 0</th></tr></thead>

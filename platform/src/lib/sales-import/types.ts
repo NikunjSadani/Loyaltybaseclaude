@@ -156,6 +156,11 @@ export interface SalesKpiTestResult {
   unmatchedEntries: { anyOf: number[]; noneOf: number[] };
   redundantEntries: { anyOf: number[] };
   matchedLines: number;
+  /**
+   * Roster-only imports (2026-11-23): outlets on the roster NOW that were not on it when the tested import was processed —
+   * any sales they have in that file are not in these totals. Absent for legacy imports.
+   */
+  outletsNotIncluded?: number;
 }
 
 /**

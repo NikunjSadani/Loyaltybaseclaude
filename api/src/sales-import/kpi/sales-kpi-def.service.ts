@@ -26,6 +26,7 @@ import {
 } from './sales-kpi.helper';
 import { forEachAggregatePage, loadRosterMeta, resolveReadyImport, rosterIndexOf } from './sales-import-data';
 import { frozenImportCombos } from './focus-data';
+import { outletsMissingFromProcessing, processedRosterSet } from '../ingest/roster';
 import { storedUnits, unitsToNumber } from '../apply/month-compute';
 import type { KpiScopeLike } from '../../common/applies-to/applies-to';
 
@@ -391,6 +392,8 @@ export class SalesKpiDefService {
     const measureIdx = measure === 'AMOUNT' ? 0 : measure === 'QUANTITY' ? 1 : 2;
     const roster = await loadRosterMeta(this.prisma, clientId);
     const index = rosterIndexOf(roster); // M6: file code → CURRENT roster outlet
+    // Roster-only imports: outlets added since processing have no lines here — reported like preview / apply (audit A L2).
+    const outletsNotIncluded = outletsMissingFromProcessing(processedRosterSet(imp.processedRosterCodes), index);
 
     const perMonth = new Map<string, OutletKpiAccumulator>();
     const matchCache = new Map<string, boolean[]>(); // shared by every month's accumulator
@@ -470,6 +473,7 @@ export class SalesKpiDefService {
       },
       redundantEntries: { anyOf: redundantAnyOfEntries(rawAny) },
       matchedLines,
+      ...(outletsNotIncluded !== null ? { outletsNotIncluded } : {}),
     };
   }
 }
