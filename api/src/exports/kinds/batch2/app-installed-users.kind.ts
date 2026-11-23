@@ -50,6 +50,8 @@ import { parseQueryDto } from './kind-support';
 import {
   AREAS_FULL_HEADERS,
   AREAS_FULL_SHEET,
+  AREA_NOT_IN_HIERARCHY,
+  AREA_NOT_SET,
   areaCell,
   areasFullRow,
   loadUserAreaResolver,
@@ -88,6 +90,21 @@ export const INSTALLED_USERS_HEADERS = [
   'Notifications Enabled',
   'User Status',
 ] as const;
+
+/**
+ * About-sheet wording for THIS file's area columns (Zone / State / City only — no ASM name column since 2026-11-23),
+ * so the generic user-area notes ("all four columns", "no ASM in the reporting chain") are not reused here.
+ */
+export function installedUsersAreaNotes(asmHeader: string): [string, string] {
+  return [
+    'Zone / State / City: retailers / wholesalers — their main outlet in the outlet master (the outlet shown as their ' +
+      'Outlet Code); a group head with no outlet of their own shows "Group — N outlets" in all three columns. Sales users — ' +
+      'the outlets covered by them and by the active reps below them (a zone typed on the employee record wins). Every value ' +
+      `is listed, except the counts for users above the ${asmHeader} level (see "N cities" / "N states").`,
+    `"${AREA_NOT_SET}" = the value is missing in the uploaded data (no active rep covering the outlet, no outlet assigned, ` +
+      `or a blank outlet field). "${AREA_NOT_IN_HIERARCHY}" = admin, MIS and Gifsy logins.`,
+  ];
+}
 
 /** Index of the first level-ID column (right after 'Employee ID'). */
 export const INSTALLED_USERS_ID_COL = INSTALLED_USERS_HEADERS.indexOf('Employee ID') + 1;
@@ -366,7 +383,8 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
 
   // 5. "About" — how to read the area columns (not data rows; not counted).
   const about = await out.addSheet(INSTALLED_USERS_ABOUT_SHEET, ['About this report', ''], { widths: [22, 120] });
-  const [, geoNote, blankNote] = area.notes;
+  // This file's own wording (it has three area columns and no ASM name column) — the Usage report keeps area.notes.
+  const [geoNote, blankNote] = installedUsersAreaNotes(area.asmHeader);
   await about.addRow(['Zone / State / City', geoNote]);
   await about.addRow(['Not set / Not in hierarchy', blankNote]);
   await about.addRow(['"N cities" / "N states"', area.notes[3] ?? '']);

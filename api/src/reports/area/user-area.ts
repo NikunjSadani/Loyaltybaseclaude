@@ -114,9 +114,12 @@ export interface UserAreaResolver {
    *   • sales user — own code at own level, every manager above (walking reportingTo); "Vacant (code)" for a vacant /
    *     inactive manager; "Not set" for a level above them nobody fills in their line; blank BELOW their level; all
    *     blank when their level is not one of the five (above rank 5) or they have no level / no employee record;
-   *   • retailer / wholesaler — the chains of the ACTIVE reps covering their primary outlet (outlet / owner / parent
-   *     group), distinct codes joined " | " in sorted order; "Not set" in every column when no active rep covers it;
-   *     blank below the lowest covering rep's level; a group head with no outlet of their own → blank;
+   *   • retailer / wholesaler — one chain per ACTIVE rep covering their primary outlet (outlet / owner / parent group),
+   *     identical chains de-duplicated, chains ordered by their codes from the lowest level up, and every column lists
+   *     the chains in that SAME order joined " | " (the n-th value in each column = the same rep; "Not set" holds a
+   *     rep's slot below its level). A rep with no level / above the five levels → an all-"Not set" chain. "Not set" in
+   *     every column when no active rep covers it; blank only for a level below every covering rep; a group head with
+   *     no outlet of their own → blank;
    *   • admin / Gifsy / vendor / other → blank.
    */
   resolveIds(user: { id: string; role: string }): string[];
@@ -493,11 +496,25 @@ export function buildUserAreaResolver(
     const o = [...own].sort(byPrimary)[0];
     const reps = [...(o.id ? repsByOutlet.get(o.id) ?? [] : [])].map((id) => suById.get(id)).filter((s): s is SalesUserRow => !!s);
     if (!reps.length) return idLevels.map(() => AREA_NOT_SET);
-    return idLevels.map((_, col) => {
-      const values = new Set(reps.map((r) => idChain(r)[col]).filter(Boolean));
-      if (values.size > 1) values.delete(AREA_NOT_SET); // one rep's gap never hides another rep's real code
-      return [...values].sort((a, b) => a.localeCompare(b)).join(HIERARCHY_ID_SEPARATOR);
+    // ONE chain per covering rep. A rep with no level, or above the five levels, has no position in these columns →
+    // "Not set" everywhere (never an all-blank row).
+    const chains = reps.map((r) => {
+      const c = idChain(r);
+      return c.every((v) => !v) ? idLevels.map(() => AREA_NOT_SET) : c;
     });
+    // De-dup identical chains; order them by their codes from the lowest level upward (deterministic).
+    const unique = [...new Map(chains.map((c) => [c.join('\u0000'), c])).values()].sort((a, b) => {
+      for (let i = 0; i < a.length; i++) {
+        const d = (a[i] || '￿').localeCompare(b[i] || '￿');
+        if (d) return d;
+      }
+      return 0;
+    });
+    // Column-aligned: the n-th value in EVERY column belongs to the same rep. A level below one rep but filled by
+    // another gets "Not set" in that rep's slot; a level below every rep stays blank.
+    return idLevels.map((_, col) =>
+      unique.some((c) => c[col]) ? unique.map((c) => c[col] || AREA_NOT_SET).join(HIERARCHY_ID_SEPARATOR) : '',
+    );
   }
 
   const lowest = idLevels[0]?.label ?? 'lowest';
@@ -505,8 +522,8 @@ export function buildUserAreaResolver(
   const idNotes = idLevels.length
     ? [
         `Level ID columns (${idLevels.map((l) => `${l.label} ID`).join(' · ')}): employee codes only (no names or phones) for this client's ${idLevels.length === HIERARCHY_ID_MAX_LEVELS ? 'five lowest' : idLevels.length} sales levels, ${lowest} up to ${highest}.`,
-        `Sales users: their own code in their own level's column, then the code of each manager above them (following "reports to"). Blank = a level BELOW them; all blank = they sit above the ${highest} level or have no level / employee record. "Vacant (code)" = that manager position is vacant or inactive. "${AREA_NOT_SET}" = nobody at that level in their reporting line.`,
-        `Retailers / wholesalers: the same chain for every active sales rep covering their main outlet (assigned to the outlet, its owner or its parent group); several reps → the distinct codes separated by " | ". Blank = a level below the covering rep; "${AREA_NOT_SET}" in every column = no active rep covers the outlet (or they have no outlet); all blank = a group head with no outlet of their own.`,
+        `Sales users: their own code in their own level's column, then the code of each manager above them (following "reports to"). Blank = a level BELOW them; all blank = they sit above the ${highest} level or have no level / employee record. "Vacant (code)" = that manager position is vacant, inactive or removed. "${AREA_NOT_SET}" = nobody at that level in their reporting line.`,
+        `Retailers / wholesalers: the same chain for every active sales rep covering their main outlet (assigned to the outlet, its owner or its parent group). When several reps cover an outlet, the n-th value in each ID column belongs to the same rep (values separated by " | "; "${AREA_NOT_SET}" holds a rep's place at a level below that rep). Blank = a level below every covering rep; "${AREA_NOT_SET}" in every column = no active rep covers the outlet, they have no outlet, or the covering rep has no level or sits above the ${highest} level; "Vacant (code)" = a vacant, inactive or removed manager; all blank = a group head with no outlet of their own.`,
         'Admin, MIS, Gifsy and vendor logins: always blank (not in the sales hierarchy).',
       ]
     : ['This client has no sales hierarchy levels, so there are no level ID columns.'];
