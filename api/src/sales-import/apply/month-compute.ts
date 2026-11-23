@@ -110,8 +110,10 @@ export async function computeMonthRows(
    */
   opts: { collectDays?: boolean; dayRowLimit?: number } = {},
 ): Promise<MonthComputation> {
-  // M6: aggregates carry the FILE's (normalized) customer code; they are mapped onto the roster as it is NOW, so an
-  // outlet added after processing is written and one removed since is not.
+  // Aggregates carry the FILE's (normalized) customer code; they are mapped onto the roster as it is NOW, so an outlet
+  // removed since processing is not written. An outlet added since is written only if the import has its lines: a LEGACY
+  // import (every customer aggregated, M6) does; a roster-only import (2026-11-23) does not — the caller reports those
+  // outlets (outletsMissingFromProcessing) and they are zero-filled here.
   const index = rosterIndexOf(roster);
   const acc = new OutletKpiAccumulator(defs);
   const matched = new Set<string>();

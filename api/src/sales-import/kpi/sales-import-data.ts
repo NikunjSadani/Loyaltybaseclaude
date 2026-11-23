@@ -20,7 +20,7 @@ export const AGG_PAGE_SIZE = 20_000;
 export interface AggRow extends KpiAgg {
   id: bigint;
   month: string;
-  /** normalizeOutletCode of the file's customer code (M6) — map it with RosterIndex.byNormalized. */
+  /** normalizeOutletCode of the file's customer code — map it with rosterIndexOf (roster-only imports: a processing-time roster code). */
   outletCode: string;
   dimKey: string;
   /**

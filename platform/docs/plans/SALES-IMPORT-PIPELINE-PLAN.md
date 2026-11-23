@@ -480,8 +480,10 @@ with whole-brand entries and exclusions. The §6.2 model expresses this directly
 - `OLDER_THAN_LAST_APPLIED`: this import's `createdAt` < the month's `lastAppliedImportId` import `createdAt`.
 - `REPLACES_MANUAL_VALUES`: some existing row for the month has an owned key whose value was written by a non-`SALES_IMPORT` batch
   (first apply after a KPI moved from manual to importer).
-- ~~`ROSTER_CHANGED`~~ — REMOVED in the audit fix round (§10a.8 M6): the worker aggregates every customer code and
-  preview/apply map them onto the roster current at that moment, so a roster change never blocks apply.
+- ~~`ROSTER_CHANGED`~~ — REMOVED in the audit fix round (§10a.8 M6): preview/apply map the aggregates onto the roster
+  current at that moment, so a roster change never blocks apply. ⚠️ Since 2026-11-23 (§10d, roster-only aggregates)
+  an outlet ADDED after processing has no aggregates: it is not blocked, but preview (`rosterOutletsNotIncluded`) and
+  apply (`ApplyMonthResult.outletsNotIncluded`) say loudly that its sales in the file are not included.
 - `OLDER_THAN_LAST_APPLIED` (superseded by §10a.8 UX-1): compares DATA recency — this file's latest invoice date in the
   month vs the last-applied import's latest invoice date in that month — not upload time.
 
@@ -508,8 +510,9 @@ with whole-brand entries and exclusions. The §6.2 model expresses this directly
 10. End: `createMany` aggregates in chunks of 5,000 (delete existing aggregates for the import first, so a reprocess is idempotent).
     Upload `unmatched.csv`. Set `contentSha256`, `duplicateOfId` (earlier READY import, same tenant and sha), `monthSummaries`,
     `rosterHash`, `mappingSnapshot`, READY. On any throw → FAILED with a message (no stack).
-11. Memory budget (REVISED in the re-audit: since M6 the worker aggregates EVERY customer, not only the ~6.5k roster
-    outlets). Heap is capped at 1.7 GB (`NODE_OPTIONS=--max-old-space-size=1700`, §14; was 1536, see the revision below). Measured in spike (a) ≈ 0.4 KB of
+11. Memory budget (REVISED in the re-audit when M6 aggregated EVERY customer; since 2026-11-23 (§10d) aggregates are
+    kept for ROSTER outlets only again — the real 178 MB file needs ≈ 23 k aggregate entries instead of 507 k; the
+    bounds below are unchanged and now have a wide margin). Heap is capped at 1.7 GB (`NODE_OPTIONS=--max-old-space-size=1700`, §14; was 1536, see the revision below). Measured in spike (a) ≈ 0.4 KB of
     heap per tracked entry (Map entry + BigInts + key strings). Budget:
     - exceljs shared-strings cache ≤ ~350 MB (sharedStrings.xml itself capped at 512 MB unpacked; the cache is smaller);
     - tracked entries (aggregates + unmatched rows) ≤ **1.8 M combined** (aggregates ≤ 1.5 M, unmatched ≤ 0.9 M) ≈ 720 MB;
@@ -853,7 +856,8 @@ Additive migration `20261111120000_sales_import_hardening` (touches only the two
   closed, all four routes); allowed exports/reports are recorded as AuditLog `EXPORT` on `SALES_MONTH <client>:<month>`;
   reopen → 409 unless `acknowledgeDownstream` when credit batches (any status, `period`) or recorded exports exist;
   `SalesMonthRow.downstream`, `SalesMonthReopenResult.warnings`.
-- **M6** the worker aggregates EVERY customer code (normalized), capped (readable FAILED; caps revised in §10a.9 /
+- **M6** ⚠️ SUPERSEDED 2026-11-23 by §10d (roster-only aggregates) for the "every customer" part — the worker
+  aggregated EVERY customer code (normalized), capped (readable FAILED; caps revised in §10a.9 /
   §7.1 step 11); preview/apply map codes onto the CURRENT roster
   (`normalizedRosterIndex`, shared with the worker). `ROSTER_CHANGED`, `rosterHashMatches` and the roster-hash helpers
   are gone (`rosterHash` column kept, unused); preview shows `rosterOutletsAddedSinceProcessing` and recomputes the
@@ -1079,6 +1083,35 @@ after a stop request is released, not failed).
   `finished` / `released` / `superseded` separately (`processClaimed` returns the outcome; audit L3).
 - The heap re-exec parent forwards SIGTERM / SIGINT to the child and mirrors its exit code. No infra change. (The inline
   runner in the API process is unchanged: a killed inline run is still recovered by the stale-heartbeat reclaim.)
+
+## 10d. Roster-only aggregates (owner decision 2026-11-23, option B — supersedes the "every customer" part of M6)
+
+**Measured on production 2026-11-23** (Bajaj, 178 MB xlsx, 5.5 lakh lines): 507,428 aggregates, only 22,794 (4.5 %)
+for roster (programme) outlets; 183,511 non-roster customers = 95.5 %. They dominated worker memory (peak 63 % of the
+2 GiB job) and `sales_import_aggregates` (≈ 500 k rows / ≈ 190 MB per import; 931 MB / 2.44 M rows after a week).
+
+**Rule now.** `SalesAggregator` keeps per-product aggregates (with the day split) ONLY for codes on the roster at
+processing time. A non-roster customer keeps one total per month (`unmatchedMap` → unmatched.csv + the frozen month
+summary). Unchanged: month summaries, dimension values / combos (all valid lines), error samples, skip counts, the
+distinct-code limit (all codes), unmatched.csv. The aggregate cap and the combined cap now count roster aggregates.
+
+**Processing-time roster.** `SalesImport.processedRosterCodes` (JSONB, nullable; migration
+`20261123120000_sales_import_processed_roster`) = sorted normalized roster codes written in the READY transaction;
+cleared on re-queue. NULL = a LEGACY import (processed before this change; aggregates for every customer) → preview /
+apply keep the old M6 behaviour, no new warning, and the old blue "they are included" note (`rosterOutletsAddedSinceProcessing`).
+
+**Outlets added after processing (the trade-off) — never silent.** Preview: `rosterOutletsNotIncluded` = outlets on the
+roster NOW whose normalized code is not in `processedRosterCodes` → amber banner "N outlets were added to the programme
+after this file was processed — their sales in this file are not included (they get 0). Reprocess the file (or upload
+the next file) to include them." with Reprocess / Read again as a new import. Apply: counted again under the month lock,
+returned as `ApplyMonthResult.outletsNotIncluded` (shown on the result card) and written to the audit row. Not blocking.
+Preview unmatched figures for a roster-only import = frozen unmatched (incl. added outlets) + aggregates of outlets
+removed since. Reprocess re-reads the roster and includes them (refused once a month was applied → read again as new).
+
+**Other consumers.** Month history / combos were already programme-only (2026-11-18): unchanged. Focus catalogue and the
+KPI tester's "entry matches no line" also read the frozen `dimensionCombos` of a roster-only import, so they match the
+old behaviour whenever the file has ≤ 2,000 distinct product combos (the frozen cap). Recalculate reads stored history
+(programme outlets at apply time) — an outlet added after the APPLY was already not in it; unchanged by this change.
 
 ## 11. Lane tasks (TDD: write the test first, see it fail, implement, see it pass; run `cd api && npx jest src/sales-import` or `cd platform && npx vitest run src/app/admin/sales-import src/lib/sales-import`)
 
