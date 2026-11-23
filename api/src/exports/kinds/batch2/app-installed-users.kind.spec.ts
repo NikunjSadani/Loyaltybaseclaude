@@ -298,9 +298,8 @@ describe('app-installed-users export kind', () => {
     expect(aoa[3].slice(2, 4)).toEqual(['Client admin', 'Admin']);
     expect(aoa[3].slice(4, 7)).toEqual(Array(3).fill('Not in sales hierarchy'));
     expect(aoa[3][7]).toBeNull(); // an admin has no employee record → blank Employee ID
-    expect(aoa[3].slice(8, 13)).toEqual([]); // admin → every level-ID cell blank (trailing blanks trimmed by the reader…)
-    expect(aoa[3][15]).toBe('Desktop'); // …so check a later cell is still in place
-    expect(aoa[3].slice(8, 13).every((c) => c === null) || aoa[3].slice(8, 13).length === 0).toBe(true);
+    expect(aoa[3].slice(8, 13)).toEqual(Array(5).fill(null)); // admin → every level-ID cell blank
+    expect(aoa[3][15]).toBe('Desktop');
     expect(aoa[4][2]).toBe('SO'); // no level → from the role
     expect(aoa[4].slice(4, 7)).toEqual(Array(3).fill('Not set')); // a sales login with no employee record
     expect(aoa[4][7]).toBeNull(); // a sales login with no SalesUser row → blank Employee ID
