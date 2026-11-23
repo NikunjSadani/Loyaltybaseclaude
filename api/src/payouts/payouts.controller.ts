@@ -21,7 +21,6 @@ import {
   ListBatchesQueryDto,
   ListTransactionsQueryDto,
   PayoutUtrUploadQueryDto,
-  ReceiveFundDto,
   ReconciliationQueryDto,
 } from './dto/payouts.dto';
 import { HeavyOp } from '../common/heavy-op-limiter';
@@ -46,20 +45,6 @@ export class PayoutsController {
     @Query() query: ListTransactionsQueryDto,
   ) {
     return this.payouts.listTransactions(user, query);
-  }
-
-  @Get('fund')
-  @Roles('GIFSY_ADMIN')
-  @RequirePermission('payouts:read')
-  getFundSummary(@CurrentUser() user: JwtPayload) {
-    return this.payouts.getFundSummary(user);
-  }
-
-  @Post('fund/receive')
-  @Roles('GIFSY_ADMIN')
-  @RequirePermission('payouts:manage_fund')
-  receiveFund(@CurrentUser() user: JwtPayload, @Body() dto: ReceiveFundDto) {
-    return this.payouts.receiveFund(user, dto);
   }
 
   @Get('batches')

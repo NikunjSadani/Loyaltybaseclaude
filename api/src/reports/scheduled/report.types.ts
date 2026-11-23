@@ -351,6 +351,23 @@ export interface HeldBalancesSection {
   windowLabel?: string;
 }
 
+/**
+ * Client fund (fund reconciliation) — present only for clients with any fund set-up (an entry, a rate or settings).
+ * One line: balance, committed, and LOW when under the threshold, plus the outcome of today's low-balance e-mail.
+ */
+export interface FundSection {
+  balancePaise: bigint;
+  committedPaise: bigint;
+  thresholdPaise: bigint | null;
+  isLow: boolean;
+  hasOpening: boolean;
+  /** Spend lines charged without a rate (voucher brand with no discount / payout with no agency fee). */
+  missingRates: number;
+  recipients: number;
+  /** Today's low-balance e-mail outcome (absent when the alert run did not consider this client). */
+  alert?: { status: string; error?: string; recipients?: number };
+}
+
 export interface TenantDigest {
   clientId: string;
   name: string;
@@ -368,6 +385,8 @@ export interface TenantDigest {
   tds?: SectionResult<TdsExcessSection>;
   /** Held opening balances — present only for tenants with any held row (or when the section failed to load). */
   heldBalances?: SectionResult<HeldBalancesSection>;
+  /** Client fund — present only for clients with a fund set-up (or when the section failed to load). */
+  fund?: SectionResult<FundSection>;
   messages: SectionResult<MessagesSection>;
   /** Present ONLY for tenants with the visibilityEnabled setting ON. */
   visibility?: SectionResult<VisibilitySection>;

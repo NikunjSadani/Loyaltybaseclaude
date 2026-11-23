@@ -2,10 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TenantService } from '../../tenant/tenant.service';
 import { TenantSettingsService } from '../../tenant/tenant-settings.service';
-import { PayoutsService } from '../../payouts/payouts.service';
+import { loadFundInputs } from '../../fund/fund-sources.loader';
+import { buildFundStatement } from '../../fund/fund-statement.engine';
 import { TdsService } from '../../tds/tds.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
 import { platformWide } from '../../common/tenant-scope';
+import { REPORTS_CLIENT_ID } from '../../common/report-recipients';
 import { fyOfToday } from '../../tds/tds.helpers';
 import { paiseToRupees } from '../../common/money';
 import { istMonthKey, istMonthBounds, monthYearIST } from '../../common/ist-date';
@@ -22,7 +24,7 @@ import { istMonthKey, istMonthBounds, monthYearIST } from '../../common/ist-date
  *  - liability:  outstanding points obligation, valued in ₹ at the tenant rate.
  *  - breakage:   period-only (current calendar month) expiry vs issuance.
  *  - tds:        194R (tenant) + 194C (platform-wide by design) — reused from TdsService.
- *  - fund:       fund reconciliation — reused from PayoutsService.getFundSummary.
+ *  - fund:       the client fund (advance) balance — reused from FundService (the SAME loader + engine as /admin/fund).
  *
  * Money: persisted money is BigInt paise (÷100 → ₹). Points are Int and are
  * converted to ₹ as value(₹) = points ÷ conversionRate — the SAME convention
@@ -35,7 +37,6 @@ export class FinanceDashboardService {
     private readonly prisma: PrismaService,
     private readonly tenant: TenantService,
     private readonly tenantSettings: TenantSettingsService,
-    private readonly payouts: PayoutsService,
     private readonly tds: TdsService,
   ) {}
 
@@ -164,8 +165,9 @@ export class FinanceDashboardService {
         }
       : { liabilityRupees: 0, depositedRupees: 0, outstandingRupees: 0 };
 
-    // ── Fund: reuse PayoutsService.getFundSummary (already paise→₹ mapped) ───────
-    const fundSummary = await this.payouts.getFundSummary(user);
+    // ── Fund: the client advance (fund reconciliation) — the SAME statement engine as /admin/fund, so the two can
+    // never disagree. An un-assumed Gifsy owner has no client context → an all-zero block with hasSettings=false.
+    const fund = await this.fundBlock(user);
 
     return {
       scope: { tenant: tenantSlug, generatedAt: new Date().toISOString(), fy: fyLabel },
@@ -197,13 +199,42 @@ export class FinanceDashboardService {
         },
         sec194C,
       },
-      fund: {
-        totalReceivedRupees: FinanceDashboardService.round2(fundSummary.totalReceived),
-        totalUtilisedRupees: FinanceDashboardService.round2(fundSummary.totalUtilised),
-        closingBalanceRupees: FinanceDashboardService.round2(fundSummary.closingBalance),
-        pendingLiabilityRupees: FinanceDashboardService.round2(fundSummary.pendingLiability),
-        availableRupees: FinanceDashboardService.round2(fundSummary.available),
-      },
+      fund,
+    };
+  }
+
+  private async fundBlock(user: JwtPayload) {
+    const zero = {
+      receivedRupees: 0,
+      adjustmentsRupees: 0,
+      committedRupees: 0,
+      paidRupees: 0,
+      returnedRupees: 0,
+      balanceRupees: 0,
+      lowBalance: false,
+      thresholdRupees: null as number | null,
+      hasSettings: false,
+    };
+    if (platformWide(user) || !user.clientId || user.clientId === REPORTS_CLIENT_ID) return zero;
+    const [inputs, settings] = await Promise.all([
+      loadFundInputs(this.prisma, user.clientId),
+      this.prisma.fundSettings.findUnique({ where: { clientId: user.clientId } }),
+    ]);
+    const stmt = buildFundStatement({ items: inputs.items, entries: inputs.entries, rates: inputs.rates });
+    const t = stmt.totals;
+    const r = (p: bigint) => FinanceDashboardService.round2(paiseToRupees(p));
+    const threshold = settings?.lowBalanceThresholdPaise ?? null;
+    return {
+      // Advance received = the opening balance + every receipt.
+      receivedRupees: r(t.openingPaise + t.receiptsPaise),
+      adjustmentsRupees: r(t.adjustmentsPaise),
+      committedRupees: r(t.committedPaise),
+      paidRupees: r(t.paidPaise),
+      returnedRupees: r(t.returnedPaise),
+      balanceRupees: r(t.balancePaise),
+      lowBalance: threshold != null && t.balancePaise < threshold,
+      thresholdRupees: threshold == null ? null : r(threshold),
+      hasSettings: !!settings || stmt.lines.length > 0,
     };
   }
 }

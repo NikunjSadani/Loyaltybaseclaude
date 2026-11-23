@@ -13,7 +13,6 @@ import { Msg91Service } from '../notifications/msg91.service';
 import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
-import { rupeesToPaise } from '../common/money';
 import { monthYearIST, formatDateIST, istDayRangeFilter, istDateKey } from '../common/ist-date';
 import {
   parsePayoutUtrUpload,
@@ -66,7 +65,6 @@ import {
   CreateBatchDto,
   ListBatchesQueryDto,
   ListTransactionsQueryDto,
-  ReceiveFundDto,
   ReconciliationQueryDto,
 } from './dto/payouts.dto';
 
@@ -140,131 +138,8 @@ export class PayoutsService {
     };
   }
 
-  /** GET /v1/payouts/fund — fund ledger summary (received / utilised / available). */
-  async getFundSummary(user: JwtPayload) {
-    const clientId = user.clientId;
-
-    const latestEntry = await this.prisma.fundLedger.findFirst({
-      where: { clientId },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    const received = await this.prisma.fundReceipt.aggregate({
-      where: { clientId },
-      _sum: { amountPaise: true },
-    });
-
-    const utilisedByMode = await this.prisma.payoutTransaction.groupBy({
-      by: ['payoutMode'],
-      where: {
-        batch: { clientId },
-        status: { in: ['SUCCESS', 'INITIATED'] },
-      },
-      _sum: { amountPaise: true },
-    });
-
-    const pendingLiability = await this.prisma.payoutTransaction.aggregate({
-      where: { batch: { clientId }, status: 'PENDING' },
-      _sum: { amountPaise: true },
-    });
-
-    // _sum of a BigInt column returns bigint | null. Wrap with Number() for all
-    // arithmetic (paise values are well below Number.MAX_SAFE_INTEGER).
-    const utilised = utilisedByMode.reduce(
-      (sum, m) => sum + Number(m._sum.amountPaise ?? 0n),
-      0,
-    );
-    const totalReceived = Number(received._sum.amountPaise ?? 0n);
-    const closingBalance = Number(latestEntry?.balancePaise ?? 0n) || (totalReceived - utilised);
-    const pending = Number(pendingLiability._sum.amountPaise ?? 0n);
-
-    return {
-      totalReceivedPaise: totalReceived,
-      totalReceived: totalReceived / 100,
-      utilisedByMode: utilisedByMode.map((m) => ({
-        mode: m.payoutMode,
-        amountPaise: Number(m._sum.amountPaise ?? 0n),
-        amount: Number(m._sum.amountPaise ?? 0n) / 100,
-      })),
-      totalUtilisedPaise: utilised,
-      totalUtilised: utilised / 100,
-      closingBalancePaise: closingBalance,
-      closingBalance: closingBalance / 100,
-      pendingLiabilityPaise: pending,
-      pendingLiability: pending / 100,
-      availablePaise: Math.max(0, closingBalance - pending),
-      available: Math.max(0, closingBalance - pending) / 100,
-    };
-  }
-
-  /** POST /v1/payouts/fund/receive — record an offline fund receipt + ledger entry (GIFSY-only). */
-  async receiveFund(user: JwtPayload, dto: ReceiveFundDto) {
-    const clientId = user.clientId;
-    // dto.amount is rupees from the request body; convert to integer paise.
-    const amountPaise = rupeesToPaise(dto.amount);
-    const paymentMode = dto.paymentMode ?? 'BANK_TRANSFER';
-
-    const latestEntry = await this.prisma.fundLedger.findFirst({
-      where: { clientId },
-      orderBy: { createdAt: 'desc' },
-    });
-    // balancePaise is BigInt from Prisma; Number() is safe.
-    const currentBalance = Number(latestEntry?.balancePaise ?? 0n);
-    const newBalance = currentBalance + amountPaise;
-
-    const result = await this.prisma.$transaction(async (tx) => {
-      const receiptNumber = `FR-${Date.now()}`;
-      const receipt = await tx.fundReceipt.create({
-        data: {
-          receiptNumber,
-          amountPaise: BigInt(amountPaise),
-          receivedAt: dto.paymentDate,
-          paymentMode,
-          referenceNumber: dto.referenceNumber ?? null,
-          bankName: dto.bankName ?? null,
-          notes: dto.notes ?? null,
-          createdByUserId: user.sub,
-          clientId,
-        },
-      });
-
-      const ledgerEntry = await tx.fundLedger.create({
-        data: {
-          ledgerType: 'RECEIPT',
-          amountPaise: BigInt(amountPaise),
-          balancePaise: BigInt(newBalance),
-          referenceType: 'FUND_RECEIPT',
-          referenceId: receipt.id,
-          description:
-            dto.notes ?? `Fund receipt. Ref: ${dto.referenceNumber ?? 'N/A'}`,
-          clientId,
-        },
-      });
-
-      await tx.auditLog.create({
-        data: {
-          action: 'CREATE',
-          entityType: 'FUND_RECEIPT',
-          entityId: receipt.id,
-          actorId: user.sub,
-          metadata: {
-            amountPaise,
-            referenceNumber: dto.referenceNumber,
-            newBalance,
-          },
-        },
-      });
-
-      return { receipt, ledgerEntry };
-    });
-
-    return {
-      receiptId: result.receipt.id,
-      amount: amountPaise / 100,
-      newBalance: newBalance / 100,
-      referenceNumber: dto.referenceNumber,
-    };
-  }
+  // The old fund summary / receipt endpoints (GET /v1/payouts/fund, POST /v1/payouts/fund/receive) were retired
+  // 2026-11-23 — fund reconciliation lives in src/fund (FUND-RECONCILIATION-DESIGN.md).
 
   /** GET /v1/payouts/batches — paginated payout batches with transaction counts. */
   async listBatches(user: JwtPayload, q: ListBatchesQueryDto) {

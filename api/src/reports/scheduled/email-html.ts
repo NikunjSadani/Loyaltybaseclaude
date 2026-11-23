@@ -63,7 +63,15 @@ const RESPONSIVE_STYLE = `@media only screen and (max-width:480px){
  * Wrap body HTML in an email-client-safe document: a viewport-tagged `<head>` with the responsive
  * `<style>`, then a titled card (inline-styled for the desktop/fallback look) with intro + footer.
  */
-export function emailShell(opts: { title: string; intro?: string; body: string; dateLabel: string; footerNote?: string }): string {
+export function emailShell(opts: {
+  title: string;
+  intro?: string;
+  body: string;
+  dateLabel: string;
+  footerNote?: string;
+  /** Replaces the default "Automated internal report…" footer line (e.g. for an e-mail to a client). */
+  footerText?: string;
+}): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light only"><style>${RESPONSIVE_STYLE}</style></head><body style="margin:0;padding:0;">
 <div style="margin:0;padding:24px;background:#f4f5f7;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2937;">
   <div class="rpt-card" style="max-width:720px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
@@ -76,7 +84,7 @@ export function emailShell(opts: { title: string; intro?: string; body: string; 
       ${opts.body}
     </div>
     <div class="rpt-pad" style="padding:14px 24px;border-top:1px solid #eef0f2;font-size:12px;color:#9ca3af;">
-      ${opts.footerNote ? `<div style="color:#b91c1c;font-weight:600;margin:0 0 6px;">${esc(opts.footerNote)}</div>` : ''}Automated internal report from Gifsy. Do not reply.
+      ${opts.footerNote ? `<div style="color:#b91c1c;font-weight:600;margin:0 0 6px;">${esc(opts.footerNote)}</div>` : ''}${esc(opts.footerText ?? 'Automated internal report from Gifsy. Do not reply.')}
     </div>
   </div>
 </div>

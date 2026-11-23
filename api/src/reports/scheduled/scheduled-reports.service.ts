@@ -1,6 +1,7 @@
 import { internalSecretConfigured } from '../../common/internal-call';
 import { heldDigestFigures } from '../../wallet/held-opening-balances/held-balance-facts';
 import { TdsService } from '../../tds/tds.service';
+import { FundService, type FundAlertOutcome } from '../../fund/fund.service';
 import { financialYear } from '../../tds/tds.helpers';
 import { randomUUID } from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
@@ -173,6 +174,8 @@ export class ScheduledReportsService {
     private readonly tds: TdsService,
     // Visibility digest lines (PHOTO_APPROVAL tenants): the in-scope rule needs the tenant's visibilityConfig.
     private readonly tenantSettings: TenantSettingsService,
+    // Fund reconciliation: the per-client digest line + the once-a-day low-balance e-mails to client recipients.
+    private readonly fund: FundService,
   ) {}
 
   async runDailyReports(
@@ -180,14 +183,22 @@ export class ScheduledReportsService {
     opts: { force?: boolean } = {},
   ): Promise<{ dateLabel: string; reports: ReportOutcome[] }> {
     const dateLabel = formatDateIST(new Date(nowMs));
-    const outcome = await this.runDigest(nowMs, dateLabel, opts.force === true);
+    // Client low-balance e-mails FIRST (independent of the digest: a digest problem never stops a client alert), so the
+    // digest can report each outcome. Never throws; at most one e-mail per client per IST day.
+    let fundAlerts = new Map<string, FundAlertOutcome>();
+    try {
+      fundAlerts = await this.fund.runLowBalanceAlerts(nowMs);
+    } catch (e) {
+      this.logger.error(`Fund low-balance alerts failed: ${short(e)}`);
+    }
+    const outcome = await this.runDigest(nowMs, dateLabel, opts.force === true, fundAlerts);
     const msg = `Daily operations digest (${dateLabel}${opts.force ? ', force' : ''}): ${outcome.status}${outcome.error ? ` — ${outcome.error}` : ''}`;
     if (outcome.status === 'sent' || outcome.status === 'skipped') this.logger.log(msg);
     else this.logger.error(msg);
     return { dateLabel, reports: [outcome] };
   }
 
-  private async runDigest(nowMs: number, dateLabel: string, force: boolean): Promise<ReportOutcome> {
+  private async runDigest(nowMs: number, dateLabel: string, force: boolean, fundAlerts: Map<string, FundAlertOutcome> = new Map()): Promise<ReportOutcome> {
     const key: ReportKey = 'dailyDigest';
     const deadlineMs = this.clock() + RUN_BUDGET_MS;
 
@@ -245,7 +256,7 @@ export class ScheduledReportsService {
 
     // 4. Collect (within the budget) → build → send → record.
     try {
-      const input = await this.collect(nowMs, dateLabel, plan.window, deadlineMs);
+      const input = await this.collect(nowMs, dateLabel, plan.window, deadlineMs, fundAlerts);
       if (stateReadError) {
         input.sharedFailures = [{ key: 'shared/run-history', label: 'run history' }, ...(input.sharedFailures ?? [])];
         input.runNotices = [
@@ -469,7 +480,13 @@ export class ScheduledReportsService {
   // ── Collect ─────────────────────────────────────────────────────────────────────────────────
 
   /** Assemble the builder input for `window`. Public for the runner spec (exercises section isolation). */
-  async collect(nowMs: number, dateLabel: string, window: DigestWindow, deadlineMs = Infinity): Promise<DigestInput> {
+  async collect(
+    nowMs: number,
+    dateLabel: string,
+    window: DigestWindow,
+    deadlineMs = Infinity,
+    fundAlerts: Map<string, FundAlertOutcome> = new Map(),
+  ): Promise<DigestInput> {
     const runNotices: string[] = [];
     const sharedFailures: Array<{ key: string; label: string }> = [];
     const section = <T,>(label: string, clientId: string, load: () => Promise<T>) => this.section(label, clientId, load, deadlineMs);
@@ -530,6 +547,25 @@ export class ScheduledReportsService {
       const held = await section('heldBalances', c, () => heldDigestFigures(this.prisma, c, window));
       if (!held.ok) digest.heldBalances = held;
       else if (held.data) digest.heldBalances = { ok: true, data: held.data };
+      // Client fund: only clients with a fund set-up get the line (null = none).
+      const fund = await section('fund', c, () => this.fund.digestFigures(c));
+      if (!fund.ok) digest.fund = fund;
+      else if (fund.data) {
+        const a = fundAlerts.get(c);
+        digest.fund = {
+          ok: true,
+          data: {
+            balancePaise: fund.data.balancePaise,
+            committedPaise: fund.data.committedPaise,
+            thresholdPaise: fund.data.thresholdPaise,
+            isLow: fund.data.isLow,
+            hasOpening: fund.data.hasOpening,
+            missingRates: fund.data.missingRates,
+            recipients: fund.data.recipients,
+            ...(a ? { alert: { status: a.status, ...(a.error ? { error: a.error } : {}), ...(a.recipients != null ? { recipients: a.recipients } : {}) } } : {}),
+          },
+        };
+      }
       if (t.visibility) digest.visibility = await section('visibility', c, () => this.visibility(c, window, t.visibilityPhoto, nowMs));
       // Every tenant (DEFAULT ON since 2026-11-21). An emergency-off tenant still loads it so its location history
       // is not hidden; the renderer shows it for them only when there was activity, with a "switched off" note.

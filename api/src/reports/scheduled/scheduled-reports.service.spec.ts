@@ -159,6 +159,11 @@ const tenantSettingsMock = {
     visibilityConfig: { outletScope: ['SSS'], frequencyPerMonth: 1, programs: [], subPrograms: [], geoFence: { enabled: true, radiusMeters: 200 } },
   }),
 };
+/** Fund reconciliation: no client has a fund set-up in these fixtures (null = no line); no low-balance e-mails. */
+const fundMock = {
+  digestFigures: jest.fn(async () => null),
+  runLowBalanceAlerts: jest.fn(async () => new Map()),
+};
 const tdsMock = {
   report194R: jest.fn().mockResolvedValue({ rows: [], summary: { totalExcessDeductedPaise: 0n, excessRetailerCount: 0 } }),
 };
@@ -183,7 +188,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
     prisma = makePrisma();
     store = prisma.programSetting;
     sendEmail = jest.fn().mockResolvedValue(undefined);
-    svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never, tenantSettingsMock as never);
+    svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never, tenantSettingsMock as never, fundMock as never);
   });
 
   describe('Location line (LOCATION-GATE.md)', () => {
@@ -359,7 +364,7 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       prisma = makePrisma();
       store = prisma.programSetting;
       setRecipients({ dailyDigest: ['ops@gifsy.in'] });
-      svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never, tenantSettingsMock as never);
+      svc = new ScheduledReportsService(prisma as never, { sendEmail } as never, tdsMock as never, tenantSettingsMock as never, fundMock as never);
       svc.clock = () => NOW;
       setState({ running: { startedAt: new Date(NOW - 5 * 60_000).toISOString(), token: 'slow' } });
       expect((await svc.runDailyReports(NOW)).reports[0].status).toBe('in-progress');
