@@ -317,6 +317,14 @@ describe('one-off rebuild-days (November backfill from our own stored file)', ()
     expect(db.$executeRaw).not.toHaveBeenCalled();
   });
 
+  it('roster-only aggregates (2026-11-23): the re-reader is given today\'s roster AND every stored history code (an outlet removed since the apply still has stored lines)', async () => {
+    const { db, deps, parse } = rebuildDb();
+    db.salesMonthHistory.findMany.mockResolvedValue([...HIST, { ...HIST[0], id: 99n, customerCode: 'GONE' }] as never);
+    await rebuildMonthDays(deps, { clientId: 't1', month: PREV, apply: false });
+    const codes = (parse.mock.calls[0] as unknown as [unknown, unknown, ReadonlyMap<string, string>])[2];
+    expect([...codes.keys()].sort()).toEqual(['GONE', 'O1']);
+  });
+
   it('--apply: fills the history lines\' day split and writes the cumulative day rows + set, in ONE locked transaction; audited', async () => {
     const { db, deps } = rebuildDb();
     const r = await rebuildMonthDays(deps, { clientId: 't1', month: PREV, apply: true });

@@ -51,7 +51,8 @@ describe('parseStoredFile (one-off day-data rebuild re-reader)', () => {
 
   it('CSV: same lines, totals and IST day split as processing; undatable lines skipped + sampled', async () => {
     const file = Buffer.from(CSV);
-    const r = await parseStoredFile(storageOf(file, 'p/'), { gcsPrefix: 'p/', sizeBytes: BigInt(file.length), fileKind: 'CSV' }, MAPPING, new Map([['O1', 'O1']]));
+    const r = await parseStoredFile(storageOf(file, 'p/'), { gcsPrefix: 'p/', sizeBytes: BigInt(file.length), fileKind: 'CSV' }, MAPPING, new Map([['O1', 'O1'], ['O2', 'O2']]));
+    // roster-only aggregates (2026-11-23): the rebuild passes the CURRENT roster index, so roster outlets are re-read
     if (!r.ok) throw new Error(r.problem);
     expect(r.result.get('2026-10', 'O1', KEY)).toEqual({ amountPaise: 6000n, qtyPico: 1_000_000_000_000n, lines: 2 });
     expect(r.result.getDays('2026-10', 'O1', KEY)!.map((d) => [d.day, d.amountPaise])).toEqual([[3, 10000n], [20, -4000n]]);
@@ -67,7 +68,7 @@ describe('parseStoredFile (one-off day-data rebuild re-reader)', () => {
         [new Date(Date.UTC(2026, 9, 4)), 'O1', 'Shop', 'P', '500', -0.25, 0.5],
       ]],
     ]);
-    const r = await parseStoredFile(storageOf(file, 'x/'), { gcsPrefix: 'x/', sizeBytes: BigInt(file.length), fileKind: 'XLSX' }, MAPPING, new Map());
+    const r = await parseStoredFile(storageOf(file, 'x/'), { gcsPrefix: 'x/', sizeBytes: BigInt(file.length), fileKind: 'XLSX' }, MAPPING, new Map([['O1', 'O1']]));
     if (!r.ok) throw new Error(r.problem);
     expect(r.result.getDays('2026-10', 'O1', KEY)!.map((d) => [d.day, d.amountPaise])).toEqual([[3, 10025n], [4, -25n]]);
   });

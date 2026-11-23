@@ -153,9 +153,13 @@ export async function rebuildMonthDays(deps: RebuildDeps, a: { clientId: string;
 
   // 1. Re-read the stored file and check it reproduces EVERY stored line of the month exactly.
   const roster = await loadRosterMeta(db, clientId);
-  const parsed = await deps.parse(imp, mapping, rosterIndexOf(roster));
-  if (!parsed.ok) return fail(parsed.problem, { sourceImportId: imp.id });
   const stored = await readHistory(db, clientId, month);
+  // Roster-only aggregates (2026-11-23): the re-reader keeps lines only for the codes it is given, so give it today's
+  // roster AND every customer code of the stored history (an outlet removed since the apply still has stored lines).
+  const readCodes = new Map(rosterIndexOf(roster));
+  for (const h of stored) if (!readCodes.has(h.customerCode)) readCodes.set(h.customerCode, h.customerCode);
+  const parsed = await deps.parse(imp, mapping, readCodes);
+  if (!parsed.ok) return fail(parsed.problem, { sourceImportId: imp.id });
   const mismatches: string[] = [];
   const lines: AggRow[] = [];
   for (const h of stored) {
