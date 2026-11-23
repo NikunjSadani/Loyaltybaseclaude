@@ -1,4 +1,4 @@
-# Bajaj prod follow-ups — runbook for owner approval (A flags · B Help content · C wallet backfill → V2 · D held opening balances)
+# Bajaj prod follow-ups — runbook for owner approval (A flags · B Help content · C wallet backfill → V2 · D held opening balances · E Sales Import roster-only deploy order + rollback)
 
 > **Status (2026-11-21): part A partly DONE by the owner — `requireLocation` and `wholesalerPayoutInclActivation`
 > are ON for Bajaj prod (verified read-only, see A "Read-back"); `helpVideos` still OFF. Parts B and C: NOTHING

@@ -10,7 +10,8 @@
  * on the real Bajaj file only 4.5 % of the 507 k aggregates were programme outlets; the rest dominated worker memory and
  * the sales_import_aggregates table. Trade-off: an outlet ADDED to the roster after processing has no aggregates, so its
  * sales in this file are NOT included — preview and apply say so loudly (SalesImport.processedRosterCodes holds the
- * processing-time roster; the fix is Reprocess). An outlet REMOVED since processing still has aggregates; preview /
+ * processing-time roster; the fix is Reprocess, or "Read again as a new import" once applied). An outlet REMOVED since
+ * processing still has aggregates; preview /
  * apply map onto the roster as it is NOW, so it is simply not written.
  * Day level (sales-day-level, 2026-11-18): each aggregate also carries its split by IST invoice DAY (`days`, summing
  * exactly to the row). Memory (S5): a row whose lines all fall on ONE day (the common case) costs one small integer; a
