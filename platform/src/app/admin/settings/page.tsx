@@ -1415,9 +1415,15 @@ export default function SettingsPage() {
 
       {/* Fund Alert */}
       <Card>
-        <CardHeader><CardTitle className="text-base">Fund Management</CardTitle><CardDescription>Low balance alert threshold for program fund</CardDescription></CardHeader>
+        <CardHeader><CardTitle className="text-base">Fund Reconciliation</CardTitle><CardDescription>Client fund (advance) settings moved</CardDescription></CardHeader>
         <CardContent>
-          <SettingRow label="Low Balance Alert Threshold (₹)" description="Alert is triggered when Available Balance (Closing − Pending Liability) falls below this value." value={settings.lowBalanceAlertThreshold} onChange={set('lowBalanceAlertThreshold')} min={0} />
+          {/* The old "Low Balance Alert Threshold" here was never read by anything (retired 2026-11-23). The threshold,
+              alert recipients, agency fee and voucher brand discounts now live on the Fund Reconciliation page. */}
+          <p className="text-sm text-gray-600">
+            The low-balance alert threshold, alert recipients, agency fee and voucher brand discounts are set on the{' '}
+            <a href="/admin/fund" className="font-medium text-[var(--brand-primary)] underline">Fund Reconciliation</a> page
+            (Rates &amp; alerts tab).
+          </p>
         </CardContent>
       </Card>
 
