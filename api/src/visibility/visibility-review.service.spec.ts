@@ -192,20 +192,20 @@ describe('VisibilityReviewService', () => {
   // ── Programme / sub-programme (review-layout, 2026-11-19) — additive fields ──────
   it('adminListCaptures adds the outlet programme + sub-programme to each row (flattened, no nested outlet)', async () => {
     mockPrisma.visibilityCapture.findMany.mockResolvedValue([
-      { id: 'cap1', outletCode: 'OC1', windowKey: '2020-01-P1', status: 'SUBMITTED', outlet: { programName: 'Unnati', programCategory: 'Elite' } },
-      { id: 'cap2', outletCode: 'OC2', windowKey: '2020-01-P1', status: 'SUBMITTED', outlet: { programName: null, programCategory: null } },
+      { id: 'cap1', outletCode: 'OC1', windowKey: '2020-01-P1', status: 'SUBMITTED', outlet: { programName: 'Unnati', programCategory: 'Elite', state: ' Maharashtra ', zone: 'West' } },
+      { id: 'cap2', outletCode: 'OC2', windowKey: '2020-01-P1', status: 'SUBMITTED', outlet: { programName: null, programCategory: null, state: '', zone: null } },
     ]);
     mockPrisma.visibilityCapture.count.mockResolvedValue(2);
     const res = await service.adminListCaptures(gifsy, {});
     const select = mockPrisma.visibilityCapture.findMany.mock.calls[0][0].select;
-    expect(select.outlet).toEqual({ select: { programName: true, programCategory: true } });
+    expect(select.outlet).toEqual({ select: { programName: true, programCategory: true, state: true, zone: true } });
     // Existing fields still selected (additive change).
     expect(select).toMatchObject({ id: true, outletCode: true, geoFenceOk: true, photoReviews: true });
     expect(res.captures[0]).toEqual({
-      id: 'cap1', outletCode: 'OC1', windowKey: '2020-01-P1', status: 'SUBMITTED', programName: 'Unnati', programCategory: 'Elite',
+      id: 'cap1', outletCode: 'OC1', windowKey: '2020-01-P1', status: 'SUBMITTED', programName: 'Unnati', programCategory: 'Elite', outletState: 'Maharashtra', outletZone: 'West',
       windowClosed: true,
     });
-    expect(res.captures[1]).toMatchObject({ programName: null, programCategory: null });
+    expect(res.captures[1]).toMatchObject({ programName: null, programCategory: null, outletState: null, outletZone: null });
     expect(res.captures[0]).not.toHaveProperty('outlet');
   });
 
@@ -234,13 +234,15 @@ describe('VisibilityReviewService', () => {
       formValues: { photo: 'visibility-media/t1/x.jpg' }, photoReviews: null,
       geoFenceOk: null, distanceMeters: null, captureLat: null, captureLng: null, captureAccuracy: null,
       submissions: [], imageHashes: [], submittedBy: null, approvedBy: null,
-      outlet: { programName: 'SAMT', programCategory: 'Privilege' },
+      outlet: { programName: 'SAMT', programCategory: 'Privilege', state: 'Punjab', zone: 'North' },
     });
     const res = await service.adminGetCapture(gifsy, 'cap1');
     const include = mockPrisma.visibilityCapture.findFirst.mock.calls[0][0].include;
-    expect(include.outlet).toEqual({ select: { programName: true, programCategory: true } });
+    expect(include.outlet).toEqual({ select: { programName: true, programCategory: true, state: true, zone: true } });
     expect(res.capture.programName).toBe('SAMT');
     expect(res.capture.programCategory).toBe('Privilege');
+    expect(res.capture.outletState).toBe('Punjab');
+    expect(res.capture.outletZone).toBe('North');
     expect(res.capture).not.toHaveProperty('outlet');
     // Existing detail shape intact.
     expect(res.capture.media).toHaveLength(1);
@@ -252,6 +254,8 @@ describe('VisibilityReviewService', () => {
     const bare = await service.adminGetCapture(gifsy, 'cap1');
     expect(bare.capture.programName).toBeNull();
     expect(bare.capture.programCategory).toBeNull();
+    expect(bare.capture.outletState).toBeNull();
+    expect(bare.capture.outletZone).toBeNull();
   });
 
   // ── Per-photo review (VISIBILITY-PER-PHOTO-APPROVAL) ──────────────────────────

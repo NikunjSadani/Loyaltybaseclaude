@@ -291,7 +291,7 @@ describe('VISQ — VisibilityCaptureQueue', () => {
   });
 
   // ── Review layout (owner request 2026-11-19) ─────────────────────────────────
-  const PROG = { programName: 'Unnati', programCategory: 'Elite' };
+  const PROG = { programName: 'Unnati', programCategory: 'Elite', outletState: 'Maharashtra', outletZone: 'West' };
   const TWO_PHOTO_DETAIL = {
     ...DETAIL,
     ...PROG,
@@ -309,6 +309,11 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     const cell = await screen.findByTestId('row-program-cap-1');
     expect(within(cell).getByText('Unnati')).toBeInTheDocument();
     expect(within(cell).getByText('Elite')).toBeInTheDocument();
+    // State / Zone (owner 2026-11-23): own column, State over Zone.
+    expect(screen.getByRole('columnheader', { name: 'State / Zone' })).toBeInTheDocument();
+    const sz = screen.getByTestId('row-state-zone-cap-1');
+    expect(within(sz).getByText('Maharashtra')).toBeInTheDocument();
+    expect(within(sz).getByText('West')).toBeInTheDocument();
   });
 
   it('VISQ9: review opens a centred modal dialog with Program + Sub-Program in the header', async () => {
@@ -329,6 +334,8 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     expect(within(prog).getByText('Unnati')).toBeInTheDocument();
     expect(within(prog).getByText('Sub-Program')).toBeInTheDocument();
     expect(within(prog).getByText('Elite')).toBeInTheDocument();
+    expect(within(within(prog).getByTestId('capture-review-state')).getByText('Maharashtra')).toBeInTheDocument();
+    expect(within(within(prog).getByTestId('capture-review-zone')).getByText('West')).toBeInTheDocument();
     // Outlet + code + window + rep in the header too.
     expect(within(header).getByText('Sharma Store')).toBeInTheDocument();
     expect(within(header).getByText('OUT-1')).toBeInTheDocument();
@@ -340,7 +347,8 @@ describe('VISQ — VisibilityCaptureQueue', () => {
     render(<VisibilityCaptureQueue />);
     fireEvent.click(await screen.findByRole('button', { name: /review/i }));
     const prog = await screen.findByTestId('capture-review-program');
-    expect(within(prog).getAllByText('—')).toHaveLength(2);
+    // Program, Sub-Program, State, Zone all unset → four dashes.
+    expect(within(prog).getAllByText('—')).toHaveLength(4);
   });
 
   it('VISQ11: two photos render side by side, each large with its label + per-photo fence badge', async () => {
