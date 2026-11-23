@@ -15,6 +15,7 @@ import { BannerConfigService } from './banner-config.service';
 import { ReportsService } from './reports.service';
 import { KycService } from '../kyc/kyc.service';
 import { TargetsService } from '../targets/targets.service';
+import { fakeModel } from '../exports/kinds/batch2/parity.support-spec';
 
 const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '' };
 const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: '' };
@@ -261,160 +262,121 @@ describe('ReportsService', () => {
   });
 });
 
-describe('ReportsService — target-vs-sales', () => {
+describe('ReportsService — target-vs-sales (JSON preview = the export kind engine)', () => {
   const KPIS = [
-    { code: 'MONTH_TGT', label: 'Month Target', unit: 'cases' },
-    { code: 'FOCUS_PACK_1', label: 'Focus Pack - 1', unit: 'cases' },
+    { clientId: 'deoleo', code: 'MONTH_TGT', label: 'Month Target', unit: 'cases', order: 1, enabled: true, isPrimary: true, outletType: null, outletTypes: [], programs: [], subPrograms: [] },
+    { clientId: 'deoleo', code: 'FOCUS_PACK_1', label: 'Focus Pack - 1', unit: 'cases', order: 2, enabled: true, isPrimary: false, outletType: null, outletTypes: [], programs: [], subPrograms: [] },
   ];
 
-  it('rejects a span exceeding 15 months (inclusive)', async () => {
-    const service = await build(ReportsService);
-    mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
-    // 2025-01 .. 2026-04 = 16 months
-    await expect(
-      service.targetVsSales(gifsy, { fromMonth: '2025-01', toMonth: '2026-04' }),
-    ).rejects.toBeInstanceOf(BadRequestException);
-    // getPace must never be hit once the range is rejected.
-    expect(mockTargets.getPace).not.toHaveBeenCalled();
+  /** In-memory tenant data (real where / paging semantics) — the preview reads the DB exactly like the download. */
+  function world(opts: { targets?: Record<string, unknown>[]; sales?: Record<string, unknown>[]; outlets?: Record<string, unknown>[] } = {}) {
+    return {
+      kpiDef: fakeModel(KPIS.map((k, i) => ({ id: `k${i}`, ...k }))),
+      outletTarget: fakeModel((opts.targets ?? []).map((r, i) => ({ id: `t${i}`, ...r }))),
+      outletSalesRecord: fakeModel((opts.sales ?? []).map((r, i) => ({ id: `s${i}`, ...r }))),
+      outlet: fakeModel(
+        (opts.outlets ?? []).map((r, i) => ({
+          id: `o${i}`, deletedAt: null, deactivatedAt: null, kycIntent: null, programName: null, programCategory: null,
+          zone: null, state: null, partnerId: null, parentId: null, salesAssignments: [], ...r,
+        })),
+      ),
+      salesHierarchyLevel: fakeModel([]),
+      salesUser: fakeModel([]),
+      salesUserAssignment: fakeModel([]),
+    };
+  }
+  const svc = (prisma: ReturnType<typeof world>) => new ReportsService(prisma as unknown as PrismaService);
+  type Preview = { months: string[]; columns: string[]; rows: Record<string, unknown>[]; filtersSummary: string };
+
+  it('rejects a span exceeding 15 months (inclusive) — before any read', async () => {
+    const prisma = world();
+    await expect(svc(prisma).targetVsSales(gifsy, { fromMonth: '2025-01', toMonth: '2026-04' })).rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.kpiDef.findMany).not.toHaveBeenCalled();
   });
 
   it('the JSON preview accepts exactly 3 months', async () => {
-    const service = await build(ReportsService);
-    mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
-    const res = (await service.targetVsSales(gifsy, {
-      fromMonth: '2026-01',
-      toMonth: '2026-03',
-    })) as { months: string[] };
+    const res = (await svc(world()).targetVsSales(gifsy, { fromMonth: '2026-01', toMonth: '2026-03' })) as Preview;
     expect(res.months).toHaveLength(3);
-    expect(mockTargets.getPace).toHaveBeenCalledTimes(3);
+    expect(res.columns.slice(13, 15)).toEqual(['Month', 'Billing bucket']);
   });
 
   it('the JSON preview rejects 4–15 months with a message pointing to the download (never computes)', async () => {
-    const service = await build(ReportsService);
-    mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
-    // 2025-01 .. 2026-03 = 15 months — valid for the download, too long for the on-screen preview.
-    const err = await service.targetVsSales(gifsy, { fromMonth: '2025-01', toMonth: '2026-03' }).catch((e: unknown) => e);
+    const prisma = world();
+    const err = await svc(prisma).targetVsSales(gifsy, { fromMonth: '2025-01', toMonth: '2026-03' }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(BadRequestException);
     expect((err as BadRequestException).message).toMatch(/up to 3 months .*Download Excel/);
-    expect(mockTargets.getPace).not.toHaveBeenCalled();
+    expect(prisma.kpiDef.findMany).not.toHaveBeenCalled();
   });
 
-  it('rejects fromMonth after toMonth', async () => {
-    const service = await build(ReportsService);
-    mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
+  it('rejects fromMonth after toMonth, and an unknown bucket', async () => {
+    await expect(svc(world()).targetVsSales(gifsy, { fromMonth: '2026-05', toMonth: '2026-03' })).rejects.toBeInstanceOf(BadRequestException);
     await expect(
-      service.targetVsSales(gifsy, { fromMonth: '2026-05', toMonth: '2026-03' }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+      svc(world()).targetVsSales(gifsy, { fromMonth: '2026-01', toMonth: '2026-01', bucket: 'BEHIND_PACE' }),
+    ).rejects.toThrow(/Unknown `bucket`/);
   });
 
-  it('scopes to the caller clientId — getPace is called with the caller (no clientId param exists)', async () => {
-    const service = await build(ReportsService);
-    mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
-
-    await service.targetVsSales(clientAdmin, { fromMonth: '2026-01', toMonth: '2026-02' });
-
-    // KpiDef query tenant-scoped.
-    expect(mockPrisma.kpiDef.findMany.mock.calls[0][0].where.clientId).toBe('deoleo');
-    expect(mockPrisma.kpiDef.findMany.mock.calls[0][0].where.enabled).toBe(true);
-    // Every getPace call carries the caller's JwtPayload (whose clientId getPace filters on).
-    for (const call of mockTargets.getPace.mock.calls) {
-      expect(call[0]).toBe(clientAdmin);
-    }
-  });
-
-  it('foreign-tenant data never appears (only getPace-returned outlets are emitted)', async () => {
-    const service = await build(ReportsService);
-    mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
-    // getPace (tenant-scoped) returns only OUT-1 for the caller's tenant.
-    mockTargets.getPace.mockResolvedValue({
-      month: '2026-01',
-      outlets: [
-        {
-          outletCode: 'OUT-1',
-          outletName: 'Alpha',
-          outletType: 'RETAIL',
-          month: '2026-01',
-          kpis: [{ code: 'MONTH_TGT', target: 100, achieved: 80, pace: 0.8 }],
-        },
+  it('scopes to the caller clientId — foreign-tenant data never appears', async () => {
+    const prisma = world({
+      targets: [
+        { clientId: 'deoleo', outletCode: 'OUT-1', month: '2026-01', outletName: 'Alpha', targetValues: { MONTH_TGT: 100 } },
+        { clientId: 'bajaj', outletCode: 'FOREIGN', month: '2026-01', outletName: 'X', targetValues: { MONTH_TGT: 1 } },
       ],
+      sales: [{ clientId: 'deoleo', outletCode: 'OUT-1', month: '2026-01', kpiValues: { MONTH_TGT: 80 } }],
+      outlets: [{ clientId: 'deoleo', outletCode: 'OUT-1', outletType: { code: 'RETAIL' } }],
     });
-
-    const res = (await service.targetVsSales(clientAdmin, {
-      fromMonth: '2026-01',
-      toMonth: '2026-01',
-    })) as { rows: Record<string, unknown>[] };
-
-    const codes = new Set(res.rows.map((r) => r['Outlet Code']));
-    expect(codes).toEqual(new Set(['OUT-1'])); // no foreign outlet leaks in
+    const res = (await svc(prisma).targetVsSales(clientAdmin, { fromMonth: '2026-01', toMonth: '2026-01' })) as Preview;
+    expect(new Set(res.rows.map((r) => r['Outlet Code']))).toEqual(new Set(['OUT-1']));
+    expect(prisma.kpiDef.findMany.mock.calls[0][0].where).toMatchObject({ clientId: 'deoleo', enabled: true });
+    expect(res.rows[0]['Billing bucket']).toBe('80–99%');
   });
 
   it('blank (not 0) for a missing KPI/actual; a stored 0 stays 0; pace math is achieved÷target×100', async () => {
-    const service = await build(ReportsService);
-    mockPrisma.kpiDef.findMany.mockResolvedValue(KPIS);
-    mockTargets.getPace.mockResolvedValue({
-      month: '2026-01',
-      outlets: [
-        {
-          outletCode: 'OUT-1',
-          outletName: 'Alpha',
-          outletType: 'RETAIL',
-          month: '2026-01',
-          kpis: [
-            // MONTH_TGT: real 0 achieved, real target → achieved cell 0, pace 0.
-            { code: 'MONTH_TGT', target: 200, achieved: 0, pace: 0 },
-            // FOCUS_PACK_1 absent → all three cells blank.
-          ],
-        },
-      ],
+    const prisma = world({
+      targets: [{ clientId: 'deoleo', outletCode: 'OUT-1', month: '2026-01', outletName: 'Alpha', targetValues: { MONTH_TGT: 200 } }],
+      sales: [{ clientId: 'deoleo', outletCode: 'OUT-1', month: '2026-01', kpiValues: { MONTH_TGT: 0 } }],
+      outlets: [{ clientId: 'deoleo', outletCode: 'OUT-1', outletType: { code: 'RETAIL' } }],
     });
-
-    const res = (await service.targetVsSales(clientAdmin, {
-      fromMonth: '2026-01',
-      toMonth: '2026-01',
-    })) as { rows: Record<string, unknown>[] };
-    const row = res.rows[0];
-
+    const row = ((await svc(prisma).targetVsSales(clientAdmin, { fromMonth: '2026-01', toMonth: '2026-01' })) as Preview).rows[0];
     expect(row['Month Target Target']).toBe(200);
-    expect(row['Month Target Achieved']).toBe(0); // real 0, NOT blank
+    expect(row['Month Target Achieved']).toBe(0);
     expect(row['Month Target Pace %']).toBe(0);
-    // Absent KPI → blank across the board.
     expect(row['Focus Pack - 1 Target']).toBe('');
     expect(row['Focus Pack - 1 Achieved']).toBe('');
     expect(row['Focus Pack - 1 Pace %']).toBe('');
+    expect(row['Billing bucket']).toBe('Not started');
   });
 
   it('emits one row per (outlet × month) across the range, blank where a month has no data', async () => {
-    const service = await build(ReportsService);
-    mockPrisma.kpiDef.findMany.mockResolvedValue([KPIS[0]]);
-    // OUT-1 has data only in 2026-02; the range is Jan..Mar.
-    mockTargets.getPace.mockImplementation(async (_user: unknown, q: { month: string }) => {
-      if (q.month === '2026-02') {
-        return {
-          month: '2026-02',
-          outlets: [
-            {
-              outletCode: 'OUT-1',
-              outletName: 'Alpha',
-              outletType: 'RETAIL',
-              month: '2026-02',
-              kpis: [{ code: 'MONTH_TGT', target: 100, achieved: 50, pace: 0.5 }],
-            },
-          ],
-        };
-      }
-      return { month: q.month, outlets: [] };
+    const prisma = world({
+      targets: [{ clientId: 'deoleo', outletCode: 'OUT-1', month: '2026-02', outletName: 'Alpha', targetValues: { MONTH_TGT: 100 } }],
+      sales: [{ clientId: 'deoleo', outletCode: 'OUT-1', month: '2026-02', kpiValues: { MONTH_TGT: 50 } }],
+      outlets: [{ clientId: 'deoleo', outletCode: 'OUT-1', outletType: { code: 'RETAIL' } }],
     });
-
-    const res = (await service.targetVsSales(clientAdmin, {
-      fromMonth: '2026-01',
-      toMonth: '2026-03',
-    })) as { rows: Record<string, unknown>[] };
-
-    // 1 qualifying outlet × 3 months = 3 rows, ordered by month.
+    const res = (await svc(prisma).targetVsSales(clientAdmin, { fromMonth: '2026-01', toMonth: '2026-03' })) as Preview;
     expect(res.rows.map((r) => r['Month'])).toEqual(['2026-01', '2026-02', '2026-03']);
-    expect(res.rows[0]['Month Target Target']).toBe(''); // Jan blank
-    expect(res.rows[1]['Month Target Achieved']).toBe(50); // Feb has data
+    expect(res.rows[0]['Month Target Target']).toBe('');
+    expect(res.rows[1]['Month Target Achieved']).toBe(50);
     expect(res.rows[1]['Month Target Pace %']).toBe(50);
-    expect(res.rows[2]['Month Target Achieved']).toBe(''); // Mar blank
+    expect(res.rows[2]['Month Target Achieved']).toBe('');
+    expect(res.rows.map((r) => r['Billing bucket'])).toEqual(['No target', '40–59%', 'No target']);
+  });
+
+  it('filters apply to the preview exactly like the download (programme + bucket) and are summarised', async () => {
+    const prisma = world({
+      targets: ['A', 'B'].map((c) => ({ clientId: 'deoleo', outletCode: c, month: '2026-01', outletName: c, targetValues: { MONTH_TGT: 100 } })),
+      sales: [
+        { clientId: 'deoleo', outletCode: 'A', month: '2026-01', kpiValues: { MONTH_TGT: 100 } },
+        { clientId: 'deoleo', outletCode: 'B', month: '2026-01', kpiValues: { MONTH_TGT: 100 } },
+      ],
+      outlets: [
+        { clientId: 'deoleo', outletCode: 'A', outletType: { code: 'RETAIL' }, programName: 'Gold' },
+        { clientId: 'deoleo', outletCode: 'B', outletType: { code: 'RETAIL' }, programName: 'Silver' },
+      ],
+    });
+    const res = (await svc(prisma).targetVsSales(clientAdmin, {
+      fromMonth: '2026-01', toMonth: '2026-01', program: 'Gold', bucket: 'ACHIEVED',
+    })) as Preview;
+    expect(res.rows.map((r) => r['Outlet Code'])).toEqual(['A']);
+    expect(res.filtersSummary).toBe('Jan 2026 · Programme: Gold · Billing bucket: Achieved (100%+)');
   });
 });

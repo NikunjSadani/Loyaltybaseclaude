@@ -24,6 +24,28 @@ export class TargetVsSalesQueryDto {
   @IsOptional()
   @IsEnum(ReportFormat)
   format?: ReportFormat = ReportFormat.JSON;
+
+  // Optional filters (2026-11-23) — the Overview billing card's own filters. Trimmed / '' = absent and validated
+  // (length, bucket key) in parseTargetVsSalesParams, exactly like the dashboard.
+  /** Outlet programme (trimmed Outlet.programName). */
+  @IsOptional()
+  @IsString()
+  program?: string;
+
+  /** OutletType code. */
+  @IsOptional()
+  @IsString()
+  outletType?: string;
+
+  /** A sales manager's SalesUser.id — their whole downline. */
+  @IsOptional()
+  @IsString()
+  managerId?: string;
+
+  /** One of the billing-progress bands (NOT_STARTED, P0_20 … ACHIEVED). */
+  @IsOptional()
+  @IsString()
+  bucket?: string;
 }
 
 /**

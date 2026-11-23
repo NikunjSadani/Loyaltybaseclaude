@@ -123,6 +123,8 @@ function matchField(v: unknown, cond: unknown): boolean {
   if (typeof cond !== 'object') return v === cond;
   const c = cond as Record<string, unknown>;
   if ('in' in c && !(c.in as unknown[]).includes(v)) return false;
+  // Postgres: `NOT IN` never matches NULL (Prisma `notIn` drops NULL rows).
+  if ('notIn' in c && (v === null || v === undefined || (c.notIn as unknown[]).includes(v))) return false;
   if ('not' in c) {
     if (c.not === null) {
       if (v === null || v === undefined) return false;

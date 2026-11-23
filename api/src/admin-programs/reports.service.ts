@@ -5,20 +5,24 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
 import { istMonthBounds } from '../common/ist-date';
 import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
-import { TargetsService } from '../targets/targets.service';
 import { PointsLedgerQueryDto, TargetVsSalesQueryDto, TicketAgingQueryDto, ReportFormat } from './dto/reports.dto';
-import { TARGET_VS_SALES_INSTANT_MAX_MONTHS } from '../exports/kinds/batch2/target-vs-sales.kind';
+import {
+  TARGET_VS_SALES_INSTANT_MAX_MONTHS,
+  describeTargetVsSales,
+  parseTargetVsSalesParams,
+  runTargetVsSales,
+  targetVsSalesAbout,
+} from '../exports/kinds/batch2/target-vs-sales.kind';
+import { BILLING_BUCKETS, billingAvailableManagers } from '../admin-core/dashboards/billing-progress';
+import { liveOutletWhere, loadAvailablePrograms } from '../admin-core/dashboards/dashboard-program-filter';
 import {
   aggregateLedgerToRow,
-  buildTargetVsSalesRows,
   buildTicketAgingRow,
   monthsInRange,
-  PaceMonthResult,
   PointsLedgerReportRow,
   pointsLedgerXlsxRows,
   ReportMonth,
   summarizeAging,
-  targetVsSalesMonthList,
   TicketAgingRow,
   ticketAgingXlsxRows,
 } from './reports/report-helpers';
@@ -51,10 +55,7 @@ const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
  */
 @Injectable()
 export class ReportsService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly targets: TargetsService,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   private isValidYYYYMM(s: string): boolean {
     return /^\d{4}-(0[1-9]|1[0-2])$/.test(s);
@@ -275,22 +276,15 @@ export class ReportsService {
   /**
    * GET /v1/admin/reports/target-vs-sales — the json on-screen preview (≤ 3 months; the xlsx download of up to 15
    * months is the 'target-vs-sales' export kind, routed by the controller). One row per (outlet × month) across an
-   * inclusive fromMonth→toMonth range. For each enabled KpiDef the sheet carries
-   * three columns: Target, Achieved, Pace %.
+   * inclusive fromMonth→toMonth range, with the optional filters (program / outletType / managerId / bucket).
    *
-   * The target↔actual join is NOT re-implemented: it delegates to
-   * TargetsService.getPace per month (the exact OutletTarget.targetValues ↔
-   * OutletSalesRecord.kpiValues join on (clientId, outletCode, month) with the
-   * pace = achieved÷target divide-by-zero guard). getPace is tenant-scoped by
-   * `user.clientId` from the JWT — this endpoint takes NO clientId param, so a
-   * caller cannot read another tenant's data (an un-assumed GIFSY_ADMIN sees only
-   * its own — empty — client, an assumed one sees the assumed tenant, exactly like
-   * every sibling report). Batches one getPace (2 queries) per month + one KpiDef
-   * query — never N+1 per outlet.
+   * Since 2026-11-23 the preview runs the EXPORT KIND'S OWN ENGINE (`runTargetVsSales`) and collects its rows in
+   * memory — so the screen and the Excel can never disagree (same columns, values, row order and filters). The
+   * target↔actual join is the same OutletTarget.targetValues ↔ OutletSalesRecord.kpiValues join on
+   * (clientId, outletCode, month) as getPace (proven cell-for-cell by the kind's parity spec). Tenant-scoped by
+   * `user.clientId` from the JWT — the endpoint takes NO clientId param.
    *
-   * Blank-not-zero: getPace returns null for an ABSENT target/actual key; those
-   * become '' (blank) here, while a stored 0 stays 0 — mirroring the upload rule
-   * "blank cells are skipped, not stored as 0". Pace % is blank when pace is null.
+   * Blank-not-zero: an ABSENT target/actual key is '' (blank); a stored 0 stays 0. Pace % is blank when pace is null.
    */
   async targetVsSales(user: JwtPayload, q: TargetVsSalesQueryDto) {
     const fromMonth = q.fromMonth ?? '';
@@ -303,14 +297,10 @@ export class ReportsService {
     if (!this.isValidYYYYMM(fromMonth) || !this.isValidYYYYMM(toMonth)) {
       throw new BadRequestException('`fromMonth` and `toMonth` must be in YYYY-MM format.');
     }
-
-    let months: string[];
-    try {
-      months = targetVsSalesMonthList(fromMonth, toMonth);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Invalid period range.';
-      throw new BadRequestException(msg);
-    }
+    // Same validation as the download (range ≤ 15, filters, bucket key).
+    const { format: _f, ...raw } = q as TargetVsSalesQueryDto & Record<string, unknown>;
+    void _f;
+    const params = parseTargetVsSalesParams(raw);
 
     // The xlsx download is the 'target-vs-sales' export kind (Downloads page — streamed, or prepared in the background
     // for > 3 months); the controller routes format=xlsx there. This method is the on-screen JSON preview only, held
@@ -318,28 +308,84 @@ export class ReportsService {
     if (format === ReportFormat.XLSX) {
       throw new BadRequestException('Use the report download for the Excel file.');
     }
-    if (months.length > TARGET_VS_SALES_INSTANT_MAX_MONTHS) {
+    if (params.months.length > TARGET_VS_SALES_INSTANT_MAX_MONTHS) {
       throw new BadRequestException(
-        `The on-screen preview covers up to ${TARGET_VS_SALES_INSTANT_MAX_MONTHS} months (you chose ${months.length}). ` +
+        `The on-screen preview covers up to ${TARGET_VS_SALES_INSTANT_MAX_MONTHS} months (you chose ${params.months.length}). ` +
           'Use Download Excel for a longer range — it will be prepared on the Downloads page.',
       );
     }
 
-    // KPI columns = the tenant's ENABLED KpiDef catalogue, in KpiDef order.
-    const kpiDefs = await this.prisma.kpiDef.findMany({
-      where: { clientId: user.clientId, enabled: true },
-      orderBy: [{ order: 'asc' }, { code: 'asc' }],
-      select: { code: true, label: true, unit: true },
+    const rows: Record<string, unknown>[] = [];
+    let columns: string[] = [];
+    const { rowCount, meta } = await runTargetVsSales(this.prisma, user.clientId, params, {
+      async start(headers) {
+        columns = headers;
+      },
+      async row(cells) {
+        const r: Record<string, unknown> = {};
+        columns.forEach((h, i) => {
+          r[h] = cells[i];
+        });
+        rows.push(r);
+      },
     });
+    return {
+      fromMonth,
+      toMonth,
+      months: params.months,
+      kpis: meta.kpis,
+      columns,
+      rows,
+      filters: {
+        program: params.program,
+        outletType: params.outletType,
+        managerId: params.managerId,
+        managerName: meta.managerName,
+        bucket: params.bucket,
+      },
+      /** True when any filter was applied (the screen's "no outlet matches these filters" wording). */
+      filtered: !!(params.program || params.outletType || params.managerId || params.bucket),
+      filtersSummary: describeTargetVsSales(params, meta.managerName),
+      about: targetVsSalesAbout(params, meta, rowCount, new Date()),
+    };
+  }
 
-    // Reuse getPace's join per month (tenant-scoped by user.clientId).
-    const paceResults: PaceMonthResult[] = [];
-    for (const month of months) {
-      const res = await this.targets.getPace(user, { month });
-      paceResults.push({ month, outlets: res.outlets });
-    }
-
-    const { rows, kpis } = buildTargetVsSalesRows(months, kpiDefs, paceResults);
-    return { fromMonth, toMonth, months, kpis, rows };
+  /**
+   * GET /v1/admin/reports/target-vs-sales/filters — the dropdown sources for the report's filters: the SAME lists the
+   * Overview billing card offers (programmes = loadAvailablePrograms; outlet types = the live roster's types; sales
+   * managers = billingAvailableManagers; buckets = the card's bands). Tenant-scoped by the JWT.
+   */
+  async targetVsSalesFilters(user: JwtPayload) {
+    const clientId = user.clientId;
+    const [programs, outletTypeRows, salesUsers, levels] = await Promise.all([
+      loadAvailablePrograms(this.prisma, clientId),
+      this.prisma.outlet.findMany({
+        where: { clientId, ...liveOutletWhere() },
+        select: { outletType: { select: { code: true } } },
+        distinct: ['outletTypeId'],
+      }),
+      this.prisma.salesUser.findMany({
+        where: { clientId },
+        select: {
+          id: true,
+          reportingToId: true,
+          isActive: true,
+          deletedAt: true,
+          employeeCode: true,
+          user: { select: { name: true } },
+          hierarchyLevel: { select: { code: true, name: true, level: true } },
+        },
+      }),
+      this.prisma.salesHierarchyLevel.findMany({ where: { clientId }, select: { level: true } }),
+    ]);
+    const outletTypes = [
+      ...new Set(outletTypeRows.map((o) => o.outletType?.code).filter((c): c is string => !!c && c.trim().length > 0)),
+    ].sort((a, b) => a.localeCompare(b));
+    return {
+      programs,
+      outletTypes,
+      managers: billingAvailableManagers(salesUsers, levels),
+      buckets: BILLING_BUCKETS.map((b) => ({ key: b.key, label: b.label })),
+    };
   }
 }

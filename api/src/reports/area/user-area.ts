@@ -91,22 +91,52 @@ export function summariseAboveAsm(area: UserArea): UserArea {
   return out;
 }
 
+/** Hierarchy employee-ID columns: the tenant's levels ranked 1..5 by `level` (bottom up). */
+export const HIERARCHY_ID_MAX_LEVELS = 5;
+/** Joins several reps' codes in one cell (a code could in theory contain a comma). */
+export const HIERARCHY_ID_SEPARATOR = ' | ';
+
+export interface HierarchyIdLevel {
+  /** Internal level code (XSR / SO / ASM / RSM / ZNM …). */
+  code: string;
+  /** The tenant's own name for it (SalesHierarchyLevel.name), else the Bajaj label, else the code. */
+  label: string;
+}
+
 export interface UserAreaResolver {
   /** The ASM column header: the tenant's own name for the ASM level ("ASM" by default). */
   asmHeader: string;
   resolve(user: { id: string; role: string }): UserArea;
+  /** The (≤ 5) levels with an employee-ID column, lowest first. */
+  idLevels: HierarchyIdLevel[];
+  /**
+   * One cell per `idLevels` entry (see `idNotes` for what each value / blank means):
+   *   • sales user — own code at own level, every manager above (walking reportingTo); "Vacant (code)" for a vacant /
+   *     inactive manager; "Not set" for a level above them nobody fills in their line; blank BELOW their level; all
+   *     blank when their level is not one of the five (above rank 5) or they have no level / no employee record;
+   *   • retailer / wholesaler — one chain per ACTIVE rep covering their primary outlet (outlet / owner / parent group),
+   *     identical chains de-duplicated, chains ordered by their codes from the lowest level up, and every column lists
+   *     the chains in that SAME order joined " | " (the n-th value in each column = the same rep; "Not set" holds a
+   *     rep's slot below its level). A rep with no level / above the five levels → an all-"Not set" chain. "Not set" in
+   *     every column when no active rep covers it; blank only for a level below every covering rep; a group head with
+   *     no outlet of their own → blank;
+   *   • admin / Gifsy / vendor / other → blank.
+   */
+  resolveIds(user: { id: string; role: string }): string[];
+  /** Plain-English lines for the About sheet (one per row type). */
+  idNotes: string[];
   /** Plain-English lines for the sheet's About / notes: [ASM, Zone/State/City, placeholder words, above-ASM counts]. */
   notes: string[];
 }
 
 // ─── Minimal read shapes (only what is selected) ─────────────────────────────────────────────────────────────────
 
-interface LevelRow {
+export interface LevelRow {
   code: string;
   name: string | null;
   level: number;
 }
-interface SalesUserRow {
+export interface SalesUserRow {
   id: string;
   userId: string;
   reportingToId: string | null;
@@ -117,7 +147,7 @@ interface SalesUserRow {
   hierarchyLevel: { code: string } | null;
   user: { name: string | null; status: string | null } | null;
 }
-interface AssignmentRow {
+export interface AssignmentRow {
   salesUserId: string;
   outletId: string | null;
   partnerId: string | null;
@@ -198,6 +228,57 @@ function pushTo<K, V>(m: Map<K, V[]>, k: K, v: V): void {
   else m.set(k, [v]);
 }
 
+/**
+ * Rung ranks (higher = more senior): the tenant's own SalesHierarchyLevel numbers when it defines an ASM level,
+ * else the canonical code order (XSR 1 … NSM 6). Shared with the outlet-hierarchy resolver.
+ */
+export function hierarchyRankByCode(levels: readonly LevelRow[]): Map<string, number> {
+  const rankByCode = new Map<string, number>();
+  HIERARCHY_RUNG_CODES.forEach((c, i) => rankByCode.set(c, i + 1));
+  const ownLevels = (levels ?? []).filter((l) => l && typeof l.level === 'number' && l.level > 0);
+  if (ownLevels.some((l) => clean(l.code).toUpperCase() === ASM_CODE)) {
+    rankByCode.clear();
+    for (const l of ownLevels) rankByCode.set(clean(l.code).toUpperCase(), l.level);
+  }
+  return rankByCode;
+}
+
+/** A rep who still covers outlets: not removed, not deactivated, not a vacant placeholder. */
+export function isLiveSalesUser(s: Pick<SalesUserRow, 'isActive' | 'deletedAt' | 'user'>): boolean {
+  return s.isActive && s.deletedAt == null && (s.user?.status == null || s.user.status === 'ACTIVE');
+}
+
+/**
+ * The outlets each LIVE rep covers — the ONE assignment rule shared by every area / hierarchy column: an assignment
+ * covers its outlet (outletId), every outlet its partner OWNS (partnerId = Outlet.partnerId) and every child outlet of
+ * that partner's group (partnerId = Outlet.parentId). Inactive / vacant / removed reps cover nothing. `cover` is
+ * called once per (rep, outlet) route (a pair may repeat — callers use sets).
+ */
+export function forEachCoveredOutlet<O extends { id: string; partnerId: string | null; parentId?: string | null }>(
+  assignments: readonly AssignmentRow[],
+  outlets: readonly O[],
+  repById: (id: string) => SalesUserRow | undefined,
+  cover: (rep: SalesUserRow, outlet: O) => void,
+): void {
+  const outletById = new Map<string, O>();
+  const outletsByOwnerOrParent = new Map<string, O[]>(); // partner id → its own outlets + its group's children
+  for (const o of outlets) {
+    if (o.id) outletById.set(o.id, o);
+    if (o.partnerId) pushTo(outletsByOwnerOrParent, o.partnerId, o);
+    if (o.parentId && o.parentId !== o.partnerId) pushTo(outletsByOwnerOrParent, o.parentId, o);
+  }
+  for (const a of assignments ?? []) {
+    if (!a?.salesUserId) continue;
+    const rep = repById(a.salesUserId);
+    if (!rep || !isLiveSalesUser(rep)) continue; // an inactive / vacant / removed rep covers nothing
+    if (a.outletId) {
+      const o = outletById.get(a.outletId);
+      if (o) cover(rep, o);
+    }
+    if (a.partnerId) for (const o of outletsByOwnerOrParent.get(a.partnerId) ?? []) cover(rep, o);
+  }
+}
+
 /** Build the resolver from already-loaded rows (pure — unit-testable without a DB). */
 export function buildUserAreaResolver(
   clientId: string,
@@ -210,13 +291,7 @@ export function buildUserAreaResolver(
   outlets = (outlets ?? []).filter(Boolean);
 
   // ── rung ranks: the tenant's own level numbers, else the canonical code order ──
-  const rankByCode = new Map<string, number>();
-  HIERARCHY_RUNG_CODES.forEach((c, i) => rankByCode.set(c, i + 1));
-  const ownLevels = levels.filter((l) => typeof l.level === 'number' && l.level > 0);
-  if (ownLevels.some((l) => clean(l.code).toUpperCase() === ASM_CODE)) {
-    rankByCode.clear();
-    for (const l of ownLevels) rankByCode.set(clean(l.code).toUpperCase(), l.level);
-  }
+  const rankByCode = hierarchyRankByCode(levels);
   const asmRank = rankByCode.get(ASM_CODE) ?? 3;
   const levelNameByCode = new Map<string, string>();
   for (const l of levels) {
@@ -242,9 +317,7 @@ export function buildUserAreaResolver(
     const r = rankOf(s);
     return r !== undefined && r > asmRank;
   };
-  /** A rep who still covers outlets: not removed, not deactivated, not a vacant placeholder. */
-  const isLive = (s: SalesUserRow) =>
-    s.isActive && s.deletedAt == null && (s.user?.status == null || s.user.status === 'ACTIVE');
+  const isLive = isLiveSalesUser;
   const ownName = (s: SalesUserRow) => clean(s.user?.name) || AREA_NOT_SET;
 
   // ── the ASM ABOVE a sales user (memoised): ASM name / "Vacant (code)" / "Not set" ──
@@ -282,13 +355,6 @@ export function buildUserAreaResolver(
         : asmAbove(s);
 
   // ── outlets covered by each LIVE rep: outlet-level, owner-level, and parent-group-level assignments ──
-  const outletById = new Map<string, OutletRow>();
-  const outletsByOwnerOrParent = new Map<string, OutletRow[]>(); // partner id → its own outlets + its group's children
-  for (const o of outlets) {
-    if (o.id) outletById.set(o.id, o);
-    if (o.partnerId) pushTo(outletsByOwnerOrParent, o.partnerId, o);
-    if (o.parentId && o.parentId !== o.partnerId) pushTo(outletsByOwnerOrParent, o.parentId, o);
-  }
   const repsByOutlet = new Map<string, Set<string>>(); // outlet id → live sales user ids
   const geoOwn = new Map<string, GeoSets>(); // live sales user id → geo of the outlets they cover directly
   const cover = (suId: string, o: OutletRow) => {
@@ -301,16 +367,7 @@ export function buildUserAreaResolver(
     addGeo(g, o);
     geoOwn.set(suId, g);
   };
-  for (const a of assignments ?? []) {
-    if (!a?.salesUserId) continue;
-    const rep = suById.get(a.salesUserId);
-    if (!rep || !isLive(rep)) continue; // an inactive / vacant / removed rep covers nothing
-    if (a.outletId) {
-      const o = outletById.get(a.outletId);
-      if (o) cover(rep.id, o);
-    }
-    if (a.partnerId) for (const o of outletsByOwnerOrParent.get(a.partnerId) ?? []) cover(rep.id, o);
-  }
+  forEachCoveredOutlet(assignments ?? [], outlets, (id) => suById.get(id), (rep, o) => cover(rep.id, o));
 
   // ── downline geo: each rep's outlets count for the rep and every manager above them ──
   const geoAll = new Map<string, GeoSets>();
@@ -385,7 +442,93 @@ export function buildUserAreaResolver(
     return fill(AREA_NOT_IN_HIERARCHY);
   }
 
-  return { asmHeader, resolve, notes: areaNotes(asmHeader) };
+  // ── Hierarchy employee-ID columns (owner 2026-11-23): the tenant's levels ranked 1..5 by `level`, lowest first ──
+  const idLevels: HierarchyIdLevel[] = levels
+    .filter((l) => typeof l.level === 'number' && l.level > 0 && clean(l.code))
+    .sort((a, b) => a.level - b.level || clean(a.code).localeCompare(clean(b.code)))
+    .slice(0, HIERARCHY_ID_MAX_LEVELS)
+    .map((l) => {
+      const code = clean(l.code).toUpperCase();
+      return { code, label: levelName(code) };
+    });
+  const colByCode = new Map(idLevels.map((l, i) => [l.code, i]));
+  const blankIds = (): string[] => idLevels.map(() => '');
+  const codeCell = (s: SalesUserRow) => clean(s.employeeCode) || AREA_NOT_SET;
+
+  /** One sales user's chain: own code at own level, each manager above; "Not set" for an unfilled level above. */
+  const idChainMemo = new Map<string, string[]>();
+  function idChain(s: SalesUserRow): string[] {
+    const hit = idChainMemo.get(s.id);
+    if (hit) return hit;
+    const cells = blankIds();
+    const own = colByCode.get(codeOf(s));
+    if (own !== undefined) {
+      cells[own] = codeCell(s);
+      const seen = new Set<string>([s.id]);
+      let cur = s.reportingToId;
+      for (let hops = 0; cur && hops < HIERARCHY_MAX_HOPS; hops++) {
+        if (seen.has(cur)) break; // cycle guard
+        seen.add(cur);
+        const m = suById.get(cur);
+        if (!m) break; // dangling link
+        const col = colByCode.get(codeOf(m));
+        if (col !== undefined && col > own && !cells[col]) {
+          cells[col] = isLive(m) ? codeCell(m) : `Vacant (${clean(m.employeeCode) || 'no code'})`;
+        }
+        cur = m.reportingToId;
+      }
+      for (let i = own + 1; i < cells.length; i++) if (!cells[i]) cells[i] = AREA_NOT_SET;
+    }
+    idChainMemo.set(s.id, cells);
+    return cells;
+  }
+
+  function resolveIds(user: { id: string; role: string }): string[] {
+    const role = String(user?.role ?? '');
+    const su = user?.id ? suByUserId.get(user.id) : undefined;
+    if (su) return [...idChain(su)];
+    if (!PARTNER_ROLES.has(role)) return blankIds(); // admin / Gifsy / vendor, or a sales login with no employee record
+    const own = ownOutlets.get(user.id) ?? [];
+    if (!own.length) {
+      // A group head with no outlet of their own → blank (the Zone column says "Group — N outlets"); otherwise no outlet.
+      return (groupOutlets.get(user.id) ?? []).length ? blankIds() : idLevels.map(() => AREA_NOT_SET);
+    }
+    const o = [...own].sort(byPrimary)[0];
+    const reps = [...(o.id ? repsByOutlet.get(o.id) ?? [] : [])].map((id) => suById.get(id)).filter((s): s is SalesUserRow => !!s);
+    if (!reps.length) return idLevels.map(() => AREA_NOT_SET);
+    // ONE chain per covering rep. A rep with no level, or above the five levels, has no position in these columns →
+    // "Not set" everywhere (never an all-blank row).
+    const chains = reps.map((r) => {
+      const c = idChain(r);
+      return c.every((v) => !v) ? idLevels.map(() => AREA_NOT_SET) : c;
+    });
+    // De-dup identical chains; order them by their codes from the lowest level upward (deterministic).
+    const unique = [...new Map(chains.map((c) => [c.join('\u0000'), c])).values()].sort((a, b) => {
+      for (let i = 0; i < a.length; i++) {
+        const d = (a[i] || '￿').localeCompare(b[i] || '￿');
+        if (d) return d;
+      }
+      return 0;
+    });
+    // Column-aligned: the n-th value in EVERY column belongs to the same rep. A level below one rep but filled by
+    // another gets "Not set" in that rep's slot; a level below every rep stays blank.
+    return idLevels.map((_, col) =>
+      unique.some((c) => c[col]) ? unique.map((c) => c[col] || AREA_NOT_SET).join(HIERARCHY_ID_SEPARATOR) : '',
+    );
+  }
+
+  const lowest = idLevels[0]?.label ?? 'lowest';
+  const highest = idLevels[idLevels.length - 1]?.label ?? 'highest';
+  const idNotes = idLevels.length
+    ? [
+        `Level ID columns (${idLevels.map((l) => `${l.label} ID`).join(' · ')}): employee codes only (no names or phones) for this client's ${idLevels.length === HIERARCHY_ID_MAX_LEVELS ? 'five lowest' : idLevels.length} sales levels, ${lowest} up to ${highest}.`,
+        `Sales users: their own code in their own level's column, then the code of each manager above them (following "reports to"). Blank = a level BELOW them; all blank = they sit above the ${highest} level or have no level / employee record. "Vacant (code)" = that manager position is vacant, inactive or removed. "${AREA_NOT_SET}" = nobody at that level in their reporting line.`,
+        `Retailers / wholesalers: the same chain for every active sales rep covering their main outlet (assigned to the outlet, its owner or its parent group). When several reps cover an outlet, the n-th value in each ID column belongs to the same rep (values separated by " | "; "${AREA_NOT_SET}" holds a rep's place at a level below that rep). Blank = a level below every covering rep; "${AREA_NOT_SET}" in every column = no active rep covers the outlet, they have no outlet, or the covering rep has no level or sits above the ${highest} level; "Vacant (code)" = a vacant, inactive or removed manager; all blank = a group head with no outlet of their own.`,
+        'Admin, MIS, Gifsy and vendor logins: always blank (not in the sales hierarchy).',
+      ]
+    : ['This client has no sales hierarchy levels, so there are no level ID columns.'];
+
+  return { asmHeader, resolve, notes: areaNotes(asmHeader), idLevels, resolveIds, idNotes };
 }
 
 /** Load the tenant's hierarchy + outlet geography (4 reads, sequential) and build the resolver. */

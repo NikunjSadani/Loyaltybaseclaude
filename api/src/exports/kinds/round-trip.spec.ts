@@ -44,6 +44,10 @@ const CASES: Record<string, Array<Record<string, unknown>>> = {
     { fromMonth: '2026-01', toMonth: '2026-06' },
     { fromMonth: '2025-11', toMonth: '2026-10' },
     { fromMonth: '2026-10', toMonth: '2026-10' },
+    // 2026-11-23 filters (the Overview card's "Download Target vs Sales" sends these).
+    { fromMonth: '2026-10', toMonth: '2026-10', format: 'xlsx', program: 'Gold', outletType: 'RETAIL', managerId: 'su-1' },
+    { fromMonth: '2026-11', toMonth: '2026-11', format: 'xlsx', program: 'Gold', bucket: 'P20_40' },
+    { fromMonth: '2026-01', toMonth: '2026-06', program: '', outletType: '  ', bucket: 'ACHIEVED' },
   ],
   'targets-template': [{ months: '2026-07,2026-08,2026-09,2026-10,2026-11' }, { months: '2026-11' }],
   'achievements-template': [{ month: '2026-10' }],

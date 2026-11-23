@@ -15,15 +15,19 @@
  *   • Generate Preview → on-screen table (one row per outlet × month; blank cells
  *     where a month/outlet/KPI has no uploaded data).
  *   • Download Excel → downloads the xlsx blob.
+ *   • Filters (2026-11-23): Programme / Outlet type / Sales manager (whole team) / Billing bucket — the Overview
+ *     billing card's own filters (options from GET …/target-vs-sales/filters); applied to BOTH the preview and the
+ *     Excel. Columns come from the server (`columns`) so the preview always matches the file.
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Download, RefreshCw, TableIcon } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { downloadButtonLabel, useDownloadAction } from '@/lib/exports/use-download-action'
 import { DownloadActionStatus } from '@/components/exports/download-action-status'
 import { formatMonth } from '@/lib/targets'
+import { TVS_BUCKETS, TVS_FILTERS_URL, TVS_REPORT_URL, describeTvsFilters, tvsPeriodWords, tvsQueryString } from '@/lib/target-vs-sales'
 
 const MAX_MONTHS = 15
 /**
@@ -42,7 +46,20 @@ interface PreviewData {
   toMonth: string
   months: string[]
   kpis: KpiCol[]
+  /** The sheet's headers in order (server-provided; same as the Excel). */
+  columns?: string[]
   rows: Record<string, string | number>[]
+  /** e.g. "Nov 2026 · Programme: Gold · Billing bucket: Under 20%" */
+  filtersSummary?: string
+  /** True when any filter (programme / outlet type / manager / bucket) was applied. */
+  filtered?: boolean
+}
+
+interface FilterOptions {
+  programs: string[]
+  outletTypes: string[]
+  managers: Array<{ id: string; name: string; levelCode: string; levelName: string }>
+  buckets: Array<{ key: string; label: string }>
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -69,11 +86,19 @@ function monthSpan(from: string, to: string): number {
   return (ty * 12 + tm) - (fy * 12 + fm) + 1
 }
 
-/** The full ordered column list: 4 lead columns + Target/Achieved/Pace % per KPI. */
+/** Fallback column list (an older server without `columns`): 4 lead columns + Target/Achieved/Pace % per KPI. */
 function columnsFor(kpis: KpiCol[]): string[] {
   const cols = ['Outlet Code', 'Outlet Name', 'Outlet Type', 'Month']
   for (const k of kpis) cols.push(`${k.label} Target`, `${k.label} Achieved`, `${k.label} Pace %`)
   return cols
+}
+
+/** Text (left-aligned) columns = everything up to and including Billing bucket (or Month). */
+function leadCount(cols: string[]): number {
+  const b = cols.indexOf('Billing bucket')
+  if (b >= 0) return b + 1
+  const m = cols.indexOf('Month')
+  return m >= 0 ? m + 1 : 4
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -89,6 +114,46 @@ export default function TargetVsSalesPage() {
   const [loading, setLoading] = useState(false)
   const [error,   setError  ] = useState<string | null>(null)
   const exportAction = useDownloadAction()
+  const [program,    setProgram   ] = useState('')
+  const [outletType, setOutletType] = useState('')
+  const [managerId,  setManagerId ] = useState('')
+  const [bucket,     setBucket    ] = useState('')
+  const [options,    setOptions   ] = useState<FilterOptions | null>(null)
+  const [optionsError, setOptionsError] = useState<string | null>(null)
+  // Bumped on every period / filter change: a preview fetched for older choices is dropped, never shown.
+  const choiceVersion = useRef(0)
+  /** Any period / filter change clears the preview — it would no longer match the controls. */
+  const onChoice = useCallback((set: (v: string) => void) => (v: string) => {
+    set(v)
+    choiceVersion.current += 1
+    setPreview(null)
+  }, [])
+
+  // Filter dropdowns — the same lists as the Overview billing card.
+  useEffect(() => {
+    let cancelled = false
+    Promise.resolve()
+      .then(() => fetch(TVS_FILTERS_URL))
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Request failed (${res.status})`)
+        const body = await res.json() as { data?: FilterOptions } & Partial<FilterOptions>
+        const d = (body.data ?? body) as FilterOptions
+        if (!cancelled) setOptions({
+          programs: Array.isArray(d.programs) ? d.programs : [],
+          outletTypes: Array.isArray(d.outletTypes) ? d.outletTypes : [],
+          managers: Array.isArray(d.managers) ? d.managers : [],
+          buckets: Array.isArray(d.buckets) ? d.buckets : [],
+        })
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setOptionsError(e instanceof Error ? e.message : 'Could not load the filters.')
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  const query = useCallback((format: 'json' | 'xlsx') =>
+    tvsQueryString({ fromMonth: from, toMonth: to, format, program, outletType, managerId, bucket }),
+  [from, to, program, outletType, managerId, bucket])
 
   // ── Inline validation ──────────────────────────────────────────────────────
   const validationError: string | null = (() => {
@@ -104,10 +169,11 @@ export default function TargetVsSalesPage() {
 
   // ── Generate preview ──────────────────────────────────────────────────────
   const handlePreview = useCallback(async () => {
+    const version = choiceVersion.current
     setLoading(true)
     setError(null)
     try {
-      const url = `/api/admin/reports/target-vs-sales?fromMonth=${from}&toMonth=${to}&format=json`
+      const url = `${TVS_REPORT_URL}?${query('json')}`
       const res = await fetch(url)
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
@@ -116,26 +182,48 @@ export default function TargetVsSalesPage() {
           ?? `Request failed (${res.status})`)
       }
       const body = await res.json() as { success: boolean; data: PreviewData }
-      setPreview(body.data)
+      if (version === choiceVersion.current) setPreview(body.data)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Preview failed.')
       setPreview(null)
     } finally {
       setLoading(false)
     }
-  }, [from, to])
+  }, [query])
 
   // ── Download Excel ──────────────────────────────────────────────────────────
   // 200 → saves straight away; 202 (a long period) → prepared in the background (Downloads page).
   const runExport = exportAction.run
   const handleExport = useCallback(() => {
     setError(null)
-    void runExport(`/api/admin/reports/target-vs-sales?fromMonth=${from}&toMonth=${to}&format=xlsx`, {
-      fallbackFileName: `target-vs-sales-${from}-to-${to}.xlsx`,
+    void runExport(`${TVS_REPORT_URL}?${query('xlsx')}`, {
+      fallbackFileName: `target-vs-sales-${from}-to-${to}${bucket ? `-${bucket.toLowerCase().replace(/_/g, '-')}` : ''}.xlsx`,
     })
-  }, [from, to, runExport])
+  }, [from, to, bucket, query, runExport])
 
-  const columns = preview ? columnsFor(preview.kpis) : []
+  const columns = preview ? (preview.columns?.length ? preview.columns : columnsFor(preview.kpis)) : []
+  const lead = leadCount(columns)
+  const selectCls = 'border border-gray-200 rounded px-2 py-1.5 text-sm bg-white max-w-[16rem]'
+  const optionsLoading = !options && !optionsError
+  // The bands are fixed — offered even when the filter lists fail to load.
+  const bucketOptions = options?.buckets?.length ? options.buckets : TVS_BUCKETS
+  const managerName = managerId ? options?.managers.find(m => m.id === managerId)?.name ?? null : null
+  const forText = describeTvsFilters({
+    period: tvsPeriodWords(from, to),
+    program,
+    outletType,
+    managerId,
+    managerName,
+    bucketLabel: bucket ? bucketOptions.find(b => b.key === bucket)?.label ?? bucket : null,
+  })
+  const managerGroups = (() => {
+    const groups = new Map<string, FilterOptions['managers']>()
+    for (const m of options?.managers ?? []) {
+      const g = m.levelName || m.levelCode || 'Managers'
+      groups.set(g, [...(groups.get(g) ?? []), m])
+    }
+    return [...groups.entries()]
+  })()
 
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
@@ -162,7 +250,7 @@ export default function TargetVsSalesPage() {
               <input
                 type="month"
                 value={from}
-                onChange={e => setFrom(e.target.value)}
+                onChange={e => onChoice(setFrom)(e.target.value)}
                 className="border border-gray-200 rounded px-2 py-1.5 text-sm"
               />
             </div>
@@ -172,9 +260,46 @@ export default function TargetVsSalesPage() {
               <input
                 type="month"
                 value={to}
-                onChange={e => setTo(e.target.value)}
+                onChange={e => onChoice(setTo)(e.target.value)}
                 className="border border-gray-200 rounded px-2 py-1.5 text-sm"
               />
+            </div>
+
+            {/* Filters (all optional — absent = every outlet) */}
+            <div>
+              <label htmlFor="tvs-program" className="block text-xs text-gray-500 mb-1">Programme</label>
+              <select id="tvs-program" data-testid="tvs-filter-program" value={program} onChange={e => onChoice(setProgram)(e.target.value)} className={selectCls} aria-busy={optionsLoading || undefined}>
+                <option value="">All programmes</option>
+                {optionsLoading && <option value="" disabled>Loading…</option>}
+                {(options?.programs ?? []).map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="tvs-outlet-type" className="block text-xs text-gray-500 mb-1">Outlet type</label>
+              <select id="tvs-outlet-type" data-testid="tvs-filter-outlet-type" value={outletType} onChange={e => onChoice(setOutletType)(e.target.value)} className={selectCls} aria-busy={optionsLoading || undefined}>
+                <option value="">All outlet types</option>
+                {optionsLoading && <option value="" disabled>Loading…</option>}
+                {(options?.outletTypes ?? []).map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="tvs-manager" className="block text-xs text-gray-500 mb-1">Sales manager (whole team)</label>
+              <select id="tvs-manager" data-testid="tvs-filter-manager" value={managerId} onChange={e => onChoice(setManagerId)(e.target.value)} className={selectCls} aria-busy={optionsLoading || undefined}>
+                <option value="">Everyone</option>
+                {optionsLoading && <option value="" disabled>Loading…</option>}
+                {managerGroups.map(([group, list]) => (
+                  <optgroup key={group} label={group}>
+                    {list.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="tvs-bucket" className="block text-xs text-gray-500 mb-1">Billing bucket</label>
+              <select id="tvs-bucket" data-testid="tvs-filter-bucket" value={bucket} onChange={e => onChoice(setBucket)(e.target.value)} className={selectCls}>
+                <option value="">All rows</option>
+                {bucketOptions.map(b => <option key={b.key} value={b.key}>{b.label}</option>)}
+              </select>
             </div>
 
             {/* Actions */}
@@ -201,7 +326,19 @@ export default function TargetVsSalesPage() {
               {downloadButtonLabel(exportAction, 'Download Excel')}
             </Button>
           </div>
+          <p className="text-xs text-gray-600" data-testid="tvs-download-for">For: {forText}</p>
           <DownloadActionStatus action={exportAction} />
+
+          {optionsError && (
+            <p role="alert" data-testid="tvs-filters-error" className="text-xs text-amber-700">
+              Couldn&apos;t load the programme / outlet type / manager lists ({optionsError}) — the report still works
+              for every outlet, and the billing bucket filter is available.
+            </p>
+          )}
+          <p className="text-xs text-gray-500">
+            Billing bucket = the same rule as the Overview&apos;s &ldquo;Monthly billing progress&rdquo; card (billed ÷ target
+            on its KPI, per outlet and month). The Excel&apos;s About sheet explains every column and lists the filters used.
+          </p>
 
           {/* Helper / validation copy */}
           <p className="text-xs text-gray-500">
@@ -233,11 +370,16 @@ export default function TargetVsSalesPage() {
               {preview.months.length} month{preview.months.length !== 1 ? 's' : ''} ·{' '}
               {preview.kpis.length} KPI{preview.kpis.length !== 1 ? 's' : ''}
             </CardTitle>
+            {preview.filtersSummary && (
+              <p className="text-xs text-gray-500" data-testid="tvs-preview-filters">For: {preview.filtersSummary}</p>
+            )}
           </CardHeader>
           <CardContent className="p-0">
             {preview.rows.length === 0 ? (
               <p className="px-4 py-6 text-sm text-gray-500">
-                No target or sales data was uploaded for any outlet in this period.
+                {preview.filtered
+                  ? 'No outlet matches these filters in this period.'
+                  : 'No target or sales data was uploaded for any outlet in this period.'}
               </p>
             ) : (
               <div className="overflow-x-auto">
@@ -248,8 +390,8 @@ export default function TargetVsSalesPage() {
                         <th
                           key={h}
                           className={`bg-gray-50 px-3 py-1.5 font-medium whitespace-nowrap
-                            ${i < 4 ? 'text-left' : 'text-right'}
-                            ${i === 3 ? 'border-r border-gray-300' : ''}`}
+                            ${i < lead ? 'text-left' : 'text-right'}
+                            ${i === lead - 1 ? 'border-r border-gray-300' : ''}`}
                         >
                           {h}
                         </th>
@@ -266,9 +408,9 @@ export default function TargetVsSalesPage() {
                           <td
                             key={col}
                             className={`px-3 py-1.5 whitespace-nowrap
-                              ${ci < 4 ? 'text-left' : 'text-right'}
-                              ${ci === 3 ? 'border-r border-gray-300' : ''}
-                              ${ci < 4 ? 'text-gray-800' : 'text-gray-700'}`}
+                              ${ci < lead ? 'text-left' : 'text-right'}
+                              ${ci === lead - 1 ? 'border-r border-gray-300' : ''}
+                              ${ci < lead ? 'text-gray-800' : 'text-gray-700'}`}
                           >
                             {row[col] === '' || row[col] === undefined ? '' : String(row[col])}
                           </td>
