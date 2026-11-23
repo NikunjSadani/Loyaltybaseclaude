@@ -330,6 +330,14 @@ describe('SalesImportUploadService — lifecycle', () => {
     expect(h.rows.get(id)!.claimToken).toBeNull();
   });
 
+  it('roster-only: a reprocess (re-queue) clears processedRosterCodes — the next READY run records its own roster', async () => {
+    const h = harness();
+    const id = await inState(h, 'READY');
+    (h.rows.get(id) as unknown as { processedRosterCodes: unknown }).processedRosterCodes = ['O1'];
+    await h.svc.reprocess(USER, id);
+    expect((h.rows.get(id) as unknown as { processedRosterCodes: unknown }).processedRosterCodes).toBeNull();
+  });
+
   it('S1/S2: reprocess is refused once a month was applied, while an apply holds the row (busy), and once purged', async () => {
     const h = harness();
     const applied = await inState(h, 'READY');
@@ -636,6 +644,34 @@ describe('SalesImportUploadService — reprocess as a new import (re-audit M3)',
     expect(h.audits.filter((a) => a.entityId === s.id).map((a) => (a.newValues as { action: string }).action)).toEqual(['reprocess-as-new', 'complete']);
     expect(h.runner.kick).toHaveBeenCalled();
     await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/already being re-imported/);
+  });
+
+  // Roster-only aggregates (2026-11-23): the only recovery once a month was applied is a re-import read with today's
+  // roster, so it is ALSO allowed when the roster now has outlets missing from the processing-time roster.
+  it('roster-only: allowed when the roster gained outlets since processing (mapping unchanged); refused when nothing changed; legacy NULL never counts', async () => {
+    const h = harness();
+    const id = await appliedImport(h);
+    h.setProfile(MAP_A); // mapping unchanged
+    let roster = ['O1', 'O2'];
+    (h.prisma as unknown as { outlet: unknown }).outlet = { findMany: jest.fn(async () => roster.map((outletCode) => ({ outletCode }))) };
+    // legacy import (processedRosterCodes NULL): nothing to re-import
+    expect((await h.svc.get(USER, id)).canReprocessAsNew).toBe(false);
+    await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/Neither the column mapping nor the programme outlets changed/);
+    // roster-only import, roster unchanged since processing: still refused
+    (h.rows.get(id) as unknown as { processedRosterCodes: string[] }).processedRosterCodes = ['O1', 'O2'];
+    expect((await h.svc.get(USER, id)).canReprocessAsNew).toBe(false);
+    expect((await h.svc.list(USER, { limit: 50 })).items.find((i) => i.id === id)!.canReprocessAsNew).toBe(false);
+    await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/Neither the column mapping nor the programme outlets changed/);
+    // O3 joined the programme after processing → allowed (flag on detail AND list), same guards, audited
+    roster = ['O1', 'O2', 'O3'];
+    expect((await h.svc.get(USER, id)).canReprocessAsNew).toBe(true);
+    expect((await h.svc.list(USER, { limit: 50 })).items.find((i) => i.id === id)!.canReprocessAsNew).toBe(true);
+    const s2 = await h.svc.reprocessAsNew(USER, id);
+    expect(s2).toMatchObject({ status: 'QUEUED', reprocessedFromId: id });
+    expect(h.audits.filter((a) => a.entityId === s2.id).map((a) => (a.newValues as { action: string }).action)).toEqual(['reprocess-as-new', 'complete']);
+    expect((await h.svc.get(USER, id)).canReprocessAsNew).toBe(false); // one live child at a time
+    await expect(h.svc.reprocessAsNew(USER, id)).rejects.toThrow(/already being re-imported/);
+    await expect(h.svc.reprocessAsNew(OTHER, id)).rejects.toBeInstanceOf(NotFoundException);
   });
 
   it('409 when never applied (use Reprocess), mapping unchanged, purged, or cross-tenant 404', async () => {

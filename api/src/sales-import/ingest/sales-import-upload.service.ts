@@ -531,15 +531,14 @@ export class SalesImportUploadService {
    */
   private async rosterChanged(clientId: string, ids: string[]): Promise<Set<string>> {
     if (!ids.length) return new Set();
-    const rows = await this.prisma.salesImport.findMany({
-      where: { clientId, id: { in: ids }, NOT: { processedRosterCodes: { equals: Prisma.DbNull } } },
-      select: { id: true, processedRosterCodes: true },
-    });
+    const rows = (
+      await this.prisma.salesImport.findMany({ where: { clientId, id: { in: ids } }, select: { id: true, processedRosterCodes: true } })
+    )
+      .map((r) => ({ id: r.id, processed: processedRosterSet(r.processedRosterCodes) }))
+      .filter((r) => r.processed !== null); // legacy imports never count
     if (!rows.length) return new Set();
     const roster = await loadRoster(this.prisma, clientId);
-    return new Set(
-      rows.filter((r) => (outletsMissingFromProcessing(processedRosterSet(r.processedRosterCodes), roster.byNormalizedCode) ?? 0) > 0).map((r) => r.id),
-    );
+    return new Set(rows.filter((r) => (outletsMissingFromProcessing(r.processed, roster.byNormalizedCode) ?? 0) > 0).map((r) => r.id));
   }
 
   /** Ids (of `ids`) that already have a live "reprocess as new" child (not CANCELLED / FAILED). */
