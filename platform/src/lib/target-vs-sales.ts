@@ -23,6 +23,18 @@ export const TVS_BUCKETS: ReadonlyArray<{ key: TvsBucketKey; label: string }> = 
   { key: 'ACHIEVED', label: 'Achieved (100%+)' },
 ];
 
+/** "2026-01" → "Jan 2026" (the server's Downloads-page wording). */
+export function tvsMonthWords(ym: string): string {
+  const [y, m] = ym.split('-').map(Number);
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return names[m - 1] ? `${names[m - 1]} ${y}` : ym;
+}
+
+/** The period part of a "For: …" line. */
+export function tvsPeriodWords(from: string, to: string): string {
+  return from === to ? tvsMonthWords(from) : `${tvsMonthWords(from)} – ${tvsMonthWords(to)}`;
+}
+
 export function isTvsBucketKey(v: string | null | undefined): v is TvsBucketKey {
   return !!v && (TVS_BUCKET_KEYS as readonly string[]).includes(v);
 }

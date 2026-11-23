@@ -147,13 +147,68 @@ describe('Target vs Sales — filters (2026-11-23)', () => {
     expect(urls).toContain('/api/admin/reports/target-vs-sales?fromMonth=2026-01&toMonth=2026-01&format=xlsx&program=Gold&managerId=m1&bucket=P0_20');
   });
 
-  it('a failed filter-list load is shown, and the report still works unfiltered', async () => {
+  it('a failed filter-list load is shown; the report still works and the 7 bucket options are still offered', async () => {
     fetchMock.mockImplementation(async (url: string) => {
       if (String(url).includes('/filters')) return { ok: false, status: 500, json: async () => ({}) };
       return { ok: true, status: 202, json: async () => ({ success: true, data: { exportRequestId: 'e4', message: 'Queued.' } }) };
     });
     render(<TargetVsSalesPage />);
-    expect(await screen.findByTestId('tvs-filters-error')).toHaveTextContent(/Couldn.t load the filter lists/);
+    expect(await screen.findByTestId('tvs-filters-error')).toHaveTextContent(/Couldn.t load the programme \/ outlet type \/ manager lists/);
     expect(screen.getByRole('button', { name: /download excel/i })).toBeEnabled();
+    const bucketOpts = Array.from((screen.getByTestId('tvs-filter-bucket') as HTMLSelectElement).options).map((o) => o.textContent);
+    expect(bucketOpts).toEqual(['All rows', 'Not started', 'Under 20%', '20–39%', '40–59%', '60–79%', '80–99%', 'Achieved (100%+)']);
+  });
+
+  it('shows a loading cue in the filter dropdowns until the lists arrive', async () => {
+    let release: (() => void) | null = null;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes('/filters')) {
+        await new Promise<void>((r) => { release = r; });
+        return { ok: true, status: 200, json: async () => ({ success: true, data: OPTIONS }) };
+      }
+      return { ok: true, status: 202, json: async () => ({ success: true, data: {} }) };
+    });
+    render(<TargetVsSalesPage />);
+    expect(screen.getByTestId('tvs-filter-program')).toHaveAttribute('aria-busy', 'true');
+    expect(within(screen.getByTestId('tvs-filter-manager')).getByRole('option', { name: 'Loading…' })).toBeDisabled();
+    await waitFor(() => expect(release).not.toBeNull());
+    release!();
+    await screen.findByRole('option', { name: 'Gold' });
+    expect(screen.getByTestId('tvs-filter-program')).not.toHaveAttribute('aria-busy');
+    expect(screen.queryByRole('option', { name: 'Loading…' })).not.toBeInTheDocument();
+  });
+
+  it('a "For: …" line names the filters the Excel will use (the card’s words)', async () => {
+    route({});
+    const { container } = render(<TargetVsSalesPage />);
+    const [fromInput, toInput] = Array.from(container.querySelectorAll('input[type="month"]')) as HTMLInputElement[];
+    fireEvent.change(fromInput, { target: { value: '2026-01' } });
+    fireEvent.change(toInput, { target: { value: '2026-02' } });
+    await screen.findByRole('option', { name: 'Asha' });
+    expect(screen.getByTestId('tvs-download-for')).toHaveTextContent('For: Jan 2026 – Feb 2026 · All programs · All outlet types · Everyone');
+    fireEvent.change(screen.getByTestId('tvs-filter-program'), { target: { value: 'Gold' } });
+    fireEvent.change(screen.getByTestId('tvs-filter-manager'), { target: { value: 'm1' } });
+    fireEvent.change(screen.getByTestId('tvs-filter-bucket'), { target: { value: 'ACHIEVED' } });
+    expect(screen.getByTestId('tvs-download-for')).toHaveTextContent(
+      'For: Jan 2026 – Feb 2026 · Program: Gold · All outlet types · Manager: Asha (and team) · Billing bucket: Achieved (100%+)',
+    );
+  });
+
+  it('changing any filter clears the preview (it would no longer match); "no match" uses the server flag', async () => {
+    route({ fromMonth: '2026-01', toMonth: '2026-01', months: ['2026-01'], kpis: [], columns: ['Outlet Code', 'Month'], rows: [], filtersSummary: 'Jan 2026', filtered: false });
+    const { container } = render(<TargetVsSalesPage />);
+    const [fromInput, toInput] = Array.from(container.querySelectorAll('input[type="month"]')) as HTMLInputElement[];
+    fireEvent.change(fromInput, { target: { value: '2026-01' } });
+    fireEvent.change(toInput, { target: { value: '2026-01' } });
+    await screen.findByRole('option', { name: 'Gold' });
+    fireEvent.click(screen.getByRole('button', { name: /generate preview/i }));
+    expect(await screen.findByText('No target or sales data was uploaded for any outlet in this period.')).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId('tvs-filter-outlet-type'), { target: { value: 'RETAIL' } });
+    expect(screen.queryByTestId('tvs-preview-filters')).not.toBeInTheDocument();
+    expect(screen.queryByText(/No target or sales data/)).not.toBeInTheDocument();
+
+    route({ fromMonth: '2026-01', toMonth: '2026-01', months: ['2026-01'], kpis: [], columns: ['Outlet Code', 'Month'], rows: [], filtersSummary: 'Jan 2026 · Outlet type: RETAIL', filtered: true });
+    fireEvent.click(screen.getByRole('button', { name: /generate preview/i }));
+    expect(await screen.findByText('No outlet matches these filters in this period.')).toBeInTheDocument();
   });
 });

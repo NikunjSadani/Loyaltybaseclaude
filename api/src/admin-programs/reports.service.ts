@@ -343,6 +343,8 @@ export class ReportsService {
         managerName: meta.managerName,
         bucket: params.bucket,
       },
+      /** True when any filter was applied (the screen's "no outlet matches these filters" wording). */
+      filtered: !!(params.program || params.outletType || params.managerId || params.bucket),
       filtersSummary: describeTargetVsSales(params, meta.managerName),
       about: targetVsSalesAbout(params, meta, rowCount, new Date()),
     };
