@@ -34,6 +34,7 @@ import {
 } from '../sales-import.contract';
 import { isStalled, lockImportRow, rethrowBusy, IMPORT_BUSY_MESSAGE, type LockedImport } from './import-lock';
 import { mappingFingerprint } from './mapping-fingerprint';
+import { loadRoster, outletsMissingFromProcessing, processedRosterSet } from './roster';
 import { expectedPartSize, partCountFor, partKey } from './parts-file';
 import { SalesImportRetentionService } from './sales-import-retention.service';
 import { SALES_IMPORT_RUNNER_NOT_CONFIGURED_MESSAGE } from './sales-import-runner.config';
@@ -324,8 +325,10 @@ export class SalesImportUploadService {
    * "Reprocess as a new import" (re-audit M3): an APPLIED import cannot be reprocessed in place (its aggregates are the
    * record of what was written), so once the column mapping has changed it would be stranded. This creates a NEW import
    * from the same stored file — parts copied server-side in GCS, outside any transaction — and queues it; the old import
-   * stays untouched as the record. 409 when the import is not applied (use Reprocess), the mapping is unchanged, it was
-   * purged, or a live re-import of it already exists.
+   * stays untouched as the record. Allowed when the mapping changed OR (roster-only aggregates, 2026-11-23) the roster now
+   * has outlets that were not on it when the file was processed (their sales are not in this import; the new import is
+   * processed with today's roster). 409 when the import is not applied (use Reprocess), neither changed, it was purged,
+   * or a live re-import of it already exists.
    */
   async reprocessAsNew(user: JwtPayload, id: string): Promise<SalesImportSummary> {
     this.assertRunnerConfigured();
@@ -335,8 +338,10 @@ export class SalesImportUploadService {
     if ((await this.appliedCount(this.prisma, old.id)) === 0) {
       throw new ConflictException('This import was never applied; use Reprocess instead.');
     }
-    if (old.mappingFingerprint === (await this.currentFingerprint(user.clientId))) {
-      throw new ConflictException('The column mapping has not changed since this file was processed; there is nothing to re-import.');
+    if (old.mappingFingerprint === (await this.currentFingerprint(user.clientId)) && !(await this.rosterChanged(user.clientId, [old.id])).has(old.id)) {
+      throw new ConflictException(
+        'Neither the column mapping nor the programme outlets changed since this file was processed; there is nothing to re-import.',
+      );
     }
     const child = (await this.liveChildren(user.clientId, [old.id])).get(old.id);
     if (child) throw new ConflictException(`This file is already being re-imported (import ${child}).`);
@@ -518,6 +523,25 @@ export class SalesImportUploadService {
     return mappingFingerprint((p?.columnMapping ?? null) as SalesColumnMapping | null);
   }
 
+  /**
+   * Roster-only aggregates (2026-11-23): ids (of `ids`) whose processing-time roster (processedRosterCodes) lacks an
+   * outlet that is on the roster NOW — their sales are not in that import, so "read again as a new import" is useful.
+   * Legacy imports (NULL) never count (every customer was aggregated). Loads the roster once, and only the candidates'
+   * code lists (the list endpoint never selects JSON blobs otherwise).
+   */
+  private async rosterChanged(clientId: string, ids: string[]): Promise<Set<string>> {
+    if (!ids.length) return new Set();
+    const rows = await this.prisma.salesImport.findMany({
+      where: { clientId, id: { in: ids }, NOT: { processedRosterCodes: { equals: Prisma.DbNull } } },
+      select: { id: true, processedRosterCodes: true },
+    });
+    if (!rows.length) return new Set();
+    const roster = await loadRoster(this.prisma, clientId);
+    return new Set(
+      rows.filter((r) => (outletsMissingFromProcessing(processedRosterSet(r.processedRosterCodes), roster.byNormalizedCode) ?? 0) > 0).map((r) => r.id),
+    );
+  }
+
   /** Ids (of `ids`) that already have a live "reprocess as new" child (not CANCELLED / FAILED). */
   private async liveChildren(clientId: string, ids: string[]): Promise<Map<string, string>> {
     if (!ids.length) return new Map();
@@ -536,7 +560,14 @@ export class SalesImportUploadService {
       this.currentFingerprint(clientId),
       this.liveChildren(clientId, ids),
     ]);
-    return rows.map((r) => this.toSummary(r, names, applied.has(r.id), { currentFingerprint: fp, hasLiveChild: children.has(r.id) }));
+    // Only applied, READY, unpurged imports with no live re-import and an unchanged mapping need the roster check.
+    const candidates = rows
+      .filter((r) => applied.has(r.id) && r.status === 'READY' && !r.purgedAt && !children.has(r.id) && r.mappingFingerprint === fp)
+      .map((r) => r.id);
+    const rosterChanged = await this.rosterChanged(clientId, candidates);
+    return rows.map((r) =>
+      this.toSummary(r, names, applied.has(r.id), { currentFingerprint: fp, hasLiveChild: children.has(r.id), rosterChanged: rosterChanged.has(r.id) }),
+    );
   }
 
   private async summaryOf(row: SummaryRow): Promise<SalesImportSummary> {
@@ -547,7 +578,7 @@ export class SalesImportUploadService {
     row: SummaryRow,
     names: Map<string, string>,
     applied: boolean,
-    ctx: { currentFingerprint: string | null; hasLiveChild: boolean } = { currentFingerprint: null, hasLiveChild: false },
+    ctx: { currentFingerprint: string | null; hasLiveChild: boolean; rosterChanged?: boolean } = { currentFingerprint: null, hasLiveChild: false },
     now = Date.now(),
   ): SalesImportSummary {
     const size = Number(row.sizeBytes);
@@ -581,7 +612,8 @@ export class SalesImportUploadService {
       purgedAt: row.purgedAt ? row.purgedAt.toISOString() : null,
       canReprocess: !applied && !purged && (REPROCESSABLE.includes(status) || stalled),
       canReprocessAsNew:
-        applied && !purged && status === 'READY' && !ctx.hasLiveChild && row.mappingFingerprint !== ctx.currentFingerprint,
+        applied && !purged && status === 'READY' && !ctx.hasLiveChild &&
+        (row.mappingFingerprint !== ctx.currentFingerprint || ctx.rosterChanged === true),
       canCancel: !applied && (status === 'QUEUED' || stalled),
       canDelete: !applied && !(status === 'PROCESSING' && !stalled),
     };
