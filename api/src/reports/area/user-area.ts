@@ -101,12 +101,12 @@ export interface UserAreaResolver {
 
 // ─── Minimal read shapes (only what is selected) ─────────────────────────────────────────────────────────────────
 
-interface LevelRow {
+export interface LevelRow {
   code: string;
   name: string | null;
   level: number;
 }
-interface SalesUserRow {
+export interface SalesUserRow {
   id: string;
   userId: string;
   reportingToId: string | null;
@@ -117,7 +117,7 @@ interface SalesUserRow {
   hierarchyLevel: { code: string } | null;
   user: { name: string | null; status: string | null } | null;
 }
-interface AssignmentRow {
+export interface AssignmentRow {
   salesUserId: string;
   outletId: string | null;
   partnerId: string | null;
@@ -198,6 +198,57 @@ function pushTo<K, V>(m: Map<K, V[]>, k: K, v: V): void {
   else m.set(k, [v]);
 }
 
+/**
+ * Rung ranks (higher = more senior): the tenant's own SalesHierarchyLevel numbers when it defines an ASM level,
+ * else the canonical code order (XSR 1 … NSM 6). Shared with the outlet-hierarchy resolver.
+ */
+export function hierarchyRankByCode(levels: readonly LevelRow[]): Map<string, number> {
+  const rankByCode = new Map<string, number>();
+  HIERARCHY_RUNG_CODES.forEach((c, i) => rankByCode.set(c, i + 1));
+  const ownLevels = (levels ?? []).filter((l) => l && typeof l.level === 'number' && l.level > 0);
+  if (ownLevels.some((l) => clean(l.code).toUpperCase() === ASM_CODE)) {
+    rankByCode.clear();
+    for (const l of ownLevels) rankByCode.set(clean(l.code).toUpperCase(), l.level);
+  }
+  return rankByCode;
+}
+
+/** A rep who still covers outlets: not removed, not deactivated, not a vacant placeholder. */
+export function isLiveSalesUser(s: Pick<SalesUserRow, 'isActive' | 'deletedAt' | 'user'>): boolean {
+  return s.isActive && s.deletedAt == null && (s.user?.status == null || s.user.status === 'ACTIVE');
+}
+
+/**
+ * The outlets each LIVE rep covers — the ONE assignment rule shared by every area / hierarchy column: an assignment
+ * covers its outlet (outletId), every outlet its partner OWNS (partnerId = Outlet.partnerId) and every child outlet of
+ * that partner's group (partnerId = Outlet.parentId). Inactive / vacant / removed reps cover nothing. `cover` is
+ * called once per (rep, outlet) route (a pair may repeat — callers use sets).
+ */
+export function forEachCoveredOutlet<O extends { id: string; partnerId: string | null; parentId?: string | null }>(
+  assignments: readonly AssignmentRow[],
+  outlets: readonly O[],
+  repById: (id: string) => SalesUserRow | undefined,
+  cover: (rep: SalesUserRow, outlet: O) => void,
+): void {
+  const outletById = new Map<string, O>();
+  const outletsByOwnerOrParent = new Map<string, O[]>(); // partner id → its own outlets + its group's children
+  for (const o of outlets) {
+    if (o.id) outletById.set(o.id, o);
+    if (o.partnerId) pushTo(outletsByOwnerOrParent, o.partnerId, o);
+    if (o.parentId && o.parentId !== o.partnerId) pushTo(outletsByOwnerOrParent, o.parentId, o);
+  }
+  for (const a of assignments ?? []) {
+    if (!a?.salesUserId) continue;
+    const rep = repById(a.salesUserId);
+    if (!rep || !isLiveSalesUser(rep)) continue; // an inactive / vacant / removed rep covers nothing
+    if (a.outletId) {
+      const o = outletById.get(a.outletId);
+      if (o) cover(rep, o);
+    }
+    if (a.partnerId) for (const o of outletsByOwnerOrParent.get(a.partnerId) ?? []) cover(rep, o);
+  }
+}
+
 /** Build the resolver from already-loaded rows (pure — unit-testable without a DB). */
 export function buildUserAreaResolver(
   clientId: string,
@@ -210,13 +261,7 @@ export function buildUserAreaResolver(
   outlets = (outlets ?? []).filter(Boolean);
 
   // ── rung ranks: the tenant's own level numbers, else the canonical code order ──
-  const rankByCode = new Map<string, number>();
-  HIERARCHY_RUNG_CODES.forEach((c, i) => rankByCode.set(c, i + 1));
-  const ownLevels = levels.filter((l) => typeof l.level === 'number' && l.level > 0);
-  if (ownLevels.some((l) => clean(l.code).toUpperCase() === ASM_CODE)) {
-    rankByCode.clear();
-    for (const l of ownLevels) rankByCode.set(clean(l.code).toUpperCase(), l.level);
-  }
+  const rankByCode = hierarchyRankByCode(levels);
   const asmRank = rankByCode.get(ASM_CODE) ?? 3;
   const levelNameByCode = new Map<string, string>();
   for (const l of levels) {
@@ -242,9 +287,7 @@ export function buildUserAreaResolver(
     const r = rankOf(s);
     return r !== undefined && r > asmRank;
   };
-  /** A rep who still covers outlets: not removed, not deactivated, not a vacant placeholder. */
-  const isLive = (s: SalesUserRow) =>
-    s.isActive && s.deletedAt == null && (s.user?.status == null || s.user.status === 'ACTIVE');
+  const isLive = isLiveSalesUser;
   const ownName = (s: SalesUserRow) => clean(s.user?.name) || AREA_NOT_SET;
 
   // ── the ASM ABOVE a sales user (memoised): ASM name / "Vacant (code)" / "Not set" ──
@@ -282,13 +325,6 @@ export function buildUserAreaResolver(
         : asmAbove(s);
 
   // ── outlets covered by each LIVE rep: outlet-level, owner-level, and parent-group-level assignments ──
-  const outletById = new Map<string, OutletRow>();
-  const outletsByOwnerOrParent = new Map<string, OutletRow[]>(); // partner id → its own outlets + its group's children
-  for (const o of outlets) {
-    if (o.id) outletById.set(o.id, o);
-    if (o.partnerId) pushTo(outletsByOwnerOrParent, o.partnerId, o);
-    if (o.parentId && o.parentId !== o.partnerId) pushTo(outletsByOwnerOrParent, o.parentId, o);
-  }
   const repsByOutlet = new Map<string, Set<string>>(); // outlet id → live sales user ids
   const geoOwn = new Map<string, GeoSets>(); // live sales user id → geo of the outlets they cover directly
   const cover = (suId: string, o: OutletRow) => {
@@ -301,16 +337,7 @@ export function buildUserAreaResolver(
     addGeo(g, o);
     geoOwn.set(suId, g);
   };
-  for (const a of assignments ?? []) {
-    if (!a?.salesUserId) continue;
-    const rep = suById.get(a.salesUserId);
-    if (!rep || !isLive(rep)) continue; // an inactive / vacant / removed rep covers nothing
-    if (a.outletId) {
-      const o = outletById.get(a.outletId);
-      if (o) cover(rep.id, o);
-    }
-    if (a.partnerId) for (const o of outletsByOwnerOrParent.get(a.partnerId) ?? []) cover(rep.id, o);
-  }
+  forEachCoveredOutlet(assignments ?? [], outlets, (id) => suById.get(id), (rep, o) => cover(rep.id, o));
 
   // ── downline geo: each rep's outlets count for the rep and every manager above them ──
   const geoAll = new Map<string, GeoSets>();

@@ -66,4 +66,15 @@ export class ReportsController {
     if (query.format === ReportFormat.XLSX) return this.exports.respond(res, user, 'target-vs-sales', query);
     return this.reports.targetVsSales(user, query);
   }
+
+  /**
+   * GET /v1/admin/reports/target-vs-sales/filters — the report's filter dropdowns (programmes, outlet types, sales
+   * managers, billing buckets) — the same lists as the Overview billing card. Same guards as the report.
+   */
+  @Get('target-vs-sales/filters')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  targetVsSalesFilters(@CurrentUser() user: JwtPayload) {
+    return this.reports.targetVsSalesFilters(user);
+  }
 }

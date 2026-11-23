@@ -257,6 +257,102 @@ export function pickReportKpi<T extends { isPrimary: boolean }>(enabledSorted: r
   return enabledSorted.find((k) => k.isPrimary) ?? enabledSorted[0] ?? null;
 }
 
+// ─── Shared per-outlet rules (also used by the Target vs Sales report, so the two can never disagree) ──────────
+
+/** A KPI value read from an OutletTarget.targetValues / OutletSalesRecord.kpiValues JSON map (absent / junk → 0). */
+export function billingKpiValue(values: unknown, code: string): number {
+  return num((values as Record<string, unknown> | null | undefined)?.[code]);
+}
+
+/** Where one outlet lands on the billing card for one month. */
+export type BillingOutletClass =
+  | { kind: 'NOT_COVERED' }
+  | { kind: 'NO_TARGET' }
+  | { kind: 'BUCKET'; bucket: BillingBucketKey; rawPct: number };
+
+/**
+ * The card's per-outlet rule: outside the KPI's applies-to scope → NOT_COVERED; a positive target → its bucket
+ * (`bucketOf`, raw pct); otherwise (no / zero / negative target) → NO_TARGET. `appliesTo` = kpiOutletPredicate(kpi)
+ * (undefined = unscoped KPI = applies everywhere). Facets are the outlet master's raw values.
+ */
+export function classifyBillingOutlet(
+  appliesTo: ((o: { outletType: string | null; program: string | null; subProgram: string | null }) => boolean) | undefined,
+  facets: { outletType: string | null; program: string | null; subProgram: string | null },
+  target: number,
+  achieved: number,
+): BillingOutletClass {
+  if (appliesTo && !appliesTo(facets)) return { kind: 'NOT_COVERED' };
+  if (target > 0) return { kind: 'BUCKET', bucket: bucketOf(target, achieved), rawPct: (achieved / target) * 100 };
+  return { kind: 'NO_TARGET' };
+}
+
+/** The minimal sales-user shape the manager filter needs (soft-deleted users INCLUDED — see G3 below). */
+export interface BillingManagerUser {
+  id: string;
+  reportingToId: string | null;
+  deletedAt: Date | null;
+  employeeCode: string;
+  user?: { name: string | null } | null;
+}
+
+/**
+ * The card's sales-manager filter: the manager's WHOLE downline (descendantSalesUserIds over every sales user,
+ * soft-deleted included so the walk passes THROUGH a resigned manager). No `managerId` → `downline: null` (no
+ * filter). An unknown / other-tenant / deleted manager id → an EMPTY downline (matches nothing — never their old team).
+ */
+export function resolveBillingManagerScope(
+  salesUsers: readonly BillingManagerUser[],
+  managerId: string | null,
+): { downline: Set<string> | null; managerName: string | null } {
+  if (!managerId) return { downline: null, managerName: null };
+  const candidate = salesUsers.find((u) => u.id === managerId);
+  const selected = candidate && candidate.deletedAt == null ? candidate : undefined;
+  if (!selected) return { downline: new Set<string>(), managerName: null };
+  return {
+    downline: descendantSalesUserIds(
+      managerId,
+      salesUsers.map((u) => ({ id: u.id, reportingToId: u.reportingToId, deletedAt: u.deletedAt ?? null })),
+    ),
+    managerName: selected.user?.name || selected.employeeCode,
+  };
+}
+
+/**
+ * The card's program / outlet-type / manager filters for ONE outlet. `repIds` = the outlet's CURRENT direct
+ * assignments (SalesUserAssignment by outletId, unassignedAt null). Program match is whitespace-tolerant (the
+ * filter value is trimmed; stored names may not be).
+ */
+export function outletPassesBillingFilters(
+  o: { programName: string | null; outletType: string | null; repIds: readonly string[] },
+  f: Pick<BillingProgressFilters, 'program' | 'outletType'>,
+  downline: Set<string> | null,
+): boolean {
+  if (f.program && (o.programName ?? '').trim() !== f.program) return false;
+  if (f.outletType && o.outletType !== f.outletType) return false;
+  if (downline && !o.repIds.some((id) => downline.has(id))) return false;
+  return true;
+}
+
+/** The manager dropdown: live, active sales users above the lowest level, highest level first, then by name. */
+export function billingAvailableManagers(
+  salesUsers: ReadonlyArray<
+    BillingManagerUser & { isActive: boolean; hierarchyLevel: { code: string; name: string; level: number } | null }
+  >,
+  levels: ReadonlyArray<{ level: number }>,
+): Array<{ id: string; name: string; levelCode: string; levelName: string }> {
+  const liveUsers = salesUsers.filter((u) => u.deletedAt == null);
+  const nameOf = (u: BillingManagerUser) => u.user?.name || u.employeeCode;
+  const minLevel = levels.length
+    ? Math.min(...levels.map((l) => l.level))
+    : liveUsers.length
+      ? Math.min(...liveUsers.map((u) => u.hierarchyLevel?.level ?? Infinity))
+      : Infinity;
+  return liveUsers
+    .filter((u) => u.isActive && u.hierarchyLevel && u.hierarchyLevel.level > minLevel)
+    .sort((a, b) => b.hierarchyLevel!.level - a.hierarchyLevel!.level || nameOf(a).localeCompare(nameOf(b)))
+    .map((u) => ({ id: u.id, name: nameOf(u), levelCode: u.hierarchyLevel!.code, levelName: u.hierarchyLevel!.name }));
+}
+
 export async function loadBillingProgress(
   prisma: PrismaService,
   clientId: string,
@@ -338,21 +434,10 @@ export async function loadBillingProgress(
 
   // ── managers ──
   const userById = new Map(salesUsers.map((u) => [u.id, u]));
-  const liveUsers = salesUsers.filter((u) => u.deletedAt == null);
   const nameOf = (u: (typeof salesUsers)[number]) => u.user?.name || u.employeeCode;
-  const minLevel = levels.length
-    ? Math.min(...levels.map((l) => l.level))
-    : liveUsers.length
-      ? Math.min(...liveUsers.map((u) => u.hierarchyLevel?.level ?? Infinity))
-      : Infinity;
-  const availableManagers = liveUsers
-    .filter((u) => u.isActive && u.hierarchyLevel && u.hierarchyLevel.level > minLevel)
-    .sort((a, b) => b.hierarchyLevel.level - a.hierarchyLevel.level || nameOf(a).localeCompare(nameOf(b)))
-    .map((u) => ({ id: u.id, name: nameOf(u), levelCode: u.hierarchyLevel.code, levelName: u.hierarchyLevel.name }));
+  const availableManagers = billingAvailableManagers(salesUsers, levels);
   // A deleted manager id (stale URL) behaves like an unknown id → empty downline (never their old team).
-  const selectedCandidate = f.managerId ? userById.get(f.managerId) : undefined;
-  const selectedManager = selectedCandidate && selectedCandidate.deletedAt == null ? selectedCandidate : undefined;
-  const managerName = selectedManager ? nameOf(selectedManager) : null;
+  const { downline, managerName } = resolveBillingManagerScope(salesUsers, f.managerId);
 
   const availableOutletTypes = [
     ...new Set(outlets.map((o) => o.outletType?.code).filter((c): c is string => !!c && c.trim().length > 0)),
@@ -368,17 +453,6 @@ export async function loadBillingProgress(
     availableManagers,
   };
   if (!kpiDef) return { ...base, kpi: null, inScope: [], noTarget: [], notCovered: [], targetsOutsideRoster: 0 };
-
-  // ── manager downline (unknown / other-tenant id → empty set → nothing matches) ──
-  let downline: Set<string> | null = null;
-  if (f.managerId) {
-    downline = selectedManager
-      ? descendantSalesUserIds(
-          f.managerId,
-          salesUsers.map((u) => ({ id: u.id, reportingToId: u.reportingToId, deletedAt: u.deletedAt ?? null })),
-        )
-      : new Set<string>();
-  }
 
   /**
    * Nearest LIVE self-or-ancestor with level code `code` (cycle-safe). G3: the walk passes THROUGH a deleted
@@ -398,8 +472,8 @@ export async function loadBillingProgress(
 
   const appliesTo = kpiOutletPredicate(kpiDef);
   const code = kpiDef.code;
-  const targetByCode = new Map(targetRows.map((r) => [r.outletCode, num((r.targetValues as Record<string, unknown> | null)?.[code])]));
-  const achByCode = new Map(salesRows.map((r) => [r.outletCode, num((r.kpiValues as Record<string, unknown> | null)?.[code])]));
+  const targetByCode = new Map(targetRows.map((r) => [r.outletCode, billingKpiValue(r.targetValues, code)]));
+  const achByCode = new Map(salesRows.map((r) => [r.outletCode, billingKpiValue(r.kpiValues, code)]));
 
   // Target rows that can never reach the report: their outlet isn't in the live roster.
   const rosterCodes = new Set(outlets.map((o) => o.outletCode));
@@ -411,11 +485,8 @@ export async function loadBillingProgress(
   const notCovered: BillingOutletRow[] = [];
   for (const o of outlets) {
     const type = o.outletType?.code ?? null;
-    // Program match is whitespace-tolerant (the filter value is trimmed; stored names may not be).
-    if (f.program && (o.programName ?? '').trim() !== f.program) continue;
-    if (f.outletType && type !== f.outletType) continue;
     const reps = o.salesAssignments.map((a) => a.salesUserId);
-    if (downline && !reps.some((id) => downline!.has(id))) continue;
+    if (!outletPassesBillingFilters({ programName: o.programName ?? null, outletType: type, repIds: reps }, f, downline)) continue;
     const row: BillingOutletRow = {
       outletCode: o.outletCode,
       outletName: o.name,
@@ -431,22 +502,25 @@ export async function loadBillingProgress(
       bucket: null,
       behindPace: false,
     };
-    if (appliesTo && !appliesTo({ outletType: type, program: o.programName ?? null, subProgram: o.programCategory ?? null })) {
-      // Outside the KPI's applies-to scope: listed with its REAL stored values (never silently dropped, never a
-      // fake 0), but NOT counted in any total — the platform rule for out-of-scope (outlet, KPI) values.
-      row.target = targetByCode.get(o.outletCode) ?? 0;
-      row.achieved = achByCode.get(o.outletCode) ?? 0;
-      row.note = NOT_COVERED_NOTE;
-      notCovered.push(row);
-      continue;
-    }
     const target = targetByCode.get(o.outletCode) ?? 0;
     const achieved = achByCode.get(o.outletCode) ?? 0;
     row.target = target;
     row.achieved = achieved;
-    if (target > 0) {
-      const rawPct = (achieved / target) * 100;
-      const bucket = bucketOf(target, achieved);
+    const cls = classifyBillingOutlet(
+      appliesTo,
+      { outletType: type, program: o.programName ?? null, subProgram: o.programCategory ?? null },
+      target,
+      achieved,
+    );
+    if (cls.kind === 'NOT_COVERED') {
+      // Outside the KPI's applies-to scope: listed with its REAL stored values (never silently dropped, never a
+      // fake 0), but NOT counted in any total — the platform rule for out-of-scope (outlet, KPI) values.
+      row.note = NOT_COVERED_NOTE;
+      notCovered.push(row);
+      continue;
+    }
+    if (cls.kind === 'BUCKET') {
+      const { rawPct, bucket } = cls;
       row.rawPct = rawPct;
       row.bucket = bucket;
       row.pct = displayPct(target, achieved, bucket);
