@@ -76,6 +76,8 @@ const CASES: Record<string, Array<Record<string, unknown>>> = {
     { from: '2025-11-01', to: '2025-11-30' },
     { clientId: 'bajaj', from: '2025-01-01', to: '2025-11-30', status: 'DELIVERED', rewardType: 'CASH', zone: 'West', state: 'Maharashtra' },
   ],
+  // Fund reconciliation (src/fund) — tenant-only: the un-assumed owner is refused (no client context).
+  'fund-reconciliation': [{}, { from: '2026-10-01', to: '2026-10-31' }],
   'billing-comparison-slower': [
     {},
     { month: '2026-10', program: 'Gold', outletType: 'RETAIL', managerId: 'su-1' },
