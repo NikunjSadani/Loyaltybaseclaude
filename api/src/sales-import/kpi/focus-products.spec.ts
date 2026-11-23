@@ -15,6 +15,7 @@ import {
 import { OutletKpiAccumulator, type KpiDefLite } from './sales-kpi.helper';
 import type { RosterOutlet, AggRow } from './sales-import-data';
 import { computeMonthRows } from '../apply/month-compute';
+import { loadFocusCatalogue } from './focus-data';
 import type { SalesKpiMeasure } from '../sales-import.contract';
 
 // ─── November 2026 shape (prod) ──────────────────────────────────────────────
@@ -453,5 +454,35 @@ describe('end to end with computeMonthRows + buildMonthReconciliation (November 
     const v = Object.fromEntries(comp.rows.map((r) => [r.outletCode, r.values]));
     expect(v.R1).toEqual({ [FB]: 6, [FB2]: 2 }); // CNO 2+1 + ADHO500 3 cases; CNO → 2 products
     expect(v.W1).toEqual({ [FB]: 5, [FB2]: 1 }); // ADHO50 5 cases; ADHO500 → 1 product
+  });
+});
+
+// Roster-only aggregates (2026-11-23): for a roster-only import the catalogue also takes the file's frozen product
+// combos (products sold only to non-programme customers); a legacy import (processedRosterCodes NULL) does not.
+describe('loadFocusCatalogue — frozen combos of a roster-only import', () => {
+  const dbWith = (imp: Record<string, unknown> | null) => ({
+    salesImportProfile: { findUnique: jest.fn(async () => ({ columnMapping: { dimensions: [{ key: 'brand' }, { key: 'skuGroup' }] } })) },
+    $queryRaw: jest.fn(async (q: { strings: string[] }) =>
+      q.strings.join('?').includes('sales_import_aggregates') ? [{ dims: { brand: 'ADHO', skuGroup: '500' } }] : []),
+    salesImport: { findFirst: jest.fn(async ({ where }: { where: { id: string; clientId: string } }) => (where.clientId === 't1' ? imp : null)) },
+  });
+  const FROZEN = [{ dims: { brand: 'ONLY NONPROGRAMME', skuGroup: '1' }, lines: 1, amountRupees: 1, quantity: 0 }];
+
+  it('roster-only import: aggregates ∪ frozen combos', async () => {
+    const cat = await loadFocusCatalogue(dbWith({ processedRosterCodes: ['O1'], dimensionCombos: FROZEN }) as never, 't1', { importId: 'imp1' });
+    expect(cat.byKey.get('ADHO')).toEqual([{ brand: 'ADHO' }]);
+    expect(cat.byKey.get('ONLYNONPROGRAMME')).toEqual([{ brand: 'ONLY NONPROGRAMME' }]);
+    expect(cat.size).toBe(2);
+  });
+
+  it('legacy import (processedRosterCodes NULL): the aggregates only, frozen combos NOT read in', async () => {
+    const cat = await loadFocusCatalogue(dbWith({ processedRosterCodes: null, dimensionCombos: FROZEN }) as never, 't1', { importId: 'imp1' });
+    expect(cat.byKey.get('ONLYNONPROGRAMME')).toBeUndefined();
+    expect(cat.size).toBe(1);
+  });
+
+  it('another tenant\'s import id contributes no frozen combos', async () => {
+    const cat = await loadFocusCatalogue(dbWith({ processedRosterCodes: ['O1'], dimensionCombos: FROZEN }) as never, 't2', { importId: 'imp1' });
+    expect(cat.byKey.get('ONLYNONPROGRAMME')).toBeUndefined();
   });
 });

@@ -300,6 +300,17 @@ describe('SalesKpiDefService (K-2)', () => {
       });
       expect(res.unmatchedEntries).toEqual({ anyOf: [], noneOf: [] });
       expect(res.months[0]).toEqual({ month: '2026-09', totalAmountRupees: 140, totalQuantity: 1.5, outletsNonZero: 2 });
+      expect(res.outletsNotIncluded).toBe(0); // O1, O2 were both on the processing-time roster
+    });
+
+    it('roster-only import (audit A L2): the tester reports outlets added since processing; a legacy import reports nothing', async () => {
+      const db = testDb();
+      db.salesImport.findFirst.mockImplementation(async ({ where }: { where: { id?: string; clientId: string; status?: string } }) =>
+        where.clientId === 't1' && (where.id === 'imp1' || where.status === 'READY') ? { id: 'imp1', status: 'READY', processedRosterCodes: ['O1'], dimensionCombos: [] } : null);
+      const def = { kpiCode: 'K', measure: 'AMOUNT', filter: {}, outletTypes: [], programs: [], enabled: true, order: 0 };
+      expect((await new SalesKpiDefService(db as never).test(user, { importId: 'latest', definition: def } as never)).outletsNotIncluded).toBe(1);
+      const legacy = await new SalesKpiDefService(testDb() as never).test(user, { importId: 'latest', definition: def } as never);
+      expect(legacy).not.toHaveProperty('outletsNotIncluded');
     });
 
     it('PRODUCT_COUNT draft: adds totalProducts (Σ per-outlet counts) and judges "outlets > 0" on the count', async () => {

@@ -1,6 +1,6 @@
 import type { SalesColumnMapping } from '../sales-import.contract';
 import { SALES_IMPORT_MAX_DIMENSION_COMBOS, SALES_IMPORT_MAX_DIMENSION_VALUES, SALES_IMPORT_MAX_ERROR_SAMPLES } from '../sales-import.contract';
-import { AggregatorLimitError, SalesAggregator } from './aggregator';
+import { AggregatorLimitError, MAX_DISTINCT_PRODUCTS, SalesAggregator } from './aggregator';
 import type { ColumnIndex } from './header';
 
 // Synthetic, neutral fixtures (plan G3): outlets O1/O2, dims dimA/dimB, round numbers.
@@ -431,5 +431,26 @@ describe('SalesAggregator — roster-only aggregates (equivalence with the old e
     expect(new Set(unmatched.map((u) => u.code))).toEqual(new Set(['U1', 'U2', 'U3', 'U4']));
     expect(unmatched.every((u) => u.name.startsWith('Name '))).toBe(true);
     expect(now.processedRosterCodes).toEqual(['C3', 'O1', 'O2']);
+  });
+});
+
+describe('SalesAggregator — guards kept with roster-only aggregates (audit A L1)', () => {
+  it('a non-roster customer is still bounded by the quantity limit (first line and its monthly total)', () => {
+    const first = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    expect(() => first.push(row('U1', '2026-10-03', 'X', '500', 1, '9000001'), 2)).toThrow(/Row 2: the quantity exceeds 90,00,000 cases/);
+    const total = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
+    total.push(row('U1', '2026-10-03', 'X', '500', 1, '5000000'), 2);
+    expect(() => total.push(row('U1', '2026-10-04', 'Y', '500', 1, '5000000'), 3)).toThrow(/Row 3: one customer's quantity in a month exceeds 90,00,000 cases/);
+  });
+
+  it('an exploded dimension column (a new "product" on every line) fails loudly over ALL lines, roster or not', () => {
+    const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY, '.', { maxProducts: 3 });
+    a.push(row('U1', '2026-10-03', 'INV1', '500', 1, 1), 2); // non-roster lines count too
+    a.push(row('U2', '2026-10-03', 'INV2', '500', 1, 1), 3);
+    a.push(row('O1', '2026-10-03', 'INV3', '500', 1, 1), 4);
+    a.push(row('U3', '2026-10-03', 'INV1', '500', 1, 1), 5); // a known product: fine
+    expect(() => a.push(row('U4', '2026-10-03', 'INV4', '500', 1, 1), 6)).toThrow(AggregatorLimitError);
+    expect(() => a.push(row('U4', '2026-10-03', 'INV4', '500', 1, 1), 6)).toThrow(/more than 3 distinct product combinations\. Check the dimension columns/);
+    expect(MAX_DISTINCT_PRODUCTS).toBe(200_000);
   });
 });
