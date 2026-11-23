@@ -1,7 +1,7 @@
 // Unit tests for FinanceDashboardService — GET /v1/admin/dashboard/finance.
 // Covers: points→₹ liability conversion at the tenant rate, period-only breakage
 // formula (+ /0 guard), TDS paise→₹ mapping from mocked summaries (194R tenant +
-// 194C platform-wide), fund paise→₹ mapping from a mocked fund summary, and that
+// 194C platform-wide), the client fund block from the fund reconciliation loader + engine, and that
 // every query is tenant-scoped by user.clientId.
 //
 // Run: npx jest src/admin-core/dashboards/finance-dashboard.service.spec.ts
@@ -11,18 +11,21 @@ import { FinanceDashboardService } from './finance-dashboard.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { TenantService } from '../../tenant/tenant.service';
 import { TenantSettingsService } from '../../tenant/tenant-settings.service';
-import { PayoutsService } from '../../payouts/payouts.service';
+import { loadFundInputs } from '../../fund/fund-sources.loader';
+
+jest.mock('../../fund/fund-sources.loader', () => ({ loadFundInputs: jest.fn() }));
+const mockLoadFund = loadFundInputs as jest.MockedFunction<typeof loadFundInputs>;
 import { TdsService } from '../../tds/tds.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
 
 const mockPrisma = {
   wallet: { aggregate: jest.fn() },
   pointsLedger: { aggregate: jest.fn() },
+  fundSettings: { findUnique: jest.fn() },
 };
 
 const mockTenant = { resolveClient: jest.fn() };
 const mockTenantSettings = { getConversionRate: jest.fn() };
-const mockPayouts = { getFundSummary: jest.fn() };
 const mockTds = { report194R: jest.fn(), summary194C: jest.fn() };
 
 const admin: JwtPayload = {
@@ -66,13 +69,22 @@ function primeDefaults() {
     totalOutstandingPaise: 20_000_00n,       // ₹20,000
     rowCount: 7,
   });
-  mockPayouts.getFundSummary.mockResolvedValue({
-    totalReceived: 100_000,
-    totalUtilised: 70_000,
-    closingBalance: 30_000,
-    pendingLiability: 8_000,
-    available: 22_000,
-  });
+  // Fund: opening ₹1,00,000 + receipt ₹50,000; one paid cash payout ₹10,000 (+10% fee) and one committed ₹5,000.
+  const at = new Date(Date.now() - 86_400_000);
+  mockLoadFund.mockResolvedValue({
+    entries: [
+      { id: 'o', kind: 'OPENING_BALANCE', amountPaise: 100_000_00n, date: new Date(at.getTime() - 86_400_000), ref: 'o', note: null },
+      { id: 'r', kind: 'RECEIPT', amountPaise: 50_000_00n, date: at, ref: 'r', note: null },
+    ],
+    rates: [{ kind: 'AGENCY_FEE', feeType: 'PERCENT', rateBps: 1000, effectiveFrom: new Date(0), createdAt: new Date(0) }],
+    items: [
+      { key: 'a', type: 'CASH_REDEMPTION', ref: 'a', description: 'a', source: { kind: 'payoutTransaction', id: 'a' }, facePaise: 10_000_00n, status: 'PAID', committedAt: at, paidAt: at },
+      { key: 'b', type: 'CASH_REDEMPTION', ref: 'b', description: 'b', source: { kind: 'payoutTransaction', id: 'b' }, facePaise: 5_000_00n, status: 'COMMITTED', committedAt: at },
+    ],
+    entryRows: [],
+    rateRows: [],
+  } as never);
+  mockPrisma.fundSettings.findUnique.mockResolvedValue({ lowBalanceThresholdPaise: 200_000_00n });
 }
 
 describe('FinanceDashboardService', () => {
@@ -87,7 +99,6 @@ describe('FinanceDashboardService', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: TenantService, useValue: mockTenant },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
-        { provide: PayoutsService, useValue: mockPayouts },
         { provide: TdsService, useValue: mockTds },
       ],
     }).compile();
@@ -187,16 +198,32 @@ describe('FinanceDashboardService', () => {
     // OFF / not in this FY → no key at all (the C1 tests above assert the exact 3-field tile).
   });
 
-  it('maps the fund reconciliation summary (already ₹) through', async () => {
-    const out = await service.finance(admin);
+  it('fund block = the fund reconciliation engine for the caller''s (assumed) tenant, in ₹', async () => {
+    const out = await service.finance(assumedGifsy);
     expect(out.fund).toEqual({
-      totalReceivedRupees: 100_000,
-      totalUtilisedRupees: 70_000,
-      closingBalanceRupees: 30_000,
-      pendingLiabilityRupees: 8_000,
-      availableRupees: 22_000,
+      receivedRupees: 150_000, // opening + receipts
+      adjustmentsRupees: 0,
+      committedRupees: 5_500, // ₹5,000 + 10% fee
+      paidRupees: 11_000, // ₹10,000 + 10% fee
+      returnedRupees: 0,
+      balanceRupees: 133_500,
+      lowBalance: true, // below the ₹2,00,000 threshold
+      thresholdRupees: 200_000,
+      hasSettings: true,
     });
-    expect(mockPayouts.getFundSummary).toHaveBeenCalledWith(admin);
+    expect(mockLoadFund).toHaveBeenCalledWith(mockPrisma, 'deoleo');
+    expect(mockPrisma.fundSettings.findUnique).toHaveBeenCalledWith({ where: { clientId: 'deoleo' } });
+  });
+
+  it('fund block for a CLIENT_ADMIN reads only its own tenant', async () => {
+    await service.finance(clientAdmin);
+    expect(mockLoadFund).toHaveBeenCalledWith(mockPrisma, 'deoleo');
+  });
+
+  it('fund block for an un-assumed Gifsy owner (no client context) is all zero — never another tenant''s numbers', async () => {
+    const out = await service.finance(admin);
+    expect(out.fund).toMatchObject({ balanceRupees: 0, receivedRupees: 0, hasSettings: false, lowBalance: false });
+    expect(mockLoadFund).not.toHaveBeenCalled();
   });
 
   it('honours the fy override and echoes the resolved tenant slug', async () => {

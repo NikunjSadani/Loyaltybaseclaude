@@ -166,48 +166,7 @@ describe('PayoutsService', () => {
     });
   });
 
-  describe('getFundSummary', () => {
-    it('aggregates received/utilised and derives available balance', async () => {
-      mockPrisma.fundLedger.findFirst.mockResolvedValue({ balancePaise: 100000 });
-      mockPrisma.fundReceipt.aggregate.mockResolvedValue({ _sum: { amountPaise: 150000 } });
-      mockPrisma.payoutTransaction.groupBy.mockResolvedValue([
-        { payoutMode: 'UPI', _sum: { amountPaise: 40000 } },
-      ]);
-      mockPrisma.payoutTransaction.aggregate.mockResolvedValue({ _sum: { amountPaise: 10000 } });
-
-      const res = await service.getFundSummary(gifsy);
-      expect(res.totalReceivedPaise).toBe(150000);
-      expect(res.totalUtilisedPaise).toBe(40000);
-      expect(res.closingBalancePaise).toBe(100000); // latest ledger balance wins
-      expect(res.pendingLiabilityPaise).toBe(10000);
-      expect(res.availablePaise).toBe(90000); // 100000 - 10000
-    });
-  });
-
-  describe('receiveFund', () => {
-    it('creates a receipt + ledger entry and returns the new balance', async () => {
-      mockPrisma.fundLedger.findFirst.mockResolvedValue({ balancePaise: 50000 });
-      mockTx.fundReceipt.create.mockResolvedValue({ id: 'r1' });
-      mockTx.fundLedger.create.mockResolvedValue({ id: 'l1' });
-
-      const res = await service.receiveFund(gifsy, {
-        amount: 100,
-        paymentDate: new Date('2026-06-01'),
-        referenceNumber: 'REF1',
-      });
-
-      expect(mockTx.fundReceipt.create).toHaveBeenCalled();
-      const ledgerData = mockTx.fundLedger.create.mock.calls[0][0].data;
-      expect(ledgerData.balancePaise).toBe(60000n); // 50000 + 10000 (BigInt paise)
-      expect(mockTx.auditLog.create).toHaveBeenCalled();
-      expect(res).toEqual({
-        receiptId: 'r1',
-        amount: 100,
-        newBalance: 600,
-        referenceNumber: 'REF1',
-      });
-    });
-  });
+  // getFundSummary / receiveFund were retired (fund reconciliation lives in src/fund — see fund.service.spec.ts).
 
   describe('createBatch', () => {
     it('creates a DRAFT batch scoped to the caller tenant', async () => {
