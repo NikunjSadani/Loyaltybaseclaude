@@ -1,7 +1,7 @@
 import { internalSecretConfigured } from '../../common/internal-call';
 import { heldDigestFigures } from '../../wallet/held-opening-balances/held-balance-facts';
 import { TdsService } from '../../tds/tds.service';
-import { FundService, type FundAlertOutcome } from '../../fund/fund.service';
+import { FundService } from '../../fund/fund.service';
 import { financialYear } from '../../tds/tds.helpers';
 import { randomUUID } from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
@@ -183,22 +183,14 @@ export class ScheduledReportsService {
     opts: { force?: boolean } = {},
   ): Promise<{ dateLabel: string; reports: ReportOutcome[] }> {
     const dateLabel = formatDateIST(new Date(nowMs));
-    // Client low-balance e-mails FIRST (independent of the digest: a digest problem never stops a client alert), so the
-    // digest can report each outcome. Never throws; at most one e-mail per client per IST day.
-    let fundAlerts = new Map<string, FundAlertOutcome>();
-    try {
-      fundAlerts = await this.fund.runLowBalanceAlerts(nowMs);
-    } catch (e) {
-      this.logger.error(`Fund low-balance alerts failed: ${short(e)}`);
-    }
-    const outcome = await this.runDigest(nowMs, dateLabel, opts.force === true, fundAlerts);
+    const outcome = await this.runDigest(nowMs, dateLabel, opts.force === true);
     const msg = `Daily operations digest (${dateLabel}${opts.force ? ', force' : ''}): ${outcome.status}${outcome.error ? ` — ${outcome.error}` : ''}`;
     if (outcome.status === 'sent' || outcome.status === 'skipped') this.logger.log(msg);
     else this.logger.error(msg);
     return { dateLabel, reports: [outcome] };
   }
 
-  private async runDigest(nowMs: number, dateLabel: string, force: boolean, fundAlerts: Map<string, FundAlertOutcome> = new Map()): Promise<ReportOutcome> {
+  private async runDigest(nowMs: number, dateLabel: string, force: boolean): Promise<ReportOutcome> {
     const key: ReportKey = 'dailyDigest';
     const deadlineMs = this.clock() + RUN_BUDGET_MS;
 
@@ -256,7 +248,7 @@ export class ScheduledReportsService {
 
     // 4. Collect (within the budget) → build → send → record.
     try {
-      const input = await this.collect(nowMs, dateLabel, plan.window, deadlineMs, fundAlerts);
+      const input = await this.collect(nowMs, dateLabel, plan.window, deadlineMs);
       if (stateReadError) {
         input.sharedFailures = [{ key: 'shared/run-history', label: 'run history' }, ...(input.sharedFailures ?? [])];
         input.runNotices = [
@@ -480,13 +472,7 @@ export class ScheduledReportsService {
   // ── Collect ─────────────────────────────────────────────────────────────────────────────────
 
   /** Assemble the builder input for `window`. Public for the runner spec (exercises section isolation). */
-  async collect(
-    nowMs: number,
-    dateLabel: string,
-    window: DigestWindow,
-    deadlineMs = Infinity,
-    fundAlerts: Map<string, FundAlertOutcome> = new Map(),
-  ): Promise<DigestInput> {
+  async collect(nowMs: number, dateLabel: string, window: DigestWindow, deadlineMs = Infinity): Promise<DigestInput> {
     const runNotices: string[] = [];
     const sharedFailures: Array<{ key: string; label: string }> = [];
     const section = <T,>(label: string, clientId: string, load: () => Promise<T>) => this.section(label, clientId, load, deadlineMs);
@@ -547,21 +533,24 @@ export class ScheduledReportsService {
       const held = await section('heldBalances', c, () => heldDigestFigures(this.prisma, c, window));
       if (!held.ok) digest.heldBalances = held;
       else if (held.data) digest.heldBalances = { ok: true, data: held.data };
-      // Client fund: only clients with a fund set-up get the line (null = none).
-      const fund = await section('fund', c, () => this.fund.digestFigures(c));
+      // Client fund: only clients with a fund set-up get the line (null = none). The once-a-day low-balance e-mail to
+      // the client is sent from HERE — inside this run's lease + time budget, from the same single statement compute
+      // (A7 / B5); a skipped section sends nothing.
+      const fund = await section('fund', c, () => this.fund.digestAndAlert(c, nowMs));
       if (!fund.ok) digest.fund = fund;
-      else if (fund.data) {
-        const a = fundAlerts.get(c);
+      else if (fund.data.figures) {
+        const a = fund.data.alert;
+        const f = fund.data.figures;
         digest.fund = {
           ok: true,
           data: {
-            balancePaise: fund.data.balancePaise,
-            committedPaise: fund.data.committedPaise,
-            thresholdPaise: fund.data.thresholdPaise,
-            isLow: fund.data.isLow,
-            hasOpening: fund.data.hasOpening,
-            missingRates: fund.data.missingRates,
-            recipients: fund.data.recipients,
+            balancePaise: f.balancePaise,
+            committedPaise: f.committedPaise,
+            thresholdPaise: f.thresholdPaise,
+            isLow: f.isLow,
+            hasOpening: f.hasOpening,
+            missingRates: f.missingRates,
+            recipients: f.recipients,
             ...(a ? { alert: { status: a.status, ...(a.error ? { error: a.error } : {}), ...(a.recipients != null ? { recipients: a.recipients } : {}) } } : {}),
           },
         };

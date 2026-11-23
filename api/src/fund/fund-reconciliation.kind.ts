@@ -16,7 +16,8 @@ import type { XlsxStreamWriter } from '../common/xlsx-stream';
 import { JsonSheet, parseQueryDto } from '../exports/kinds/batch2/kind-support';
 import { FundExportQueryDto } from './dto/fund.dto';
 import { loadFundInputs } from './fund-sources.loader';
-import { buildFundStatement, bpsLabel, FUND_SPEND_TYPE_LABEL, periodSummary } from './fund-statement.engine';
+import { bpsLabel, FUND_SPEND_TYPE_LABEL, periodSummary } from './fund-statement.engine';
+import { statementOf } from './fund-statement-of';
 import { istDayStart } from './fund-day';
 
 export const FUND_RECONCILIATION_KIND_ID = 'fund-reconciliation';
@@ -29,12 +30,14 @@ export interface FundReconciliationParams {
 const inr = (p: bigint | number) => Number(p) / 100;
 const d = (x: Date | null | undefined) => (x ? formatDateIST(x) : '');
 
-const EVENT_WORDS = { OPENING: 'Opening balance', RECEIPT: 'Advance received', ADJUSTMENT: 'Adjustment', CHARGE: 'Charge', RETURN: 'Return' } as const;
+const EVENT_WORDS = { OPENING: 'Opening balance', RECEIPT: 'Advance received', ADJUSTMENT: 'Adjustment', CHARGE: 'Charge', RETURN: 'Return', RATE_CHANGE: 'Rate change (information)' } as const;
 const STATUS_WORDS = { COMMITTED: 'Committed', PAID: 'Paid', RETURNED: 'Returned' } as const;
 const FLAG_WORDS: Record<string, string> = {
-  NO_BRAND_RATE: 'No discount set for this brand — charged at face value',
+  NO_ITEM_RATE: 'No discount set for this voucher item — charged at face value',
   NO_FEE_RATE: 'No agency fee set — no fee charged',
-  HUBBLE_NEEDS_RECONCILE: 'Hubble outcome unknown — counted as committed',
+  HUBBLE_NEEDS_RECONCILE: 'Voucher provider has not confirmed the outcome yet — counted as committed',
+  DATE_ESTIMATED: 'The source record has no date for this step — a return is shown on its commit day; a paid date is left blank',
+  TDS_UNALLOCATED: 'TDS could not be matched to a payout — shown on the day it was recorded',
   FAILED_AWAITING_REBANK: 'Failed at the bank — awaiting re-bank (still committed)',
   FACE_RECOMPUTED: 'Face value re-derived from the order (its value was cleared by the refund)',
   FACE_UNKNOWN: 'Face value unknown — ₹0 charged; check the order',
@@ -43,7 +46,7 @@ const FLAG_WORDS: Record<string, string> = {
 async function run(ctx: ExportRunContext, p: FundReconciliationParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
   const clientId = ctx.clientId;
   const inputs = await loadFundInputs(ctx.prisma, clientId);
-  const stmt = buildFundStatement({ items: inputs.items, entries: inputs.entries, rates: inputs.rates });
+  const stmt = statementOf(inputs);
   const from = p.from ? istDayStart(p.from) : null;
   const to = p.to ? new Date(istDayStart(p.to).getTime() + 24 * 3600_000) : null;
   const ps = periodSummary(stmt, from, to);
@@ -97,7 +100,7 @@ async function run(ctx: ExportRunContext, p: FundReconciliationParams, out: Xlsx
   for (const [flag, count] of Object.entries(stmt.flagCounts)) {
     await S('Check', FLAG_WORDS[flag] ?? flag, null, count ?? 0);
   }
-  for (const b of stmt.brandsWithoutRate) await S('Check', `Brand without a discount rate: ${b.brandLabel}`, null, b.count);
+  for (const b of stmt.itemsWithoutRate) await S('Check', `Voucher item without a discount rate: ${b.itemLabel}`, null, b.count);
   rows += await sum.end();
 
   // ── Statement ── (chronological, the period's lines; running balance over the full history)
@@ -111,7 +114,7 @@ async function run(ctx: ExportRunContext, p: FundReconciliationParams, out: Xlsx
       Type: l.type ? FUND_SPEND_TYPE_LABEL[l.type] : '',
       Reference: l.ref,
       Description: l.description,
-      Brand: l.brandLabel ?? '',
+      'Voucher item': l.itemLabel ?? '',
       'Face (₹)': l.type ? inr(l.facePaise) : null,
       'Rate': l.rateLabel ?? '',
       'Discount (₹)': l.type ? inr(l.discountPaise) : null,
@@ -153,11 +156,13 @@ async function run(ctx: ExportRunContext, p: FundReconciliationParams, out: Xlsx
   for (const r of inputs.rateRows) {
     await rt.add({
       Rate: r.kind === 'AGENCY_FEE' ? 'Agency fee' : 'Voucher discount',
-      Brand: r.brandLabel ?? '',
+      'Voucher item': r.rewardLabel ?? '',
       'Fee type': r.kind === 'AGENCY_FEE' ? (r.feeType === 'FLAT' ? 'Flat ₹ per payout' : '% of payout') : '',
       Value: r.feeType === 'FLAT' ? `₹${inr(r.flatPaise ?? 0n)}` : r.rateBps != null ? bpsLabel(r.rateBps) : '',
       'Effective from': d(r.effectiveFrom),
       Note: r.note ?? '',
+      'Back-dated: lines re-priced': r.repricedLines ?? '',
+      'Back-dated: balance change (₹)': r.repriceDeltaPaise != null ? inr(r.repriceDeltaPaise) : '',
       'Recorded at': d(r.createdAt),
     });
   }
@@ -170,14 +175,14 @@ async function run(ctx: ExportRunContext, p: FundReconciliationParams, out: Xlsx
   await A('Committed', 'Spend approved but not yet paid: a voucher ordered (points debited), a cash redemption confirmed, or a payout batch confirmed.');
   await A('Paid', 'Voucher code issued (delivered), or the bank UTR recorded as paid.');
   await A('Returned', 'Spend that came back: a voucher failed / cancelled / returned with a refund, a cash payout failed, or a payout reversed before payment. A return line credits the same amount the charge took, so a returned item nets to zero.');
-  await A('Vouchers', 'Face value minus the client\'s discount % for that voucher brand, at the rate in force on the order date. A brand with no rate is charged at face value and flagged.');
+  await A('Vouchers', 'Face value minus the client\'s discount % for that voucher item, at the rate in force on the order date. An item with no rate is charged at face value and flagged.');
   await A('Cash redemptions / target payouts / visibility payouts', 'Face value plus the agency fee (% of the payout or a flat ₹ per payout line), at the fee in force on the commit date. No fee set → no fee, flagged.');
-  await A('TDS 194C', 'The 194C TDS Gifsy deposits on top of a payout (gross-up, or a no-PAN payout paid in full), recovered from this client. A later true-up may be a credit.');
+  await A('TDS 194C', 'The 194C TDS Gifsy deposits on top of a payout (gross-up, or a no-PAN payout paid in full), recovered from this client. It is dated with its payout: the year\'s TDS for a PAN (or a no-PAN outlet) is shared across that PAN\'s payouts by amount, and follows each payout\'s status. TDS that cannot be matched to a payout is shown on the day it was recorded and flagged.');
   await A('Not on this statement', 'Points credits (money leaves only when points are redeemed), physical gifts, Voucher Dispersal campaigns, GST held back on visibility payouts, 194R TDS (paid by the client) and DEDUCT-method TDS (part of the gross award). No GST is charged on the portal.');
   await A('To recover', 'A payout already paid and later reversed. The money is with the outlet; once Gifsy recovers it, an adjustment credits the advance.');
   await A('Opening balance', 'The balance at the START of its date. Spend committed before that date is inside the opening figure and is ignored.');
-  await A('Rates', 'Rates are never edited: a change is a new rate effective from a date, so history is never rewritten.');
-  await A('Low balance', 'When the balance is below the client\'s threshold, a banner shows and an e-mail goes to the configured recipients once a day. Nothing is ever blocked.');
+  await A('Rates', 'Rates are never edited: a change is a new rate effective from a date. A change dated in the past re-prices the spend already committed from that date; Gifsy confirms the effect first and the statement shows a "Rate change" line with the number of lines re-priced and the balance change.');
+  await A('Low balance', 'When the balance is below the client\'s threshold, a banner shows and an e-mail goes to the configured recipients once a day, Monday to Saturday, once an opening balance is recorded. Nothing is ever blocked.');
   rows += await ab.end();
 
   return { rowCount: rows };

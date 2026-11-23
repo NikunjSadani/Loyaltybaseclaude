@@ -6,9 +6,9 @@
  * Output: a dated event list with a running balance, totals, a breakdown by spend type, receivables and flags.
  *
  * Accounting model (bank-statement style):
- *  - every spend item is ONE debit at its commit date of `charged` (vouchers: face − brand discount; cash /
- *    credit / visibility payouts: face + agency fee; 194C TDS: the TDS Gifsy bears, which may be a negative
- *    true-up);
+ *  - every spend item is ONE debit at its commit date of `charged` (vouchers: face − the client's discount for that
+ *    VOUCHER ITEM (owner D4); cash / credit / visibility payouts: face + agency fee; 194C TDS: the TDS Gifsy bears,
+ *    dated with its payout (owner D3), which may be a negative true-up);
  *  - a RETURNED item adds ONE credit of the same `charged` at its return date (net effect 0);
  *  - receipts / adjustments are credits (an adjustment may be negative); the opening balance is the first line.
  *  Balance = opening + receipts + adjustments − Σ charged of items not returned (= committed + paid).
@@ -16,12 +16,14 @@
  *  Opening cut-off: an item committed before the opening as-of date is ignored entirely (it is inside the opening
  *  figure); if it is RETURNED on/after that date it is listed in `preOpeningReturns` (never silently dropped — Gifsy
  *  records an adjustment if the money really came back).
+ *  Back-dated rate changes (owner D1) are confirmed by the operator and recorded; each one adds an informational
+ *  RATE_CHANGE line (amount 0) saying how many lines it re-priced and by how much.
  */
 
 export type FundSpendType = 'VOUCHER' | 'CASH_REDEMPTION' | 'CREDIT_PAYOUT' | 'VISIBILITY_PAYOUT' | 'TDS_194C';
 export type FundItemStatus = 'COMMITTED' | 'PAID' | 'RETURNED';
 export type FundEntryKind = 'RECEIPT' | 'ADJUSTMENT' | 'OPENING_BALANCE';
-export type FundEventKind = 'OPENING' | 'RECEIPT' | 'ADJUSTMENT' | 'CHARGE' | 'RETURN';
+export type FundEventKind = 'OPENING' | 'RECEIPT' | 'ADJUSTMENT' | 'CHARGE' | 'RETURN' | 'RATE_CHANGE';
 
 export const FUND_SPEND_TYPES: readonly FundSpendType[] = [
   'VOUCHER',
@@ -41,12 +43,41 @@ export const FUND_SPEND_TYPE_LABEL: Record<FundSpendType, string> = {
 
 /** Item flags — every one is shown on the statement (owner rule: no silent pass-through). */
 export type FundFlag =
-  | 'NO_BRAND_RATE' // voucher brand with no discount set → charged at face value
+  | 'NO_ITEM_RATE' // voucher item with no discount set → charged at face value
   | 'NO_FEE_RATE' // payout with no agency fee set → no fee charged
   | 'HUBBLE_NEEDS_RECONCILE' // Hubble outcome unknown — counted as committed
   | 'FAILED_AWAITING_REBANK' // credit payout failed at the bank, not reversed — still committed (re-banked later)
   | 'FACE_RECOMPUTED' // the order's frozen value was zeroed by the refund; face re-derived from the order snapshot
-  | 'FACE_UNKNOWN'; // no face value could be derived (₹0 charged) — check the source record
+  | 'FACE_UNKNOWN' // no face value could be derived (₹0 charged) — check the source record
+  | 'DATE_ESTIMATED' // the source has no event timestamp for the paid / return date (never updatedAt): a return is
+  //                     placed on its commit day (nets to zero there); a paid date is left blank
+  | 'TDS_UNALLOCATED'; // a 194C TDS amount that could not be tied to a payout — shown on the day it was recorded
+
+export type FundSourceRef = {
+  kind: 'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'tdsRecoveryEntry' | 'creditReversal';
+  id: string;
+};
+
+/** Paid, then reversed: money to recover off-platform (never credited to the advance until Gifsy records it). */
+export interface FundReceivable {
+  ref: string;
+  description: string;
+  type: FundSpendType;
+  source: FundSourceRef;
+  paidAt: Date | null;
+  amountPaise: bigint;
+}
+
+/** A confirmed back-dated rate change (owner D1) — shown as an informational statement line. */
+export interface FundRateChange {
+  id: string;
+  /** When the change was saved. */
+  at: Date;
+  effectiveFrom: Date;
+  label: string;
+  linesRepriced: number;
+  deltaPaise: bigint;
+}
 
 export interface FundSpendItem {
   /** Unique across the statement, e.g. `order:<id>`, `ptx:<id>`, `cpe:<id>`, `tds:<id>`. */
@@ -56,12 +87,12 @@ export interface FundSpendItem {
   ref: string;
   description: string;
   /** Source record for "open the source" links. */
-  source: { kind: 'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'tdsRecoveryEntry'; id: string };
+  source: FundSourceRef;
   /** The value the outlet receives (paise). For TDS: the TDS amount (may be negative — a true-up). */
   facePaise: bigint;
-  /** VOUCHER only. */
-  brandKey?: string | null;
-  brandLabel?: string | null;
+  /** VOUCHER only — the catalogue reward (voucher item) the order is for, and its name. */
+  rewardId?: string | null;
+  itemLabel?: string | null;
   status: FundItemStatus;
   committedAt: Date;
   paidAt?: Date | null;
@@ -85,8 +116,9 @@ export interface FundManualEntry {
 
 export interface FundRateRow {
   kind: 'AGENCY_FEE' | 'VOUCHER_DISCOUNT';
-  brandKey?: string | null;
   feeType?: 'PERCENT' | 'FLAT' | null;
+  /** VOUCHER_DISCOUNT only — the voucher item (RewardCatalog id). */
+  rewardId?: string | null;
   rateBps?: number | null;
   flatPaise?: bigint | null;
   effectiveFrom: Date;
@@ -101,7 +133,7 @@ export interface FundLine {
   type: FundSpendType | null;
   ref: string;
   description: string;
-  source: FundSpendItem['source'] | { kind: 'fundReceipt'; id: string };
+  source: FundSourceRef | { kind: 'fundReceipt' | 'fundRate'; id: string };
   facePaise: bigint;
   discountPaise: bigint;
   feePaise: bigint;
@@ -118,7 +150,7 @@ export interface FundLine {
   paidAt: Date | null;
   returnedAt: Date | null;
   utr: string | null;
-  brandLabel: string | null;
+  itemLabel: string | null;
   /** Rate applied (bps for % / flat paise) — for the statement's "rate" column. */
   rateLabel: string | null;
   receivablePaise: bigint;
@@ -160,14 +192,14 @@ export interface FundStatement {
   lines: FundLine[];
   totals: FundTotals;
   byType: FundTypeTotals[];
-  receivables: { items: Array<Pick<FundLine, 'ref' | 'description' | 'type' | 'source' | 'paidAt'> & { amountPaise: bigint }>; totalPaise: bigint };
+  receivables: { items: FundReceivable[]; totalPaise: bigint };
   /** Items committed BEFORE the opening date and returned on/after it — not credited automatically. */
   preOpeningReturns: { items: Array<{ ref: string; type: FundSpendType; returnedAt: Date; facePaise: bigint; source: FundSpendItem['source'] }>; facePaise: bigint };
   /** Money-in entries dated before the opening date (already inside the opening figure) — excluded and listed. */
   excludedEntries: FundManualEntry[];
   flagCounts: Partial<Record<FundFlag, number>>;
-  /** Voucher brands seen without a discount rate (label → count). */
-  brandsWithoutRate: Array<{ brandKey: string; brandLabel: string; count: number }>;
+  /** Voucher items seen without a discount rate (→ count). */
+  itemsWithoutRate: Array<{ rewardId: string; itemLabel: string; count: number }>;
   openingDate: Date | null;
 }
 
@@ -205,6 +237,19 @@ export function bpsLabel(bps: number): string {
   return `${(bps / 100).toFixed(2).replace(/\.?0+$/, '')}%`;
 }
 
+/** IST calendar day "dd Mon yyyy" (pure). */
+export function istDay(d: Date): string {
+  const x = new Date(d.getTime() + 330 * 60_000);
+  const m = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][x.getUTCMonth()];
+  return String(x.getUTCDate()).padStart(2, '0') + ' ' + m + ' ' + x.getUTCFullYear();
+}
+
+/** "+₹1,234.50" / "−₹10.00" (pure). */
+export function signedRupees(p: bigint): string {
+  const abs = p < 0n ? -p : p;
+  return (p < 0n ? '−' : '+') + '₹' + (Number(abs) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 const rupeeLabel = (p: bigint) => `₹${(Number(p) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 export interface FundCharge {
@@ -223,11 +268,11 @@ export function chargeFor(item: FundSpendItem, rates: readonly FundRateRow[]): F
     return { discountPaise: 0n, feePaise: 0n, tdsPaise: item.facePaise, chargedPaise: item.facePaise, rateLabel: null, flags };
   }
   if (item.type === 'VOUCHER') {
-    const key = item.brandKey ?? '';
-    const brandRows = rates.filter((r) => r.kind === 'VOUCHER_DISCOUNT' && (r.brandKey ?? '') === key && key !== '');
-    const r = rateInForce(brandRows, item.committedAt);
+    const key = item.rewardId ?? '';
+    const itemRows = rates.filter((r) => r.kind === 'VOUCHER_DISCOUNT' && (r.rewardId ?? '') === key && key !== '');
+    const r = rateInForce(itemRows, item.committedAt);
     if (!r || r.rateBps == null) {
-      flags.push('NO_BRAND_RATE');
+      flags.push('NO_ITEM_RATE');
       return { discountPaise: 0n, feePaise: 0n, tdsPaise: 0n, chargedPaise: item.facePaise, rateLabel: null, flags };
     }
     const discount = applyBps(item.facePaise, r.rateBps);
@@ -254,7 +299,7 @@ export function chargeFor(item: FundSpendItem, rates: readonly FundRateRow[]): F
 
 // ── Statement ────────────────────────────────────────────────────────────────────────────────────
 
-const EVENT_ORDER: Record<FundEventKind, number> = { OPENING: 0, RECEIPT: 1, ADJUSTMENT: 2, CHARGE: 3, RETURN: 4 };
+const EVENT_ORDER: Record<FundEventKind, number> = { OPENING: 0, RECEIPT: 1, ADJUSTMENT: 2, CHARGE: 3, RETURN: 4, RATE_CHANGE: 5 };
 
 interface PendingLine extends Omit<FundLine, 'seq' | 'balancePaise'> {
   sortKey: string;
@@ -264,6 +309,10 @@ export interface BuildStatementInput {
   items: readonly FundSpendItem[];
   entries: readonly FundManualEntry[];
   rates: readonly FundRateRow[];
+  /** Receivables not tied to one spend line (legacy reversals). */
+  extraReceivables?: readonly FundReceivable[];
+  /** Confirmed back-dated rate changes → informational lines. */
+  rateChanges?: readonly FundRateChange[];
 }
 
 export function buildFundStatement(input: BuildStatementInput): FundStatement {
@@ -316,7 +365,7 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
       paidAt: null,
       returnedAt: null,
       utr: null,
-      brandLabel: null,
+      itemLabel: null,
       rateLabel: null,
       receivablePaise: 0n,
       flags: [],
@@ -333,7 +382,7 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
   const receivables: FundStatement['receivables'] = { items: [], totalPaise: 0n };
   const preOpeningReturns: FundStatement['preOpeningReturns'] = { items: [], facePaise: 0n };
   const flagCounts: Partial<Record<FundFlag, number>> = {};
-  const noRateBrands = new Map<string, { brandKey: string; brandLabel: string; count: number }>();
+  const noRateItems = new Map<string, { rewardId: string; itemLabel: string; count: number }>();
 
   for (const item of input.items) {
     if (item.committedAt.getTime() < cutoff) {
@@ -346,11 +395,11 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
     const c = chargeFor(item, input.rates);
     const flags = [...(item.flags ?? []), ...c.flags];
     for (const f of flags) flagCounts[f] = (flagCounts[f] ?? 0) + 1;
-    if (flags.includes('NO_BRAND_RATE')) {
-      const k = item.brandKey ?? '(no brand)';
-      const cur = noRateBrands.get(k) ?? { brandKey: k, brandLabel: item.brandLabel ?? k, count: 0 };
+    if (flags.includes('NO_ITEM_RATE')) {
+      const k = item.rewardId ?? '(unknown item)';
+      const cur = noRateItems.get(k) ?? { rewardId: k, itemLabel: item.itemLabel ?? k, count: 0 };
       cur.count += 1;
-      noRateBrands.set(k, cur);
+      noRateItems.set(k, cur);
     }
 
     const t = byType.get(item.type)!;
@@ -390,7 +439,7 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
       paidAt: item.paidAt ?? null,
       returnedAt: item.returnedAt ?? null,
       utr: item.utr ?? null,
-      brandLabel: item.brandLabel ?? null,
+      itemLabel: item.itemLabel ?? null,
       rateLabel: c.rateLabel,
       receivablePaise: item.receivablePaise ?? 0n,
       flags,
@@ -405,6 +454,39 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
       receivables.items.push({ ref: item.ref, description: item.description, type: item.type, source: item.source, paidAt: item.paidAt ?? null, amountPaise: item.receivablePaise! });
       receivables.totalPaise += item.receivablePaise!;
     }
+  }
+
+  for (const r of input.extraReceivables ?? []) {
+    receivables.items.push(r);
+    receivables.totalPaise += r.amountPaise;
+  }
+  for (const rc of input.rateChanges ?? []) {
+    pending.push({
+      sortKey: 'rate:' + rc.id,
+      date: rc.at,
+      event: 'RATE_CHANGE',
+      type: null,
+      ref: rc.label,
+      description:
+        'Rate change on ' + istDay(rc.at) + ': ' + rc.linesRepriced + (rc.linesRepriced === 1 ? ' line' : ' lines') +
+        ' re-priced from ' + istDay(rc.effectiveFrom) + ', balance changed by ' + signedRupees(rc.deltaPaise),
+      source: { kind: 'fundRate', id: rc.id },
+      facePaise: 0n,
+      discountPaise: 0n,
+      feePaise: 0n,
+      tdsPaise: 0n,
+      chargedPaise: 0n,
+      amountPaise: 0n,
+      status: null,
+      committedAt: null,
+      paidAt: null,
+      returnedAt: null,
+      utr: null,
+      itemLabel: null,
+      rateLabel: null,
+      receivablePaise: 0n,
+      flags: [],
+    });
   }
 
   pending.sort((a, b) => {
@@ -436,7 +518,7 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
     preOpeningReturns,
     excludedEntries,
     flagCounts,
-    brandsWithoutRate: [...noRateBrands.values()].sort((a, b) => b.count - a.count),
+    itemsWithoutRate: [...noRateItems.values()].sort((a, b) => b.count - a.count),
     openingDate,
   };
 }

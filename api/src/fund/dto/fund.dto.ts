@@ -100,7 +100,7 @@ export class UpdateFundAlertsDto {
   alertRecipients!: string[];
 }
 
-/** POST /v1/fund/rates/fee */
+/** POST /v1/gifsy/clients/:slug/fund/rates/fee (Gifsy console, owner D6). */
 export class SetAgencyFeeDto {
   @IsIn(['PERCENT', 'FLAT'])
   feeType!: 'PERCENT' | 'FLAT';
@@ -112,12 +112,14 @@ export class SetAgencyFeeDto {
   effectiveFrom!: string;
 
   @IsOptional() @IsString() @MaxLength(300) note?: string;
+
+  /** Owner D1: required to SAVE a back-dated rate — the token returned by the preview call. */
+  @IsOptional() @IsString() @MaxLength(64) confirmToken?: string;
 }
 
-/** POST /v1/fund/rates/discount */
-export class SetBrandDiscountDto {
-  @IsString() @IsNotEmpty() @MaxLength(200) brandKey!: string;
-  @IsString() @IsNotEmpty() @MaxLength(200) brandLabel!: string;
+/** POST /v1/gifsy/clients/:slug/fund/rates/discount — per voucher ITEM (owner D4). */
+export class SetItemDiscountDto {
+  @IsString() @IsNotEmpty() @MaxLength(64) rewardId!: string;
 
   @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(100) percent!: number;
 
@@ -125,4 +127,7 @@ export class SetBrandDiscountDto {
   effectiveFrom!: string;
 
   @IsOptional() @IsString() @MaxLength(300) note?: string;
+
+  /** Owner D1: required to SAVE a back-dated rate — the token returned by the preview call. */
+  @IsOptional() @IsString() @MaxLength(64) confirmToken?: string;
 }

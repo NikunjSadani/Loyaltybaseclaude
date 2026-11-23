@@ -3,7 +3,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { TenantService } from '../../tenant/tenant.service';
 import { TenantSettingsService } from '../../tenant/tenant-settings.service';
 import { loadFundInputs } from '../../fund/fund-sources.loader';
-import { buildFundStatement } from '../../fund/fund-statement.engine';
+import { statementOf } from '../../fund/fund-statement-of';
+import { GifsyRoleService } from '../../common/rbac/gifsy-role.service';
 import { TdsService } from '../../tds/tds.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
 import { platformWide } from '../../common/tenant-scope';
@@ -38,6 +39,7 @@ export class FinanceDashboardService {
     private readonly tenant: TenantService,
     private readonly tenantSettings: TenantSettingsService,
     private readonly tds: TdsService,
+    private readonly gifsyRoles: GifsyRoleService,
   ) {}
 
   /** round to 2 decimals (₹). */
@@ -165,8 +167,10 @@ export class FinanceDashboardService {
         }
       : { liabilityRupees: 0, depositedRupees: 0, outstandingRupees: 0 };
 
-    // ── Fund: the client advance (fund reconciliation) — the SAME statement engine as /admin/fund, so the two can
-    // never disagree. An un-assumed Gifsy owner has no client context → an all-zero block with hasSettings=false.
+    // ── Fund: the client advance (fund reconciliation) — the SAME loader + engine as /admin/fund, so the two can
+    // never disagree. null (the card is hidden) unless the caller may see the fund (B1): CLIENT_ADMIN of its own
+    // tenant or a Gifsy operator holding payouts:read — never MIS_USER. An un-assumed Gifsy owner has no client
+    // context → an all-zero block with hasSettings=false (the screen says "Open a client first").
     const fund = await this.fundBlock(user);
 
     return {
@@ -204,6 +208,11 @@ export class FinanceDashboardService {
   }
 
   private async fundBlock(user: JwtPayload) {
+    const allowed =
+      user.role === 'CLIENT_ADMIN' ||
+      user.role === 'GIFSY_ADMIN' ||
+      (user.role === 'GIFSY_STAFF' && (await this.gifsyRoles.getPermissions(user.gifsyRoleId)).has('payouts:read'));
+    if (!allowed) return null;
     const zero = {
       receivedRupees: 0,
       adjustmentsRupees: 0,
@@ -214,13 +223,14 @@ export class FinanceDashboardService {
       lowBalance: false,
       thresholdRupees: null as number | null,
       hasSettings: false,
+      noClientContext: true,
     };
     if (platformWide(user) || !user.clientId || user.clientId === REPORTS_CLIENT_ID) return zero;
     const [inputs, settings] = await Promise.all([
       loadFundInputs(this.prisma, user.clientId),
       this.prisma.fundSettings.findUnique({ where: { clientId: user.clientId } }),
     ]);
-    const stmt = buildFundStatement({ items: inputs.items, entries: inputs.entries, rates: inputs.rates });
+    const stmt = statementOf(inputs);
     const t = stmt.totals;
     const r = (p: bigint) => FinanceDashboardService.round2(paiseToRupees(p));
     const threshold = settings?.lowBalanceThresholdPaise ?? null;
@@ -235,6 +245,7 @@ export class FinanceDashboardService {
       lowBalance: threshold != null && t.balancePaise < threshold,
       thresholdRupees: threshold == null ? null : r(threshold),
       hasSettings: !!settings || stmt.lines.length > 0,
+      noClientContext: false,
     };
   }
 }

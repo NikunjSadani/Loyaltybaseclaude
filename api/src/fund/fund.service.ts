@@ -4,66 +4,105 @@ import {
   ForbiddenException,
   Injectable,
   Logger,
+  NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
+import { GifsyTenantGrantService } from '../common/rbac/gifsy-tenant-grant.service';
+import type { Permission } from '../common/rbac/permissions';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isGifsyOperator, platformWide } from '../common/tenant-scope';
 import { formatDateIST, istDateKey } from '../common/ist-date';
-import { istDayStart } from './fund-day';
 import { REPORTS_CLIENT_ID } from '../common/report-recipients';
 import {
-  buildFundStatement,
   FUND_SPEND_TYPE_LABEL,
   FundLine,
+  FundRateRow,
   FundStatement,
   periodSummary,
   rateInForce,
   type FundSpendType,
 } from './fund-statement.engine';
 import { loadFundInputs, type FundInputs } from './fund-sources.loader';
-import { voucherBrandOf } from './fund-brand';
 import { buildLowBalanceEmail } from './fund-alert-email';
+import { statementOf } from './fund-statement-of';
+
+export { statementOf };
+import { istDayStart } from './fund-day';
 import {
   FundStatementQueryDto,
   RecordFundAdjustmentDto,
   RecordFundReceiptDto,
   RecordOpeningBalanceDto,
   SetAgencyFeeDto,
-  SetBrandDiscountDto,
+  SetItemDiscountDto,
   UpdateFundAlertsDto,
 } from './dto/fund.dto';
 
 const n = (v: bigint | number | null | undefined): number => (v == null ? 0 : Number(v));
 const toPaise = (rupees: number): bigint => BigInt(Math.round(rupees * 100));
 
-/** Per-client fund figures for the Daily Ops Digest / low-balance alert. */
+/** Shown to a client admin instead of a raw mail-server error (C11). */
+export const CLIENT_ALERT_ERROR_TEXT = 'The last low-balance e-mail could not be delivered. Gifsy has been notified.';
+
+/** Per-client fund figures for the Daily Ops Digest. */
 export interface FundDigestFigures {
   balancePaise: bigint;
   committedPaise: bigint;
   thresholdPaise: bigint | null;
   isLow: boolean;
   hasOpening: boolean;
-  /** Items flagged without a rate (voucher brand / agency fee) — the digest calls them out. */
+  /** Items flagged without a rate (voucher item discount / agency fee) — the digest calls them out. */
   missingRates: number;
   recipients: number;
   lastAlertSentOn: string | null;
   lastAlertError: string | null;
 }
 
+export type FundAlertStatus =
+  | 'sent'
+  | 'sent-to-test-address'
+  | 'already-sent-today'
+  | 'not-low'
+  | 'no-threshold'
+  | 'no-recipients'
+  | 'no-opening'
+  | 'client-inactive'
+  | 'disabled-in-environment'
+  | 'email-not-configured'
+  | 'failed';
+
 export interface FundAlertOutcome {
   clientId: string;
-  status: 'sent' | 'already-sent-today' | 'not-low' | 'no-threshold' | 'no-recipients' | 'email-not-configured' | 'failed';
+  status: FundAlertStatus;
   error?: string;
   recipients?: number;
 }
 
 /**
- * Fund reconciliation (FUND-RECONCILIATION-DESIGN.md). Tenant-scoped by the caller's (assumed) clientId. Reads:
- * GIFSY operators + CLIENT_ADMIN of the own tenant (read-only). Writes: Gifsy operators only, always audited.
- * Spend is COMPUTED on read (fund-sources.loader + the pure engine) — nothing here touches a money path.
+ * Where low-balance e-mails may go in THIS environment (B5). There was no environment guard for client-facing
+ * scheduled e-mails, so this adds one, fail-safe:
+ *   FUND_ALERTS_LIVE=true            → the client's configured recipients (set on PRODUCTION only);
+ *   else FUND_ALERTS_TEST_RECIPIENT  → ONE test address (subject says who it would have gone to) — staging;
+ *   else                             → nothing is sent (outcome "disabled-in-environment", shown in the digest).
+ */
+export function fundAlertTarget(env: NodeJS.ProcessEnv = process.env): { mode: 'live' } | { mode: 'test'; to: string } | { mode: 'off' } {
+  if ((env.FUND_ALERTS_LIVE ?? '').trim().toLowerCase() === 'true') return { mode: 'live' };
+  const t = (env.FUND_ALERTS_TEST_RECIPIENT ?? '').trim().toLowerCase();
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)) return { mode: 'test', to: t };
+  return { mode: 'off' };
+}
+
+type RateDraft = Omit<FundRateRow, 'createdAt'> & { rewardLabel?: string | null; note: string | null };
+
+/**
+ * Fund reconciliation (FUND-RECONCILIATION-DESIGN.md). Tenant routes are scoped by the caller's (assumed) clientId;
+ * the settings routes live in the Gifsy console (owner D6) and target a client by slug. Reads: Gifsy operators with
+ * payouts:read + CLIENT_ADMIN of the own tenant. Writes: Gifsy operators holding payouts:manage_fund. Every write is
+ * audited. Spend is COMPUTED on read (fund-sources.loader + the pure engine) — nothing here touches a money path.
  */
 @Injectable()
 export class FundService {
@@ -72,6 +111,8 @@ export class FundService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly msg91: Msg91Service,
+    private readonly gifsyRoles: GifsyRoleService,
+    private readonly grants: GifsyTenantGrantService,
   ) {}
 
   // ── Guards ──────────────────────────────────────────────────────────────────────────────────
@@ -84,49 +125,93 @@ export class FundService {
     return user.clientId;
   }
 
-  private assertManage(user: JwtPayload): string {
-    if (!isGifsyOperator(user)) throw new ForbiddenException('Only Gifsy can record fund entries or change fund settings.');
-    return this.tenantOf(user);
+  /** The caller's effective permission (GIFSY_ADMIN all; GIFSY_STAFF = its GifsyRole; CLIENT_ADMIN read only). */
+  async hasPermission(user: JwtPayload, perm: Permission): Promise<boolean> {
+    if (user.role === 'GIFSY_ADMIN') return true;
+    if (user.role === 'GIFSY_STAFF') return (await this.gifsyRoles.getPermissions(user.gifsyRoleId)).has(perm);
+    if (user.role === 'CLIENT_ADMIN') return perm === 'payouts:read';
+    return false;
   }
 
-  canManage(user: JwtPayload): boolean {
-    return isGifsyOperator(user);
+  /** May record receipts / adjustments / the opening balance (and change settings in the console). */
+  async canManage(user: JwtPayload): Promise<boolean> {
+    return isGifsyOperator(user) && (await this.hasPermission(user, 'payouts:manage_fund'));
+  }
+
+  private async assertManage(user: JwtPayload): Promise<string> {
+    const clientId = this.tenantOf(user);
+    if (!(await this.canManage(user))) throw new ForbiddenException('Only Gifsy can record fund entries.');
+    return clientId;
+  }
+
+  /** Gifsy console target (owner D6): an operator; a staff member only for a client they hold a grant for. */
+  async consoleClient(user: JwtPayload, slug: string, write: boolean): Promise<string> {
+    if (!isGifsyOperator(user)) throw new ForbiddenException('Forbidden');
+    if (!(await this.hasPermission(user, write ? 'payouts:manage_fund' : 'payouts:read'))) {
+      throw new ForbiddenException(`Forbidden: missing permission ${write ? 'payouts:manage_fund' : 'payouts:read'}`);
+    }
+    if (user.role === 'GIFSY_STAFF' && !(await this.grants.hasGrantUncached(user.sub, slug))) {
+      throw new ForbiddenException('You do not have access to this client.');
+    }
+    const c = await this.prisma.client.findUnique({ where: { id: slug }, select: { id: true } });
+    if (!c || slug === REPORTS_CLIENT_ID) throw new NotFoundException(`Client "${slug}" not found.`);
+    return slug;
   }
 
   // ── Computation ─────────────────────────────────────────────────────────────────────────────
 
   async compute(clientId: string): Promise<{ inputs: FundInputs; stmt: FundStatement }> {
     const inputs = await loadFundInputs(this.prisma, clientId);
-    const stmt = buildFundStatement({ items: inputs.items, entries: inputs.entries, rates: inputs.rates });
-    return { inputs, stmt };
+    return { inputs, stmt: statementOf(inputs) };
   }
 
   private async settingsRow(clientId: string) {
     return this.prisma.fundSettings.findUnique({ where: { clientId } });
   }
 
+  private async clientActive(clientId: string): Promise<{ active: boolean; name: string }> {
+    const c = await this.prisma.client.findUnique({ where: { id: clientId }, select: { status: true, internalName: true, branding: true } });
+    const display = ((c?.branding ?? {}) as Record<string, unknown>).displayName;
+    const name = typeof display === 'string' && display.trim() ? display.trim() : c?.internalName ?? clientId;
+    return { active: !c || (c.status ?? 'ACTIVE') === 'ACTIVE', name };
+  }
+
   // ── Reads ───────────────────────────────────────────────────────────────────────────────────
 
   async summary(user: JwtPayload) {
     const clientId = this.tenantOf(user);
-    const [{ stmt }, settings] = await Promise.all([this.compute(clientId), this.settingsRow(clientId)]);
-    return this.summaryDto(clientId, stmt, settings, this.canManage(user));
+    const [{ stmt }, settings, client, canManage] = await Promise.all([
+      this.compute(clientId),
+      this.settingsRow(clientId),
+      this.clientActive(clientId),
+      this.canManage(user),
+    ]);
+    return this.summaryDto(clientId, stmt, settings, { canManage, internal: isGifsyOperator(user), clientActive: client.active });
   }
 
   summaryDto(
     clientId: string,
     stmt: FundStatement,
-    settings: { lowBalanceThresholdPaise: bigint | null; alertRecipients: unknown; lowAlertLastSentOn: string | null; lowAlertLastError: string | null } | null,
-    canManage: boolean,
+    settings: {
+      lowBalanceThresholdPaise: bigint | null;
+      alertRecipients: unknown;
+      lowAlertLastSentOn: string | null;
+      lowAlertLastError: string | null;
+      lowAlertLastRecipients?: number | null;
+    } | null,
+    o: { canManage: boolean; internal: boolean; clientActive: boolean },
   ) {
     const t = stmt.totals;
     const threshold = settings?.lowBalanceThresholdPaise ?? null;
+    const err = settings?.lowAlertLastError ?? null;
     return {
       clientId,
       asOf: new Date().toISOString(),
       openingDate: stmt.openingDate ? stmt.openingDate.toISOString() : null,
       hasOpening: !!stmt.openingDate,
-      canManage,
+      canManage: o.canManage,
+      /** Settings are managed in the Gifsy console (owner D6); a Gifsy operator gets the link. */
+      settingsConsoleHref: o.internal ? `/gifsy/clients/${encodeURIComponent(clientId)}#fund` : null,
       totals: {
         openingPaise: n(t.openingPaise),
         receiptsPaise: n(t.receiptsPaise),
@@ -179,12 +264,16 @@ export class FundService {
       },
       excludedEntries: stmt.excludedEntries.map((e) => ({ id: e.id, kind: e.kind, amountPaise: n(e.amountPaise), date: e.date.toISOString(), ref: e.ref })),
       flagCounts: stmt.flagCounts,
-      brandsWithoutRate: stmt.brandsWithoutRate,
+      itemsWithoutRate: stmt.itemsWithoutRate,
       lowBalance: {
         thresholdPaise: threshold == null ? null : n(threshold),
         isLow: threshold != null && t.balancePaise < threshold,
+        /** Why daily e-mails are paused (A7): no opening balance yet, or the client is not ACTIVE. */
+        alertsPaused: threshold == null ? null : !stmt.openingDate ? 'NO_OPENING' : !o.clientActive ? 'CLIENT_INACTIVE' : null,
         lastAlertSentOn: settings?.lowAlertLastSentOn ?? null,
-        lastAlertError: settings?.lowAlertLastError ?? null,
+        lastAlertRecipients: settings?.lowAlertLastRecipients ?? null,
+        // A client admin never sees a raw mail-server error (C11).
+        lastAlertError: err == null ? null : o.internal ? err : CLIENT_ALERT_ERROR_TEXT,
         recipients: recipientsOf(settings?.alertRecipients).length,
       },
     };
@@ -221,6 +310,8 @@ export class FundService {
       period: {
         from: from ? from.toISOString() : null,
         to: to ? to.toISOString() : null,
+        /** The period figures cover ALL spend types / statuses of the date range (C6) — never the other filters. */
+        scope: 'ALL_TYPES_FOR_PERIOD' as const,
         openingBalancePaise: n(ps.openingBalancePaise),
         closingBalancePaise: n(ps.closingBalancePaise),
         openingEntryPaise: n(ps.openingEntryPaise),
@@ -267,73 +358,94 @@ export class FundService {
     };
   }
 
-  async settings(user: JwtPayload) {
+  /** GET /v1/fund/settings — READ-ONLY view for /admin/fund (the settings are managed in the console, owner D6). */
+  async tenantSettings(user: JwtPayload) {
     const clientId = this.tenantOf(user);
-    const [settings, rates, catalogue] = await Promise.all([
+    return this.settingsView(clientId, user);
+  }
+
+  /** GET /v1/gifsy/clients/:slug/fund — the console Fund section. */
+  async consoleSettings(user: JwtPayload, slug: string) {
+    const clientId = await this.consoleClient(user, slug, false);
+    return this.settingsView(clientId, user);
+  }
+
+  private async settingsView(clientId: string, user: JwtPayload) {
+    const [settings, rates, catalogue, canManage] = await Promise.all([
       this.settingsRow(clientId),
       this.prisma.fundRate.findMany({ where: { clientId }, orderBy: [{ effectiveFrom: 'desc' }, { createdAt: 'desc' }] }),
       this.prisma.rewardCatalog.findMany({
         where: { clientId, redemptionMode: 'GIFT_CARD' },
-        select: { id: true, name: true, metadata: true, deletedAt: true },
+        select: { id: true, name: true, code: true, metadata: true, deletedAt: true, status: true },
         orderBy: { name: 'asc' },
       }),
+      this.canManage(user),
     ]);
+    const internal = isGifsyOperator(user);
     const names = await this.userNames(rates.map((r) => r.createdById));
     const now = new Date();
     const feeRows = rates.filter((r) => r.kind === 'AGENCY_FEE');
     const discRows = rates.filter((r) => r.kind === 'VOUCHER_DISCOUNT');
     const cur = rateInForce(feeRows, now);
-
-    const brands = new Map<string, { brandKey: string; brandLabel: string; items: string[] }>();
-    for (const item of catalogue) {
-      const b = voucherBrandOf(item);
-      const e = brands.get(b.brandKey) ?? { brandKey: b.brandKey, brandLabel: b.brandLabel, items: [] };
-      e.items.push(item.deletedAt ? `${item.name} (deleted)` : item.name);
-      brands.set(b.brandKey, e);
-    }
-    for (const r of discRows) {
-      if (r.brandKey && !brands.has(r.brandKey)) brands.set(r.brandKey, { brandKey: r.brandKey, brandLabel: r.brandLabel ?? r.brandKey, items: [] });
-    }
-
+    const nextOf = <T extends { effectiveFrom: Date; createdAt: Date }>(rows: T[]) =>
+      rows.filter((r) => r.effectiveFrom.getTime() > now.getTime()).sort((a, b) => a.effectiveFrom.getTime() - b.effectiveFrom.getTime())[0] ?? null;
+    const nextFee = nextOf(feeRows);
+    const err = settings?.lowAlertLastError ?? null;
+    const rateDto = (r: (typeof rates)[number]) => ({
+      id: r.id,
+      feeType: r.feeType,
+      rewardId: r.rewardId,
+      rewardLabel: r.rewardLabel,
+      rateBps: r.rateBps,
+      flatPaise: r.flatPaise == null ? null : n(r.flatPaise),
+      effectiveFrom: r.effectiveFrom.toISOString(),
+      note: r.note,
+      repricedLines: r.repricedLines,
+      repriceDeltaPaise: r.repriceDeltaPaise == null ? null : n(r.repriceDeltaPaise),
+      createdAt: r.createdAt.toISOString(),
+      createdByName: r.createdById ? names.get(r.createdById) ?? null : null,
+    });
+    const items = catalogue.map((c) => {
+      const rows = discRows.filter((d) => d.rewardId === c.id);
+      const r = rateInForce(rows, now);
+      const nx = nextOf(rows);
+      return {
+        rewardId: c.id,
+        name: c.name,
+        code: c.code,
+        brandText: brandTextOf(c.metadata),
+        deleted: !!c.deletedAt,
+        active: !c.deletedAt && c.status === 'ACTIVE',
+        currentRateBps: r?.rateBps ?? null,
+        currentEffectiveFrom: r ? r.effectiveFrom.toISOString() : null,
+        scheduledRateBps: nx?.rateBps ?? null,
+        scheduledFrom: nx ? nx.effectiveFrom.toISOString() : null,
+      };
+    });
     return {
-      canManage: this.canManage(user),
+      clientId,
+      canManage,
+      managedInConsole: true,
+      consoleHref: internal ? `/gifsy/clients/${encodeURIComponent(clientId)}#fund` : null,
       thresholdPaise: settings?.lowBalanceThresholdPaise == null ? null : n(settings.lowBalanceThresholdPaise),
       alertRecipients: recipientsOf(settings?.alertRecipients),
       lastAlertSentOn: settings?.lowAlertLastSentOn ?? null,
-      lastAlertError: settings?.lowAlertLastError ?? null,
+      lastAlertRecipients: settings?.lowAlertLastRecipients ?? null,
+      lastAlertError: err == null ? null : internal ? err : CLIENT_ALERT_ERROR_TEXT,
+      alertEnvironment: internal ? fundAlertTarget().mode : null,
       currentFee: cur
         ? { feeType: cur.feeType, rateBps: cur.rateBps, flatPaise: cur.flatPaise == null ? null : n(cur.flatPaise), effectiveFrom: cur.effectiveFrom.toISOString() }
         : null,
-      feeRates: feeRows.map((r) => ({
-        id: r.id,
-        feeType: r.feeType,
-        rateBps: r.rateBps,
-        flatPaise: r.flatPaise == null ? null : n(r.flatPaise),
-        effectiveFrom: r.effectiveFrom.toISOString(),
-        note: r.note,
-        createdAt: r.createdAt.toISOString(),
-        createdByName: r.createdById ? names.get(r.createdById) ?? null : null,
-      })),
-      discountRates: discRows.map((r) => ({
-        id: r.id,
-        brandKey: r.brandKey,
-        brandLabel: r.brandLabel,
-        rateBps: r.rateBps,
-        effectiveFrom: r.effectiveFrom.toISOString(),
-        note: r.note,
-        createdAt: r.createdAt.toISOString(),
-        createdByName: r.createdById ? names.get(r.createdById) ?? null : null,
-      })),
-      brands: [...brands.values()]
-        .map((b) => {
-          const r = rateInForce(discRows.filter((d) => d.brandKey === b.brandKey), now);
-          return { ...b, currentRateBps: r?.rateBps ?? null, currentEffectiveFrom: r ? r.effectiveFrom.toISOString() : null };
-        })
-        .sort((a, b) => a.brandLabel.localeCompare(b.brandLabel)),
+      scheduledFee: nextFee
+        ? { feeType: nextFee.feeType, rateBps: nextFee.rateBps, flatPaise: nextFee.flatPaise == null ? null : n(nextFee.flatPaise), effectiveFrom: nextFee.effectiveFrom.toISOString() }
+        : null,
+      feeRates: feeRows.map(rateDto),
+      discountRates: discRows.map(rateDto),
+      items,
     };
   }
 
-  // ── Writes (Gifsy only, audited) ────────────────────────────────────────────────────────────
+  // ── Writes: receipts / adjustments / opening (tenant routes, Gifsy only, audited) ─────────────
 
   private todayKey(): string {
     return istDateKey(new Date());
@@ -362,83 +474,104 @@ export class FundService {
     }
   }
 
+  /** B9: a receipt-number clash (P2002 on the per-client unique) → a clear 409, nothing saved. */
+  private numberClash(e: unknown): never {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+      throw new ConflictException('Two entries were recorded at the same moment and got the same number — nothing was saved. Please try again.');
+    }
+    throw e;
+  }
+
   async recordReceipt(user: JwtPayload, dto: RecordFundReceiptDto) {
-    const clientId = this.assertManage(user);
+    const clientId = await this.assertManage(user);
     this.assertNotFuture(dto.receivedOn, 'The date received');
     const at = istDayStart(dto.receivedOn);
     const amountPaise = toPaise(dto.amountRupees);
     if (amountPaise <= 0n) throw new BadRequestException('Amount must be more than ₹0');
     const ref = dto.referenceNumber.trim();
-    return this.prisma.$transaction(async (tx) => {
-      await this.lock(tx, clientId);
-      await this.assertAfterOpening(tx, clientId, at, 'This receipt');
-      const dup = await tx.fundReceipt.findFirst({ where: { clientId, entryType: 'RECEIPT', referenceNumber: ref }, select: { receiptNumber: true } });
-      if (dup) throw new ConflictException(`A receipt with UTR / reference "${ref}" is already recorded (${dup.receiptNumber}).`);
-      const receipt = await tx.fundReceipt.create({
-        data: {
-          clientId,
-          entryType: 'RECEIPT',
-          receiptNumber: await this.nextNumber(tx, clientId, 'FR', dto.receivedOn),
-          amountPaise,
-          receivedAt: at,
-          paymentMode: dto.paymentMode?.trim() || 'BANK_TRANSFER',
-          referenceNumber: ref,
-          bankName: dto.bankName?.trim() || null,
-          notes: dto.notes?.trim() || null,
-          createdByUserId: user.sub,
-        },
+    if (!ref) throw new BadRequestException('UTR / reference is required');
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await this.lock(tx, clientId);
+        await this.assertAfterOpening(tx, clientId, at, 'This receipt');
+        // B7: the same UTR in another case / with spaces is the same receipt.
+        const dup = await tx.fundReceipt.findFirst({
+          where: { clientId, entryType: 'RECEIPT', referenceNumber: { equals: ref, mode: 'insensitive' } },
+          select: { receiptNumber: true },
+        });
+        if (dup) throw new ConflictException(`A receipt with UTR / reference "${ref}" is already recorded (${dup.receiptNumber}).`);
+        const receipt = await tx.fundReceipt.create({
+          data: {
+            clientId,
+            entryType: 'RECEIPT',
+            receiptNumber: await this.nextNumber(tx, clientId, 'FR', dto.receivedOn),
+            amountPaise,
+            receivedAt: at,
+            paymentMode: dto.paymentMode?.trim() || 'BANK_TRANSFER',
+            referenceNumber: ref,
+            bankName: dto.bankName?.trim() || null,
+            notes: dto.notes?.trim() || null,
+            createdByUserId: user.sub,
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            action: 'CREATE',
+            entityType: 'FUND_RECEIPT',
+            entityId: receipt.id,
+            actorId: user.sub,
+            newValues: { clientId, entryType: 'RECEIPT', amountPaise: amountPaise.toString(), receivedOn: dto.receivedOn, referenceNumber: ref },
+          },
+        });
+        return { id: receipt.id, receiptNumber: receipt.receiptNumber, amountPaise: n(amountPaise) };
       });
-      await tx.auditLog.create({
-        data: {
-          action: 'CREATE',
-          entityType: 'FUND_RECEIPT',
-          entityId: receipt.id,
-          actorId: user.sub,
-          newValues: { clientId, entryType: 'RECEIPT', amountPaise: amountPaise.toString(), receivedOn: dto.receivedOn, referenceNumber: ref },
-        },
-      });
-      return { id: receipt.id, receiptNumber: receipt.receiptNumber, amountPaise: n(amountPaise) };
-    });
+    } catch (e) {
+      return this.numberClash(e);
+    }
   }
 
   async recordAdjustment(user: JwtPayload, dto: RecordFundAdjustmentDto) {
-    const clientId = this.assertManage(user);
+    const clientId = await this.assertManage(user);
     this.assertNotFuture(dto.date, 'The adjustment date');
     const reason = dto.reason.trim();
     if (!reason) throw new BadRequestException('A reason is required for an adjustment');
     const at = istDayStart(dto.date);
     const amountPaise = toPaise(dto.amountRupees);
     if (amountPaise === 0n) throw new BadRequestException('An adjustment cannot be ₹0');
-    return this.prisma.$transaction(async (tx) => {
-      await this.lock(tx, clientId);
-      await this.assertAfterOpening(tx, clientId, at, 'This adjustment');
-      const row = await tx.fundReceipt.create({
-        data: {
-          clientId,
-          entryType: 'ADJUSTMENT',
-          receiptNumber: await this.nextNumber(tx, clientId, 'FA', dto.date),
-          amountPaise,
-          receivedAt: at,
-          paymentMode: 'ADJUSTMENT',
-          reason,
-          createdByUserId: user.sub,
-        },
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await this.lock(tx, clientId);
+        await this.assertAfterOpening(tx, clientId, at, 'This adjustment');
+        const row = await tx.fundReceipt.create({
+          data: {
+            clientId,
+            entryType: 'ADJUSTMENT',
+            receiptNumber: await this.nextNumber(tx, clientId, 'FA', dto.date),
+            amountPaise,
+            receivedAt: at,
+            paymentMode: 'ADJUSTMENT',
+            reason,
+            createdByUserId: user.sub,
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            action: 'CREATE',
+            entityType: 'FUND_ADJUSTMENT',
+            entityId: row.id,
+            actorId: user.sub,
+            newValues: { clientId, entryType: 'ADJUSTMENT', amountPaise: amountPaise.toString(), date: dto.date, reason },
+          },
+        });
+        return { id: row.id, receiptNumber: row.receiptNumber, amountPaise: n(amountPaise) };
       });
-      await tx.auditLog.create({
-        data: {
-          action: 'CREATE',
-          entityType: 'FUND_ADJUSTMENT',
-          entityId: row.id,
-          actorId: user.sub,
-          newValues: { clientId, entryType: 'ADJUSTMENT', amountPaise: amountPaise.toString(), date: dto.date, reason },
-        },
-      });
-      return { id: row.id, receiptNumber: row.receiptNumber, amountPaise: n(amountPaise) };
-    });
+    } catch (e) {
+      return this.numberClash(e);
+    }
   }
 
   async recordOpening(user: JwtPayload, dto: RecordOpeningBalanceDto) {
-    const clientId = this.assertManage(user);
+    const clientId = await this.assertManage(user);
     this.assertNotFuture(dto.asOfDate, 'The opening balance date');
     const at = istDayStart(dto.asOfDate);
     const amountPaise = toPaise(dto.amountRupees);
@@ -447,7 +580,8 @@ export class FundService {
         await this.lock(tx, clientId);
         const existing = await tx.fundReceipt.findFirst({ where: { clientId, entryType: 'OPENING_BALANCE' }, select: { receiptNumber: true } });
         if (existing) {
-          throw new ConflictException(`An opening balance is already recorded (${existing.receiptNumber}). Correct it with an adjustment.`);
+          // Owner D2 (2026-11-23): the opening balance can never be changed; a correction is an adjustment.
+          throw new ConflictException(`An opening balance is already recorded (${existing.receiptNumber}) and cannot be changed. Correct it with an adjustment.`);
         }
         const earlier = await tx.fundReceipt.count({ where: { clientId, receivedAt: { lt: at } } });
         if (earlier > 0) {
@@ -487,8 +621,10 @@ export class FundService {
     }
   }
 
-  async updateAlerts(user: JwtPayload, dto: UpdateFundAlertsDto) {
-    const clientId = this.assertManage(user);
+  // ── Writes: settings (Gifsy console, owner D6) ────────────────────────────────────────────────
+
+  async updateAlerts(user: JwtPayload, slug: string, dto: UpdateFundAlertsDto) {
+    const clientId = await this.consoleClient(user, slug, true);
     const recipients = [...new Set(dto.alertRecipients.map((e) => e.trim().toLowerCase()).filter(Boolean))];
     const threshold = dto.thresholdRupees == null ? null : toPaise(dto.thresholdRupees);
     if (threshold != null && recipients.length === 0) {
@@ -517,8 +653,8 @@ export class FundService {
     });
   }
 
-  async setAgencyFee(user: JwtPayload, dto: SetAgencyFeeDto) {
-    const clientId = this.assertManage(user);
+  async setAgencyFee(user: JwtPayload, slug: string, dto: SetAgencyFeeDto) {
+    const clientId = await this.consoleClient(user, slug, true);
     let rateBps: number | null = null;
     let flatPaise: bigint | null = null;
     if (dto.feeType === 'PERCENT') {
@@ -530,57 +666,122 @@ export class FundService {
       if (dto.percent != null) throw new BadRequestException('A flat fee has no %');
       flatPaise = toPaise(dto.flatRupees);
     }
-    return this.createRate(user, clientId, {
+    return this.saveRate(user, clientId, {
       kind: 'AGENCY_FEE',
       feeType: dto.feeType,
       rateBps,
       flatPaise,
       effectiveFrom: istDayStart(dto.effectiveFrom),
       note: dto.note?.trim() || null,
-    });
+    }, dto.confirmToken);
   }
 
-  async setBrandDiscount(user: JwtPayload, dto: SetBrandDiscountDto) {
-    const clientId = this.assertManage(user);
-    const brandKey = dto.brandKey.trim();
-    if (!/^(brand|hubble|item):.+/.test(brandKey)) throw new BadRequestException('Unknown voucher brand');
-    return this.createRate(user, clientId, {
+  /** Owner D4: the voucher discount is per voucher ITEM (RewardCatalog id) of this client. */
+  async setItemDiscount(user: JwtPayload, slug: string, dto: SetItemDiscountDto) {
+    const clientId = await this.consoleClient(user, slug, true);
+    const item = await this.prisma.rewardCatalog.findFirst({
+      where: { id: dto.rewardId, clientId, redemptionMode: 'GIFT_CARD' },
+      select: { id: true, name: true },
+    });
+    if (!item) throw new BadRequestException("That voucher item is not in this client's catalogue.");
+    return this.saveRate(user, clientId, {
       kind: 'VOUCHER_DISCOUNT',
-      brandKey,
-      brandLabel: dto.brandLabel.trim(),
+      rewardId: item.id,
+      rewardLabel: item.name,
       rateBps: Math.round(dto.percent * 100),
       effectiveFrom: istDayStart(dto.effectiveFrom),
       note: dto.note?.trim() || null,
-    });
+    }, dto.confirmToken);
   }
 
-  private async createRate(
-    user: JwtPayload,
-    clientId: string,
-    data: Omit<Prisma.FundRateUncheckedCreateInput, 'clientId' | 'createdById'>,
-  ) {
-    return this.prisma.$transaction(async (tx) => {
-      const row = await tx.fundRate.create({ data: { ...data, clientId, createdById: user.sub } });
+  /**
+   * Owner D1 (2026-11-23): a BACK-DATED rate (effectiveFrom ≤ now — incl. today, which re-prices lines committed
+   * earlier today) re-prices already-committed lines. The first call returns a PREVIEW (lines re-priced, balance
+   * change, period) and a confirm token; only a second call carrying that token saves — server-enforced. If the
+   * figures moved in between, the token no longer matches → 409 and a fresh preview is needed. The saved row records
+   * the re-pricing (→ an informational statement line) and the audit has old/new + the delta. A future-dated rate
+   * re-prices nothing and saves at once.
+   */
+  private async saveRate(user: JwtPayload, clientId: string, draft: RateDraft, confirmToken?: string) {
+    const now = new Date();
+    const backdated = draft.effectiveFrom.getTime() <= now.getTime();
+    let preview: { linesRepriced: number; deltaPaise: bigint; repricedFrom: Date | null; token: string } | null = null;
+    let previous: FundRateRow | null = null;
+    if (backdated) {
+      const inputs = await loadFundInputs(this.prisma, clientId);
+      preview = repricePreview(clientId, inputs, draft, now);
+      previous = rateInForce(
+        inputs.rates.filter((r) => r.kind === draft.kind && (draft.kind === 'AGENCY_FEE' || r.rewardId === draft.rewardId)),
+        draft.effectiveFrom,
+      );
+      if (!confirmToken) {
+        return {
+          saved: false,
+          requiresConfirmation: true,
+          preview: {
+            linesRepriced: preview.linesRepriced,
+            deltaPaise: n(preview.deltaPaise),
+            effectiveFrom: draft.effectiveFrom.toISOString(),
+            from: (preview.repricedFrom ?? draft.effectiveFrom).toISOString(),
+            to: now.toISOString(),
+          },
+          confirmToken: preview.token,
+        };
+      }
+      if (confirmToken !== preview.token) {
+        throw new ConflictException('The figures changed since the preview (new spend or another rate change). Review the new preview and confirm again.');
+      }
+    }
+    const row = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.fundRate.create({
+        data: {
+          clientId,
+          kind: draft.kind,
+          feeType: draft.feeType ?? null,
+          rewardId: draft.rewardId ?? null,
+          rewardLabel: draft.rewardLabel ?? null,
+          rateBps: draft.rateBps ?? null,
+          flatPaise: draft.flatPaise ?? null,
+          effectiveFrom: draft.effectiveFrom,
+          note: draft.note,
+          repricedLines: preview ? preview.linesRepriced : null,
+          repriceDeltaPaise: preview ? preview.deltaPaise : null,
+          repricedFrom: preview ? preview.repricedFrom : null,
+          createdById: user.sub,
+        },
+      });
       await tx.auditLog.create({
         data: {
           action: 'CREATE',
           entityType: 'FUND_RATE',
-          entityId: row.id,
+          entityId: created.id,
           actorId: user.sub,
+          oldValues: previous
+            ? { feeType: previous.feeType ?? null, rateBps: previous.rateBps ?? null, flatPaise: previous.flatPaise?.toString() ?? null, effectiveFrom: previous.effectiveFrom.toISOString() }
+            : undefined,
           newValues: {
             clientId,
-            kind: row.kind,
-            brandKey: row.brandKey,
-            feeType: row.feeType,
-            rateBps: row.rateBps,
-            flatPaise: row.flatPaise?.toString() ?? null,
-            effectiveFrom: row.effectiveFrom.toISOString(),
-            note: row.note,
+            kind: created.kind,
+            rewardId: created.rewardId,
+            feeType: created.feeType,
+            rateBps: created.rateBps,
+            flatPaise: created.flatPaise?.toString() ?? null,
+            effectiveFrom: created.effectiveFrom.toISOString(),
+            note: created.note,
+            backdated,
+            ...(preview ? { linesRepriced: preview.linesRepriced, balanceDeltaPaise: preview.deltaPaise.toString() } : {}),
           },
         },
       });
-      return { id: row.id };
+      return created;
     });
+    return {
+      saved: true,
+      id: row.id,
+      scheduled: !backdated,
+      effectiveFrom: row.effectiveFrom.toISOString(),
+      ...(preview ? { linesRepriced: preview.linesRepriced, deltaPaise: n(preview.deltaPaise) } : {}),
+    };
   }
 
   private async userNames(ids: Array<string | null>): Promise<Map<string, string>> {
@@ -590,122 +791,157 @@ export class FundService {
     return new Map(users.map((u) => [u.id, u.name]));
   }
 
-  // ── Digest + daily low-balance alert ─────────────────────────────────────────────────────────
+  // ── Digest line + daily low-balance e-mail (ONE statement compute, inside the digest run) ─────
 
-  /** null = the client has no fund set-up at all (no entry, no rate, no settings) → the digest shows nothing. */
-  async digestFigures(clientId: string): Promise<FundDigestFigures | null> {
+  /**
+   * For the Daily Ops Digest (called per tenant INSIDE the digest's lease + time budget — A7): the figures and, when
+   * due, today's low-balance e-mail, from ONE statement compute. null figures = no fund set-up (no line). Alerts are
+   * skipped (and say why) for a client without an opening balance, a non-ACTIVE client, no threshold / recipients.
+   * At most one e-mail per client per IST day (compare-and-set claim; released on failure or relay rejection — B6, so
+   * a forced re-run retries). Never throws for an e-mail problem; never blocks anything.
+   */
+  async digestAndAlert(clientId: string, nowMs: number): Promise<{ figures: FundDigestFigures | null; alert?: FundAlertOutcome }> {
     const [settings, entryCount, rateCount] = await Promise.all([
       this.settingsRow(clientId),
       this.prisma.fundReceipt.count({ where: { clientId } }),
       this.prisma.fundRate.count({ where: { clientId } }),
     ]);
-    if (!settings && entryCount === 0 && rateCount === 0) return null;
+    if (!settings && entryCount === 0 && rateCount === 0) return { figures: null };
     const { stmt } = await this.compute(clientId);
     const threshold = settings?.lowBalanceThresholdPaise ?? null;
-    return {
+    const to = recipientsOf(settings?.alertRecipients);
+    const isLow = threshold != null && stmt.totals.balancePaise < threshold;
+    const figures: FundDigestFigures = {
       balancePaise: stmt.totals.balancePaise,
       committedPaise: stmt.totals.committedPaise,
       thresholdPaise: threshold,
-      isLow: threshold != null && stmt.totals.balancePaise < threshold,
+      isLow,
       hasOpening: !!stmt.openingDate,
-      missingRates: (stmt.flagCounts.NO_BRAND_RATE ?? 0) + (stmt.flagCounts.NO_FEE_RATE ?? 0),
-      recipients: recipientsOf(settings?.alertRecipients).length,
+      missingRates: (stmt.flagCounts.NO_ITEM_RATE ?? 0) + (stmt.flagCounts.NO_FEE_RATE ?? 0),
+      recipients: to.length,
       lastAlertSentOn: settings?.lowAlertLastSentOn ?? null,
       lastAlertError: settings?.lowAlertLastError ?? null,
     };
-  }
-
-  /**
-   * Once-a-day low-balance e-mails (called by the daily scheduled-reports run, BEFORE the digest so the digest can
-   * report each outcome). Never throws; never blocks anything. At most one e-mail per client per IST day
-   * (fund_settings.lowAlertLastSentOn, claimed with a compare-and-set before sending). A failure is stored on the
-   * settings row (shown on the screen + the digest) and logged as an error.
-   */
-  async runLowBalanceAlerts(nowMs: number): Promise<Map<string, FundAlertOutcome>> {
-    const out = new Map<string, FundAlertOutcome>();
+    if (threshold == null) return { figures, alert: { clientId, status: 'no-threshold' } };
+    if (!stmt.openingDate) return { figures, alert: { clientId, status: 'no-opening' } };
+    const client = await this.clientActive(clientId);
+    if (!client.active) return { figures, alert: { clientId, status: 'client-inactive' } };
+    if (!isLow) return { figures, alert: { clientId, status: 'not-low' } };
+    if (to.length === 0) return { figures, alert: { clientId, status: 'no-recipients' } };
     const today = istDateKey(new Date(nowMs));
-    let rows: Array<{ clientId: string; lowBalanceThresholdPaise: bigint | null; alertRecipients: unknown; lowAlertLastSentOn: string | null }>;
+    if (settings!.lowAlertLastSentOn === today) return { figures, alert: { clientId, status: 'already-sent-today', recipients: settings!.lowAlertLastRecipients ?? to.length } };
+    const target = fundAlertTarget();
+    if (target.mode === 'off') return { figures, alert: { clientId, status: 'disabled-in-environment' } };
+    if (!this.msg91.isEmailConfigured()) {
+      const error = 'E-mail is not configured on this server (MSG91_SMTP_PASS) — the low-balance e-mail was NOT sent.';
+      await this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastError: error } });
+      this.logger.error(`Fund low-balance alert for ${clientId}: ${error}`);
+      return { figures, alert: { clientId, status: 'email-not-configured', error } };
+    }
+    // Claim today's send (compare-and-set) so two concurrent runs can never both e-mail.
+    const claim = await this.prisma.fundSettings.updateMany({
+      where: { clientId, OR: [{ lowAlertLastSentOn: null }, { lowAlertLastSentOn: { not: today } }] },
+      data: { lowAlertLastSentOn: today },
+    });
+    if (claim.count === 0) return { figures, alert: { clientId, status: 'already-sent-today', recipients: to.length } };
+    const release = (error: string) =>
+      this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastSentOn: settings!.lowAlertLastSentOn, lowAlertLastError: error } });
+    const mail = buildLowBalanceEmail({
+      clientName: client.name,
+      dateLabel: formatDateIST(new Date(nowMs)),
+      balancePaise: stmt.totals.balancePaise,
+      committedPaise: stmt.totals.committedPaise,
+      thresholdPaise: threshold,
+    });
+    const sendTo = target.mode === 'live' ? to : [target.to];
+    const subject = target.mode === 'live' ? mail.subject : `[TEST — would go to ${to.length} recipient(s): ${to.join(', ')}] ${mail.subject}`;
     try {
-      rows = await this.prisma.fundSettings.findMany({
-        where: { lowBalanceThresholdPaise: { not: null }, clientId: { not: REPORTS_CLIENT_ID } },
-        select: { clientId: true, lowBalanceThresholdPaise: true, alertRecipients: true, lowAlertLastSentOn: true },
-      });
-    } catch (e) {
-      this.logger.error(`Fund low-balance alerts: could not read the settings: ${(e as Error)?.message ?? e}`);
-      return out;
-    }
-    for (const s of rows) {
-      const clientId = s.clientId;
-      try {
-        const to = recipientsOf(s.alertRecipients);
-        const { stmt } = await this.compute(clientId);
-        const threshold = s.lowBalanceThresholdPaise!;
-        if (stmt.totals.balancePaise >= threshold) {
-          out.set(clientId, { clientId, status: 'not-low' });
-          continue;
-        }
-        if (to.length === 0) {
-          out.set(clientId, { clientId, status: 'no-recipients' });
-          continue;
-        }
-        if (s.lowAlertLastSentOn === today) {
-          out.set(clientId, { clientId, status: 'already-sent-today', recipients: to.length });
-          continue;
-        }
-        if (!this.msg91.isEmailConfigured()) {
-          const error = 'E-mail is not configured on this server (MSG91_SMTP_PASS) — the low-balance e-mail was NOT sent.';
-          await this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastError: error } });
-          this.logger.error(`Fund low-balance alert for ${clientId}: ${error}`);
-          out.set(clientId, { clientId, status: 'email-not-configured', error });
-          continue;
-        }
-        // Claim today's send (compare-and-set) so two concurrent runs can never both e-mail.
-        const claim = await this.prisma.fundSettings.updateMany({
-          where: { clientId, OR: [{ lowAlertLastSentOn: null }, { lowAlertLastSentOn: { not: today } }] },
-          data: { lowAlertLastSentOn: today },
-        });
-        if (claim.count === 0) {
-          out.set(clientId, { clientId, status: 'already-sent-today', recipients: to.length });
-          continue;
-        }
-        const client = await this.prisma.client.findUnique({ where: { id: clientId }, select: { internalName: true, branding: true } });
-        const display = ((client?.branding ?? {}) as Record<string, unknown>).displayName;
-        const clientName = typeof display === 'string' && display.trim() ? display.trim() : client?.internalName ?? clientId;
-        const mail = buildLowBalanceEmail({
-          clientName,
-          dateLabel: formatDateIST(new Date(nowMs)),
-          balancePaise: stmt.totals.balancePaise,
-          committedPaise: stmt.totals.committedPaise,
-          thresholdPaise: threshold,
-        });
-        try {
-          const res = await this.msg91.sendEmail({ to, subject: mail.subject, html: mail.html });
-          const rejected = res.rejected.length ? `relay rejected ${res.rejected.join(', ')}` : null;
-          await this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastError: rejected } });
-          await this.prisma.auditLog.create({
-            data: {
-              action: 'EXPORT',
-              entityType: 'FUND_LOW_BALANCE_ALERT',
-              entityId: clientId,
-              metadata: { clientId, date: today, recipients: to, balancePaise: stmt.totals.balancePaise.toString(), thresholdPaise: threshold.toString(), rejected: res.rejected },
-            },
-          });
-          out.set(clientId, rejected ? { clientId, status: 'failed', error: rejected, recipients: to.length } : { clientId, status: 'sent', recipients: to.length });
-        } catch (e) {
-          const error = ((e as Error)?.message ?? String(e)).slice(0, 300);
-          // Release today's claim so a forced re-run can retry; keep the error visible.
-          await this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastSentOn: s.lowAlertLastSentOn, lowAlertLastError: error } });
-          this.logger.error(`Fund low-balance alert for ${clientId} failed: ${error}`);
-          out.set(clientId, { clientId, status: 'failed', error, recipients: to.length });
-        }
-      } catch (e) {
-        const error = ((e as Error)?.message ?? String(e)).slice(0, 300);
-        this.logger.error(`Fund low-balance alert for ${clientId} failed: ${error}`);
-        out.set(clientId, { clientId, status: 'failed', error });
+      const res = await this.msg91.sendEmail({ to: sendTo, subject, html: mail.html });
+      if (res.rejected.length > 0) {
+        const error = `the mail relay rejected ${res.rejected.join(', ')}`;
+        await release(error); // B6: a forced re-run retries
+        this.logger.error(`Fund low-balance alert for ${clientId}: ${error}`);
+        return { figures, alert: { clientId, status: 'failed', error, recipients: sendTo.length } };
       }
+      await this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastError: null, lowAlertLastRecipients: sendTo.length } });
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'EXPORT',
+          entityType: 'FUND_LOW_BALANCE_ALERT',
+          entityId: clientId,
+          metadata: { clientId, date: today, mode: target.mode, recipients: sendTo, balancePaise: stmt.totals.balancePaise.toString(), thresholdPaise: threshold.toString() },
+        },
+      });
+      return { figures, alert: { clientId, status: target.mode === 'live' ? 'sent' : 'sent-to-test-address', recipients: sendTo.length } };
+    } catch (e) {
+      const error = ((e as Error)?.message ?? String(e)).slice(0, 300);
+      await release(error);
+      this.logger.error(`Fund low-balance alert for ${clientId} failed: ${error}`);
+      return { figures, alert: { clientId, status: 'failed', error, recipients: sendTo.length } };
     }
-    return out;
   }
+}
+
+/**
+ * Owner D1 preview: the statement with and without the new rate (saved "now"). Lines re-priced = spend lines whose
+ * charge differs; delta = the balance change (negative = the advance goes down). The token binds the client, the
+ * exact rate and the computed figures — a confirm whose figures no longer match is refused.
+ */
+export function repricePreview(
+  clientId: string,
+  inputs: FundInputs,
+  draft: RateDraft,
+  now: Date,
+): { linesRepriced: number; deltaPaise: bigint; repricedFrom: Date | null; token: string } {
+  const before = statementOf(inputs);
+  const newRow: FundRateRow = { ...draft, createdAt: now };
+  const after = statementOf({ ...inputs, rates: [...inputs.rates, newRow] });
+  const charged = (s: FundStatement) => {
+    const m = new Map<string, { charged: bigint; at: Date }>();
+    for (const l of s.lines) if (l.event === 'CHARGE') m.set(`${l.source.kind}:${l.source.id}:${l.ref}`, { charged: l.chargedPaise, at: l.date });
+    return m;
+  };
+  const b = charged(before);
+  const a = charged(after);
+  let lines = 0;
+  let from: Date | null = null;
+  for (const [k, v] of a) {
+    const old = b.get(k);
+    if (!old || old.charged !== v.charged) {
+      lines += 1;
+      if (!from || v.at.getTime() < from.getTime()) from = v.at;
+    }
+  }
+  const deltaPaise = after.totals.balancePaise - before.totals.balancePaise;
+  const fingerprint = inputs.rates.length + ':' + inputs.rates.reduce((m, r) => Math.max(m, r.createdAt.getTime()), 0);
+  const token = createHash('sha256')
+    .update(
+      JSON.stringify({
+        clientId,
+        kind: draft.kind,
+        rewardId: draft.rewardId ?? null,
+        feeType: draft.feeType ?? null,
+        rateBps: draft.rateBps ?? null,
+        flatPaise: draft.flatPaise?.toString() ?? null,
+        effectiveFrom: draft.effectiveFrom.toISOString(),
+        lines,
+        delta: deltaPaise.toString(),
+        fingerprint,
+      }),
+    )
+    .digest('hex')
+    .slice(0, 32);
+  return { linesRepriced: lines, deltaPaise, repricedFrom: from, token };
+}
+
+/** The voucher item's brand text for the operator (metadata brand / brandName; never used for pricing). */
+function brandTextOf(m: unknown): string | null {
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return null;
+  for (const k of ['brand', 'brandName']) {
+    const v = (m as Record<string, unknown>)[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return null;
 }
 
 export function recipientsOf(v: unknown): string[] {
@@ -734,7 +970,7 @@ export function lineDto(l: FundLine) {
     paidAt: l.paidAt ? l.paidAt.toISOString() : null,
     returnedAt: l.returnedAt ? l.returnedAt.toISOString() : null,
     utr: l.utr,
-    brandLabel: l.brandLabel,
+    itemLabel: l.itemLabel,
     rateLabel: l.rateLabel,
     receivablePaise: n(l.receivablePaise),
     flags: l.flags,

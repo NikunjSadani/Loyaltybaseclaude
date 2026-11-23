@@ -27,20 +27,25 @@
  *    re-banked by a later download) and is flagged. PAID then reversed (PayoutReversalAllocation APPLIED_RECEIVABLE)
  *    stays paid + a receivable (receivablePaise, else amountPaise for a legacy row). face = amountPaise (gross).
  *  TDS_194C — TdsRecoveryEntry section SEC_194C (the 194C TDS Gifsy deposits — gross-up, and no-PAN 194C paid in
- *    full — recovered from this tenant pro-rata): tenantSharePaise (a later true-up delta may be negative), at
- *    createdAt (the bank-file run that crystallised it). 194R recovery and DEDUCT-method TDS are excluded.
+ *    full — recovered from this tenant pro-rata). Owner D3 (2026-11-23): dated WITH ITS PAYOUT. A recovery row is
+ *    keyed by (PAN or no-PAN outlet, FY) and is a cumulative delta, not per payout, so for each key the NET recovery
+ *    (Σ tenantSharePaise — true-ups included) is allocated pro rata by amount over the client's 194C payout entries
+ *    of that key and FY that went to the bank (status ≠ PENDING; PAN = the entry's payeePan snapshot, no-PAN = the
+ *    outlet), largest remainder in paise. Each piece is a TDS line with its payout's commit date and status (paid /
+ *    committed / returned when the payout was reversed before payment). A key with no matching entry keeps its
+ *    recovery rows as lines on the day they were recorded, flagged TDS_UNALLOCATED. 194R / DEDUCT TDS excluded.
  */
 import { computeFrozenValuePaise } from '../rewards/gift-value.helper';
 import type { PrismaService } from '../prisma/prisma.service';
-import { voucherBrandOf } from './fund-brand';
-import type { FundFlag, FundManualEntry, FundRateRow, FundSpendItem } from './fund-statement.engine';
+import { fyLabelForPeriod } from '../tds/tds.helpers';
+import type { FundFlag, FundManualEntry, FundRateChange, FundRateRow, FundReceivable, FundSpendItem } from './fund-statement.engine';
 
 const PAGE = 2000;
 const REFUNDED: ReadonlySet<string> = new Set(['FAILED', 'CANCELLED', 'RETURNED']);
 
 type Db = Pick<
   PrismaService,
-  'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'creditField' | 'tdsRecoveryEntry' | 'fundReceipt' | 'fundRate'
+  'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'creditField' | 'creditReversal' | 'tdsRecoveryEntry' | 'fundReceipt' | 'fundRate'
 >;
 
 /** Keyset pages ordered by id (id is unique + NOT NULL). */
@@ -80,7 +85,7 @@ export interface VoucherOrderRow {
   deliveredAt: Date | null;
   cancelledAt: Date | null;
   updatedAt: Date;
-  reward: { id: string; name: string; metadata: unknown } | null;
+  reward: { id: string; name: string } | null;
   rewardId: string;
   statusHistory: Array<{ toStatus: string; createdAt: Date }>;
 }
@@ -103,16 +108,19 @@ export function voucherItem(o: VoucherOrderRow): FundSpendItem | null {
     });
     flags.push(face > 0n ? 'FACE_RECOMPUTED' : 'FACE_UNKNOWN');
   }
-  const brand = voucherBrandOf(o.reward ?? { id: o.rewardId, name: 'Voucher', metadata: null });
+  const itemLabel = o.reward?.name ?? 'Voucher';
   let status: FundSpendItem['status'] = 'COMMITTED';
   let paidAt: Date | null = null;
   let returnedAt: Date | null = null;
   if (o.status === 'DELIVERED') {
     status = 'PAID';
-    paidAt = o.deliveredAt ?? lastAt(hist, 'DELIVERED') ?? o.updatedAt;
+    // Event timestamps only (never updatedAt — any later edit would move it).
+    paidAt = o.deliveredAt ?? lastAt(hist, 'DELIVERED');
+    if (!paidAt) flags.push('DATE_ESTIMATED');
   } else if (REFUNDED.has(o.status)) {
     status = 'RETURNED';
-    returnedAt = lastAt(hist, o.status) ?? o.cancelledAt ?? o.updatedAt;
+    returnedAt = lastAt(hist, o.status) ?? o.cancelledAt;
+    if (!returnedAt) flags.push('DATE_ESTIMATED'); // placed on its commit day (nets to zero there)
   } else if (meta?.hubbleNeedsReconcile === true) {
     flags.push('HUBBLE_NEEDS_RECONCILE');
   }
@@ -120,11 +128,12 @@ export function voucherItem(o: VoucherOrderRow): FundSpendItem | null {
     key: `order:${o.id}`,
     type: 'VOUCHER',
     ref: o.orderNumber,
-    description: `Voucher — ${o.reward?.name ?? brand.brandLabel}`,
+    description: `Voucher — ${itemLabel}`,
     source: { kind: 'redemptionOrder', id: o.id },
     facePaise: face,
-    brandKey: brand.brandKey,
-    brandLabel: brand.brandLabel,
+    // Owner D4: the discount is per voucher ITEM — the order's rewardId is stable, so past orders keep their item.
+    rewardId: o.rewardId,
+    itemLabel,
     status,
     committedAt,
     paidAt,
@@ -159,14 +168,19 @@ export function cashItem(t: CashTxnRow, order: CashOrderInfo | undefined): FundS
   let status: FundSpendItem['status'] = 'COMMITTED';
   let paidAt: Date | null = null;
   let returnedAt: Date | null = null;
+  const flags: FundFlag[] = [];
   const orderRefunded = !!order && REFUNDED.has(order.status);
   if (t.status === 'SUCCESS') {
     status = 'PAID';
-    paidAt = t.completedAt ?? t.updatedAt;
+    paidAt = t.completedAt; // event timestamp only — never updatedAt
+    if (!paidAt) flags.push('DATE_ESTIMATED');
   } else if (t.status === 'FAILED' || t.status === 'REVERSED' || orderRefunded) {
     status = 'RETURNED';
     const hist = order ? [...order.statusHistory].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()) : [];
-    returnedAt = t.reversedAt ?? (order && orderRefunded ? lastAt(hist, order.status) : null) ?? t.updatedAt;
+    // The order's refund history row (the UTR-FAILED path flips the order to FAILED in the same tx), else reversedAt.
+    const orderRow = orderRefunded ? lastAt(hist, order!.status) : null;
+    returnedAt = orderRow ?? t.reversedAt;
+    if (!returnedAt) flags.push('DATE_ESTIMATED'); // placed on its commit day (nets to zero there)
   }
   const rail = t.payoutMode === 'UPI' ? 'UPI' : 'bank';
   return {
@@ -181,6 +195,7 @@ export function cashItem(t: CashTxnRow, order: CashOrderInfo | undefined): FundS
     paidAt,
     returnedAt,
     utr: status === 'PAID' ? t.providerRefId : null,
+    flags,
   };
 }
 
@@ -200,10 +215,22 @@ export interface CreditEntryRow {
   createdAt: Date;
   updatedAt: Date;
   batch: { batchCode: string; sourceKind: string | null };
-  reversalAllocations: Array<{ state: string; amountPaise: bigint; receivablePaise: bigint; updatedAt: Date }>;
+  reversalAllocations: Array<{ state: string; amountPaise: bigint; receivablePaise: bigint; creditReversal: { approvedAt: Date | null } | null }>;
 }
 
-export function creditItem(e: CreditEntryRow, visibilityFieldIds: ReadonlySet<string>): FundSpendItem | null {
+/** What the LEGACY (pre-allocation) payout-reversal path recorded for an entry (from CreditReversal rows). */
+export interface LegacyReversalInfo {
+  /** Approved-at of the reversal that consumed the entry (CreditReversal.approvedAt). */
+  approvedAt: Date | null;
+  /** Receivable for a PAID entry the legacy path consumed (net released = amount − TDS withheld). */
+  receivablePaise: bigint;
+}
+
+export function creditItem(
+  e: CreditEntryRow,
+  visibilityFieldIds: ReadonlySet<string>,
+  legacy?: LegacyReversalInfo,
+): FundSpendItem | null {
   if (e.batch.sourceKind === 'VENDOR_IMPORT') return null;
   const isVis = visibilityFieldIds.has(e.fieldId);
   const flags: FundFlag[] = [];
@@ -211,16 +238,27 @@ export function creditItem(e: CreditEntryRow, visibilityFieldIds: ReadonlySet<st
   let paidAt: Date | null = null;
   let returnedAt: Date | null = null;
   let receivable = 0n;
-  if (e.status === 'PAID') {
+  // A paid entry keeps paidAt for ever (a FAILED / PENDING entry never has one). So a REVERSED entry WITH a paidAt was
+  // paid before the reversal — incl. a fully TDS-withheld entry that both reversal engines flip PAID → REVERSED: the
+  // money (or the deposited TDS) already left, so it stays PAID (never "returned"); recoverable cash is a receivable.
+  const wasPaid = e.status === 'PAID' || (e.status === 'REVERSED' && e.paidAt != null);
+  if (wasPaid) {
     status = 'PAID';
-    paidAt = e.paidAt ?? e.updatedAt;
-    for (const a of e.reversalAllocations) {
-      if (a.state === 'APPLIED_RECEIVABLE') receivable += a.receivablePaise > 0n ? a.receivablePaise : a.amountPaise;
+    paidAt = e.paidAt;
+    if (!paidAt) flags.push('DATE_ESTIMATED');
+    let fromAllocations = false;
+    for (const al of e.reversalAllocations) {
+      if (al.state === 'APPLIED_RECEIVABLE') {
+        fromAllocations = true;
+        receivable += al.receivablePaise > 0n ? al.receivablePaise : al.amountPaise;
+      }
     }
+    if (!fromAllocations && legacy && legacy.receivablePaise > 0n) receivable += legacy.receivablePaise;
   } else if (e.status === 'REVERSED') {
     status = 'RETURNED';
-    const applied = e.reversalAllocations.find((a) => a.state === 'APPLIED_CANCELLED');
-    returnedAt = applied?.updatedAt ?? e.updatedAt;
+    const applied = e.reversalAllocations.find((al) => al.state === 'APPLIED_CANCELLED');
+    returnedAt = applied?.creditReversal?.approvedAt ?? legacy?.approvedAt ?? null;
+    if (!returnedAt) flags.push('DATE_ESTIMATED'); // placed on its commit day (nets to zero there)
   } else if (e.status === 'FAILED') {
     flags.push('FAILED_AWAITING_REBANK');
   }
@@ -251,27 +289,111 @@ export interface TdsRecoveryRow {
   createdAt: Date;
 }
 
-const maskPan = (p: string) => (p.startsWith('__NO_PAN__') ? `no PAN (outlet ${p.split(':').slice(1).join(':') || '?'})` : `PAN …${p.slice(-4)}`);
+/** A 194C payout entry that can carry a share of its PAN / outlet's recovered TDS. */
+export interface Tds194cEntry {
+  id: string;
+  outletId: string;
+  period: string;
+  amountPaise: bigint;
+  status: string;
+  payeePan: string | null;
+  /** The entry's own spend line (for its commit date + status). */
+  item: FundSpendItem;
+}
 
-export function tdsItem(r: TdsRecoveryRow): FundSpendItem {
-  return {
-    key: `tds:${r.id}`,
-    type: 'TDS_194C',
-    ref: `TDS 194C · ${r.fyLabel}`,
-    description: `${r.tenantSharePaise < 0n ? 'TDS 194C true-up (credit)' : 'TDS 194C borne by Gifsy'} — ${maskPan(r.panNumber)}`,
-    source: { kind: 'tdsRecoveryEntry', id: r.id },
-    facePaise: r.tenantSharePaise,
-    // Crystallised when the bank file is made; there is no separate "paid" step for the tenant's share.
-    status: 'PAID',
-    committedAt: r.createdAt,
-    paidAt: r.createdAt,
-  };
+const NO_PAN = '__NO_PAN__';
+const maskPan = (p: string) => (p.startsWith(NO_PAN) ? `no PAN (outlet ${p.split(':').slice(1).join(':') || '?'})` : `PAN …${p.slice(-4)}`);
+
+/** Largest-remainder split of `total` (may be negative) by non-negative weights. Σ result === total. */
+export function splitPaise(total: bigint, weights: bigint[]): bigint[] {
+  const w = weights.reduce((x, y) => x + y, 0n);
+  if (w <= 0n) return weights.map(() => 0n);
+  const neg = total < 0n;
+  const t = neg ? -total : total;
+  const base = weights.map((x) => (t * x) / w);
+  let left = t - base.reduce((x, y) => x + y, 0n);
+  const order = weights
+    .map((x, i) => ({ i, rem: (t * x) % w }))
+    .sort((p1, p2) => (p2.rem > p1.rem ? 1 : p2.rem < p1.rem ? -1 : p1.i - p2.i));
+  for (const o of order) {
+    if (left <= 0n) break;
+    base[o.i] += 1n;
+    left -= 1n;
+  }
+  return neg ? base.map((x) => -x) : base;
+}
+
+/**
+ * 194C TDS lines dated with their payouts (owner D3). See the header for the rule. Pure.
+ */
+export function tdsItems(recoveries: readonly TdsRecoveryRow[], entries: readonly Tds194cEntry[]): FundSpendItem[] {
+  const byKey = new Map<string, TdsRecoveryRow[]>();
+  for (const r of recoveries) {
+    const pan = r.panNumber.trim();
+    const k = `${pan.startsWith(NO_PAN) ? pan : pan.toUpperCase()}|${r.fyLabel}`;
+    const list = byKey.get(k) ?? [];
+    list.push(r);
+    byKey.set(k, list);
+  }
+  const out: FundSpendItem[] = [];
+  for (const [k, rows] of byKey) {
+    const [pan, fy] = k.split('|');
+    const total = rows.reduce((x, r) => x + r.tenantSharePaise, 0n);
+    if (total === 0n) continue;
+    const noPanOutlet = pan.startsWith(NO_PAN) ? pan.slice(NO_PAN.length + 1) : null;
+    const cands = entries.filter((e) => {
+      if (e.status === 'PENDING' || fyLabelForPeriod(e.period) !== fy) return false;
+      if (noPanOutlet != null) return e.outletId === noPanOutlet && (!e.payeePan || e.payeePan.startsWith(NO_PAN));
+      return (e.payeePan ?? '').trim().toUpperCase() === pan;
+    });
+    const weights = cands.map((e) => (e.amountPaise > 0n ? e.amountPaise : 0n));
+    if (cands.length === 0 || weights.every((x) => x === 0n)) {
+      for (const r of rows) {
+        if (r.tenantSharePaise === 0n) continue;
+        out.push({
+          key: `tds:${r.id}`,
+          type: 'TDS_194C',
+          ref: `TDS 194C · ${r.fyLabel}`,
+          description: `${r.tenantSharePaise < 0n ? 'TDS 194C true-up (credit)' : 'TDS 194C borne by Gifsy'} — ${maskPan(pan)} (no matching payout found — shown on the day it was recorded)`,
+          source: { kind: 'tdsRecoveryEntry', id: r.id },
+          facePaise: r.tenantSharePaise,
+          status: 'PAID',
+          committedAt: r.createdAt,
+          paidAt: r.createdAt,
+          flags: ['TDS_UNALLOCATED'],
+        });
+      }
+      continue;
+    }
+    const parts = splitPaise(total, weights);
+    cands.forEach((e, i) => {
+      if (parts[i] === 0n) return;
+      out.push({
+        key: `tds:${k}:${e.id}`,
+        type: 'TDS_194C',
+        ref: `TDS 194C · ${e.item.ref}`,
+        description: `TDS 194C borne by Gifsy on ${e.item.description} — ${maskPan(pan)}, FY ${fy}`,
+        source: { kind: 'creditPayoutEntry', id: e.id },
+        facePaise: parts[i],
+        status: e.item.status,
+        committedAt: e.item.committedAt,
+        paidAt: e.item.paidAt ?? null,
+        returnedAt: e.item.returnedAt ?? null,
+        flags: (e.item.flags ?? []).filter((f) => f === 'DATE_ESTIMATED'),
+      });
+    });
+  }
+  return out;
 }
 
 // ── Loader ───────────────────────────────────────────────────────────────────────────────────────
 
 export interface FundInputs {
   items: FundSpendItem[];
+  /** Receivables not tied to one spend line (legacy reversals approved before entries were recorded on them). */
+  extraReceivables: FundReceivable[];
+  /** Confirmed back-dated rate changes (owner D1) → informational statement lines. */
+  rateChanges: FundRateChange[];
   entries: FundManualEntry[];
   rates: FundRateRow[];
   /** Raw rows for the Receipts / Rates sheets + screen. */
@@ -292,13 +414,16 @@ export interface FundInputs {
   rateRows: Array<{
     id: string;
     kind: string;
-    brandKey: string | null;
-    brandLabel: string | null;
+    rewardId: string | null;
+    rewardLabel: string | null;
     feeType: string | null;
     rateBps: number | null;
     flatPaise: bigint | null;
     effectiveFrom: Date;
     note: string | null;
+    repricedLines: number | null;
+    repriceDeltaPaise: bigint | null;
+    repricedFrom: Date | null;
     createdById: string | null;
     createdAt: Date;
   }>;
@@ -332,7 +457,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
         cancelledAt: true,
         updatedAt: true,
         rewardId: true,
-        reward: { select: { id: true, name: true, metadata: true } },
+        reward: { select: { id: true, name: true } },
         statusHistory: {
           where: { toStatus: { in: ['CONFIRMED', 'DELIVERED', 'FAILED', 'CANCELLED', 'RETURNED'] } },
           select: { toStatus: true, createdAt: true },
@@ -397,12 +522,43 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
         createdAt: true,
         updatedAt: true,
         batch: { select: { batchCode: true, sourceKind: true } },
-        reversalAllocations: { select: { state: true, amountPaise: true, receivablePaise: true, updatedAt: true } },
+        tdsDeductedPaise: true,
+        tdsSection: true,
+        payeePan: true,
+        reversalAllocations: { select: { state: true, amountPaise: true, receivablePaise: true, creditReversal: { select: { approvedAt: true } } } },
       },
       orderBy: { id: 'asc' },
       ...p,
     }),
   );
+
+  // LEGACY payout reversals (approved before the allocation engine — no PayoutReversalAllocation rows): the consumed
+  // entries are listed on CreditReversal.consumedPayoutEntryIds; a PAID one became a receivable of its net released
+  // amount (credits.service: amount − TDS withheld, summed into shortfallPaise). A legacy reversal approved before
+  // consumedPayoutEntryIds existed cannot be tied to entries → a reversal-level receivable of its shortfallPaise.
+  const legacyReversals = await db.creditReversal.findMany({
+    where: { clientId, awardType: 'PAYOUT', status: { in: ['APPROVED', 'PARTIAL'] }, payoutAllocations: { none: {} } },
+    select: { id: true, outletName: true, fieldName: true, period: true, approvedAt: true, shortfallPaise: true, consumedPayoutEntryIds: true },
+  });
+  const legacyByEntry = new Map<string, { approvedAt: Date | null }>();
+  const orphanReceivables: FundReceivable[] = [];
+  for (const r of legacyReversals) {
+    const ids = Array.isArray(r.consumedPayoutEntryIds)
+      ? (r.consumedPayoutEntryIds as unknown[]).filter((x): x is string => typeof x === 'string')
+      : null;
+    if (ids && ids.length > 0) {
+      for (const id of ids) legacyByEntry.set(id, { approvedAt: r.approvedAt });
+    } else if (r.shortfallPaise > 0n) {
+      orphanReceivables.push({
+        ref: `Reversal ${r.id}`,
+        description: `Paid credit payout reversed (older reversal — entries not recorded) — ${r.fieldName} (${r.period}) to ${r.outletName}`,
+        type: 'CREDIT_PAYOUT',
+        source: { kind: 'creditReversal', id: r.id },
+        paidAt: null,
+        amountPaise: r.shortfallPaise,
+      });
+    }
+  }
 
   const recoveries = await allPages((p) =>
     db.tdsRecoveryEntry.findMany({
@@ -419,14 +575,37 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
     if (it) items.push(it);
   }
   for (const t of txns) items.push(cashItem(t, t.redemptionOrderId ? cashOrders.get(t.redemptionOrderId) : undefined));
+  const tds194c: Tds194cEntry[] = [];
   for (const e of entries) {
-    const it = creditItem(e as CreditEntryRow, visIds);
-    if (it) items.push(it);
+    const lg = legacyByEntry.get(e.id);
+    const withheld = e.tdsDeductedPaise ?? 0n;
+    const net = e.amountPaise - (withheld > 0n ? withheld : 0n);
+    const legacy: LegacyReversalInfo | undefined = lg
+      ? { approvedAt: lg.approvedAt, receivablePaise: e.status === 'PAID' && net > 0n ? net : 0n }
+      : undefined;
+    const it = creditItem(e as unknown as CreditEntryRow, visIds, legacy);
+    if (it) {
+      items.push(it);
+      if (e.tdsSection === 'SEC_194C') {
+        tds194c.push({ id: e.id, outletId: e.outletId, period: e.period, amountPaise: e.amountPaise, status: e.status, payeePan: e.payeePan, item: it });
+      }
+    }
   }
-  for (const r of recoveries) if (r.tenantSharePaise !== 0n) items.push(tdsItem(r));
+  items.push(...tdsItems(recoveries, tds194c));
 
   return {
     items,
+    extraReceivables: orphanReceivables,
+    rateChanges: rateRows
+      .filter((r) => r.repricedLines != null)
+      .map((r) => ({
+        id: r.id,
+        at: r.createdAt,
+        effectiveFrom: r.effectiveFrom,
+        label: r.kind === 'AGENCY_FEE' ? 'Agency fee change' : `Voucher discount change — ${r.rewardLabel ?? 'item'}`,
+        linesRepriced: r.repricedLines ?? 0,
+        deltaPaise: r.repriceDeltaPaise ?? 0n,
+      })),
     entries: entryRows.map((r) => ({
       id: r.id,
       kind: r.entryType as FundManualEntry['kind'],
@@ -437,7 +616,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
     })),
     rates: rateRows.map((r) => ({
       kind: r.kind as FundRateRow['kind'],
-      brandKey: r.brandKey,
+      rewardId: r.rewardId,
       feeType: r.feeType as FundRateRow['feeType'],
       rateBps: r.rateBps,
       flatPaise: r.flatPaise,

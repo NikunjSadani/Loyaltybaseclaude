@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS "fund_settings" (
   "alertRecipients"          JSONB NOT NULL DEFAULT '[]',
   "lowAlertLastSentOn"       TEXT,
   "lowAlertLastError"        TEXT,
+  "lowAlertLastRecipients"   INTEGER,
   "updatedById"              TEXT,
   "createdAt"                TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updatedAt"                TIMESTAMP(3) NOT NULL,
@@ -46,13 +47,16 @@ CREATE TABLE IF NOT EXISTS "fund_rates" (
   "id"            TEXT NOT NULL,
   "clientId"      TEXT NOT NULL,
   "kind"          "FundRateKind" NOT NULL,
-  "brandKey"      TEXT,
-  "brandLabel"    TEXT,
+  "rewardId"      TEXT,
+  "rewardLabel"   TEXT,
   "feeType"       "FundFeeType",
   "rateBps"       INTEGER,
   "flatPaise"     BIGINT,
   "effectiveFrom" TIMESTAMP(3) NOT NULL,
   "note"          TEXT,
+  "repricedLines"     INTEGER,
+  "repriceDeltaPaise" BIGINT,
+  "repricedFrom"      TIMESTAMP(3),
   "createdById"   TEXT,
   "createdAt"     TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "fund_rates_pkey" PRIMARY KEY ("id")
@@ -60,5 +64,7 @@ CREATE TABLE IF NOT EXISTS "fund_rates" (
 
 CREATE INDEX IF NOT EXISTS "fund_rates_clientId_kind_effectiveFrom_idx"
   ON "fund_rates" ("clientId", "kind", "effectiveFrom");
+CREATE INDEX IF NOT EXISTS "fund_rates_clientId_rewardId_idx"
+  ON "fund_rates" ("clientId", "rewardId");
 
 RESET lock_timeout;

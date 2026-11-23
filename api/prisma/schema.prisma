@@ -2199,6 +2199,8 @@ model FundSettings {
   lowAlertLastSentOn       String?
   /// The last low-balance e-mail failure (shown on the screen + in the Daily Ops Digest); null after a success.
   lowAlertLastError        String?
+  /// How many recipients the last low-balance e-mail was sent to (at send time).
+  lowAlertLastRecipients   Int?
   updatedById              String?
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt
@@ -2208,7 +2210,7 @@ model FundSettings {
 
 enum FundRateKind {
   AGENCY_FEE // on every cash redemption, target/credit payout and visibility payout
-  VOUCHER_DISCOUNT // per voucher brand
+  VOUCHER_DISCOUNT // per voucher ITEM (catalogue reward) — owner D4 2026-11-23
 }
 
 enum FundFeeType {
@@ -2218,14 +2220,16 @@ enum FundFeeType {
 
 /// Effective-dated rate history (fund reconciliation, decisions 3/4/14). Rows are never edited: a change is a NEW row
 /// with its own effectiveFrom; spend is charged at the row in force on its COMMIT date (latest effectiveFrom ≤ commit,
-/// ties → latest createdAt — so a same-day correction supersedes without rewriting history).
+/// ties → latest createdAt). A BACK-DATED row (effectiveFrom ≤ the time it is saved) re-prices already-committed lines:
+/// the operator confirms a preview first (owner D1) and the re-pricing is recorded on the row (repriced*).
 model FundRate {
   id            String       @id @default(cuid())
   clientId      String
   kind          FundRateKind
-  /// VOUCHER_DISCOUNT only — the brand key (see fund-brand.ts) and its display label.
-  brandKey      String?
-  brandLabel    String?
+  /// VOUCHER_DISCOUNT only — the voucher item (RewardCatalog id; no FK: a deleted item keeps its rate history) and
+  /// its name at the time.
+  rewardId      String?
+  rewardLabel   String?
   /// AGENCY_FEE only.
   feeType       FundFeeType?
   /// Percent in basis points (3% = 300; 2.5% = 250) — AGENCY_FEE PERCENT and VOUCHER_DISCOUNT.
@@ -2235,10 +2239,16 @@ model FundRate {
   /// Start of the IST day the rate applies from.
   effectiveFrom DateTime
   note          String?
+  /// Back-dated rows only (owner D1): how many already-committed lines the change re-priced, the balance change
+  /// (paise; negative = the advance went down) and the earliest re-priced commit date — set on the confirmed save.
+  repricedLines     Int?
+  repriceDeltaPaise BigInt?
+  repricedFrom      DateTime?
   createdById   String?
   createdAt     DateTime     @default(now())
 
   @@index([clientId, kind, effectiveFrom])
+  @@index([clientId, rewardId])
   @@map("fund_rates")
 }
 

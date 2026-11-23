@@ -23,7 +23,7 @@ export function buildLowBalanceEmail(i: LowBalanceEmailInput): { subject: string
     `<p style="font-size:14px;line-height:1.5;color:#1f2937">The program fund for <b>${esc(i.clientName)}</b> is below the alert ` +
     `threshold. The balance already deducts vouchers and payouts that are committed but not yet paid. ` +
     `Nothing is blocked — rewards and payouts continue; please arrange a top-up of the advance.</p>` +
-    `<p style="font-size:13px;color:#6b7280">You get this e-mail at most once a day while the balance stays below the threshold. ` +
+    `<p style="font-size:13px;color:#6b7280">You get this e-mail at most once a day (Monday to Saturday) while the balance stays below the threshold. ` +
     `The full statement is under Fund Reconciliation in the admin portal.</p>`;
   return {
     subject,

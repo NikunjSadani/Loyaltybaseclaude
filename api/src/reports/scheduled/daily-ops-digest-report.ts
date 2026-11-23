@@ -319,6 +319,10 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
       push(`Fund low-balance e-mail to the client NOT sent: ${a.error ?? a.status}`, 1);
     } else if (f.isLow && a?.status === 'no-recipients') {
       push('Fund low-balance e-mail not sent: no alert recipients configured', 1);
+    } else if (a?.status === 'no-opening') {
+      push('Fund: set the opening balance to start low-balance alerts', 1);
+    } else if (f.isLow && a?.status === 'disabled-in-environment') {
+      push('Fund low-balance e-mail not sent: client e-mails are switched off on this server (FUND_ALERTS_LIVE / FUND_ALERTS_TEST_RECIPIENT)', 1);
     }
     if (f.missingRates > 0) {
       push(`Fund: ${plural(f.missingRates, 'spend line', 'spend lines')} charged without a rate (voucher brand discount / agency fee not set)`, f.missingRates);
@@ -629,6 +633,16 @@ export function fundAlertNote(f: FundSection): string {
   switch (a.status) {
     case 'sent':
       return `Low-balance e-mail sent to ${plural(a.recipients ?? 0, 'recipient', 'recipients')}.`;
+    case 'sent-to-test-address':
+      return 'Low-balance e-mail sent to the TEST address only (this server does not e-mail clients).';
+    case 'no-threshold':
+      return 'No low-balance threshold set — no e-mail.';
+    case 'no-opening':
+      return 'No opening balance yet — low-balance e-mails start once it is recorded.';
+    case 'client-inactive':
+      return 'Client is not active — no low-balance e-mail.';
+    case 'disabled-in-environment':
+      return 'Client e-mails are switched off on this server — no e-mail.';
     case 'already-sent-today':
       return 'Low-balance e-mail already sent today.';
     case 'not-low':

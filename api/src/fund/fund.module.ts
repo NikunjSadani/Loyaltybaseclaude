@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
-import { FundController } from './fund.controller';
+import { FundConsoleController, FundController } from './fund.controller';
 import { FundService } from './fund.service';
 
 /**
@@ -10,7 +10,7 @@ import { FundService } from './fund.service';
  */
 @Module({
   imports: [PrismaModule],
-  controllers: [FundController],
+  controllers: [FundController, FundConsoleController],
   providers: [FundService],
   exports: [FundService],
 })
