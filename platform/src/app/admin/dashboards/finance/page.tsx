@@ -13,6 +13,7 @@
 ──────────────────────────────────────────────────────────────────────────────── */
 
 import React, { useEffect, useState } from 'react';
+import Link from 'next/link';
 import {
   Coins, Lock, TrendingDown, Receipt, Wallet, AlertCircle, Loader2,
 } from 'lucide-react';
@@ -56,12 +57,17 @@ interface FinanceDashboardData {
     sec194R: TdsSection;
     sec194C: TdsSection;
   };
+  /** Client fund (fund reconciliation engine — full detail on /admin/fund). received = opening + receipts. */
   fund: {
-    totalReceivedRupees: number;
-    totalUtilisedRupees: number;
-    closingBalanceRupees: number;
-    pendingLiabilityRupees: number;
-    availableRupees: number;
+    receivedRupees: number;
+    adjustmentsRupees: number;
+    committedRupees: number;
+    paidRupees: number;
+    returnedRupees: number;
+    balanceRupees: number;
+    lowBalance: boolean;
+    thresholdRupees: number | null;
+    hasSettings: boolean;
   };
 }
 
@@ -162,10 +168,10 @@ function FundRow({
 }: {
   label: string;
   value: number;
-  emphasis?: 'balance' | 'available' | 'pending';
+  emphasis?: 'balance' | 'low' | 'pending';
 }) {
   const valCls =
-    emphasis === 'available' ? 'text-green-700'
+    emphasis === 'low' ? 'text-red-700'
       : emphasis === 'pending' ? 'text-amber-600'
       : emphasis === 'balance' ? 'text-gray-900'
       : 'text-gray-700';
@@ -279,10 +285,11 @@ export default function AdminFinanceDashboardPage() {
           icon={TrendingDown} iconBg="bg-rose-100" iconColor="text-rose-600" valColor="text-rose-700"
         />
         <StatCard
-          label="Fund Available"
-          value={fmtRs(fund.availableRupees)}
-          sub={`${fmtRs(fund.closingBalanceRupees)} closing balance`}
-          icon={Wallet} iconBg="bg-sky-100" iconColor="text-sky-600" valColor="text-sky-700"
+          label="Fund balance"
+          value={fmtRs(fund.balanceRupees)}
+          sub={`${fmtRs(fund.committedRupees)} committed, not yet paid`}
+          icon={Wallet} iconBg="bg-sky-100" iconColor="text-sky-600"
+          valColor={fund.lowBalance ? 'text-red-700' : 'text-sky-700'}
         />
       </div>
 
@@ -353,14 +360,28 @@ export default function AdminFinanceDashboardPage() {
       <Card className="border border-gray-100 shadow-sm rounded-2xl">
         <CardHeader>
           <CardTitle>Fund Reconciliation</CardTitle>
-          <p className="text-xs text-gray-400 mt-0.5">Received vs utilised, closing balance and what remains available</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            The client&apos;s advance less spend. Committed spend is already deducted from the balance.
+          </p>
         </CardHeader>
         <CardContent className="pb-3">
-          <FundRow label="Total Received" value={fund.totalReceivedRupees} />
-          <FundRow label="Total Utilised" value={fund.totalUtilisedRupees} />
-          <FundRow label="Closing Balance" value={fund.closingBalanceRupees} emphasis="balance" />
-          <FundRow label="Pending Liability" value={fund.pendingLiabilityRupees} emphasis="pending" />
-          <FundRow label="Available" value={fund.availableRupees} emphasis="available" />
+          {fund.lowBalance && (
+            <p data-testid="finance-fund-low" className="mb-2 flex items-center gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
+              <AlertCircle className="h-3.5 w-3.5 flex-shrink-0" />
+              Balance is below the low-balance threshold
+              {fund.thresholdRupees != null ? ` of ${fmtRs(fund.thresholdRupees)}` : ''}. Spend is never blocked.
+            </p>
+          )}
+          <FundRow label="Advance received" value={fund.receivedRupees} />
+          <FundRow label="Adjustments" value={fund.adjustmentsRupees} />
+          <FundRow label="Committed (not yet paid)" value={fund.committedRupees} emphasis="pending" />
+          <FundRow label="Paid out" value={fund.paidRupees} />
+          <FundRow label="Balance" value={fund.balanceRupees} emphasis={fund.lowBalance ? 'low' : 'balance'} />
+          <div className="pt-2 text-right">
+            <Link href="/admin/fund" className="text-xs font-medium text-[var(--brand-primary)] hover:underline">
+              Open fund reconciliation →
+            </Link>
+          </div>
         </CardContent>
       </Card>
 

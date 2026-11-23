@@ -39,11 +39,15 @@ const PAYLOAD = {
     sec194C: { liabilityRupees: 25_000, depositedRupees: 5_000, outstandingRupees: 20_000 },
   },
   fund: {
-    totalReceivedRupees: 100_000,
-    totalUtilisedRupees: 70_000,
-    closingBalanceRupees: 30_000,
-    pendingLiabilityRupees: 8_000,
-    availableRupees: 22_000,
+    receivedRupees: 100_000,
+    adjustmentsRupees: -1_000,
+    committedRupees: 8_000,
+    paidRupees: 70_000,
+    returnedRupees: 1_000,
+    balanceRupees: 22_000,
+    lowBalance: false,
+    thresholdRupees: null,
+    hasSettings: true,
   },
 };
 
@@ -133,9 +137,13 @@ describe('Admin Finance Dashboard — real data', () => {
   it('RD4: renders a fund balance value', async () => {
     mockFetchOk();
     render(<FinanceDashboardPage />);
-    // available ₹22,000 is unique to the fund ledger (and the headline card)
+    // balance ₹22,000 is unique to the fund block (and the headline card)
     expect((await screen.findAllByText('₹22,000.00')).length).toBeGreaterThan(0);
-    expect(await screen.findByText('Total Received')).toBeInTheDocument();
+    expect(await screen.findByText('Advance received')).toBeInTheDocument();
+    expect(screen.getByText('Fund balance')).toBeInTheDocument();
+    expect(screen.getByText('₹8,000.00 committed, not yet paid')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /open fund reconciliation/i })).toHaveAttribute('href', '/admin/fund');
+    expect(screen.queryByTestId('finance-fund-low')).not.toBeInTheDocument();
   });
 
   it('RD5: on fetch failure shows an error state and NO real payload numbers', async () => {
