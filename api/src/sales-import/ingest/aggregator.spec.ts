@@ -66,7 +66,7 @@ describe('SalesAggregator', () => {
     expect(r.get('2026-10', '327852', '{"dimA":"X","dimB":"200"}')).toEqual({ amountPaise: 2000n, qtyPico: pico(2_000_000n), lines: 1 });
   });
 
-  it('M6: aggregates under the NORMALIZED file code (the roster is applied at preview/apply); summary still matches', () => {
+  it('aggregates a roster outlet under the NORMALIZED file code (preview/apply map it to the roster then); summary matches', () => {
     const a = new SalesAggregator(MAP, IDX, new Map([['00123', ' 00123 ']]), TODAY);
     a.push(row('00123', '2026-10-03', 'X', 500, 10, 1), 3);
     const r = a.result();
@@ -74,15 +74,20 @@ describe('SalesAggregator', () => {
     expect(r.monthSummaries[0]).toMatchObject({ matchedOutlets: 1, unmatchedCustomers: 0 });
   });
 
-  it('M6: aggregates EVERY customer (matched or not) and still lists the processing-time unmatched ones', () => {
+  // Roster-only aggregates (owner 2026-11-23; replaced "M6: aggregates EVERY customer"): a non-roster customer keeps only
+  // its per-month total (unmatched.csv + frozen summary) — no per-product aggregate, no day split.
+  it('aggregates ROSTER outlets only; non-roster customers are still counted and listed as unmatched', () => {
     const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY);
     a.push(row('O1', '2026-10-03', 'X', '500', '100', '1'), 3);
     a.push(row('U9', '2026-10-03', 'X', '500', '7.50', '0.5', ''), 4);
     a.push(row('U9', '2026-10-05', 'Y', '500', '2.50', '0.5', 'Late Name'), 5);
     a.push(row('U8', '2026-11-01', 'X', '500', '1', '1'), 6);
     const r = a.result();
-    expect(r.aggregateCount).toBe(4);
-    expect(r.get('2026-10', 'U9', KEY_X500)).toEqual({ amountPaise: 750n, qtyPico: pico(500_000n), lines: 1 });
+    expect(r.aggregateCount).toBe(1);
+    expect([...r.aggregates()].map((x) => x.outletCode)).toEqual(['O1']);
+    expect(r.get('2026-10', 'U9', KEY_X500)).toBeUndefined();
+    expect(r.getDays('2026-10', 'U9', KEY_X500)).toBeUndefined();
+    expect(r.processedRosterCodes).toEqual(['O1']);
     expect(r.monthSummaries[0]).toMatchObject({ lines: 3, matchedOutlets: 1, unmatchedCustomers: 1, unmatchedAmountRupees: 10, unmatchedQuantity: 1 });
     expect(r.monthSummaries[1]).toMatchObject({ unmatchedCustomers: 1, matchedOutlets: 0 });
     expect([...r.unmatched()]).toEqual([
@@ -217,7 +222,9 @@ describe('SalesAggregator', () => {
 
     const aggs = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY, '.', { maxAggregates: 1 });
     aggs.push(row('O1', '2026-10-03', 'X', '500', 1, 1), 2);
-    expect(() => aggs.push(row('O1', '2026-10-03', 'X', '200', 1, 1), 3)).toThrow(/month × customer × product/);
+    expect(() => aggs.push(row('O1', '2026-10-03', 'X', '200', 1, 1), 3)).toThrow(/month × programme outlet × product/);
+    // the aggregate cap counts ROSTER aggregates only: any number of non-roster product lines never trips it
+    for (let i = 0; i < 5; i++) aggs.push(row(`U${i}`, '2026-10-03', `P${i}`, '1', 1, 1), 10 + i);
 
     const un = new SalesAggregator(MAP, IDX, roster([]), TODAY, '.', { maxUnmatched: 1 });
     un.push(row('U1', '2026-10-03', 'X', '500', 1, 1), 2);
@@ -230,9 +237,12 @@ describe('SalesAggregator', () => {
 
 describe('SalesAggregator — re-audit memory bound', () => {
   it('aggregate + unmatched entries are bounded COMBINED (a hostile file fails readably, not with an OOM)', () => {
-    const a = new SalesAggregator(MAP, IDX, roster([]), TODAY, '.', { maxTracked: 3 });
-    a.push(row('U1', '2026-10-03', 'X', '500', 1, 1), 2); // 1 aggregate + 1 unmatched
-    expect(() => a.push(row('U2', '2026-10-03', 'X', '500', 1, 1), 3)).toThrow(/too large to process in one go/);
+    const a = new SalesAggregator(MAP, IDX, roster(['O1']), TODAY, '.', { maxTracked: 3 });
+    a.push(row('O1', '2026-10-03', 'X', '500', 1, 1), 2); // 1 aggregate
+    a.push(row('U1', '2026-10-03', 'X', '500', 1, 1), 3); // + 1 unmatched (no aggregate: roster-only)
+    a.push(row('O1', '2026-10-03', 'Y', '500', 1, 1), 4); // + 1 aggregate = 3
+    expect(() => a.push(row('U2', '2026-10-03', 'X', '500', 1, 1), 5)).toThrow(/too large to process in one go/);
+    expect(() => a.push(row('O1', '2026-10-03', 'Z', '500', 1, 1), 6)).toThrow(/month × programme outlet × product and unmatched-customer entries/);
   });
 
   it('collects decimal evidence only when asked (auto mode)', () => {
@@ -324,5 +334,102 @@ describe('SalesAggregator — day split (sales-day-level)', () => {
     expect(r.rowsSkipped).toBe(1);
     expect(r.errorSamples).toEqual([{ row: 2, column: 'DATE', reason: 'invalid date' }]);
     expect([...r.aggregates()].flatMap((x) => x.days.map((d) => d.day))).toEqual([5]);
+  });
+});
+
+/**
+ * Roster-only aggregates (owner decision 2026-11-23, option B). EQUIVALENCE: for a mixed file (roster + non-roster
+ * customers, several products and days), the aggregates of ROSTER codes are byte-identical to the old behaviour, and
+ * everything else the import freezes (summaries, values, combos, unmatched, errors, counts) is unchanged.
+ * "Old behaviour" reference: before the change every code was aggregated regardless of the roster, so an aggregator
+ * whose roster contains EVERY code produced exactly the old aggregate map; it is also recomputed independently below.
+ */
+describe('SalesAggregator — roster-only aggregates (equivalence with the old every-customer behaviour)', () => {
+  const ROSTER = ['O1', 'O2', 'C3'];
+  const CUSTOMERS = ['O1', 'O2', 'C3', 'U1', 'U2', 'U3', 'U4'];
+  const PRODUCTS: Array<[string, string]> = [['P', '500'], ['P', '200'], ['Q', '500'], ['R', '1']];
+  // Deterministic pseudo-random fixture (LCG): 600 lines over 2 past months × 1–28 days, returns included, one bad row in 50.
+  const fixture = (): unknown[][] => {
+    let seed = 7;
+    const rnd = (n: number) => Math.floor((seed = (seed * 1103515245 + 12345) % 2147483648) / 65536) % n; // high bits
+    const rows: unknown[][] = [];
+    for (let i = 0; i < 600; i++) {
+      const code = CUSTOMERS[rnd(CUSTOMERS.length)];
+      const month = rnd(2) === 0 ? '2026-09' : '2026-10'; // both before TODAY (a future date is skipped)
+      const day = String(1 + rnd(28)).padStart(2, '0');
+      const [d1, d2] = PRODUCTS[rnd(PRODUCTS.length)];
+      const amt = ((rnd(20000) - 4000) / 100).toFixed(2);
+      const qty = String((rnd(9000) - 1500) / 1000);
+      rows.push(i % 50 === 49 ? row(code, 'not a date', d1, d2, amt, qty) : row(code, `${month}-${day}`, d1, d2, amt, qty, `Name ${code}`));
+    }
+    return rows;
+  };
+  const run = (codes: string[]) => {
+    const a = new SalesAggregator(MAP, IDX, new Map(codes.map((c) => [c, c])), TODAY);
+    fixture().forEach((r, i) => a.push(r, i + 2));
+    return a.result();
+  };
+  const ser = <T extends { month: string; outletCode: string; dimKey: string }>(rows: Iterable<T>): T[] =>
+    [...rows].sort((x, y) => `${x.month}|${x.outletCode}|${x.dimKey}`.localeCompare(`${y.month}|${y.outletCode}|${y.dimKey}`));
+
+  it('roster aggregates (₹, pico-cases, lines, day split) are identical to the every-customer run and to an independent recomputation', () => {
+    const now = run(ROSTER);
+    const old = run(CUSTOMERS); // every code on the roster = the old aggregate map
+    const rosterKeys = new Set(ROSTER);
+    const oldRosterRows = ser([...old.aggregates()].filter((x) => rosterKeys.has(x.outletCode)));
+    const nowRows = ser(now.aggregates());
+    expect(nowRows.length).toBeGreaterThan(10);
+    expect(nowRows).toEqual(oldRosterRows);
+    expect(now.aggregateCount).toBe(nowRows.length);
+    expect(old.aggregateCount).toBeGreaterThan(now.aggregateCount);
+
+    // Independent recomputation from the raw rows (no aggregator): Σ per month × code × product, and per day.
+    const exp = new Map<string, { paise: bigint; pico: bigint; lines: number; days: Map<number, [bigint, bigint, number]> }>();
+    for (const r of fixture()) {
+      const [code, , date, d1, d2, amt, qty] = r as string[];
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !rosterKeys.has(code)) continue;
+      const k = `${date.slice(0, 7)}|${code}|${JSON.stringify({ dimA: d1, dimB: d2 })}`;
+      let e = exp.get(k);
+      if (!e) exp.set(k, (e = { paise: 0n, pico: 0n, lines: 0, days: new Map() }));
+      const paise = BigInt(Math.round(Number(amt) * 100));
+      const p = BigInt(Math.round(Number(qty) * 1000)) * 1_000_000_000n;
+      e.paise += paise;
+      e.pico += p;
+      e.lines++;
+      const day = Number(date.slice(8, 10));
+      const dd = e.days.get(day) ?? [0n, 0n, 0];
+      e.days.set(day, [dd[0] + paise, dd[1] + p, dd[2] + 1]);
+    }
+    expect(nowRows.map((x) => `${x.month}|${x.outletCode}|${x.dimKey}`)).toEqual([...exp.keys()].sort());
+    for (const x of nowRows) {
+      const e = exp.get(`${x.month}|${x.outletCode}|${x.dimKey}`)!;
+      expect({ paise: x.amountPaise, pico: x.qtyPico, lines: x.lines }).toEqual({ paise: e.paise, pico: e.pico, lines: e.lines });
+      expect(x.days).toEqual([...e.days.entries()].sort((a, b) => a[0] - b[0]).map(([day, [amountPaise, qtyPico, lines]]) => ({ day, amountPaise, qtyPico, lines })));
+    }
+  });
+
+  it('everything else frozen on the import is unchanged: summaries, unmatched, values, combos, errors, counts', () => {
+    const now = run(ROSTER);
+    // The same file with the same roster can only differ from the old code in the aggregate map, so compare the
+    // roster-independent outputs against an all-roster run, and the roster-dependent ones against hand-checked invariants.
+    const all = run(CUSTOMERS);
+    expect(now.dimensionValues).toEqual(all.dimensionValues);
+    expect(now.dimensionCombos).toEqual(all.dimensionCombos);
+    expect(now.dimensionsTruncated).toBe(all.dimensionsTruncated);
+    expect([now.rowsRead, now.rowsSkipped]).toEqual([all.rowsRead, all.rowsSkipped]);
+    expect(now.errorSamples).toEqual(all.errorSamples);
+    expect(now.monthSummaries.map((m) => [m.month, m.firstDate, m.lastDate, m.lines]))
+      .toEqual(all.monthSummaries.map((m) => [m.month, m.firstDate, m.lastDate, m.lines]));
+    // matched + unmatched still cover EVERY valid line (nothing dropped by keeping fewer aggregates)
+    for (const [i, m] of now.monthSummaries.entries()) {
+      const a = all.monthSummaries[i];
+      expect(m.matchedOutlets + m.unmatchedCustomers).toBe(a.matchedOutlets);
+      expect(Math.round((m.matchedAmountRupees + m.unmatchedAmountRupees) * 100)).toBe(Math.round(a.matchedAmountRupees * 100));
+      expect(m.unmatchedCustomers).toBe(4); // U1..U4
+    }
+    const unmatched = [...now.unmatched()];
+    expect(new Set(unmatched.map((u) => u.code))).toEqual(new Set(['U1', 'U2', 'U3', 'U4']));
+    expect(unmatched.every((u) => u.name.startsWith('Name '))).toBe(true);
+    expect(now.processedRosterCodes).toEqual(['C3', 'O1', 'O2']);
   });
 });
