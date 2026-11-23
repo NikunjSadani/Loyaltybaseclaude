@@ -1,4 +1,4 @@
-# Fund reconciliation — design (DRAFT for owner review, 2026-11-23)
+# Fund reconciliation — design (owner-approved 2026-11-23; built — §8)
 
 Status: **built 2026-11-23 on `feat/fund-reconciliation` (not pushed; audits + runtime check pending) — see §8.** Replaces the unused "Fund Management" screen (`/admin/payouts/fund`), which
 today shows ₹0, cannot record a receipt (400 on `remarks`; would also store 100× the amount), counts only cash
