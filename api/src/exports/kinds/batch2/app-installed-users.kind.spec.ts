@@ -339,6 +339,14 @@ describe('app-installed-users export kind', () => {
     expect(String(about[5][1])).toMatch(/"Vacant \(code\)"/);
     expect(String(about[6][1])).toMatch(/separated by " \| "/);
     expect(String(about[7][1])).toMatch(/always blank/);
+    // This file's own area wording (three area columns; no ASM name column) — not the Usage report's notes.
+    expect(String(about[1][1])).toMatch(/"Group — N outlets" in all three columns/);
+    expect(String(about[1][1])).not.toMatch(/all four columns/);
+    expect(String(about[2][1])).not.toMatch(/no ASM in the reporting chain/);
+    expect(String(about[2][1])).toMatch(/no active rep covering the outlet, no outlet assigned, or a blank outlet field/);
+    expect(String(about[5][1])).toMatch(/vacant, inactive or removed/);
+    expect(String(about[6][1])).toMatch(/When several reps cover an outlet, the n-th value in each ID column belongs to the same rep/);
+    expect(String(about[6][1])).toMatch(/the covering rep has no level or sits above the ZH level/);
   }, XLSX_TIMEOUT);
 
   it('2,000 installed users → area data read ONCE (4 reads), not per row', async () => {
@@ -487,9 +495,46 @@ describe('app-installed-users export kind', () => {
         d.salesUsers.push(suRow('su-so2', 'bajaj', 'u-so2', 'SO', 'su-asm', 'Sona'), suRow('su-isr2', 'bajaj', 'u-isr2', 'XSR', 'su-so2', 'Ira'));
         d.assignments.push({ clientId: 'bajaj', salesUserId: 'su-isr2', outletId: null, partnerId: 'P-1' }); // owner route
       }));
+      // Column-aligned: the n-th value in every column belongs to the same rep (shared managers repeat).
       expect(Array.from({ length: 5 }, (_, i) => two.aoa[1][8 + i])).toEqual([
-        'su-isr | su-isr2', 'su-so | su-so2', 'su-asm', 'su-sm', 'su-zh',
+        'su-isr | su-isr2', 'su-so | su-so2', 'su-asm | su-asm', 'su-sm | su-sm', 'su-zh | su-zh',
       ]);
+    }, XLSX_TIMEOUT);
+
+    const cells = (aoa: unknown[][]) => Array.from({ length: 5 }, (_, i) => aoa[1][8 + i] ?? null);
+
+    it('pivot I1/S9 + I2/S1: each rep keeps its OWN SO in the same position (never sorted per column)', async () => {
+      const { aoa } = await build(CLIENT, { roleGroup: 'partner' }, makePrisma((d) => {
+        d.salesUsers.push(suRow('su-soZ', 'bajaj', 'u-soZ', 'SO', 'su-asm', 'Zed'), suRow('su-soA', 'bajaj', 'u-soA', 'SO', 'su-asm', 'Abe'));
+        d.salesUsers.find((x) => x.id === 'su-isr')!.reportingToId = 'su-soZ'; // I1 → S9 ("su-soZ")
+        d.salesUsers.push(suRow('su-isr2', 'bajaj', 'u-isr2', 'XSR', 'su-soA', 'Ira')); // I2 → S1 ("su-soA")
+        d.assignments.push({ clientId: 'bajaj', salesUserId: 'su-isr2', outletId: 'o-ret', partnerId: null });
+      }));
+      expect(cells(aoa)).toEqual(['su-isr | su-isr2', 'su-soZ | su-soA', 'su-asm | su-asm', 'su-sm | su-sm', 'su-zh | su-zh']);
+    }, XLSX_TIMEOUT);
+
+    it('mixed SO rep + ISR rep: the SO rep holds its ISR slot with "Not set"; chains stay aligned', async () => {
+      const { aoa } = await build(CLIENT, { roleGroup: 'partner' }, makePrisma((d) => {
+        d.assignments.push({ clientId: 'bajaj', salesUserId: 'su-so', outletId: null, partnerId: 'P-1' }); // owner route
+      }));
+      expect(cells(aoa)).toEqual(['su-isr | Not set', 'su-so | su-so', 'su-asm | su-asm', 'su-sm | su-sm', 'su-zh | su-zh']);
+    }, XLSX_TIMEOUT);
+
+    it('identical chains from two routes collapse to one', async () => {
+      const { aoa } = await build(CLIENT, { roleGroup: 'partner' }, makePrisma((d) => {
+        d.assignments.push({ clientId: 'bajaj', salesUserId: 'su-isr', outletId: null, partnerId: 'P-1' });
+      }));
+      expect(cells(aoa)).toEqual(['su-isr', 'su-so', 'su-asm', 'su-sm', 'su-zh']);
+    }, XLSX_TIMEOUT);
+
+    it.each([
+      ['a covering rep with NO level', ''],
+      ['a covering rep ABOVE rank 5 (NSM)', 'NSM'],
+    ])('%s → "Not set" in every level column (never an all-blank row)', async (_l, code) => {
+      const { aoa } = await build(CLIENT, { roleGroup: 'partner' }, makePrisma((d) => {
+        d.salesUsers.find((x) => x.id === 'su-isr')!.hierarchyLevel = { code };
+      }));
+      expect(cells(aoa)).toEqual(Array(5).fill('Not set'));
     }, XLSX_TIMEOUT);
 
     it('a retailer with no active rep → "Not set" in every level column', async () => {
