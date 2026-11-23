@@ -67,6 +67,9 @@ the Scheme decision; the dead reward columns in the current module are removed, 
   read from the LIVE outlet master** (`Outlet.programName` / `Outlet.programCategory`, joined at read time,
   not denormalised onto the capture) — so if the outlet's programme changes after capture, the review shows
   the current value, not the value at capture time (deliberate: decisions follow the current programme).
+  *State / Zone (owner 2026-11-23, platform-wide approved, no filters):* the queue list has a "State / Zone" column
+  (State over Zone) and the review header shows State and Zone chips next to Program / Sub-Program — read the same
+  way from the LIVE outlet master (`Outlet.state` / `Outlet.zone`; API fields `outletState` / `outletZone`, blank → "—").
 - **D13 — Outlet info view** (`sales/kyc/[id]`): a "Visibility — this period" card showing each window's status,
   with a **Capture CTA** (redirect preselected to the outlet) when the current window is due / missing / rejected.
 - **D14 — Sales Tasks:** a "Visibility captures due" group (mode-aware, reach-scoped), showing **N-of-M for the

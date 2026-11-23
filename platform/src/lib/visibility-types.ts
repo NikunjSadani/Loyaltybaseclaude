@@ -684,6 +684,9 @@ export interface VisibilityCaptureRow {
   programName?: string | null;
   /** The outlet's sub-programme (`Outlet.programCategory`, e.g. "Elite"); null/absent when unset. */
   programCategory?: string | null;
+  /** The outlet's State / Zone from the outlet master (reviewer context); null/absent when unset. */
+  outletState?: string | null;
+  outletZone?: string | null;
   /** The capture's window has closed (IST) — a re-take / rejection is then final ("Not approved — window closed"). */
   windowClosed?: boolean;
 }
@@ -843,6 +846,9 @@ export interface VisibilityCaptureDetail extends VisibilityCapture {
   programName?: string | null;
   /** The outlet's sub-programme (`Outlet.programCategory`); null/absent when unset. */
   programCategory?: string | null;
+  /** The outlet's State / Zone from the outlet master (reviewer context); null/absent when unset. */
+  outletState?: string | null;
+  outletZone?: string | null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
