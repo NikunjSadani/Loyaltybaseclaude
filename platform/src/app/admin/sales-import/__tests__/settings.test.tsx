@@ -150,7 +150,7 @@ describe('KPI editor — product set', () => {
     renderEditor({ initial: { ...NEW, kpiCode: 'KPI_X', filter: { anyOf: [{ dimA: 'P' }] } } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Test against latest import/ })); });
     expect(screen.getByTestId('kpi-test-not-included')).toHaveTextContent(
-      '2 outlets were not in the programme when this file was processed; any sales they have in this file are not included. The totals below don't include them.',
+      "2 outlets were not in the programme when this file was processed; any sales they have in this file are not included. The totals below don't include them.",
     );
   });
 
