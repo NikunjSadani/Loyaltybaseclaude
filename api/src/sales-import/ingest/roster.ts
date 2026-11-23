@@ -69,10 +69,3 @@ export function outletsMissingFromProcessing(processed: ReadonlySet<string> | nu
   for (const code of currentIndex.keys()) if (!processed.has(code)) n++;
   return n;
 }
-
-/** The warning shown in preview and in the apply result when outlets were added after processing (never silent). */
-export function outletsMissingText(n: number): string {
-  return `${n.toLocaleString('en-IN')} outlet${n === 1 ? ' was' : 's were'} added to the programme after this file was processed — ` +
-    `${n === 1 ? 'its' : 'their'} sales in this file are not included (${n === 1 ? 'it gets' : 'they get'} 0). ` +
-    'Reprocess the file (or upload the next file) to include them.';
-}

@@ -41,7 +41,7 @@ import {
   MonthReconciliationPanel, reconciliationNeedsAttention, useDimensionLabels, useOutletTypeNames, type OutletTypeNames,
 } from '../_components/month-reconciliation-panel';
 import { DayDataNotice } from '../_components/day-data-notice';
-import { NotIncludedNotice, notIncludedText } from '../_components/not-included-notice';
+import { NotIncludedNotice, notIncludedCountText, notIncludedText } from '../_components/not-included-notice';
 
 const POLL_MS = 2000;
 const UPLOADING_POLL_MS = 5000;
@@ -415,9 +415,13 @@ function MonthRow({
 
 function PreviewSection({
   importId, onReprocess, reprocessing, canAct, canReprocess, onApplied, canReprocessAsNew = false, onReprocessAsNew,
-  reprocessingAsNew = false, onActiveJob,
+  reprocessingAsNew = false, onActiveJob, applied = false, heldWhy = null,
 }: {
   importId: string; onReprocess(): void; reprocessing: boolean; canAct: boolean; canReprocess: boolean;
+  /** A month was already applied from this import (Reprocess is refused; read it again as a new import instead). */
+  applied?: boolean;
+  /** Why Reprocess / Read again are held (an apply of this file is queued or running) — the banner buttons honour it. */
+  heldWhy?: string | null;
   /** Applied import whose mapping changed: re-read the stored file as a NEW import. */
   canReprocessAsNew?: boolean; onReprocessAsNew?(): void; reprocessingAsNew?: boolean;
   /** After an apply attempt that changed (or may have changed) server state: refresh the import detail too. */
@@ -589,7 +593,9 @@ function PreviewSection({
       `Apply ${names}?\n\n` +
       `For each month, the Sales Import KPIs${kpiNames.length ? ` (${kpiNames.join(', ')})` : ''} are fully replaced ` +
       'for every programme outlet. Outlets with no sales in the file get 0. Other KPIs are not touched. ' +
-      'It runs in the background: you can leave this page.',
+      'It runs in the background: you can leave this page.' +
+      // Roster-only aggregates: the admin sees the left-out outlets BEFORE writing (from the preview being confirmed).
+      ((preview.rosterOutletsNotIncluded ?? 0) > 0 ? `\n\n${notIncludedCountText(preview.rosterOutletsNotIncluded)} They get 0.` : ''),
     );
     if (!ok) return;
     const partialMonths = picked.filter(isPartialMonth).map((m) => m.month);
@@ -691,12 +697,14 @@ function PreviewSection({
             'Months were already applied from it, so it is kept as the record of what was written; read the same file again as a new import to use the current mapping.'}
           {!canAct && 'Someone who can upload sales files needs to read it again with the current mapping.'}
           {canAct && canReprocess && (
-            <Button size="sm" variant="outline" className="ml-2" onClick={onReprocess} loading={reprocessing}>
+            <Button size="sm" variant="outline" className="ml-2" onClick={onReprocess} loading={reprocessing}
+              disabled={!!heldWhy} aria-describedby={heldWhy ? 'sales-import-held-why' : undefined}>
               <RefreshCw className="w-3.5 h-3.5" /> Reprocess
             </Button>
           )}
           {canAct && !canReprocess && canReprocessAsNew && onReprocessAsNew && (
             <Button size="sm" variant="outline" className="ml-2" onClick={onReprocessAsNew} loading={reprocessingAsNew}
+              disabled={!!heldWhy} aria-describedby={heldWhy ? 'sales-import-held-why' : undefined}
               data-testid="sales-import-reprocess-as-new-banner">
               <Copy className="w-3.5 h-3.5" /> Read again as a new import
             </Button>
@@ -705,24 +713,24 @@ function PreviewSection({
       )}
       {(preview.rosterOutletsNotIncluded ?? 0) > 0 && (
         <Banner tone="amber" testId="sales-import-roster-not-included">
-          <span className="inline-flex items-start gap-1.5" role="alert">
+          <span className="inline-flex items-start gap-1.5" role="status" data-testid="sales-import-roster-not-included-text">
             <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
-            <span>
-              {notIncludedText(preview.rosterOutletsNotIncluded)}
-              {canAct && canReprocess && (
-                <Button size="sm" variant="outline" className="ml-2" onClick={onReprocess} loading={reprocessing}
-                  data-testid="sales-import-reprocess-not-included">
-                  <RefreshCw className="w-3.5 h-3.5" /> Reprocess
-                </Button>
-              )}
-              {canAct && !canReprocess && canReprocessAsNew && onReprocessAsNew && (
-                <Button size="sm" variant="outline" className="ml-2" onClick={onReprocessAsNew} loading={reprocessingAsNew}
-                  data-testid="sales-import-reprocess-as-new-not-included">
-                  <Copy className="w-3.5 h-3.5" /> Read again as a new import
-                </Button>
-              )}
-            </span>
+            <span>{notIncludedText(preview.rosterOutletsNotIncluded, { applied, canAct })}</span>
           </span>
+          {canAct && canReprocess && (
+            <Button size="sm" variant="outline" className="ml-2" onClick={onReprocess} loading={reprocessing}
+              disabled={!!heldWhy} aria-describedby={heldWhy ? 'sales-import-held-why' : undefined}
+              data-testid="sales-import-reprocess-not-included">
+              <RefreshCw className="w-3.5 h-3.5" /> Reprocess
+            </Button>
+          )}
+          {canAct && !canReprocess && canReprocessAsNew && onReprocessAsNew && (
+            <Button size="sm" variant="outline" className="ml-2" onClick={onReprocessAsNew} loading={reprocessingAsNew}
+              disabled={!!heldWhy} aria-describedby={heldWhy ? 'sales-import-held-why' : undefined}
+              data-testid="sales-import-reprocess-as-new-not-included">
+              <Copy className="w-3.5 h-3.5" /> Read again as a new import
+            </Button>
+          )}
         </Banner>
       )}
       {preview.rosterOutletsAddedSinceProcessing > 0 && (
@@ -912,7 +920,7 @@ function PreviewSection({
                       : ` ${lj.result?.error ?? 'No reason was given.'}`}
                   </p>
                   {ok && <DayDataNotice month={month} dayData={lj.result?.dayData} />}
-                  {ok && <NotIncludedNotice month={month} count={lj.result?.outletsNotIncluded} />}
+                  {ok && <NotIncludedNotice month={month} count={lj.result?.outletsNotIncluded} canAct={canAct} />}
                 </div>
               );
             })}
@@ -936,7 +944,7 @@ function PreviewSection({
                     cards and dashboards now show these numbers.
                   </p>
                   <DayDataNotice month={r.month} dayData={r.dayData} />
-                  <NotIncludedNotice month={r.month} count={r.outletsNotIncluded} />
+                  <NotIncludedNotice month={r.month} count={r.outletsNotIncluded} canAct={canAct} />
                 </>
               ) : (
                 <p className="text-xs text-red-700 mt-1">{r.error ?? 'Unknown error'}</p>
@@ -983,7 +991,7 @@ export default function SalesImportDetailPage() {
   async function reprocessAsNew() {
     if (!importId || busy) return;
     if (!window.confirm(
-      'Read this file again as a NEW import with the current column mapping?\n\nThis import stays as the record of ' +
+      'Read this file again as a NEW import with the current column mapping and today\u2019s programme outlets?\n\nThis import stays as the record of ' +
       'what was already applied. The new import is processed and previewed separately; nothing is applied until you ' +
       'apply it.',
     )) return;
@@ -1172,7 +1180,8 @@ export default function SalesImportDetailPage() {
       {d.status === 'READY' && !purged && (
         <PreviewSection importId={d.id} onReprocess={reprocess} reprocessing={busy === 'reprocess'} canAct={canAct}
           canReprocess={d.canReprocess} onApplied={refresh} canReprocessAsNew={d.canReprocessAsNew}
-          onReprocessAsNew={reprocessAsNew} reprocessingAsNew={busy === 'reprocess-new'} onActiveJob={setHeldWhy} />
+          onReprocessAsNew={reprocessAsNew} reprocessingAsNew={busy === 'reprocess-new'} onActiveJob={setHeldWhy}
+          applied={d.applied} heldWhy={heldWhy} />
       )}
     </div>
   );
