@@ -1,6 +1,6 @@
 # Fund reconciliation — design (DRAFT for owner review, 2026-11-23)
 
-Status: **design only — nothing built.** Replaces the unused "Fund Management" screen (`/admin/payouts/fund`), which
+Status: **built 2026-11-23 on `feat/fund-reconciliation` (not pushed; audits + runtime check pending) — see §8.** Replaces the unused "Fund Management" screen (`/admin/payouts/fund`), which
 today shows ₹0, cannot record a receipt (400 on `remarks`; would also store 100× the amount), counts only cash
 redemptions and never debits its own ledger. Production has 0 receipts, 0 ledger rows, 0 cash payouts (checked
 2026-11-23), so nothing has to be migrated.
@@ -101,3 +101,47 @@ agency fee type and value; the voucher brand discount table; low-balance thresho
 7. Dual audit (money) + UI/UX audit; staging with real Bajaj-like data; prod.
 
 Estimated effort: **~3–4 working days** including audits and staging.
+
+## 8. What was built (2026-11-23, branch `feat/fund-reconciliation` — LOCAL, not pushed)
+
+Status: steps 1–6 built; **step 7 (dual money audit + UI/UX audit, runtime check on staging) NOT done.**
+
+**Data** (migration `20261123150000_fund_reconciliation`, additive + idempotent, `lock_timeout 5s`): `fund_receipts`
+gains `entryType` (RECEIPT / ADJUSTMENT / OPENING_BALANCE, default RECEIPT) + `reason`, a per-client unique receipt
+number and a partial unique index (ONE opening balance per client). New `fund_settings` (threshold, recipients, last
+alert date/error) and `fund_rates` (effective-dated, never edited: AGENCY_FEE PERCENT bps / FLAT paise per payout line;
+VOUCHER_DISCOUNT bps per brand key). `fund_ledger` is deprecated and unused.
+
+**Engine** — `api/src/fund/fund-statement.engine.ts` (pure) + `fund-sources.loader.ts` (rules per spend type, with the
+source fields, in its header). Bank-statement model: each item is one debit at its commit date; a returned item adds a
+credit of the same amount at its return date; balance = opening + receipts + adjustments − committed − paid (=
+available). Rates are those in force on the COMMIT date. Opening cut-off: spend committed before the opening date is
+ignored; its return after that date is listed ("pre-opening returns"), never auto-credited. Receipts dated before the
+opening date are refused (and excluded + listed if any exist).
+
+**API** `/v1/fund/*`: `summary`, `statement` (filters + paging; running balance over the full history), `entries`,
+`settings`, `export` (Excel via the Downloads kind `fund-reconciliation`: Summary · Statement · Receipts · Rates ·
+About) — GIFSY_ADMIN + CLIENT_ADMIN (own tenant), `payouts:read`. Writes (`receipts`, `adjustments`,
+`opening-balance`, `settings/alerts`, `rates/fee`, `rates/discount`) — Gifsy only (`payouts:manage_fund` + a service
+check), audited, serialised per client by an advisory lock. An un-assumed Gifsy owner gets 400 "open a client first".
+
+**Screen** `/admin/fund` (Overview · Statement · Receipts & adjustments · Rates & alerts; write controls for Gifsy
+only). The payouts-page Fund card and the Finance dashboard fund block read the same engine. The settings-page "Low
+balance alert threshold" (never read by anything) was replaced by a pointer. Help & Guides: "Fund reconciliation".
+
+**Alerts**: the daily scheduled-reports run (Mon–Sat) first sends each low client ONE e-mail per IST day to its
+recipients (claimed by compare-and-set; failure stored + shown), then the Daily Ops Digest shows one Fund line per
+client with a fund set-up (balance · committed · LOW) plus the e-mail outcome; LOW, a failed e-mail and lines charged
+without a rate are "needs attention". Nothing is ever blocked.
+
+**Decisions taken in the build that the owner should confirm:**
+1. **Voucher brand** — the catalogue has no brand column. Brand key = `metadata.brand/brandName` → else the Hubble
+   product id (all amounts of one Hubble brand share it) → else the catalogue item itself. Manual vouchers without a
+   brand therefore get a rate per item. Ideal alternative: a "brand" field on the catalogue item.
+2. **Flat fee** is charged per payout LINE (one credit entry / one cash redemption), not per combined bank transfer.
+3. **TDS 194C lines** (TdsRecoveryEntry 194C, incl. no-PAN 194C paid in full) are charged when the bank file is made
+   and shown as "paid" (there is no separate paid step); a negative true-up is a credit.
+4. **Imported vendor history** (`CreditBatch.sourceKind = VENDOR_IMPORT`) is not spend from the advance.
+5. Only `redemptionMode = GIFT_CARD` counts as a voucher; a PHYSICAL_GIFT fulfilled as a DIGITAL_VOUCHER stays off.
+6. The low-balance e-mail goes to the recipients Gifsy configured (any domain — client addresses), Mon–Sat with the
+   digest trigger.
