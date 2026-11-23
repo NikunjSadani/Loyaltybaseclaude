@@ -65,6 +65,8 @@ const resetForQueue = (): Prisma.SalesImportUpdateManyMutationInput => ({
   monthSummaries: Prisma.DbNull,
   dimensionValues: Prisma.DbNull,
   dimensionCombos: Prisma.DbNull,
+  // roster-only aggregates: the next READY run records its own processing-time roster
+  processedRosterCodes: Prisma.DbNull,
   detectedHeaders: Prisma.DbNull,
 });
 

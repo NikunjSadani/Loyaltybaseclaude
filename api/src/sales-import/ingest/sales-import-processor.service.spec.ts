@@ -204,6 +204,9 @@ describe('SalesImportProcessorService.processClaimed', () => {
       },
     ]);
     expect(f.data.mappingSnapshot).toEqual(MAPPING);
+    // the processing-time roster (normalized codes, sorted) — preview / apply warn about outlets added since
+    expect(f.data.processedRosterCodes).toEqual(['O1', 'O2']);
+    // dimension combos still cover EVERY valid line (U9's P/500 line is in the P/500 combo: 4 lines)
     expect(f.data.dimensionCombos).toEqual([
       { dims: { dimA: 'Q', dimB: '200' }, lines: 1, amountRupees: 1000.5, quantity: 2 },
       { dims: { dimA: 'P', dimB: '500' }, lines: 4, amountRupees: 77.5, quantity: 2.04 },
@@ -215,8 +218,8 @@ describe('SalesImportProcessorService.processClaimed', () => {
     expect(written.map(({ days: _days, ...w }: Record<string, unknown>) => w)).toEqual([
       { importId: 'imp1', month: '2026-10', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 6000n, qtyPico: 1_000_000n * 1_000_000n, lines: 2 },
       { importId: 'imp1', month: '2026-10', outletCode: 'O2', dims: { dimA: 'Q', dimB: '200' }, dimKey: '{"dimA":"Q","dimB":"200"}', amountPaise: 100050n, qtyPico: 2_000_000n * 1_000_000n, lines: 1 },
-      // M6: the unmatched customer is aggregated too (apply maps codes onto the roster current at apply time)
-      { importId: 'imp1', month: '2026-10', outletCode: 'U9', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 750n, qtyPico: 1_000_000n * 1_000_000n, lines: 1 },
+      // Roster-only aggregates (owner 2026-11-23; was M6 "every customer"): the unmatched customer U9 has NO aggregate —
+      // only its per-month total in unmatched.csv + the frozen summary (unmatchedCustomers 1, ₹7.50 above).
       { importId: 'imp1', month: '2026-11', outletCode: 'O1', dims: { dimA: 'P', dimB: '500' }, dimKey: '{"dimA":"P","dimB":"500"}', amountPaise: 1000n, qtyPico: 40_000n * 1_000_000n, lines: 1 },
     ]);
     // M1 (re-check): the CSV is per run (claim token) and its key is stored on the row in the READY write
@@ -235,6 +238,23 @@ describe('SalesImportProcessorService.processClaimed', () => {
     expect(final().data.status).toBe('READY');
     const writes = calls.filter((c) => c === 'deleteMany' || c.startsWith('createMany'));
     expect(writes).toEqual(['deleteMany', `createMany:${AGGREGATE_CHUNK}`, `createMany:${AGGREGATE_CHUNK}`, 'createMany:7']);
+  });
+
+  // Roster-only aggregates (owner 2026-11-23): a run reads the roster AS IT IS THEN, so reprocessing after an outlet was
+  // added gives it aggregates (and records it in processedRosterCodes — preview / apply then report nothing missing).
+  it('roster-only: a reprocess after U9 joined the roster aggregates U9 and records the new processing-time roster', async () => {
+    const first = setup({ file: Buffer.from(CSV, 'utf8'), roster: ['O1', 'O2'] });
+    await first.svc.processClaimed(first.row);
+    const codesOf = (p: typeof first.prisma) =>
+      new Set(p.salesImportAggregate.createMany.mock.calls.flatMap((c) => c[0].data as Array<{ outletCode: string }>).map((a) => a.outletCode));
+    expect(codesOf(first.prisma)).toEqual(new Set(['O1', 'O2']));
+    expect(first.final().data.processedRosterCodes).toEqual(['O1', 'O2']);
+
+    const again = setup({ file: Buffer.from(CSV, 'utf8'), roster: ['O1', 'O2', 'U9'] });
+    await again.svc.processClaimed(again.row);
+    expect(codesOf(again.prisma)).toEqual(new Set(['O1', 'O2', 'U9']));
+    expect(again.final().data.processedRosterCodes).toEqual(['O1', 'O2', 'U9']);
+    expect(again.final().data.monthSummaries[0]).toMatchObject({ matchedOutlets: 3, unmatchedCustomers: 0 });
   });
 
   it('READY (XLSX in Excel entry order) through the re-sequencer', async () => {

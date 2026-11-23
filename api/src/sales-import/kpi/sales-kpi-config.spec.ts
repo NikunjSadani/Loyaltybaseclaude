@@ -285,6 +285,23 @@ describe('SalesKpiDefService (K-2)', () => {
       expect(res.matchedLines).toBe(4);
     });
 
+    it('roster-only import (2026-11-23): "matches no line of the file" also checks the frozen combos (products sold only to non-programme customers); totals unchanged', async () => {
+      const db = testDb();
+      db.salesImport.findFirst.mockImplementation(async ({ where }: { where: { id?: string; clientId: string; status?: string } }) =>
+        where.clientId === 't1' && (where.id === 'imp1' || where.status === 'READY')
+          ? {
+              id: 'imp1', status: 'READY', processedRosterCodes: ['O1', 'O2'],
+              dimensionCombos: [{ dims: { dimA: 'P', dimB: '150' }, lines: 1, amountRupees: 1, quantity: 0 }, { dims: { dimA: 'Z', dimB: '999' }, lines: 1, amountRupees: 1, quantity: 0 }],
+            }
+          : null);
+      const res = await new SalesKpiDefService(db as never).test(user, {
+        importId: 'latest',
+        definition: { kpiCode: 'K', measure: 'AMOUNT', filter: { anyOf: [{ dimA: 'P', dimB: '500' }, { dimA: 'P' }, { dimA: 'P', dimB: '150' }], noneOf: [{ dimB: '999' }] }, outletTypes: [], programs: [], enabled: true, order: 0 },
+      });
+      expect(res.unmatchedEntries).toEqual({ anyOf: [], noneOf: [] });
+      expect(res.months[0]).toEqual({ month: '2026-09', totalAmountRupees: 140, totalQuantity: 1.5, outletsNonZero: 2 });
+    });
+
     it('PRODUCT_COUNT draft: adds totalProducts (Σ per-outlet counts) and judges "outlets > 0" on the count', async () => {
       const db = testDb();
       const rows = [

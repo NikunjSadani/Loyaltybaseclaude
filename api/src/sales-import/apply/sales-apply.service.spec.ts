@@ -278,10 +278,13 @@ describe('SalesPreviewService', () => {
     expect(p.months[1].warnings).not.toContain('ENDS_BEFORE_MONTH_END');
   });
 
-  it('M6: an outlet added to the roster AFTER processing is included (no ROSTER_CHANGED block); the count is informational', async () => {
+  // LEGACY import (processedRosterCodes NULL — processed before roster-only aggregates, 2026-11-23): every customer was
+  // aggregated, so an outlet added after processing IS included (old M6 behaviour, kept for those imports).
+  it('LEGACY import (M6): an outlet added to the roster AFTER processing is included (no ROSTER_CHANGED block); the count is informational', async () => {
     const roster = [...ROSTER, { outletCode: 'O4', name: 'Four', programName: null, outletType: { code: 'RETAIL' } }];
     const p = await services(makeDb({ roster, rosterAdded: 1 })).preview.preview('t1', 'imp1');
     expect(p.rosterOutletsAddedSinceProcessing).toBe(1);
+    expect(p.rosterOutletsNotIncluded).toBe(0); // legacy: nothing is missing → no "not included" warning
     const prev = p.months.find((m) => m.month === PREV)!;
     expect(prev.canApply).toBe(true);
     expect(prev.kpis.find((k) => k.kpiCode === 'OWN_AMT')!.newTotal).toBe(82); // 100 - 25 + O4's 7
@@ -466,11 +469,12 @@ describe('SalesApplyService', () => {
     expect(r1.results[0].error).toMatch(/not in this file/);
   });
 
-  it('M6: apply maps file codes onto the roster AT APPLY TIME (an outlet added after processing is written)', async () => {
+  it('LEGACY import (M6): apply maps file codes onto the roster AT APPLY TIME (an outlet added after processing is written)', async () => {
     const roster = [...ROSTER, { outletCode: 'O4', name: 'Four', programName: null, outletType: { code: 'RETAIL' } }];
     const db = makeDb({ roster });
     const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
     expect(r.results[0]).toEqual(expect.objectContaining({ ok: true, outletsWritten: 4 }));
+    expect(r.results[0]).not.toHaveProperty('outletsNotIncluded'); // legacy: nothing reported
     const ins = sqlCalls(db)[1];
     expect(ins.values).toContainEqual(['O1', 'O2', 'O3', 'O4']);
   });
@@ -1368,5 +1372,76 @@ describe('preview × background jobs', () => {
     const p = await services(makeDb({ lastJobs: [fin] })).preview.preview('t1', 'imp1');
     expect(p.months.find((m) => m.month === PREV)!.lastJob).toEqual(expect.objectContaining({ jobId: 'j0', status: 'DONE', requestedBy: 'Asha',
       finishedAt: '2026-11-18T05:04:00.000Z', result: { month: PREV, ok: true, outletsWritten: 3 } }));
+  });
+});
+
+// ─── Roster-only aggregates (owner decision 2026-11-23, option B) ───────────────────────────────────────────────
+// The import keeps aggregates ONLY for codes on the roster at processing time (SalesImport.processedRosterCodes).
+// Fixture: processed with roster GONE/O1/O2/O3 (GONE removed since); O4 was NOT on the roster then (no aggregate — its
+// ₹7 is in the frozen unmatched summary) and is on the roster NOW → "not included", loudly, never silently zero.
+describe('roster-only imports — outlets added after processing', () => {
+  const body = (months: string[]) => ({ months, expectedDefinitionsHash: HASH, processingVersion: VERSION });
+  const ROSTER_NOW = [...ROSTER, { id: 'id-O4', outletCode: 'O4', name: 'Four', programName: null, outletType: { code: 'RETAIL' } }];
+  const rosterOnlyDb = (opts: { processed: string[]; withO4Aggs?: boolean; roster?: Array<Record<string, unknown>>; rosterAdded?: number }) => {
+    const months = [PREV, CUR];
+    const aggs = months.flatMap((m, i) => [
+      agg(i * 10 + 1, m, 'O1', { dimA: 'P', dimB: '500' }, 10000n, 1_500000n),
+      agg(i * 10 + 2, m, 'O1', { dimA: 'Q', dimB: '500' }, 5000n, 500000n),
+      agg(i * 10 + 3, m, 'O2', { dimA: 'P', dimB: '50' }, -2500n, 0n),
+      agg(i * 10 + 4, m, 'GONE', { dimA: 'P', dimB: '50' }, 99999n, 0n), // on the roster at processing, removed since
+      ...(opts.withO4Aggs ? [agg(i * 10 + 5, m, 'O4', { dimA: 'P', dimB: '50' }, 700n, 0n)] : []),
+    ]);
+    const db = makeDb({ aggs, roster: opts.roster ?? ROSTER_NOW, rosterAdded: opts.rosterAdded });
+    db.imp.processedRosterCodes = opts.processed;
+    // the frozen summary of that processing run: O4 was an unmatched customer (₹7.00, 0 cases) unless it was on the roster
+    db.imp.monthSummaries = months.map((m) => summary(m, opts.withO4Aggs
+      ? { matchedOutlets: 4, unmatchedCustomers: 0, unmatchedAmountRupees: 0, unmatchedQuantity: 0 }
+      : { matchedOutlets: 3, unmatchedCustomers: 1, unmatchedAmountRupees: 7, unmatchedQuantity: 0.25 }));
+    return db;
+  };
+
+  it('preview: counts the outlets not on the processing-time roster, keeps them in "not in programme", never in the totals', async () => {
+    const p = await services(rosterOnlyDb({ processed: ['GONE', 'O1', 'O2', 'O3'], rosterAdded: 1 })).preview.preview('t1', 'imp1');
+    expect(p.rosterOutletsNotIncluded).toBe(1); // O4
+    expect(p.rosterOutletsAddedSinceProcessing).toBe(0); // the legacy "they ARE included" note never shows for a roster-only import
+    const prev = p.months.find((m) => m.month === PREV)!;
+    expect(prev.kpis.find((k) => k.kpiCode === 'OWN_AMT')!.newTotal).toBe(75); // O1 100 + O2 -25; O4 NOT included
+    expect(prev.zeroFillOutlets).toBe(2); // O3 + O4 get 0
+    // matched = outlets on both rosters; unmatched = frozen (O4, ₹7, 0.25 cases) + removed since (GONE, ₹999.99)
+    expect(prev).toMatchObject({ matchedOutlets: 2, matchedAmountRupees: 125, unmatchedCustomers: 2, unmatchedAmountRupees: 1006.99, unmatchedQuantity: 0.25 });
+    expect(prev.canApply).toBe(true); // loud, not blocking (owner: the next file / a reprocess includes them)
+  });
+
+  it('preview: nothing added since processing → 0, and the figures equal the frozen + removed split', async () => {
+    const p = await services(rosterOnlyDb({ processed: ['GONE', 'O1', 'O2', 'O3', 'O4'], roster: ROSTER })).preview.preview('t1', 'imp1');
+    expect(p.rosterOutletsNotIncluded).toBe(0);
+  });
+
+  it('a malformed processedRosterCodes is treated as an EMPTY roster (every outlet reported missing — loud, never "nothing missing")', async () => {
+    const db = rosterOnlyDb({ processed: [] });
+    db.imp.processedRosterCodes = 'garbage' as never;
+    const p = await services(db).preview.preview('t1', 'imp1');
+    expect(p.rosterOutletsNotIncluded).toBe(4);
+  });
+
+  it('apply: the month result and the audit row report outletsNotIncluded (counted under the lock against the roster at apply time)', async () => {
+    const db = rosterOnlyDb({ processed: ['GONE', 'O1', 'O2', 'O3'] });
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
+    expect(r.results[0]).toEqual(expect.objectContaining({ ok: true, outletsWritten: 4, outletsZeroFilled: 2, outletsNotIncluded: 1 }));
+    const audit = (db.auditLog.create.mock.calls[0] as unknown as [{ data: { newValues: Record<string, unknown> } }])[0].data.newValues;
+    expect(audit.outletsNotIncluded).toBe(1);
+    const apply = (db.salesImportApply.create.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0].data;
+    expect(apply.totals).toEqual({ OWN_AMT: { before: 0, after: 75 }, OWN_QTY: { before: 0, after: 2 } });
+  });
+
+  it('after a REPROCESS (O4 on the processing-time roster, its aggregates present): O4 is included and nothing is reported missing', async () => {
+    const db = rosterOnlyDb({ processed: ['O1', 'O2', 'O3', 'O4'], withO4Aggs: true, roster: ROSTER_NOW });
+    const p = await services(db).preview.preview('t1', 'imp1');
+    expect(p.rosterOutletsNotIncluded).toBe(0);
+    const prev = p.months.find((m) => m.month === PREV)!;
+    expect(prev.kpis.find((k) => k.kpiCode === 'OWN_AMT')!.newTotal).toBe(82); // 100 - 25 + O4's 7
+    expect(prev).toMatchObject({ matchedOutlets: 3, unmatchedCustomers: 1 }); // GONE (removed since); frozen unmatched 0
+    const r = await services(db).apply.apply(user, 'imp1', body([PREV]));
+    expect(r.results[0]).toEqual(expect.objectContaining({ ok: true, outletsWritten: 4, outletsZeroFilled: 1, outletsNotIncluded: 0 }));
   });
 });
