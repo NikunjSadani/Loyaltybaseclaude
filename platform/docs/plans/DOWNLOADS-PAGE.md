@@ -45,7 +45,7 @@ like a bank statement download. Small downloads stay instant.
 | Lane | Reports |
 |---|---|
 | B | Outlet Master (also fix its over-fetch: latest KYC only, no full status history, no 6-deep include), visibility capture export + visibility status report, KYC dumps/exports |
-| C | Target-vs-Sales (> 3 months heavy), target/achievement exports + templates (> 3 months heavy), TDS-reports payouts export, payments report, delivery-status export, points-compute exports |
+| C | Target-vs-Sales (> 3 months heavy; 2026-11-23 columns + filters + About sheet — [`TARGET-VS-SALES-REPORT.md`](TARGET-VS-SALES-REPORT.md)), target/achievement exports + templates (> 3 months heavy), TDS-reports payouts export, payments report, delivery-status export, points-compute exports |
 | later | `app-installed-users` (App Adoption → "Download installed users", 2026-11-16; always light/instant; audit row per file) |
 
 ## Infra
