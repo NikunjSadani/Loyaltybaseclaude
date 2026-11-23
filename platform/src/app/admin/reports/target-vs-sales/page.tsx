@@ -122,7 +122,8 @@ export default function TargetVsSalesPage() {
   // Filter dropdowns — the same lists as the Overview billing card.
   useEffect(() => {
     let cancelled = false
-    fetch(TVS_FILTERS_URL)
+    Promise.resolve()
+      .then(() => fetch(TVS_FILTERS_URL))
       .then(async (res) => {
         if (!res.ok) throw new Error(`Request failed (${res.status})`)
         const body = await res.json() as { data?: FilterOptions } & Partial<FilterOptions>
