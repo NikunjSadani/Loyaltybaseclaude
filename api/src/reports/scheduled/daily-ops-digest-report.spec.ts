@@ -369,6 +369,12 @@ describe('needsAttention', () => {
     expect(needsAttention(t)).toEqual(['Hubble: 2 orders need reconcile', 'Sales Import: 1 import failed in the window']);
   });
 
+  it('voucher code messages that could not be sent are an attention item (no silent pass-through)', () => {
+    const t = quietTenant('x', 'X');
+    t.vouchers = ok({ issued: 0, failed: 0, stuckProcessing: 0, needsReconcile: 0, voucherNotifyFailed: 2, voucherNotifyFailedOrders: ['BAJAJ-26-000050', 'BAJAJ-26-000051'] });
+    expect(needsAttention(t)).toEqual(['Vouchers: 2 code messages to members not sent']);
+  });
+
   it('a fast-tracked KYC at a field stage and a failed Billing progress section are attention items', () => {
     const t = quietTenant('x', 'X');
     if (t.kyc.ok) t.kyc.data.fieldFastTrackedExcluded = 1;

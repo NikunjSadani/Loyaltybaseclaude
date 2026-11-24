@@ -89,6 +89,28 @@ const mockPrisma = {
     // DELIVERED moves also snapshot the TDS payee (owner rule 2026-11-18; a Prisma.sql object) — not the metadata merge.
     if (!Array.isArray(strings) && (strings as { strings?: string[] }).strings?.join('?').includes('"payeePan"')) return 1;
     const sql = (strings as TemplateStringsArray).join('?');
+    if (sql.includes('voucherNotifyFailedAt')) {
+      const m0 = (row.metadata && typeof row.metadata === 'object' ? row.metadata : {}) as Row;
+      if (sql.includes('jsonb_build_object')) {
+        // Send FAILED: [at, reason, id] — marker cleared, failure recorded.
+        const [at, reason, mid] = vals as [string, string, string];
+        if (mid !== row.id) return 0;
+        const { voucherIssuedNotifiedFp: _f, voucherIssuedNotifiedAt: _a, ...rest } = m0;
+        row.metadata = { ...rest, voucherNotifyFailedAt: at, voucherNotifyFailedReason: reason };
+        return 1;
+      }
+      // Sent: [id] — an earlier failure record is cleared.
+      if (vals[0] !== row.id || m0.voucherNotifyFailedAt == null) return 0;
+      const { voucherNotifyFailedAt: _x, voucherNotifyFailedReason: _y, ...rest } = m0;
+      row.metadata = rest;
+      return 1;
+    }
+    if (sql.includes('hubbleManualMatchesHubble')) {
+      const [at, mid] = vals as [string, string];
+      if (mid !== row.id) return 0;
+      row.metadata = { ...((row.metadata ?? {}) as Row), hubbleManualMatchesHubble: true, hubbleManualMatchesHubbleAt: at };
+      return 1;
+    }
     if (sql.includes('voucherIssuedNotifiedFp')) {
       // Once-only VOUCHER_ISSUED marker (audit A): [fp, at, id, fp] — CAS on the stored fingerprint.
       const [fp, at, mid] = vals as [string, string, string];
@@ -1548,6 +1570,34 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       expect(meta()).toMatchObject({ hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT' });
       expect(row.voucherCode).toBe('MANUAL-9');
       expect(voucherIssuedSends()).toHaveLength(0);
+    });
+
+    it('follow-up 2: a manual code that IS Hubble\u2019s own voucher → one voucher: no flag, recorded "matches Hubble"', async () => {
+      const stale = snapshot();
+      Object.assign(row, { status: 'DELIVERED', voucherCode: ' card-o1 ', voucherProvider: 'Manual' }); // same code, other case/space
+      o1Lookup.mockResolvedValue(SUCCESS_BODY);
+      mockPrisma.redemptionOrder.findFirst
+        .mockImplementationOnce(async () => snapshot())
+        .mockImplementationOnce(async () => stale);
+      const outcome = await service.reconcileHubbleOrder('o1', { source: 'SWEEP' });
+      expect(outcome).toBe('DELIVERED');
+      expect(meta().hubbleNeedsReconcile).not.toBe(true);
+      expect(meta().hubbleManualMatchesHubble).toBe(true);
+      expect(voucherIssuedSends()).toHaveLength(0);
+    });
+
+    it('follow-up 4: a FAILED VOUCHER_ISSUED send is recorded (digest) and the marker cleared, so a later path sends it', async () => {
+      Object.assign(row, { status: 'DELIVERED', voucherCode: 'CARD-O1' });
+      const notify = (service as unknown as { notifyVoucherIssued: (a: string, b: string) => Promise<void> }).notifyVoucherIssued.bind(service);
+      mockNotifications.notifyUserWithChannels.mockRejectedValueOnce(new Error('WhatsApp provider down'));
+      await notify('o1', 'bajaj');
+      expect(meta().voucherIssuedNotifiedFp).toBeUndefined();
+      expect(meta()).toMatchObject({ voucherNotifyFailedAt: expect.any(String), voucherNotifyFailedReason: expect.stringContaining('WhatsApp provider down') });
+      // A later path (e.g. a retry) can now send it — and the failure record is cleared.
+      await notify('o1', 'bajaj');
+      expect(voucherIssuedSends()).toHaveLength(2); // the failed attempt + the successful one
+      expect(meta().voucherIssuedNotifiedFp).toEqual(expect.any(String));
+      expect(meta().voucherNotifyFailedAt).toBeUndefined();
     });
 
     it('F: re-raising the SAME open reason writes nothing (no hubbleReconcileAt / updatedAt churn)', async () => {

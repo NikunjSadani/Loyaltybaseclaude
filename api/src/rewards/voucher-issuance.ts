@@ -124,7 +124,7 @@ export async function notifyVoucherIssued(
   },
   orderId: string,
   clientId: string,
-): Promise<void> {
+): Promise<VoucherNotifyResult> {
   try {
     const o = (await deps.prisma.redemptionOrder.findUnique({
       where: { id: orderId },
@@ -143,8 +143,8 @@ export async function notifyVoucherIssued(
       reward?: { name?: string } | null;
       partner?: { userId?: string | null; phone?: string | null; ownerName?: string | null } | null;
     } | null;
-    // Nothing to send without a code and a login user to deliver the bell to.
-    if (!o?.voucherCode || !o.partner?.userId) return;
+    // Nothing to send without a code and a login user to deliver the bell to (not a send failure).
+    if (!o?.voucherCode || !o.partner?.userId) return { sent: false, reason: 'NO_CODE_OR_LOGIN' };
 
     const program = await programLabelFor(deps.prisma, clientId);
     const amount = o.valuePaise != null ? `₹${(Number(o.valuePaise) / 100).toLocaleString('en-IN')}` : '';
@@ -177,7 +177,53 @@ export async function notifyVoucherIssued(
       url: '/partner/rewards/orders',
       event: 'VOUCHER_ISSUED',
     });
+    return { sent: true };
   } catch (e) {
     deps.logger.error(`[voucher] VOUCHER_ISSUED notify failed for order ${orderId} (non-fatal): ${e}`);
+    return { sent: false, failed: true, reason: String(e).slice(0, 300) };
   }
+}
+
+/**
+ * NO SILENT PASS-THROUGH for a failed VOUCHER_ISSUED send (every issuing path — Gifsy console, Hubble,
+ * vendor portal): the once-only marker (voucherIssuedNotifiedFp) is cleared so a later path / ops retry can
+ * send, and the failure is recorded (voucherNotifyFailedAt / Reason) — the Daily Ops Digest lists these
+ * orders. A later successful send clears the record. Never throws.
+ */
+export async function recordVoucherNotifyResult(
+  deps: { prisma: { $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => PromiseLike<number> }; logger: Logger },
+  orderId: string,
+  r: VoucherNotifyResult | void,
+): Promise<void> {
+  try {
+    if (r && r.failed) {
+      const at = new Date().toISOString();
+      const reason = (r.reason ?? 'send failed').slice(0, 300);
+      await deps.prisma.$executeRaw`
+        UPDATE "redemption_orders"
+        SET "metadata" = ((CASE WHEN jsonb_typeof("metadata") = 'object' THEN "metadata" ELSE '{}'::jsonb END)
+                          - 'voucherIssuedNotifiedFp' - 'voucherIssuedNotifiedAt')
+                         || jsonb_build_object('voucherNotifyFailedAt', ${at}::text, 'voucherNotifyFailedReason', ${reason}::text)
+        WHERE "id" = ${orderId}`;
+      deps.logger.error(`[voucher] order ${orderId}: VOUCHER_ISSUED could not be sent — recorded for the Daily Ops Digest; marker cleared so it can be re-sent`);
+    } else if (r && r.sent) {
+      await deps.prisma.$executeRaw`
+        UPDATE "redemption_orders"
+        SET "metadata" = "metadata" - 'voucherNotifyFailedAt' - 'voucherNotifyFailedReason'
+        WHERE "id" = ${orderId} AND jsonb_typeof("metadata") = 'object'
+          AND ("metadata"->>'voucherNotifyFailedAt') IS NOT NULL`;
+    }
+  } catch (e) {
+    deps.logger.error(`[voucher] order ${orderId}: could not record the VOUCHER_ISSUED send result: ${e}`);
+  }
+}
+
+/**
+ * Outcome of notifyVoucherIssued. `failed` = the send itself threw (the member did NOT get their code) —
+ * callers must surface it (no silent pass-through); `sent: false` without `failed` = nothing to send.
+ */
+export interface VoucherNotifyResult {
+  sent: boolean;
+  failed?: boolean;
+  reason?: string;
 }

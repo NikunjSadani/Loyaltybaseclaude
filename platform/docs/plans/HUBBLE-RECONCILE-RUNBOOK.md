@@ -42,11 +42,18 @@ prod webhook is not registered with Hubble). Before this, an order Hubble left P
 - "No order" on an unflagged order (e.g. the server died in the middle of the place call) → flagged **Hubble state
   unknown** (`HUBBLE_INDETERMINATE`) so ops Retry can refund it under the usual 2 h + same-account + canary rules (the
   2 h count from the flag); if Hubble had acknowledged the order before → `HUBBLE_PROCESSING_NOT_FOUND`.
-- Order no longer eligible for Hubble (tenant flag off / product gone) → **Hubble can't be checked — fulfil manually or
-  refund** (`HUBBLE_NOT_ELIGIBLE_NOW`).
+- Order no longer eligible for Hubble (tenant flag off / product gone) → **Hubble can't be checked — fulfil manually**
+  (`HUBBLE_NOT_ELIGIBLE_NOW`). A hand refund stays blocked (a Hubble order may exist).
 - Orders ops **fulfilled manually** after handing them to Hubble are still asked about for 7 days (check only — never
   delivered or refunded): if Hubble reports SUCCESS too → the double-issuance flag (`HUBBLE_SUCCESS_MANUAL_CODE_PRESENT`).
-- Each Scheduler call has a ~90 s budget; work left over is picked up by the next call (`budget` in the response).
+- Each Scheduler call has a 60 s budget (the job's attempt deadline is 180 s); work left over is picked up by the next
+  call (`budget` in the response).
+- A manual code that IS Hubble's own voucher (ops copied it from Hubble's portal) is recognised (same code, and PIN when
+  both have one): one voucher, no double-issuance flag; recorded as `hubbleManualMatchesHubble` and no longer re-checked.
+  Only a DIFFERENT code raises the double-issuance flag.
+- A VOUCHER_ISSUED message that could not be sent is never silent: the once-only marker is cleared (a later path can send
+  it), `voucherNotifyFailedAt` / `voucherNotifyFailedReason` are recorded on the order, and the Daily Ops Digest lists
+  those orders under Vouchers (Hubble) → "voucher message not sent".
 - Not before 2 min after hand-off; every run for the first hour, then every 15 min, until 7 days. At most 25 orders per
   run, least-recently-checked first. One instance at a time (Postgres advisory lock + per-order claim). Metadata:
   `hubbleLastSweepAt`, `hubbleSweepCount`, `hubbleLastSweepOutcome`.
@@ -73,7 +80,7 @@ Same pattern as `voucher-dispersal-drain-*` (VOUCHER-DISPERSAL.md):
    - target HTTP `POST https://<api-host>/v1/hubble/sweep`, header `x-drain-secret: <the secret>`, empty body
    - e.g. `gcloud scheduler jobs create http hubble-sweep-prod --location=<region> --schedule="*/2 * * * *"
      --time-zone="Asia/Kolkata" --http-method=POST --uri="https://<api-host>/v1/hubble/sweep"
-     --headers="x-drain-secret=<secret>" --attempt-deadline=120s` then `gcloud scheduler jobs pause hubble-sweep-prod --location=<region>`
+     --headers="x-drain-secret=<secret>" --attempt-deadline=180s` then `gcloud scheduler jobs pause hubble-sweep-prod --location=<region>`
      (or create from the console and pause it).
 3. **RESUME the job only after the deploy that carries `/v1/hubble/sweep` is serving** (before that it would 404 every
    2 min). Check: `gcloud scheduler jobs resume hubble-sweep-prod --location=<region>`; the job's last run shows HTTP 200

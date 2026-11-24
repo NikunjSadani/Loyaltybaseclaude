@@ -109,6 +109,13 @@ export interface VouchersSection {
   stuckProcessing: number;
   /** Orders with an open hubbleNeedsReconcile flag right now. */
   needsReconcile: number;
+  /**
+   * Orders whose VOUCHER_ISSUED message (code to the member) could not be sent and has not been sent since
+   * (metadata.voucherNotifyFailedAt) — any provider. Optional for older snapshots.
+   */
+  voucherNotifyFailed?: number;
+  /** Up to 10 of those order numbers. */
+  voucherNotifyFailedOrders?: string[];
 }
 
 export interface PayoutsSection {

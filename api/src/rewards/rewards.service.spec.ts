@@ -5359,16 +5359,17 @@ describe('RewardsService', () => {
       expect(aoa[2][h.indexOf('Phone')]).toBe('9822222222');
     });
 
-    it('audit 6: leaves out orders handed to Hubble with no code (the upload would refuse them); audit 7: list scope', async () => {
+    it('audit 6: leaves out orders handed to Hubble with no code (the upload would refuse them); owner scope = upload scope', async () => {
       mockPrisma.redemptionOrder.findMany.mockResolvedValue([
         { orderNumber: 'HUB-1', redemptionMode: 'GIFT_CARD', status: 'PROCESSING', voucherCode: null, voucherProvider: 'Hubble', metadata: {}, createdAt: new Date(), reward: { name: 'A' }, partner: null },
         { orderNumber: 'HUB-2', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED', voucherCode: null, voucherProvider: null, metadata: { hubblePlaceAttemptAt: '2026-11-24T05:00:00.000Z' }, createdAt: new Date(), reward: { name: 'A' }, partner: null },
         { orderNumber: 'MAN-1', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED', voucherCode: null, voucherProvider: null, metadata: {}, createdAt: new Date(), reward: { name: 'A' }, partner: null },
         { orderNumber: 'PHY-1', redemptionMode: 'PHYSICAL_GIFT', status: 'DISPATCHED', voucherCode: null, voucherProvider: null, metadata: {}, createdAt: new Date(), reward: { name: 'B' }, partner: null },
       ]);
-      // An UN-assumed Gifsy owner gets the SAME scope as the list (its own tenant), not every tenant.
+      // An UN-assumed Gifsy owner keeps the cross-tenant sheet (tenantScope) — the SAME scope uploadFulfilment
+      // resolves order numbers with, so download and upload always agree (intentional; see the code comment).
       const buf = await service.getFulfilmentTemplate(gifsyHomeForSheet, {});
-      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where.partner).toEqual({ clientId: 'gifsy' });
+      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where.partner).toBeUndefined();
       const rows = parseFulfilmentUploadBuffer(buf).rows.map((r) => r.orderNumber);
       expect(rows).toEqual(['MAN-1', 'PHY-1']);
     });
