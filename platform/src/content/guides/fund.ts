@@ -34,7 +34,7 @@ Not on this ledger: points credits (money leaves only when points are redeemed),
 
 Who can do what:
 
-- **Settings** (agency fee, voucher item discounts, low-balance alert) are managed in the **Gifsy console**: **Clients** → the client → **Fund** section. Gifsy admins, and Gifsy staff with the "manage fund" permission and access to that client. Gifsy staff (who do not use the console client pages) open the same section while working in the client: **Fund Reconciliation → Rates & alerts → Change the fund settings** (`/admin/fund/settings`).
+- **Settings** (agency fee, voucher item discounts, low-balance alert) are managed in the **Gifsy console**: **Clients** → the client → **Fund** section. Gifsy admins, and Gifsy staff with the "manage fund" permission and access to that client. Gifsy staff (who do not use the console client pages) open the same section while working in the client: **Fund Reconciliation → Rates & alerts → Change the fund settings** (\`/admin/fund/settings\`).
 - **Money entries** (opening balance, advances, adjustments) are recorded on **Fund Reconciliation** while working inside the client — same people.
 - Gifsy staff with "payouts: read" can open Fund Reconciliation read-only.
 - The **client admin** sees everything read-only. The **Rates & alerts** tab there says "Managed by Gifsy in the console".
