@@ -166,6 +166,7 @@ const gifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deole
 // order write-paths (§12) scope by partner.clientId. An UN-assumed GIFSY_ADMIN is
 // platform-wide (cross-tenant) for those same paths (the fulfilment console).
 const assumedGifsy: JwtPayload = { sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', assumed: true, phone: '9990001111', name: '' };
+const gifsyHomeForSheet: JwtPayload = { sub: 'admin0', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '9990001112', name: '' };
 const partner: JwtPayload = { sub: 'user1', role: 'RETAILER', clientId: 'deoleo', phone: '9991112222', name: '' };
 const sales: JwtPayload = { sub: 'salesUser1', role: 'SALES_SO', clientId: 'deoleo', phone: '9993334444', name: '' };
 
@@ -866,6 +867,140 @@ describe('RewardsService', () => {
       const body = JSON.stringify(res);
       // No part of any code — not even the last 4.
       for (const frag of ['AMZN', '1234', '5678', 'WXYZ', 'ABC12', 'BC12']) expect(body).not.toContain(frag);
+    });
+
+    describe('q — server-side search', () => {
+      const ci = (v: string) => ({ contains: v, mode: 'insensitive' });
+      /** The expected OR for an operator / tenant-admin search (contact fields included). */
+      const fullOr = (lit: string, opts: { idContains?: boolean; phoneTerms?: string[] } = {}) => ({
+        OR: [
+          { reward: { name: ci(lit) } },
+          { orderNumber: ci(lit) },
+          { id: { endsWith: lit, mode: 'insensitive' } },
+          ...(opts.idContains ? [{ id: ci(lit) }] : []),
+          { partner: { businessName: ci(lit) } },
+          { partner: { partnerCode: ci(lit) } },
+          { partner: { outlets: { some: { deletedAt: null, outletCode: ci(lit) } } } },
+          ...(opts.phoneTerms ?? [lit]).flatMap((t) => [
+            { partner: { phone: { contains: t } } },
+            { partner: { OR: [{ phone: null }, { phone: '' }], user: { phone: { contains: t } } } },
+          ]),
+        ],
+      });
+      const whereOf = () => mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where;
+
+      beforeEach(() => {
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+        mockPrisma.redemptionOrder.count.mockResolvedValue(0);
+      });
+
+      it.each([
+        ['reward name / partner name / partner code / outlet code (trimmed)', '  amazon  ', 'amazon', {}],
+        ['a short ref: internal id only by its TAIL (endsWith), never a fragment', 'u8qc6', 'u8qc6', {}],
+        ['an 8+ char term also matches the internal id anywhere (and its 6+ digits the phone)', 'BAJAJ-26-0000', 'BAJAJ-26-0000', { idContains: true, phoneTerms: ['BAJAJ-26-0000', '260000'] }],
+      ])('%s', async (_l, q, lit, opts) => {
+        await service.listOrders(clientAdminA, { q } as never);
+        expect(whereOf().AND).toEqual([fullOr(lit, opts as never)]);
+        expect(mockPrisma.redemptionOrder.count.mock.calls[0][0].where.AND).toEqual([fullOr(lit, opts as never)]);
+      });
+
+      it('outlet NAME is not searched (it is not shown); outlet CODE of any live outlet is', async () => {
+        await service.listOrders(clientAdminA, { q: 'BJ-0042' } as never);
+        const s = JSON.stringify(whereOf().AND);
+        expect(s).toContain('"outletCode"');
+        expect(s).not.toMatch(/"outlets":\{"some":\{[^}]*"name"/);
+      });
+
+      it('LIKE wildcards in the term match literally (% _ \\ escaped)', async () => {
+        await service.listOrders(clientAdminA, { q: '50%_off\\x' } as never);
+        expect(whereOf().AND).toEqual([fullOr('50\\%\\_off\\\\x', { idContains: true })]);
+      });
+
+      it('phone: "+91 98765 43210" also matches its digits and the last 10 digits; the login phone only when the partner has none', async () => {
+        await service.listOrders(clientAdminA, { q: '+91 98765 43210' } as never);
+        expect(whereOf().AND).toEqual([
+          fullOr('+91 98765 43210', { idContains: true, phoneTerms: ['+91 98765 43210', '919876543210', '9876543210'] }),
+        ]);
+      });
+
+      it('fewer than 6 digits → no digits-only phone variant', async () => {
+        await service.listOrders(clientAdminA, { q: 'ab-123' } as never);
+        expect(whereOf().AND).toEqual([fullOr('ab-123')]);
+      });
+
+      it('tenant isolation: the search is ANDed under the caller tenant scope + status filter', async () => {
+        await service.listOrders(clientAdminA, { q: 'amazon', status: 'DELIVERED' } as never, 'cp-of-tenantB');
+        const where = whereOf();
+        expect(where).toEqual({ partner: { clientId: 'tenantA' }, status: 'DELIVERED', AND: [fullOr('amazon')] });
+        expect(JSON.stringify(where)).not.toContain('tenantB');
+      });
+
+      it('cursor + q: the keyset predicate wraps the searched WHERE; the count keeps the search', async () => {
+        const at = new Date('2026-10-01T10:00:00.000Z');
+        await service.listOrders(clientAdminA, { q: 'amazon', cursor: encodeOrderCursor(at, 'oX') } as never);
+        const where = whereOf();
+        expect(where.AND[0]).toEqual({ partner: { clientId: 'tenantA' }, AND: [fullOr('amazon')] });
+        expect(where.AND[1]).toEqual({ OR: [{ createdAt: { lt: at } }, { createdAt: at, id: { lt: 'oX' } }] });
+        expect(mockPrisma.redemptionOrder.count.mock.calls[0][0].where).toEqual({
+          partner: { clientId: 'tenantA' }, AND: [fullOr('amazon')],
+        });
+      });
+
+      it('blank / whitespace q is ignored (no search clause)', async () => {
+        await service.listOrders(clientAdminA, { q: '   ' } as never);
+        expect(whereOf().AND).toBeUndefined();
+      });
+
+      it('member view: never searches by outlet or phone (it never shows them)', async () => {
+        mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+        await service.listOrders(partner, { q: '98111' } as never);
+        const s = JSON.stringify(whereOf().AND);
+        expect(s).not.toContain('phone');
+        expect(s).not.toContain('outletCode');
+        expect(s).toContain('businessName');
+      });
+    });
+
+    it('Outlet ID + Phone: operator and CLIENT_ADMIN rows carry partner.outletCode + partner.phone; the member view does not', async () => {
+      const at = new Date('2026-10-01T10:00:00.000Z');
+      const rows = () => [
+        {
+          id: 'o1', status: 'DELIVERED', voucherCode: null, createdAt: at, updatedAt: at,
+          partner: { id: 'cp1', businessName: 'Shree Stores', phone: '9811111111', user: { phone: '9000000000' }, outlets: [{ outletCode: 'BJ-0042' }] },
+        },
+        {
+          id: 'o2', status: 'DELIVERED', voucherCode: null, createdAt: at, updatedAt: at,
+          // No partner phone → the login's phone; no live outlet → null (the UI shows "—").
+          partner: { id: 'cp2', businessName: 'Sibling', phone: null, user: { phone: '9822222222' }, outlets: [] },
+        },
+      ];
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.redemptionOrder.count.mockResolvedValue(2);
+
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce(rows());
+      const g = await service.listOrders(gifsy, {});
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce(rows());
+      const ca = await service.listOrders(clientAdminA, {});
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce(rows());
+      const m = await service.listOrders(partner, {});
+
+      // The primary live outlet is picked exactly like the redemption report.
+      const sel = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].select.partner.select;
+      expect(sel.outlets).toEqual({
+        where: { deletedAt: null },
+        orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        take: 1,
+        select: { outletCode: true },
+      });
+
+      for (const res of [g, ca]) {
+        expect(res.orders[0].partner).toEqual({ id: 'cp1', businessName: 'Shree Stores', outletCode: 'BJ-0042', phone: '9811111111' });
+        expect(res.orders[1].partner).toEqual({ id: 'cp2', businessName: 'Sibling', outletCode: null, phone: '9822222222' });
+      }
+      // Member view: unchanged shape — no outlet / phone / raw relation fields.
+      expect(m.orders[0].partner).toEqual({ id: 'cp1', businessName: 'Shree Stores' });
+      expect(JSON.stringify(m)).not.toContain('9811111111');
+      expect(JSON.stringify(m)).not.toContain('BJ-0042');
     });
 
     it('GIFSY and the member (own orders) still receive the real voucher code', async () => {
@@ -4532,6 +4667,55 @@ describe('RewardsService', () => {
         .rejects.toThrow(/can't be reused/);
     });
 
+    // ── OWNER 2026-11-24: no manual FORWARD move on a Hubble-handed order without a code ──
+    const handedNoFlag = (extra: Record<string, unknown> = {}) =>
+      stuck({ metadata: { hubblePlaceAttemptAt: '2026-11-24T05:15:00.000Z', hubblePlaceResponded: false, hubbleStatus: 'PROCESSING' }, ...extra });
+    it.each([
+      ['CONFIRMED → PROCESSING (place timed out, unflagged)', { status: 'CONFIRMED', voucherProvider: null }, UpdatableOrderStatus.PROCESSING],
+      ['PROCESSING → DISPATCHED', {}, UpdatableOrderStatus.DISPATCHED],
+      ['DISPATCHED → DELIVERED', { status: 'DISPATCHED' }, UpdatableOrderStatus.DELIVERED],
+    ])('forward move refused with the plain message: %s', async (_l, over, to) => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(handedNoFlag(over));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: to }))
+        .rejects.toThrow("This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.");
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('a FLAGGED Hubble order is refused too (any Hubble hand-off marker counts, e.g. hubbleOrderId only)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck({ voucherProvider: null }));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))
+        .rejects.toThrow(/This voucher is with Hubble/);
+    });
+
+    it('NOT refused: an order ops took over manually (hubbleStatus MANUAL_OVERRIDE) or a Hubble order that holds a code', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+        stuck({ voucherProvider: 'Manual', metadata: { hubbleStatus: 'MANUAL_OVERRIDE', hubblePlaceAttemptAt: '2026-11-24T05:15:00.000Z' } }),
+      );
+      // Whatever else happens downstream (mock-dependent), it is never the Hubble forward block.
+      const msgOf = (p: Promise<unknown>) => p.then(() => '', (e: Error) => e.message);
+      expect(await msgOf(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))).not.toMatch(/This voucher is with Hubble/);
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck({ voucherCode: 'HUB-CARD-1', metadata: { hubbleStatus: 'SUCCESS' } }));
+      expect(await msgOf(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))).not.toMatch(/This voucher is with Hubble/);
+    });
+
+    it('the bulk fulfilment upload shows that message as the ROW error (not a silent skip)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(handedNoFlag({ orderNumber: 'RDM-h' }));
+      const XLSX = require('xlsx');
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['Order Number', 'Reward', 'Mode', 'Current Status', 'Voucher Code', 'Voucher Provider', 'Tracking Number', 'Tracking URL', 'New Status'],
+        ['RDM-h', 'X', 'GIFT_CARD', 'PROCESSING', '', '', '', '', 'DISPATCHED'],
+      ]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Fulfilment');
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      const res = await service.uploadFulfilment(gifsy, { buffer } as Express.Multer.File);
+      expect(res).toMatchObject({ failed: 1, succeeded: 0 });
+      expect(res.errors[0]).toMatchObject({
+        orderNumber: 'RDM-h',
+        message: "This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.",
+      });
+    });
+
     it('a manual REFUND on any Hubble-marked order is blocked (not just provider=Hubble)', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck({ voucherProvider: null, status: 'CONFIRMED' }));
       await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
@@ -5140,6 +5324,70 @@ describe('RewardsService', () => {
       expect(Buffer.isBuffer(buf)).toBe(true);
       const parsed = parseFulfilmentUploadBuffer(buf);
       expect(parsed.rows[0].orderNumber).toBe('RDM-1');
+    });
+
+    it('adds the partner Outlet ID (primary live outlet) and registered phone columns', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([
+        {
+          orderNumber: 'RDM-1', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED',
+          reward: { name: 'Amazon ₹500' },
+          partner: { phone: '9811111111', user: { phone: '9000000000' }, outlets: [{ outletCode: 'BJ-0042' }] },
+        },
+        {
+          orderNumber: 'RDM-2', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED',
+          reward: { name: 'Amazon ₹500' },
+          // No partner phone → the login's phone; no live outlet → blank.
+          partner: { phone: null, user: { phone: '9822222222' }, outlets: [] },
+        },
+      ]);
+      const buf = await service.getFulfilmentTemplate(assumedGifsy, {});
+
+      const call = mockPrisma.redemptionOrder.findMany.mock.calls?.[0]?.[0];
+      expect(call.include.partner.select.outlets).toEqual({
+        where: { deletedAt: null },
+        orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        take: 1,
+        select: { outletCode: true },
+      });
+      const XLSX = require('xlsx');
+      const wb = XLSX.read(buf, { type: 'buffer' });
+      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: false });
+      const h = aoa[0] as string[];
+      expect(aoa[1][h.indexOf('Outlet ID')]).toBe('BJ-0042');
+      expect(aoa[1][h.indexOf('Phone')]).toBe('9811111111');
+      expect(aoa[2][h.indexOf('Outlet ID')]).toBe('');
+      expect(aoa[2][h.indexOf('Phone')]).toBe('9822222222');
+    });
+
+    it('audit 6: leaves out orders handed to Hubble with no code (the upload would refuse them); audit 7: list scope', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([
+        { orderNumber: 'HUB-1', redemptionMode: 'GIFT_CARD', status: 'PROCESSING', voucherCode: null, voucherProvider: 'Hubble', metadata: {}, createdAt: new Date(), reward: { name: 'A' }, partner: null },
+        { orderNumber: 'HUB-2', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED', voucherCode: null, voucherProvider: null, metadata: { hubblePlaceAttemptAt: '2026-11-24T05:00:00.000Z' }, createdAt: new Date(), reward: { name: 'A' }, partner: null },
+        { orderNumber: 'MAN-1', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED', voucherCode: null, voucherProvider: null, metadata: {}, createdAt: new Date(), reward: { name: 'A' }, partner: null },
+        { orderNumber: 'PHY-1', redemptionMode: 'PHYSICAL_GIFT', status: 'DISPATCHED', voucherCode: null, voucherProvider: null, metadata: {}, createdAt: new Date(), reward: { name: 'B' }, partner: null },
+      ]);
+      // An UN-assumed Gifsy owner gets the SAME scope as the list (its own tenant), not every tenant.
+      const buf = await service.getFulfilmentTemplate(gifsyHomeForSheet, {});
+      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].where.partner).toEqual({ clientId: 'gifsy' });
+      const rows = parseFulfilmentUploadBuffer(buf).rows.map((r) => r.orderNumber);
+      expect(rows).toEqual(['MAN-1', 'PHY-1']);
+    });
+
+    it('follows the console search (q) and adds "Redeemed on" (order createdAt, IST)', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([
+        {
+          orderNumber: 'RDM-1', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED', createdAt: new Date('2026-11-24T10:12:00.000Z'),
+          reward: { name: 'Amazon' }, partner: { phone: '9811111111', user: null, outlets: [] },
+        },
+      ]);
+      const buf = await service.getFulfilmentTemplate(assumedGifsy, { q: ' amazon ' } as never);
+      const call = mockPrisma.redemptionOrder.findMany.mock.calls?.[0]?.[0];
+      expect(call.where.partner).toEqual({ clientId: 'deoleo' });
+      expect(JSON.stringify(call.where.AND)).toContain('"contains":"amazon"');
+      const XLSX = require('xlsx');
+      const wb = XLSX.read(buf, { type: 'buffer' });
+      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: false });
+      expect(aoa[1][(aoa[0] as string[]).indexOf('Redeemed on (IST)')]).toBe('2026-11-24 15:42');
     });
 
     it('honours an explicit ?status= and ?mode= filter', async () => {

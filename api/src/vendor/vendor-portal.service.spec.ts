@@ -268,6 +268,21 @@ describe('VendorPortalService', () => {
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
+    it.each([
+      ['CONFIRMED', 'PROCESSING', { metadata: { hubblePlaceAttemptAt: '2026-11-24T05:15:00.000Z' } }],
+      ['PROCESSING', 'DISPATCHED', { voucherProvider: 'Hubble', metadata: { hubbleStatus: 'PROCESSING' } }],
+      ['DISPATCHED', 'DELIVERED', { metadata: { hubbleOrderId: 'h1' } }],
+    ])('audit L: a vendor can NOT move a Hubble-handed order without a code forward (%s → %s)', async (from, to, extra) => {
+      grantScope();
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        id: 'o1', status: from, partnerId: 'cp1', orderNumber: 'D-26-1', voucherCode: null, ...extra,
+      });
+      await expect(service.transition(vendor, 'o1', { toStatus: to as never })).rejects.toThrow(
+        "This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.",
+      );
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
     it('transition CONFIRMED→PROCESSING succeeds without touching points/valuePaise', async () => {
       grantScope();
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ id: 'o1', status: 'CONFIRMED', partnerId: 'cp1', orderNumber: 'D-26-1' });

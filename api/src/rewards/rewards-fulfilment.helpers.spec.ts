@@ -11,6 +11,7 @@ import * as XLSX from 'xlsx';
 import {
   buildFulfilmentTemplateBuffer,
   FulfilmentTemplateRow,
+  parseFulfilmentUploadBuffer,
 } from './rewards-fulfilment.helpers';
 
 /** Read the template sheet back as raw arrays (row0 = headers, row1+ = data). */
@@ -30,16 +31,19 @@ describe('buildFulfilmentTemplateBuffer — formula-injection sanitisation (AF-5
       {
         orderNumber: '=cmd|\'/c calc\'!A1',
         reward: '@SUM(A1)',
+        outletCode: '=HYPERLINK("x")',
         mode: '+1+1',
         currentStatus: '-2',
       },
     ];
     const aoa = readAoa(buildFulfilmentTemplateBuffer(rows));
+    const col = (h: string) => (aoa[0] as string[]).indexOf(h);
     const data = aoa[1]; // header at row 0
-    expect(data[0]).toBe('\'=cmd|\'/c calc\'!A1'); // Order Number
-    expect(data[1]).toBe('\'@SUM(A1)'); // Reward
-    expect(data[2]).toBe('\'+1+1'); // Mode
-    expect(data[3]).toBe('\'-2'); // Current Status
+    expect(data[col('Order Number')]).toBe('\'=cmd|\'/c calc\'!A1');
+    expect(data[col('Reward')]).toBe('\'@SUM(A1)');
+    expect(data[col('Outlet ID')]).toBe('\'=HYPERLINK("x")');
+    expect(data[col('Mode')]).toBe('\'+1+1');
+    expect(data[col('Current Status')]).toBe('\'-2');
   });
 
   it('leaves a benign row unchanged', () => {
@@ -47,10 +51,51 @@ describe('buildFulfilmentTemplateBuffer — formula-injection sanitisation (AF-5
       { orderNumber: 'ORD-100', reward: 'Amazon Voucher', mode: 'DIGITAL', currentStatus: 'PENDING' },
     ];
     const aoa = readAoa(buildFulfilmentTemplateBuffer(rows));
+    const col = (h: string) => (aoa[0] as string[]).indexOf(h);
     const data = aoa[1];
-    expect(data[0]).toBe('ORD-100');
-    expect(data[1]).toBe('Amazon Voucher');
-    expect(data[2]).toBe('DIGITAL');
-    expect(data[3]).toBe('PENDING');
+    expect(data[col('Order Number')]).toBe('ORD-100');
+    expect(data[col('Reward')]).toBe('Amazon Voucher');
+    expect(data[col('Mode')]).toBe('DIGITAL');
+    expect(data[col('Current Status')]).toBe('PENDING');
+  });
+});
+
+describe('buildFulfilmentTemplateBuffer — Outlet ID + Phone context columns', () => {
+  it('emits Outlet ID and Phone right after Reward, before the fill columns', () => {
+    const aoa = readAoa(
+      buildFulfilmentTemplateBuffer([
+        { orderNumber: 'ORD-1', reward: 'R', outletCode: 'BJ-0042', phone: '9811111111', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+        { orderNumber: 'ORD-2', reward: 'R', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+      ]),
+    );
+    expect(aoa[0].slice(0, 7)).toEqual(['Order Number', 'Reward', 'Outlet ID', 'Phone', 'Redeemed on (IST)', 'Mode', 'Current Status']);
+    expect(aoa[1][2]).toBe('BJ-0042');
+    expect(String(aoa[1][3])).toBe('9811111111');
+    // Not recorded → blank cells, never "undefined".
+    expect(aoa[2][2] ?? '').toBe('');
+    expect(aoa[2][3] ?? '').toBe('');
+  });
+
+  it('Redeemed on = the order createdAt in IST (YYYY-MM-DD HH:mm, sortable); blank when unknown', () => {
+    const aoa = readAoa(
+      buildFulfilmentTemplateBuffer([
+        // 10:12 UTC = 15:42 IST
+        { orderNumber: 'ORD-1', reward: 'R', redeemedAt: new Date('2026-11-24T10:12:00.000Z'), mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+        { orderNumber: 'ORD-2', reward: 'R', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+      ]),
+    );
+    const col = (aoa[0] as string[]).indexOf('Redeemed on (IST)');
+    expect(aoa[1][col]).toBe('2026-11-24 15:42');
+    expect(aoa[2][col] ?? '').toBe('');
+  });
+
+  it('the upload parser ignores the new context columns (a filled sheet still round-trips)', () => {
+    const buf = buildFulfilmentTemplateBuffer([
+      { orderNumber: 'ORD-1', reward: 'R', outletCode: 'BJ-0042', phone: '9811111111', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+    ]);
+    const parsed = parseFulfilmentUploadBuffer(buf);
+    expect(parsed.rows).toHaveLength(1);
+    expect(parsed.rows[0]).toMatchObject({ orderNumber: 'ORD-1' });
+    expect(parsed.rows[0].voucherCode).toBeUndefined();
   });
 });

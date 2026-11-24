@@ -167,7 +167,8 @@ export class SalesNotificationsService implements OnModuleInit {
         where: {
           unassignedAt: null,
           outlet: { clientId, outletCode: { in: codes } },
-          salesUser: { clientId, deletedAt: null },
+          // Only a LIVE rep is notified — never a vacant position's (or deactivated) login.
+          salesUser: { clientId, deletedAt: null, isActive: true, user: { status: 'ACTIVE' } },
         },
         select: { salesUser: { select: { id: true, userId: true } } },
       });
@@ -211,7 +212,8 @@ export class SalesNotificationsService implements OnModuleInit {
   /** The login userId for a SalesUser.id (tenant-scoped, non-deleted). */
   private async salesUserLoginId(clientId: string, salesUserId: string): Promise<string | null> {
     const su = await this.prisma.salesUser.findFirst({
-      where: { id: salesUserId, clientId, deletedAt: null },
+      // Live positions only: a vacant / deactivated position's login is never notified.
+      where: { id: salesUserId, clientId, deletedAt: null, isActive: true, user: { status: 'ACTIVE' } },
       select: { userId: true },
     });
     return su?.userId ?? null;
@@ -223,7 +225,7 @@ export class SalesNotificationsService implements OnModuleInit {
     outletId: string,
   ): Promise<{ salesUserId: string; userId: string } | null> {
     const a = await this.prisma.salesUserAssignment.findFirst({
-      where: { outletId, unassignedAt: null, salesUser: { clientId, deletedAt: null } },
+      where: { outletId, unassignedAt: null, salesUser: { clientId, deletedAt: null, isActive: true, user: { status: 'ACTIVE' } } },
       orderBy: { assignedAt: 'desc' },
       select: { salesUser: { select: { id: true, userId: true } } },
     });
@@ -259,6 +261,10 @@ export class SalesNotificationsService implements OnModuleInit {
     body: string,
     url?: string,
   ): Promise<void> {
+    // Last line of defence: never notify a login that is not ACTIVE (a vacated / deactivated
+    // person) — whatever resolver produced the id.
+    const recipient = await this.prisma.user.findUnique({ where: { id: userId }, select: { status: true } });
+    if (recipient?.status !== 'ACTIVE') return;
     // IN_APP bell-feed row (best-effort; writeInApp swallows its own errors).
     await this.notifications.writeInApp({ userId, subject, body, url });
     // PUSH row — identical to the prior behaviour.

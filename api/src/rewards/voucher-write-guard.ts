@@ -166,6 +166,22 @@ export const isHubbleProvider = (v: string | null | undefined) => (norm(v) ?? ''
 const metaObj = (m: Prisma.JsonValue | null | undefined): Record<string, unknown> =>
   m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : {};
 
+/**
+ * The ONE "handed to Hubble" predicate for open-order work (auto re-check, console Retry, the forward-move
+ * block on every path — console, bulk upload, vendor portal): a place attempt was recorded, or the
+ * provider is Hubble, or Hubble gave an order id — and ops have NOT taken the order over (manual override)
+ * or released it. The auto re-check's SQL mirrors this (btrim/lower on the provider).
+ */
+export function isHubbleHandedOff(order: { voucherProvider?: string | null; metadata?: Prisma.JsonValue | null | unknown }): boolean {
+  const m = metaObj(order.metadata as Prisma.JsonValue | null | undefined);
+  if (m.hubbleStatus === 'MANUAL_OVERRIDE' || m.hubbleStatus === 'RELEASED') return false;
+  return typeof m.hubblePlaceAttemptAt === 'string' || isHubbleProvider(order.voucherProvider) || m.hubbleOrderId != null;
+}
+
+/** 400 for a manual forward move on a Hubble-handed order that has no code (owner 2026-11-24). */
+export const HUBBLE_FORWARD_BLOCK_MESSAGE =
+  "This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.";
+
 /** The order was handed to Hubble (placeOrder / markHubbleProcessing / reconcile flags). */
 export function hasHubbleMarkers(order: { voucherProvider?: string | null; metadata?: Prisma.JsonValue | null }): boolean {
   if (isHubbleProvider(order.voucherProvider)) return true;
@@ -179,6 +195,9 @@ export function hasHubbleMarkers(order: { voucherProvider?: string | null; metad
   if (m.hubbleStatus === 'MANUAL_OVERRIDE' || m.hubbleStatus === 'RELEASED') return false;
   return (
     m.hubbleNeedsReconcile === true ||
+    // A recorded place attempt (audit C, 2026-11-24): the process may have died mid-placeOrder — Hubble
+    // may hold the order, so no hand refund without a Hubble check.
+    typeof m.hubblePlaceAttemptAt === 'string' ||
     m.hubbleStatus != null ||
     m.hubbleOrderId != null ||
     m.hubbleVoucher != null ||

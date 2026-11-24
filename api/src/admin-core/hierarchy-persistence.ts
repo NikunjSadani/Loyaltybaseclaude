@@ -144,8 +144,58 @@ export function resolveReportingLinks(
 
 // ─── Pure: synthetic placeholder phone ────────────────────────────────────────
 
+export const VACANT_PHONE_PREFIX = '__vacant__:';
+
 export function syntheticPlaceholderPhone(employeeCode: string): string {
-  return `__vacant__:${employeeCode}`;
+  return `${VACANT_PHONE_PREFIX}${employeeCode}`;
+}
+
+/** The display name a vacant placeholder's login row carries (same as the bulk upload writes). */
+export function vacantPlaceholderName(employeeCode: string): string {
+  return `(vacant) ${employeeCode}`;
+}
+
+/**
+ * The ONE notion of a "vacant position": the login row carries the synthetic placeholder phone
+ * and is not ACTIVE. This is the state the bulk upload writes for a blank name + blank mobile row,
+ * and the state the single-record edit writes when the admin clears both name and phone.
+ */
+export function isVacantPlaceholderUser(
+  user: { phone?: string | null; status?: string | null } | null | undefined,
+): boolean {
+  return !!user && isSyntheticPlaceholderPhone(user.phone) && user.status !== 'ACTIVE';
+}
+
+/** True for the synthetic '__vacant__:<code>' login phone (never a real, dialable number). */
+export function isSyntheticPlaceholderPhone(phone: string | null | undefined): boolean {
+  return typeof phone === 'string' && phone.startsWith(VACANT_PHONE_PREFIX);
+}
+
+/**
+ * Name given to the OLD login row when a vacant position is filled by a new person (owner
+ * decision 2026-11-24: the new person gets a brand-new login; the old row stays as a closed,
+ * INACTIVE record that keeps its history — notifications, tickets, login logs, activity, installs).
+ */
+export function formerEmployeeName(employeeCode: string): string {
+  return `(former) ${employeeCode}`;
+}
+
+/**
+ * The User fields reset when a person leaves a position (owner decision 2026-11-24): the
+ * synthetic phone frees their number, INACTIVE blocks login, and their personal contact /
+ * device data (email, avatar, language, FCM token) is cleared. Push subscriptions are deleted
+ * separately (a child table). Shared by the single-record edit AND the bulk upload.
+ */
+export function vacatedUserData(employeeCode: string) {
+  return {
+    name: vacantPlaceholderName(employeeCode),
+    phone: syntheticPlaceholderPhone(employeeCode),
+    status: 'INACTIVE' as const,
+    email: null,
+    avatarUrl: null,
+    preferredLanguage: 'en',
+    fcmToken: null,
+  };
 }
 
 // ─── Wired: persist into relational tables ────────────────────────────────────
@@ -315,7 +365,7 @@ export async function persistHierarchy(
     if (isPlaceholder) placeholders++;
 
     const phone = realMobile !== '' ? realMobile : syntheticPlaceholderPhone(emp.id);
-    const name = emp.name ?? `(vacant) ${emp.id}`;
+    const name = emp.name ?? vacantPlaceholderName(emp.id);
     const userRole = mapRoleCodeToUserRole(emp.roleCode);
     const userStatus = isPlaceholder ? 'INACTIVE' : 'ACTIVE';
 
@@ -330,7 +380,7 @@ export async function persistHierarchy(
     // correctly reclaims a pre-existing user that happens to already hold that phone.
     const existingSU = await tx.salesUser.findUnique({
       where: { clientId_employeeCode: { clientId, employeeCode: emp.id } },
-      select: { userId: true },
+      select: { userId: true, user: { select: { phone: true, status: true } } },
     });
     // Brand-new employee (no SalesUser yet): resolve the ACTIVE holder of this phone, if any,
     // and reclaim it in place; otherwise create a fresh User. Phone uniqueness is now the PARTIAL
@@ -341,12 +391,35 @@ export async function persistHierarchy(
     // create that would P2002 on the partial index) keeps the upload robust. A freed INACTIVE
     // number simply creates a fresh row (the stale INACTIVE row no longer reserves the phone).
     let user: { id: string };
-    if (existingSU) {
-      // K3: an existing employee re-uploaded as a vacant placeholder → their sessions are revoked after commit.
-      if (isPlaceholder) vacatedUserIds.push(existingSU.userId);
+    const wasVacant = !!existingSU && isVacantPlaceholderUser(existingSU.user);
+    if (existingSU && !isPlaceholder && wasVacant) {
+      // FILL a vacant position (owner decision 2026-11-24): the new person gets a BRAND-NEW login.
+      // The old row stays as a closed INACTIVE record (renamed "(former) <code>") that keeps its own
+      // history; the position (SalesUser) is re-pointed below, keeping code / level / reporting /
+      // outlet assignments. §0b already rejected a phone held by another ACTIVE account. The old
+      // login is signed out again after the commit (belt-and-braces; it is already INACTIVE).
+      await tx.user.update({
+        where: { id: existingSU.userId },
+        data: { name: formerEmployeeName(emp.id) },
+      });
+      vacatedUserIds.push(existingSU.userId);
+      user = await tx.user.create({
+        data: { clientId, phone, name, role: userRole, status: 'ACTIVE' },
+      });
+    } else if (existingSU) {
+      if (isPlaceholder && !wasVacant) {
+        // VACATE: an existing person re-uploaded as a vacant placeholder. Their contact / device
+        // data is cleared and push subscriptions removed (no push may reach a departed person);
+        // K3: their sessions are revoked after commit.
+        vacatedUserIds.push(existingSU.userId);
+        await tx.pushSubscription.deleteMany({ where: { userId: existingSU.userId } });
+      }
       user = await tx.user.update({
         where: { id: existingSU.userId },
-        data: { phone, name, role: userRole, status: userStatus },
+        data:
+          isPlaceholder && realMobile === ''
+            ? { ...vacatedUserData(emp.id), name, role: userRole }
+            : { phone, name, role: userRole, status: userStatus },
       });
     } else {
       const activeHolder = await tx.user.findFirst({

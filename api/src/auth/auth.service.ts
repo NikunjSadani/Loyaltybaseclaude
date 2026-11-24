@@ -862,6 +862,13 @@ export class AuthService implements OnModuleInit {
       throw new UnauthorizedException('Session expired — please log in again.');
     }
 
+    // M1: never renew a session for a login that is no longer ACTIVE (deactivated, suspended, a
+    // vacated position) — independent of whether its sessions were revoked. Login requires ACTIVE,
+    // so a user in normal operation is unaffected. Checked BEFORE the grace/successor paths.
+    if (session.user.status !== 'ACTIVE') {
+      throw new UnauthorizedException('Session expired — please log in again.');
+    }
+
     // ── logout-all authority (1b), predecessor-predates-sweep guard ──────────────
     // If a "log out everywhere" was stamped on the user AFTER this session was created,
     // the predecessor predates the sweep and is dead — refuse regardless of the grace/

@@ -283,7 +283,7 @@ function buildService(db: FakeDb, opts: { grant?: boolean } = {}) {
 }
 
 function seedUser(db: FakeDb, user: Row) {
-  db.users.set(user.id, { sessionsInvalidBefore: null, gifsyRoleId: null, vendorId: null, ...user });
+  db.users.set(user.id, { sessionsInvalidBefore: null, gifsyRoleId: null, vendorId: null, status: 'ACTIVE', ...user });
 }
 
 function seedSession(db: FakeDb, s: Row) {

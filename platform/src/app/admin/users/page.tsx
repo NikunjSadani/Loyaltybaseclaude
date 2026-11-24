@@ -10,6 +10,9 @@ import { getAssumedBrand } from '@/lib/auth-client';
 import {
   EditUserModal,
   ROLE_META,
+  VACANT_LOGIN_REACTIVATE_MSG,
+  isVacantPlaceholderPhone,
+  vacantLoginLabel,
   type AdminUser,
   type EmployeeOptions,
 } from '@/components/admin/EditUserModal';
@@ -235,6 +238,8 @@ export default function AdminUsersPage() {
   // the hierarchy permission just leaves it null (the modal disables those selects).
   const [employeeOptions, setEmployeeOptions] = useState<EmployeeOptions | null>(null);
   const [toast,   setToast]   = useState<string | null>(null);
+  // A warning toast (amber) for a save that committed with a problem to report — never a green tick.
+  const [toastWarn, setToastWarn] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   // "Revoke sessions" — the user whose sessions are being revoked (confirm modal),
   // plus an in-flight flag so the confirm button can't double-fire.
@@ -302,9 +307,10 @@ export default function AdminUsersPage() {
     setPage(1);
   }, [search]);
 
-  function showToast(msg: string) {
+  function showToast(msg: string, warn = false) {
     setToast(msg);
-    setTimeout(() => setToast(null), 3000);
+    setToastWarn(warn);
+    setTimeout(() => setToast(null), warn ? 8000 : 3000);
   }
 
   // Revoke every session for the target user. The backend kills the REFRESH path, so
@@ -334,6 +340,12 @@ export default function AdminUsersPage() {
 
   async function toggleStatus(u: AdminUser) {
     const next = u.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    // A vacant position's (or former employee's) login is not a person — never switch it back on
+    // here (the API refuses too). Say where the position is filled instead.
+    if (next === 'ACTIVE' && isVacantPlaceholderPhone(u.phone)) {
+      showToast(VACANT_LOGIN_REACTIVATE_MSG, true);
+      return;
+    }
     setUpdatingId(u.id);
     try {
       const res = await fetch(`/api/admin/users/${u.id}`, {
@@ -438,10 +450,13 @@ export default function AdminUsersPage() {
               {users.map((u) => (
                 <tr key={u.id} className="hover:bg-gray-50 transition-colors">
                   <td className="px-5 py-3">
-                    <p className="font-medium text-gray-900">{u.name}</p>
+                    {/* Never show the synthetic placeholder name/phone raw (L1). */}
+                    <p className="font-medium text-gray-900">{vacantLoginLabel(u) ?? u.name}</p>
                     {u.email && <p className="text-xs text-gray-400">{u.email}</p>}
                   </td>
-                  <td className="px-5 py-3 text-gray-600 font-mono text-xs">{u.phone}</td>
+                  <td className="px-5 py-3 text-gray-600 font-mono text-xs">
+                    {isVacantPlaceholderPhone(u.phone) ? '—' : u.phone}
+                  </td>
                   <td className="px-5 py-3">{roleBadge(u.role)}</td>
                   <td className="px-5 py-3">
                     {u.status === 'ACTIVE' ? (
@@ -461,14 +476,17 @@ export default function AdminUsersPage() {
                       <span className="text-xs text-gray-300">—</span>
                     ) : canCreate ? (
                       <div className="flex items-center justify-end gap-3">
-                        <button
-                          onClick={() => setEditTarget(u)}
-                          className="text-gray-500 hover:text-[var(--brand-primary)] transition-colors"
-                          aria-label={`Edit ${u.name}`}
-                          title="Edit user"
-                        >
-                          <SquarePen className="w-4 h-4" />
-                        </button>
+                        {/* A former employee's closed login (no position any more) is history, not editable. */}
+                        {!(isVacantPlaceholderPhone(u.phone) && !u.salesUser) && (
+                          <button
+                            onClick={() => setEditTarget(u)}
+                            className="text-gray-500 hover:text-[var(--brand-primary)] transition-colors"
+                            aria-label={`Edit ${vacantLoginLabel(u) ?? u.name}`}
+                            title="Edit user"
+                          >
+                            <SquarePen className="w-4 h-4" />
+                          </button>
+                        )}
                         <button
                           onClick={() => setRevokeTarget(u)}
                           className="text-xs font-medium text-gray-500 hover:text-[var(--brand-primary)] transition-colors"
@@ -536,7 +554,12 @@ export default function AdminUsersPage() {
           roles={roles}
           employeeOptions={employeeOptions}
           onClose={() => setEditTarget(null)}
-          onSaved={() => { showToast('User updated.'); loadUsers(); }}
+          onSaved={(r) => {
+            // A save that committed with a problem (e.g. sign-out failed) is a WARNING, not a green tick.
+            if (r?.warning) showToast(r.warning, true);
+            else showToast(r?.message ?? 'User updated.');
+            loadUsers();
+          }}
         />
       )}
 
@@ -589,8 +612,13 @@ export default function AdminUsersPage() {
 
       {/* Success toast */}
       {toast && (
-        <div className="fixed bottom-6 right-6 z-[70] flex items-center gap-2 bg-gray-900 text-white text-sm font-medium px-4 py-2.5 rounded-xl shadow-lg">
-          <CheckCircle2 className="w-4 h-4 text-green-400" />
+        <div
+          role={toastWarn ? 'alert' : 'status'}
+          className={`fixed bottom-6 right-6 z-[70] flex items-center gap-2 text-sm font-medium px-4 py-2.5 rounded-xl shadow-lg max-w-md ${toastWarn ? 'bg-amber-50 text-amber-900 border border-amber-300' : 'bg-gray-900 text-white'}`}
+        >
+          {toastWarn
+            ? <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+            : <CheckCircle2 className="w-4 h-4 text-green-400" />}
           {toast}
         </div>
       )}

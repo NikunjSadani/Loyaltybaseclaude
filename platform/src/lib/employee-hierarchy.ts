@@ -933,6 +933,7 @@ ${config.filter(l => !l.isLeaf && !l.isRoot)
   <li>Keep Hierarchy and Reporting Manager unchanged.</li>
   <li>Upload and confirm. No outlets or sub-reports change.</li>
 </ol>
+<p><strong>Or in the app:</strong> on the Hierarchy page, click "Fill vacant position" on the vacant row, enter the new person's name and 10-digit phone, and save. The new person gets their own new login (the previous holder's history stays on their old, closed record); the position keeps its Employee ID, level, reporting line and outlets.</p>
 
 <h3>D. Moving an Employee to a Different Manager</h3>
 <div class="box warn"><strong>Rule:</strong> Employee must have <em>no outlets assigned</em> and <em>no sub-reports</em> before they can be moved.</div>
@@ -957,6 +958,7 @@ ${config.filter(l => !l.isLeaf && !l.isRoot)
   <li>Position becomes PLACEHOLDER — hierarchy and outlet assignments are preserved.</li>
   <li>When a replacement is found, update the Name and Phone against the same Employee ID.</li>
 </ol>
+<p><strong>Or in the app (one employee):</strong> on the Hierarchy page, click the edit button on the employee's row, clear BOTH Full name and Phone, save, and confirm. The person is signed out and can no longer log in, their phone number is freed for reuse, their email is removed, and the position keeps its Employee ID, level, reporting line and outlets. Approvals for that position go to the next active manager up. Clearing only one of the two is not allowed, and you cannot mark your own position vacant. If the sign-out could not finish, the dialog shows "Retry sign-out" (the login is already blocked meanwhile).</p>
 
 <h3>G. Entire Sub-team Moves to a New Manager</h3>
 <ol>

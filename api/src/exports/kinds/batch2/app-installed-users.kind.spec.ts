@@ -3,6 +3,7 @@ import { BadRequestException, ForbiddenException, NotFoundException } from '@nes
 import { Reflector } from '@nestjs/core';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import { ROLES_KEY } from '../../../common/decorators/roles.decorator';
+import { PERMISSION_KEY } from '../../../common/decorators/require-permission.decorator';
 import { PushController } from '../../../push/push.controller';
 import { PwaAdoptionService } from '../../../push/pwa-adoption.service';
 import { ExportAccessChecker } from '../../export-access';
@@ -588,7 +589,21 @@ describe('app-installed-users export kind', () => {
       expect(roles).toEqual(reflector.get(ROLES_KEY, proto.getAdoption));
       expect(roles).toEqual(['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER']);
       expect([...APP_INSTALLED_USERS_KIND.access.roles]).toEqual(roles);
-      expect(APP_INSTALLED_USERS_KIND.access.permission).toBeUndefined();
+      // Owner 2026-11-24: Gifsy staff roles (e.g. Project Manager) reach App Adoption via 'Reporting & Analytics → view'.
+      expect(reflector.get(PERMISSION_KEY, proto.getAdoption)).toBe('reports:read');
+      expect(reflector.get(PERMISSION_KEY, proto.installedUsers)).toBe('reports:read');
+      expect(APP_INSTALLED_USERS_KIND.access.permission).toBe('reports:read');
+    });
+
+    it('a Gifsy staff role WITH reports:read is allowed; WITHOUT it is refused (endpoint and export kind alike)', async () => {
+      const staffAccess = new ExportAccessChecker(
+        { getPermissions: async (id?: string | null) => new Set(id === 'pm-role' ? ['reports:read'] : []) } as unknown as GifsyRoleService,
+        { isFeatureEnabled: async () => false } as unknown as TenantService,
+      );
+      const pm = { ...CLIENT, role: 'GIFSY_STAFF', gifsyRoleId: 'pm-role' } as JwtPayload;
+      const noPerm = { ...CLIENT, role: 'GIFSY_STAFF', gifsyRoleId: 'other-role' } as JwtPayload;
+      await expect(staffAccess.assert(pm, APP_INSTALLED_USERS_KIND.access)).resolves.toBeUndefined();
+      await expect(staffAccess.assert(noPerm, APP_INSTALLED_USERS_KIND.access)).rejects.toBeInstanceOf(ForbiddenException);
     });
 
     it.each(['SALES_ISR', 'SALES_SO', 'WHOLESALER', 'SSS', 'VENDOR', 'GIFSY_STAFF'])('%s is refused', async (role) => {

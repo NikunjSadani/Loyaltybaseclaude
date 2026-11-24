@@ -15,7 +15,7 @@ import { EventKey } from '../notification-templates/notification-templates.confi
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
-import { transitionOrderStatusOrConflict } from '../rewards/order-status-transition';
+import { hasIssuedVoucher, transitionOrderStatusOrConflict } from '../rewards/order-status-transition';
 import {
   assertVoucherCodeReusableInTx,
   canFillStoredVoucher,
@@ -23,6 +23,8 @@ import {
   planVoucherWrite,
   rethrowUnlessIdempotentPinRace,
   withPinRaceRetry,
+  isHubbleHandedOff,
+  HUBBLE_FORWARD_BLOCK_MESSAGE,
 } from '../rewards/voucher-write-guard';
 import { notifyVoucherIssued, recordVoucherIssuedAudit } from '../rewards/voucher-issuance';
 import {
@@ -799,6 +801,12 @@ export class VendorPortalService {
       throw new BadRequestException(
         `Vendors may only move an order PROCESSING → DISPATCHED → DELIVERED. Illegal: ${fromStatus} → ${toStatus}`,
       );
+    }
+
+    // OWNER 2026-11-24 (audit L): no forward move on an order handed to Hubble while it has no code —
+    // the same block as the Gifsy console / bulk upload (rewards.service transitionOrder).
+    if (isHubbleHandedOff(order) && !hasIssuedVoucher(order.voucherCode) && !hasIssuedVoucher(dto.voucherCode)) {
+      throw new BadRequestException(HUBBLE_FORWARD_BLOCK_MESSAGE);
     }
 
     // VOUCHER WRITE INVARIANT (shared with Gifsy paths) — see voucher-write-guard.ts.

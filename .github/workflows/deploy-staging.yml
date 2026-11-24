@@ -87,7 +87,7 @@ jobs:
       - name: Preflight — required Secret Manager secrets exist (metadata only)
         run: |
           missing=0
-          for s in SALES_IMPORT_DRAIN_SECRET_STAGING VOUCHER_DISPERSAL_DRAIN_SECRET_STAGING INTERNAL_PROXY_SECRET_STAGING; do
+          for s in SALES_IMPORT_DRAIN_SECRET_STAGING VOUCHER_DISPERSAL_DRAIN_SECRET_STAGING HUBBLE_SWEEP_SECRET_STAGING INTERNAL_PROXY_SECRET_STAGING; do
             state="$(gcloud secrets versions describe latest --secret="$s" --project="${{ env.PROJECT_ID }}" --format='value(state)' 2>/dev/null || true)"
             if [ "$state" != "ENABLED" ]; then
               echo "::error::Secret Manager secret '$s' is missing, has no ENABLED latest version, or is not visible to the deployer SA (needs roles/secretmanager.viewer). Create it (owner, console) BEFORE deploying — see SALES-IMPORT-PIPELINE-PLAN.md §14 / BAJAJ-PROD-GO-LIVE-CHECKLIST.md § F3 runbook. Nothing was built, migrated or deployed."
@@ -240,7 +240,7 @@ jobs:
             --subnet=gifsy-subnet-asia-south1 \
             --vpc-egress=private-ranges-only \
             --startup-probe=httpGet.path=/health/ready,httpGet.port=4000,initialDelaySeconds=0,periodSeconds=5,timeoutSeconds=3,failureThreshold=30 \
-            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.dev.myhubble.money,SALES_IMPORT_RUNNER=job,SALES_IMPORT_JOB=gifsy-sales-import-staging,EXPORTS_RUNNER=job,EXPORTS_JOB=gifsy-exports-staging,GCP_PROJECT=${{ env.PROJECT_ID }}" \
+            --set-env-vars="NODE_ENV=production,GCP_REGION=${{ env.REGION }},PLATFORM_DOMAIN=gifsy.in,JWT_EXPIRES_IN=60m,POINTS_TO_INR_RATE=1,MIN_PAYOUT_AMOUNT_PAISE=10000,TDS_SINGLE_TRANSACTION_THRESHOLD_PAISE=3000000,TDS_ANNUAL_THRESHOLD_PAISE=10000000,TDS_RATE_WITH_PAN=1,TDS_RATE_WITHOUT_PAN=2,FIXED_OTP=123456,ALLOW_FIXED_OTP=true,PUSH_WORKER_ENABLED=true,VAPID_SUBJECT=mailto:ops@gifsy.in,REPORTS_FROM_EMAIL=reports@notify.gifsy.in,HUBBLE_BASE_URL=https://api.dev.myhubble.money,SALES_IMPORT_RUNNER=job,SALES_IMPORT_JOB=gifsy-sales-import-staging,EXPORTS_RUNNER=job,EXPORTS_JOB=gifsy-exports-staging,HUBBLE_ORDER_SWEEP_ENABLED=false,GCP_PROJECT=${{ env.PROJECT_ID }}" \
             --set-secrets="\
               DATABASE_URL=DATABASE_URL_STAGING:latest,\
               JWT_SECRET=JWT_SECRET_STAGING:latest,\
@@ -264,6 +264,7 @@ jobs:
               VISIBILITY_REMINDER_SECRET=VISIBILITY_REMINDER_SECRET_STAGING:latest,\
               SALES_IMPORT_DRAIN_SECRET=SALES_IMPORT_DRAIN_SECRET_STAGING:latest,\
               VOUCHER_DISPERSAL_DRAIN_SECRET=VOUCHER_DISPERSAL_DRAIN_SECRET_STAGING:latest,\
+              HUBBLE_SWEEP_SECRET=HUBBLE_SWEEP_SECRET_STAGING:latest,\
               CORS_ORIGINS=CORS_ORIGINS_STAGING:latest"
 
   # ── Build & Deploy Frontend (staging) ────────────────────────────────────────

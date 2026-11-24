@@ -40,7 +40,7 @@ const mockPrisma = {
   userSession: { updateMany: jest.fn() },
   salesUser: { findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn() },
   salesUserAssignment: { count: jest.fn() },
-  salesHierarchyLevel: { findFirst: jest.fn() },
+  salesHierarchyLevel: { findFirst: jest.fn(), findMany: jest.fn() },
   outlet: { findMany: jest.fn(), count: jest.fn() },
   kycSubmission: { count: jest.fn() },
   kycStatusHistory: { findMany: jest.fn() },
@@ -169,19 +169,45 @@ describe('AdminCoreService', () => {
       });
       const res = await service.getEmployeeByCode(clientAdmin, 'Pune101');
       const where = mockPrisma.salesUser.findFirst.mock.calls.at(-1)[0].where;
-      expect(where).toEqual({ clientId: 'deoleo', employeeCode: 'Pune101', deletedAt: null, user: { status: 'ACTIVE' } });
+      // ACTIVE employees, or VACANT positions (so a vacant position can be opened and filled).
+      expect(where).toEqual({
+        clientId: 'deoleo', employeeCode: 'Pune101', deletedAt: null,
+        OR: [
+          { user: { status: 'ACTIVE' } },
+          { user: { phone: { startsWith: '__vacant__:' }, status: { not: 'ACTIVE' } } },
+        ],
+      });
       // Shaped like a listUsers row: user fields flattened + a salesUser sub-object.
       expect(res.user.name).toBe('Asha Patel');
       expect(res.user.salesUser).toEqual({ id: 's1', employeeCode: 'Pune101', hierarchyLevelId: 'lvl1', reportingToId: 'r1' });
     });
 
-    it('404s when the code matches no ACTIVE employee (e.g. since deactivated)', async () => {
+    it('404s when the code matches no ACTIVE or vacant employee (e.g. resigned)', async () => {
       mockPrisma.salesUser.findFirst.mockResolvedValue(null);
       await expect(service.getEmployeeByCode(clientAdmin, 'GHOST')).rejects.toBeInstanceOf(NotFoundException);
     });
 
     it('rejects a blank code', async () => {
       await expect(service.getEmployeeByCode(clientAdmin, '   ')).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('getEmployeeOptions (Reports-to candidates)', () => {
+    it('L2: includes VACANT positions, labelled "Vacant (code)" and flagged', async () => {
+      mockPrisma.salesHierarchyLevel.findMany.mockResolvedValue([]);
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 's1', employeeCode: 'Pune001', hierarchyLevelId: 'l2', user: { name: 'Boss', phone: '9800000001', status: 'ACTIVE' } },
+        { id: 's2', employeeCode: 'Pune002', hierarchyLevelId: 'l2', user: { name: '(vacant) Pune002', phone: '__vacant__:Pune002', status: 'INACTIVE' } },
+      ]);
+      const res = await service.getEmployeeOptions(clientAdmin);
+      expect(mockPrisma.salesUser.findMany.mock.calls.at(-1)[0].where).toEqual({
+        clientId: 'deoleo', deletedAt: null,
+        OR: [{ isActive: true }, { user: { phone: { startsWith: '__vacant__:' }, status: { not: 'ACTIVE' } } }],
+      });
+      expect(res.managers).toEqual([
+        { id: 's1', name: 'Boss', employeeCode: 'Pune001', hierarchyLevelId: 'l2' },
+        { id: 's2', name: 'Vacant (Pune002)', employeeCode: 'Pune002', hierarchyLevelId: 'l2', vacant: true },
+      ]);
     });
   });
 
@@ -209,6 +235,28 @@ describe('AdminCoreService', () => {
       });
       // Placeholder (no live SalesUser) is untouched.
       expect(p102).toMatchObject({ id: 'Pune102', name: null, status: 'PLACEHOLDER' });
+    });
+
+    it('a position vacated from the Edit dialog shows as PLACEHOLDER with no name/mobile; a filled one shows ACTIVE', async () => {
+      mockPrisma.programSetting.findFirst.mockResolvedValue({
+        settingValue: [
+          { id: 'Pune101', roleCode: 'XSR', reportsToId: 'Pune001', name: 'Ravi', mobile: '9811111111', status: 'ACTIVE' },
+          { id: 'Pune102', roleCode: 'XSR', reportsToId: 'Pune001', name: null, mobile: null, status: 'PLACEHOLDER' },
+        ],
+      });
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        // Pune101 was vacated via the edit dialog (synthetic phone, INACTIVE).
+        { employeeCode: 'Pune101', user: { name: '(vacant) Pune101', phone: '__vacant__:Pune101', status: 'INACTIVE' }, hierarchyLevel: { code: 'XSR', name: 'XSR' }, reportingTo: { employeeCode: 'Pune001' } },
+        // Pune102 was filled via the edit dialog.
+        { employeeCode: 'Pune102', user: { name: 'Asha New', phone: '9833333333', status: 'ACTIVE' }, hierarchyLevel: { code: 'XSR', name: 'XSR' }, reportingTo: { employeeCode: 'Pune001' } },
+      ]);
+      const { employees } = await service.getHierarchyConfig(clientAdmin);
+      expect(employees.find((e: { id: string }) => e.id === 'Pune101')).toMatchObject({
+        name: null, mobile: null, status: 'PLACEHOLDER', reportsToId: 'Pune001',
+      });
+      expect(employees.find((e: { id: string }) => e.id === 'Pune102')).toMatchObject({
+        name: 'Asha New', mobile: '9833333333', status: 'ACTIVE',
+      });
     });
 
     it('returns the empty snapshot without a relational read', async () => {
@@ -689,6 +737,16 @@ describe('AdminCoreService', () => {
         status: 'ACTIVE',
         id: { not: 'u1' },
       });
+    });
+
+    it('L1: reactivating a vacant position\'s (synthetic-phone) login is refused with a pointer to "Fill vacant position"', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({
+        id: 'u1', phone: '__vacant__:Pune101', role: 'SALES_SO', status: 'INACTIVE',
+      });
+      const err = await service.updateUser(clientAdmin, 'u1', { status: 'ACTIVE' as never }).catch((e) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.message).toMatch(/vacant position and cannot be reactivated.*Fill vacant position.*Employee Hierarchy/);
+      expect(mockPrisma.user.update).not.toHaveBeenCalled();
     });
 
     it('REACT-1: reactivation is BLOCKED when the phone is held by another ACTIVE user', async () => {

@@ -29,6 +29,7 @@ import { BadRequestException, ForbiddenException, ServiceUnavailableException } 
 import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../prisma/prisma.service';
 import { ActivityTrackingService } from '../../activity/activity-tracking.service';
+import { isSyntheticPlaceholderPhone } from '../../admin-core/hierarchy-persistence';
 import {
   USAGE_PAGE_SIZE_DEFAULT,
   USAGE_PAGE_SIZE_MAX,
@@ -445,7 +446,9 @@ export async function buildUsageReport(
     inScope.push({
       userId: u.id,
       name: u.name ?? '',
-      phone: u.phone ?? '',
+      // A vacant position's / former employee's closed login carries a synthetic placeholder phone —
+      // never print it as if it were a number.
+      phone: isSyntheticPlaceholderPhone(u.phone) ? '' : (u.phone ?? ''),
       role: u.role as string,
       status: u.status as string,
       programmes,

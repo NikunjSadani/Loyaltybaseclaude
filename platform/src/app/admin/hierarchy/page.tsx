@@ -66,7 +66,8 @@ function StatusBadge({ status }: { status: HierarchyEmployee['status'] }) {
         ? <UserCheck className="h-2.5 w-2.5" />
         : <UserX className="h-2.5 w-2.5" />
       }
-      {status}
+      {/* One word everywhere for a PLACEHOLDER position: "Vacant". */}
+      {status === 'ACTIVE' ? 'Active' : status === 'PLACEHOLDER' ? 'Vacant' : status}
     </span>
   );
 }
@@ -175,6 +176,11 @@ function downloadTemplate(config: TenantHierarchyLevel[]) {
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+/** Rows with a linked login to edit: filled positions (edit / mark vacant) and vacant ones (fill). */
+function canEditRow(emp: HierarchyEmployee): boolean {
+  return (emp.status === 'ACTIVE' && emp.name != null) || emp.status === 'PLACEHOLDER';
 }
 
 /** Export the CURRENTLY stored hierarchy as the same 18-column chain workbook the upload
@@ -288,11 +294,16 @@ export default function HierarchyPage() {
   const [editError, setEditError] = useState<string | null>(null);
 
   // ── Load from API ──────────────────────────────────────────────────────────
-  const loadEmployees = useCallback(() => {
-    fetch('/api/admin/hierarchy-config')
+  // Resolves true when the list was (re)loaded, false when it could not be — callers that just
+  // saved a change must say so instead of showing a stale list as if it were current.
+  const loadEmployees = useCallback((): Promise<boolean> => {
+    return fetch('/api/admin/hierarchy-config')
       .then((r) => r.json())
-      .then((j) => { if (j.success) setEmployees(j.data.employees ?? []); })
-      .catch(() => {});
+      .then((j) => {
+        if (j?.success) { setEmployees(j.data.employees ?? []); return true; }
+        return false;
+      })
+      .catch(() => false);
   }, []);
 
   useEffect(() => { loadEmployees(); }, [loadEmployees]);
@@ -303,9 +314,9 @@ export default function HierarchyPage() {
   }
 
   // Fetch the full user record for a hierarchy row, then open the shared edit modal.
-  // Only ACTIVE, named positions have a linked login user — vacant/PLACEHOLDER slots don't.
+  // ACTIVE, named positions (edit / mark vacant) and VACANT positions (fill with a new person).
   const openEditForEmployee = useCallback(async (emp: HierarchyEmployee) => {
-    if (emp.status !== 'ACTIVE' || emp.name == null) return;
+    if (!canEditRow(emp)) return;
     setEditError(null);
     setLoadingEditCode(emp.id);
     try {
@@ -583,7 +594,7 @@ export default function HierarchyPage() {
       <div className="grid grid-cols-3 gap-3">
         <StatCard label="Total Positions"  value={totalCount}       testId="stat-total" />
         <StatCard label="Active"           value={activeCount}      testId="stat-active" />
-        <StatCard label="Placeholders"     value={placeholderCount} testId="stat-placeholder" accent />
+        <StatCard label="Vacant positions" value={placeholderCount} testId="stat-placeholder" accent />
       </div>
 
       {/* Success banner */}
@@ -841,15 +852,15 @@ export default function HierarchyPage() {
                       {emp.reportsToId ? `→ ${emp.reportsToId}` : 'Root'}
                     </p>
                   </div>
-                  {/* Edit — only for ACTIVE, filled positions (vacant/PLACEHOLDER slots have no
-                      linked login user to edit). Reuses the shared /admin/users edit modal. */}
-                  {emp.status === 'ACTIVE' && emp.name != null && (
+                  {/* Edit — filled positions (edit, or clear name + phone to mark vacant) and
+                      VACANT positions (fill with a new person). Reuses the shared edit modal. */}
+                  {canEditRow(emp) && (
                     <button
                       data-testid={`hierarchy-edit-${emp.id}`}
                       onClick={() => openEditForEmployee(emp)}
                       disabled={loadingEditCode === emp.id}
-                      aria-label={`Edit ${emp.name}`}
-                      title="Edit employee"
+                      aria-label={emp.status === 'PLACEHOLDER' ? `Fill vacant position ${emp.id}` : `Edit ${emp.name}`}
+                      title={emp.status === 'PLACEHOLDER' ? 'Fill vacant position' : 'Edit employee'}
                       className="flex-shrink-0 self-center p-1.5 rounded-lg text-gray-400 hover:text-[var(--brand-primary)] hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {loadingEditCode === emp.id
@@ -913,7 +924,15 @@ export default function HierarchyPage() {
           roles={[]}
           employeeOptions={employeeOptions}
           onClose={() => setEditUser(null)}
-          onSaved={() => { setSuccessMsg('Employee updated.'); loadEmployees(); }}
+          onSaved={(r) => {
+            // A save that committed with a problem shows as a WARNING (the dialog stays open with
+            // "Retry sign-out"); otherwise a specific success message.
+            if (r?.warning) showEditError(r.warning);
+            else setSuccessMsg(r?.message ?? 'Employee updated.');
+            void loadEmployees().then((ok) => {
+              if (!ok) showEditError('Saved, but the list could not be refreshed — reload the page to see the change.');
+            });
+          }}
         />
       )}
 

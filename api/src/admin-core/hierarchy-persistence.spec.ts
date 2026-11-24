@@ -29,7 +29,7 @@ type ExistingUser = { phone: string; salesUser: { employeeCode: string } | null 
  */
 function makeTx(
   existingUsers: ExistingUser[] = [],
-  existingSalesUsersByCode: Record<string, { userId: string }> = {},
+  existingSalesUsersByCode: Record<string, { userId: string; user?: { phone: string; status: string } }> = {},
 ) {
   const upsertedUserPhones: string[] = [];
   let userSeq = 0;
@@ -56,6 +56,7 @@ function makeTx(
           Promise.resolve({ id: `lvl-${args.where.clientId_code.code}` }),
         ),
     },
+    pushSubscription: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
     salesUser: {
       findUnique: jest.fn().mockImplementation((args: any) => {
         const code = args.where.clientId_employeeCode.employeeCode;
@@ -216,6 +217,52 @@ describe('persistHierarchy — phone ↔ employeeCode guard', () => {
     const { tx } = makeTx([], { 'XSR-1': { userId: 'user-1' }, 'XSR-2': { userId: 'user-2' } });
     const result = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
     expect(result.vacatedUserIds).toEqual(['user-1']);
+  });
+
+  it('VACATE via upload: the departed person email / avatar / language / FCM token are cleared and push subscriptions deleted', async () => {
+    const employees = [emp({ id: 'XSR-1', status: 'PLACEHOLDER' as HierarchyEmployee['status'], name: undefined, mobile: '' })];
+    const { tx } = makeTx([], { 'XSR-1': { userId: 'user-1', user: { phone: '9900000001', status: 'ACTIVE' } } });
+    await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+    expect(tx.pushSubscription.deleteMany).toHaveBeenCalledWith({ where: { userId: 'user-1' } });
+    expect(tx.user.update).toHaveBeenCalledWith({
+      where: { id: 'user-1' },
+      data: expect.objectContaining({
+        phone: syntheticPlaceholderPhone('XSR-1'), name: '(vacant) XSR-1', status: 'INACTIVE',
+        email: null, avatarUrl: null, preferredLanguage: 'en', fcmToken: null,
+      }),
+    });
+  });
+
+  it('FILL via upload: a vacant position gets a BRAND-NEW login; the old row is kept as a closed "(former)" record', async () => {
+    const employees = [emp({ id: 'XSR-1', name: 'New Person', mobile: '9900000077' })];
+    const { tx, upsertedUserPhones } = makeTx([], {
+      'XSR-1': { userId: 'user-old', user: { phone: syntheticPlaceholderPhone('XSR-1'), status: 'INACTIVE' } },
+    });
+    const result = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+    // New login, ACTIVE, real phone.
+    expect(upsertedUserPhones).toEqual(['9900000077']);
+    expect(tx.user.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ phone: '9900000077', name: 'New Person', status: 'ACTIVE' }),
+    });
+    // Old row: only renamed — stays INACTIVE with its synthetic phone and its history.
+    expect(tx.user.update).toHaveBeenCalledWith({ where: { id: 'user-old' }, data: { name: '(former) XSR-1' } });
+    // The position is re-pointed at the new login, made active.
+    expect(tx.salesUser.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ update: expect.objectContaining({ userId: 'user-0', isActive: true }) }),
+    );
+    // Old login signed out again after commit (belt-and-braces).
+    expect(result.vacatedUserIds).toEqual(['user-old']);
+  });
+
+  it('re-uploading an already-vacant position as vacant again is a no-op for push/K3', async () => {
+    const employees = [emp({ id: 'XSR-1', status: 'PLACEHOLDER' as HierarchyEmployee['status'], name: undefined, mobile: '' })];
+    const { tx } = makeTx([], {
+      'XSR-1': { userId: 'user-1', user: { phone: syntheticPlaceholderPhone('XSR-1'), status: 'INACTIVE' } },
+    });
+    const result = await persistHierarchy(CLIENT, employees, DEOLEO_HIERARCHY, tx);
+    expect(result.vacatedUserIds).toEqual([]);
+    expect(tx.pushSubscription.deleteMany).not.toHaveBeenCalled();
+    expect(tx.user.create).not.toHaveBeenCalled();
   });
 });
 

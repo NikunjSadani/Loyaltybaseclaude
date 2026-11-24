@@ -14,6 +14,7 @@ describe('SalesNotificationsService', () => {
     salesUser: { findFirst: jest.Mock; findMany: jest.Mock };
     salesUserAssignment: { findFirst: jest.Mock; findMany: jest.Mock };
     outlet: { findFirst: jest.Mock };
+    user: { findUnique: jest.Mock };
   };
   let service: SalesNotificationsService;
 
@@ -26,12 +27,49 @@ describe('SalesNotificationsService', () => {
       salesUser: { findFirst: jest.fn(), findMany: jest.fn() },
       salesUserAssignment: { findFirst: jest.fn(), findMany: jest.fn() },
       outlet: { findFirst: jest.fn() },
+      // Recipient guard: every recipient is an ACTIVE login unless a test says otherwise.
+      user: { findUnique: jest.fn().mockResolvedValue({ status: 'ACTIVE' }) },
     };
     // NotificationsService is resolved lazily via ModuleRef in onModuleInit (breaks a
     // provider cycle) — provide a ModuleRef stub whose get() returns the mock, then init.
     const moduleRef = { get: jest.fn().mockReturnValue(notifications) };
     service = new SalesNotificationsService(prisma as any, moduleRef as any);
     service.onModuleInit();
+  });
+
+  /* ── H1: a vacated / inactive login is never notified ─────────────────── */
+
+  describe('never notifies a vacant / inactive login', () => {
+    it('outletsAssigned resolves only a LIVE position (isActive + ACTIVE login)', async () => {
+      prisma.salesUser.findFirst.mockResolvedValue(null);
+      await service.outletsAssigned('c1', 'su1', 2);
+      expect(prisma.salesUser.findFirst.mock.calls[0][0].where).toMatchObject({
+        id: 'su1', clientId: 'c1', deletedAt: null, isActive: true, user: { status: 'ACTIVE' },
+      });
+      expect(notifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('the send itself refuses a recipient whose login is not ACTIVE (no bell row, no push)', async () => {
+      prisma.salesUser.findFirst.mockResolvedValue({ userId: 'u-vacated' });
+      prisma.user.findUnique.mockResolvedValue({ status: 'INACTIVE' });
+      await service.outletsAssigned('c1', 'su1', 1);
+      expect(notifications.writeInApp).not.toHaveBeenCalled();
+      expect(notifications.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('kycBounced / targetsUploaded resolve only live reps', async () => {
+      prisma.outlet.findFirst.mockResolvedValue({ id: 'o1', name: 'Shop' });
+      prisma.salesUserAssignment.findFirst.mockResolvedValue(null);
+      await service.kycBounced('c1', 'p1', 'REJECTED', null);
+      expect(prisma.salesUserAssignment.findFirst.mock.calls[0][0].where.salesUser).toMatchObject({
+        isActive: true, user: { status: 'ACTIVE' },
+      });
+      prisma.salesUserAssignment.findMany.mockResolvedValue([]);
+      await service.targetsUploaded('c1', ['OUT1']);
+      expect(prisma.salesUserAssignment.findMany.mock.calls[0][0].where.salesUser).toMatchObject({
+        isActive: true, user: { status: 'ACTIVE' },
+      });
+    });
   });
 
   /* ── Event 1: outletsAssigned ──────────────────────────────────────────── */
