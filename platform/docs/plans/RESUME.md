@@ -332,8 +332,9 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
   preflight — create it BEFORE deploying; create the job PAUSED, resume after the deploy). The `@Interval` tick (kill
   switch `HUBBLE_ORDER_SWEEP_ENABLED=false`) is only an extra — prod CPU is throttled when idle; an order still open 1 h after hand-off is flagged
   `HUBBLE_PROCESSING_STALE`. It never refunds on "no order". Runbook §2a. Register the webhook with Hubble anyway.
-- Console "Advance" on a Hubble-handed order without a code: CONFIRMED→PROCESSING and PROCESSING→DISPATCHED are allowed
-  (only →DELIVERED needs a code); DISPATCHED takes it out of the automatic re-check. Open question for the owner (2026-11-24).
+- No manual FORWARD move (→PROCESSING / DISPATCHED / DELIVERED) on a Hubble-handed order without a code (owner
+  2026-11-24): `transitionOrder` refuses it (console, dispatch controller, bulk upload row error) and the console hides
+  "Advance". Exits: Retry with Hubble / Fulfil manually; reconcile + auto re-check are exempt.
 - Hubble: a timeout is **not** a "no". Never refund a Hubble order by hand — use the runbook. Hubble only documents
   order statuses SUCCESS / PROCESSING / FAILED — CANCELLED / RETURNED are OUR redemption statuses, not Hubble's.
 - TDS 194R is keyed by the **payee PAN snapshot** (`payeePan`), not the outlet's current owner; every new payout path
