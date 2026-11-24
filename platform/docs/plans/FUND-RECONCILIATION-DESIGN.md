@@ -102,46 +102,74 @@ agency fee type and value; the voucher brand discount table; low-balance thresho
 
 Estimated effort: **~3–4 working days** including audits and staging.
 
-## 8. What was built (2026-11-23, branch `feat/fund-reconciliation` — LOCAL, not pushed)
+## 8. What was built (2026-11-23/24, branch `feat/fund-reconciliation` — LOCAL, not pushed)
 
-Status: steps 1–6 built; **step 7 (dual money audit + UI/UX audit, runtime check on staging) NOT done.**
+Status: built; three independent audits (money rules, money security, UI/UX) done and their fix round + the owner
+decisions D1–D6 implemented. **Still to do: full gates, staging runtime check (real login per role), re-audit, owner.**
 
-**Data** (migration `20261123150000_fund_reconciliation`, additive + idempotent, `lock_timeout 5s`): `fund_receipts`
-gains `entryType` (RECEIPT / ADJUSTMENT / OPENING_BALANCE, default RECEIPT) + `reason`, a per-client unique receipt
+**Data** (migration `20261123150000_fund_reconciliation`, additive + idempotent, `lock_timeout 5s`, not run anywhere
+yet): `fund_receipts` gains `entryType` (RECEIPT / ADJUSTMENT / OPENING_BALANCE) + `reason`, a per-client unique receipt
 number and a partial unique index (ONE opening balance per client). New `fund_settings` (threshold, recipients, last
-alert date/error) and `fund_rates` (effective-dated, never edited: AGENCY_FEE PERCENT bps / FLAT paise per payout line;
-VOUCHER_DISCOUNT bps per brand key). `fund_ledger` is deprecated and unused.
+alert date / error / recipient count) and `fund_rates` (effective-dated, never edited: AGENCY_FEE PERCENT bps / FLAT
+paise per payout line; VOUCHER_DISCOUNT bps per voucher ITEM = `rewardId`; back-dated rows record `repricedLines`,
+`repriceDeltaPaise`, `repricedFrom`). `fund_ledger` is deprecated and unused. The tenant wipe deletes all four.
 
 **Engine** — `api/src/fund/fund-statement.engine.ts` (pure) + `fund-sources.loader.ts` (rules per spend type, with the
 source fields, in its header). Bank-statement model: each item is one debit at its commit date; a returned item adds a
 credit of the same amount at its return date; balance = opening + receipts + adjustments − committed − paid (=
-available). Rates are those in force on the COMMIT date. Opening cut-off: spend committed before the opening date is
-ignored; its return after that date is listed ("pre-opening returns"), never auto-credited. Receipts dated before the
-opening date are refused (and excluded + listed if any exist).
+available). Rates in force on the COMMIT date. Opening cut-off: spend committed before the opening date is ignored; its
+return after that date is listed ("pre-opening returns"), never auto-credited. Receipts dated before the opening date
+are refused (excluded + listed if any exist).
+- **Paid then reversed** (audit A1): a credit entry that was PAID (it keeps `paidAt`) and later REVERSED — incl. a fully
+  TDS-withheld entry both reversal engines flip PAID → REVERSED — stays PAID; only PENDING/FAILED → REVERSED is
+  "returned". Recoverable cash is a receivable ("to recover"), never a credit.
+- **Receivables** (A2): from `PayoutReversalAllocation` (APPLIED_RECEIVABLE); for LEGACY reversals without allocations,
+  the PAID entries in `CreditReversal.consumedPayoutEntryIds` at their net amount (amount − TDS withheld); a legacy
+  reversal that recorded no entries → one reversal-level receivable of its `shortfallPaise`.
+- **Dates** (A6): only event timestamps (status-history rows, `deliveredAt`/`completedAt`/`paidAt`, reversal
+  `approvedAt`, `cancelledAt`/`reversedAt`) — never `updatedAt`. No event → flag DATE_ESTIMATED (a return is placed on
+  its commit day, where it nets to zero; a paid date is left blank).
+- **194C TDS** (owner D3): dated WITH ITS PAYOUT. Recovery rows are cumulative deltas per (PAN or no-PAN outlet, FY), so
+  each key's NET recovery (true-ups included) is shared pro rata by amount (largest remainder) over the client's 194C
+  payout entries of that key and FY that went to the bank (status ≠ PENDING; PAN = the entry's `payeePan` snapshot;
+  no-PAN = the outlet). Each piece takes its payout's commit date and status (returned if the payout was reversed
+  before payment; excluded if before the opening date). A key with no matching payout keeps its rows on the day they
+  were recorded, flagged TDS_UNALLOCATED. Limitation: the allocation re-spreads a year's true-up over that year's
+  payouts by amount — it does not reconstruct which bank run produced which delta.
+- **Back-dated rates** (owner D1): a rate whose effective date is on/before the moment it is saved (today included)
+  re-prices lines already committed. The first save returns a preview (lines re-priced, balance change, period) and a
+  confirm token; only a second call with that token saves (server-enforced; a stale token → 409 + new preview). Audited
+  with old/new values + delta; the statement shows an information line "Rate change on <date>: N lines re-priced from
+  <date>, balance changed by ±₹X". Future-dated rates save at once ("Scheduled from <date>").
 
-**API** `/v1/fund/*`: `summary`, `statement` (filters + paging; running balance over the full history), `entries`,
-`settings`, `export` (Excel via the Downloads kind `fund-reconciliation`: Summary · Statement · Receipts · Rates ·
-About) — GIFSY_ADMIN + CLIENT_ADMIN (own tenant), `payouts:read`. Writes (`receipts`, `adjustments`,
-`opening-balance`, `settings/alerts`, `rates/fee`, `rates/discount`) — Gifsy only (`payouts:manage_fund` + a service
-check), audited, serialised per client by an advisory lock. An un-assumed Gifsy owner gets 400 "open a client first".
+**API** — client view `/v1/fund/*`: `summary`, `statement` (filters + paging; period figures always cover all types for
+the date range), `entries`, `settings` (READ-ONLY), `export` (Excel via the Downloads kind `fund-reconciliation`:
+Summary · Statement · Receipts · Rates · About) — GIFSY_ADMIN / GIFSY_STAFF with `payouts:read` + CLIENT_ADMIN (own
+tenant). Writes on `/v1/fund`: `receipts`, `adjustments`, `opening-balance` — Gifsy with `payouts:manage_fund`
+(`canManage` checks the real permission). Gifsy console `/v1/gifsy/clients/:slug/fund` (owner D6): `GET`, `PUT alerts`,
+`POST rates/fee`, `POST rates/discount` — GIFSY_ADMIN, or GIFSY_STAFF with the permission AND a tenant grant. Duplicate
+UTR check is trimmed + case-insensitive; a receipt-number clash is a clear 409.
 
-**Screen** `/admin/fund` (Overview · Statement · Receipts & adjustments · Rates & alerts; write controls for Gifsy
-only). The payouts-page Fund card and the Finance dashboard fund block read the same engine. The settings-page "Low
-balance alert threshold" (never read by anything) was replaced by a pointer. Help & Guides: "Fund reconciliation".
+**Screens** — `/admin/fund` (Overview · Statement · Receipts & adjustments · Rates & alerts read-only, "Managed by
+Gifsy in the console"); the Gifsy console client page has a **Fund** section (agency fee + history, voucher-item
+discounts + history, threshold + recipients, back-dated preview/confirm). Opening balance has a confirmation step
+(owner D2: it can never be changed — corrections are adjustments). The payouts-page Fund card and the Finance dashboard
+fund block read the same engine (the dashboard block is hidden for MIS_USER / staff without `payouts:read`).
+Client-admin copy never shows raw mail errors or the supplier name. Help & Guides: "Fund reconciliation".
 
-**Alerts**: the daily scheduled-reports run (Mon–Sat) first sends each low client ONE e-mail per IST day to its
-recipients (claimed by compare-and-set; failure stored + shown), then the Daily Ops Digest shows one Fund line per
-client with a fund set-up (balance · committed · LOW) plus the e-mail outcome; LOW, a failed e-mail and lines charged
-without a rate are "needs attention". Nothing is ever blocked.
+**Alerts** — computed and sent INSIDE the Daily Ops Digest run (its lease + time budget, one statement compute per
+client), Monday to Saturday: one e-mail per client per IST day while the balance is below the threshold; skipped (and
+said why) without an opening balance, for a non-ACTIVE client, or without recipients. A send failure or relay rejection
+releases the day's claim so a forced re-run retries. **Environment guard (new, fail-safe):**
+`FUND_ALERTS_LIVE=true` → the client's recipients (set on PRODUCTION only); else `FUND_ALERTS_TEST_RECIPIENT=<address>`
+→ only that address, subject "[TEST — would go to …]" (staging); else nothing is sent ("switched off on this server",
+shown in the digest). ⚠️ Production deploy must set `FUND_ALERTS_LIVE=true` or clients get no alerts.
 
-**Decisions taken in the build that the owner should confirm:**
-1. **Voucher brand** — the catalogue has no brand column. Brand key = `metadata.brand/brandName` → else the Hubble
-   product id (all amounts of one Hubble brand share it) → else the catalogue item itself. Manual vouchers without a
-   brand therefore get a rate per item. Ideal alternative: a "brand" field on the catalogue item.
-2. **Flat fee** is charged per payout LINE (one credit entry / one cash redemption), not per combined bank transfer.
-3. **TDS 194C lines** (TdsRecoveryEntry 194C, incl. no-PAN 194C paid in full) are charged when the bank file is made
-   and shown as "paid" (there is no separate paid step); a negative true-up is a credit.
-4. **Imported vendor history** (`CreditBatch.sourceKind = VENDOR_IMPORT`) is not spend from the advance.
-5. Only `redemptionMode = GIFT_CARD` counts as a voucher; a PHYSICAL_GIFT fulfilled as a DIGITAL_VOUCHER stays off.
-6. The low-balance e-mail goes to the recipients Gifsy configured (any domain — client addresses), Mon–Sat with the
-   digest trigger.
+**Owner decisions (2026-11-23):** D1 back-dated rates allowed with preview + confirm (above). D2 no opening-balance
+correction path; confirmation before recording. D3 194C TDS dated with its payout (above). D4 voucher discount per
+voucher ITEM (catalogue reward id; the order's `rewardId` is stable, so past orders keep their item); no rate → face
+value + flag. D5 confirmed: flat fee per payout line; digital-voucher gifts not counted; imported vendor history
+excluded. D6 settings live in the Gifsy console client page; `/admin/fund` shows them read-only.
+
+**Other build choices:** only `redemptionMode = GIFT_CARD` counts as a voucher; TDS lines carry their payout's status;
+low-balance recipients may be any domain (Gifsy-configured, client addresses).
