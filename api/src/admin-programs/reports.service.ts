@@ -95,6 +95,7 @@ export class ReportsService {
       where: { partner: { clientId: user.clientId }, deletedAt: null },
       select: {
         id: true,
+        outletCode: true,
         name: true,
         outletType: { select: { id: true, name: true } },
         partner: {
@@ -140,7 +141,8 @@ export class ReportsService {
 
         return aggregateLedgerToRow(
           {
-            outletId: o.id,
+            // "Outlet ID" column = the client's outlet code, never the internal row id (owner 2026-11-24).
+            outletId: o.outletCode,
             outletName: o.name,
             outletType: o.outletType ? labelFor(typeDisplayById, o.outletType.id, o.outletType.name) : undefined,
           },

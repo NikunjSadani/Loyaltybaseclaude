@@ -98,6 +98,8 @@ export default function ProfilePage() {
         channelPartner?: {
           businessName?:      string;
           partnerCode?:       string;
+          /** The client's own Outlet ID (outlets.outletCode) — shown instead of the internal partnerCode. */
+          outletCode?:        string | null;
           gstNumber?:         string;
           panNumber?:         string;
           kycStatus?:         string;
@@ -123,7 +125,8 @@ export default function ProfilePage() {
             partner: {
               firmName:   cp?.businessName ?? '',
               kycStatus:  (cp?.kycStatus as KYCStatus | undefined) ?? undefined,
-              outletCode: cp?.partnerCode ?? '',
+              // Client's Outlet ID; the internal partnerCode only for a login with no outlet (bare parent).
+              outletCode: cp?.outletCode || cp?.partnerCode || '',
               gstNumber:  cp?.gstNumber ?? '',
               panNumber:  cp?.panNumber ?? '',
             },

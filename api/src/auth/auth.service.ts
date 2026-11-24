@@ -161,7 +161,7 @@ export class AuthService implements OnModuleInit {
           // bank/UPI mode client-side (the backend re-validates it authoritatively regardless).
           outlets: {
             where: { deletedAt: null },
-            select: { requiredPaymentType: true },
+            select: { requiredPaymentType: true, outletCode: true },
             orderBy: { createdAt: 'asc' },
             take: 1,
           },
@@ -270,6 +270,9 @@ export class AuthService implements OnModuleInit {
                 ...cp,
                 // Flat payout mandate for the FE mode pin; the raw outlets[] is not surfaced.
                 requiredPaymentType: outlets?.[0]?.requiredPaymentType ?? null,
+                // The client's own Outlet ID (outlets.outletCode, e.g. Bajaj "50220836") — NOT the internal
+                // partnerCode ("CP-50220836"). Owner 2026-11-24: the profile must show the code the client gave us.
+                outletCode: outlets?.[0]?.outletCode ?? null,
                 wallets: wallet ? [wallet] : [],
               };
             })()
