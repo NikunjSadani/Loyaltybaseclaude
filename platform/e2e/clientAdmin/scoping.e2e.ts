@@ -11,7 +11,7 @@ import { expectScopedOut } from '../helpers/assert';
  *  - Cross-portal: a CLIENT_ADMIN must not reach the Gifsy console or the partner portal.
  *
  * S4n additions (per DATA-VISIBILITY §2 negative matrix):
- *  - Q2 block: /admin/kyc/approvals + /admin/payouts/fund (the sub-page of Q1 payouts).
+ *  - Q2 block: /admin/kyc/approvals. (/admin/payouts/fund now redirects to the read-only /admin/fund — C13.)
  *  - Gifsy surface: extend to /gifsy/users and /gifsy/outlet-types (both GIFSY_ADMIN-only).
  *  - Partner portal: extend to /partner/wallet (data-bearing, seed markers from seed.ts §3.3).
  */
@@ -39,14 +39,16 @@ test.describe('@clientAdmin scoping', () => {
     expect(new URL(page.url()).pathname.endsWith('/admin/payouts')).toBe(false);
   });
 
-  // S4n — Q1 sub-page: /admin/payouts/fund is the fund-disbursement page under the payouts shell.
-  // The payouts layout guards the whole tree with allowedRoles=['GIFSY_ADMIN'], so CLIENT_ADMIN
-  // must be redirected off this sub-page too, not just the index.
-  test('Q1 — cannot reach /admin/payouts/fund (fund disbursement, GIFSY-only sub-page)', async ({ page }) => {
-    await expectScopedOut(page, '/admin/payouts/fund', {
-      forbiddenMarkers: ['fund', 'disburse', 'payout batch'],
-      safeRedirects: SAFE,
-    });
+  // Fund reconciliation C13: /admin/payouts/fund (the retired Fund Management page) now only redirects to
+  // /admin/fund, the client's READ-ONLY fund view — the payouts layout guard lets that one path through so an old
+  // CLIENT_ADMIN bookmark lands on /admin/fund instead of bouncing to the dashboard.
+  test('C13 — an old /admin/payouts/fund bookmark lands a CLIENT_ADMIN on /admin/fund (read-only)', async ({ page }) => {
+    await page.goto('/admin/payouts/fund');
+    await page.waitForURL((u) => u.pathname.endsWith('/admin/fund'), { timeout: 10_000 });
+    await expect(page).toHaveURL(/\/admin\/fund$/);
+    await expect(page.getByRole('heading', { name: 'Fund reconciliation' })).toBeVisible();
+    // Read-only: no write controls for a client admin.
+    await expect(page.getByRole('button', { name: /Record advance received/ })).toHaveCount(0);
   });
 
   // S4n — Q2: the Gifsy KYC bulk-approval workspace is GIFSY_ADMIN-only (DATA-VISIBILITY §3 Q2).

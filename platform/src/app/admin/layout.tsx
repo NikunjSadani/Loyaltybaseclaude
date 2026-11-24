@@ -138,8 +138,8 @@ const ALL_NAV_ITEMS = [
     ],
   },
   // Fund reconciliation — the client's prepaid advance vs voucher / payout spend (FUND-RECONCILIATION-DESIGN.md).
-  // fundAdmin: GIFSY_ADMIN (manages, while assumed) + CLIENT_ADMIN (read-only) only — the same two roles as the
-  // admin/fund/layout.tsx guard. Replaces the retired "Fund Management" child of Redemption Payouts.
+  // fundAdmin: GIFSY_ADMIN / GIFSY_STAFF (assumed; writes need payouts:manage_fund) + CLIENT_ADMIN (read-only) — the
+  // same roles as the admin/fund/layout.tsx guard. Replaces the retired "Fund Management" child of Redemption Payouts.
   { href: '/admin/fund', label: 'Fund Reconciliation', icon: PiggyBank, featureFlag: null, fundAdmin: true },
   { href: '/admin/gifts',    label: 'Gift Catalogue',  icon: Gift,          featureFlag: 'walletModule' as const },
   { href: '/admin/gift-catalogue', label: 'Gift Master Catalogue', icon: ShoppingBag, featureFlag: null, gifsyAdminOnly: true },
@@ -291,9 +291,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         // offersAdmin items (This Month's Offers) — same two roles; also gated on featureFlag below.
         if ((item as { offersAdmin?: boolean }).offersAdmin
           && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
-        // fundAdmin items (Fund Reconciliation) — GIFSY_ADMIN + CLIENT_ADMIN only (hidden from GIFSY_STAFF + MIS_USER).
+        // fundAdmin items (Fund Reconciliation) — GIFSY_ADMIN, GIFSY_STAFF and CLIENT_ADMIN (hidden from MIS_USER).
+        // A staff member without payouts:read keeps the item (RBAC Option-X: nav stays visible) and lands on the
+        // AdminRouteGuard's AccessDenied ('/admin/fund' → payouts:read in route-permissions.ts).
         if ((item as { fundAdmin?: boolean }).fundAdmin
-          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
+          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'GIFSY_STAFF'
+          && adminSession.role !== 'CLIENT_ADMIN') return false;
         // salesImportAdmin items (Sales Import) — same two roles; also gated on featureFlag below.
         if ((item as { salesImportAdmin?: boolean }).salesImportAdmin
           && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;

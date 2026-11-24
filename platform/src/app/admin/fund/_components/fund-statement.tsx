@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { Download } from 'lucide-react';
+import { Download, Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { formatISTDate } from '@/lib/ist-date';
@@ -11,7 +11,7 @@ import {
   EVENT_LABELS, SPEND_TYPE_LABELS, STATUS_LABELS, fundApi,
   type FundEvent, type FundSpendType, type FundStatement, type FundStatementLine, type FundStatus,
 } from '@/lib/fund';
-import { EmptyBlock, ErrorBlock, Field, FlagChips, LoadingBlock, Money, StatusPill, inputCls } from './fund-ui';
+import { EmptyBlock, ErrorBlock, Field, FlagChips, FlagLegend, LoadingBlock, Money, StatusPill, inputCls } from './fund-ui';
 
 interface Filters { from: string; to: string; type: string; status: string; event: string; q: string }
 const EMPTY_FILTERS: Filters = { from: '', to: '', type: '', status: '', event: '', q: '' };
@@ -42,7 +42,10 @@ export function FundStatementTab({ isGifsy, refreshKey }: { isGifsy: boolean; re
   const [exporting, setExporting] = useState(false);
   const [exportMsg, setExportMsg] = useState<{ kind: 'queued' | 'error' | 'done'; text: string } | null>(null);
 
+  // C8: only the LATEST request may update the screen — a slow earlier reply is ignored.
+  const reqSeq = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++reqSeq.current;
     setLoading(true);
     setError(null);
     const p = new URLSearchParams();
@@ -51,6 +54,7 @@ export function FundStatementTab({ isGifsy, refreshKey }: { isGifsy: boolean; re
     p.set('page', String(page));
     p.set('limit', String(PAGE_SIZE));
     const r = await fundApi.statement(p);
+    if (seq !== reqSeq.current) return; // a newer request was started — drop this stale reply
     if (r.ok) setData(r.data);
     else { setData(null); setError(r.message); }
     setLoading(false);
@@ -88,6 +92,9 @@ export function FundStatementTab({ isGifsy, refreshKey }: { isGifsy: boolean; re
   }
 
   const period = data?.period;
+  // C7: the Excel covers the dates APPLIED on screen; typed-but-not-applied dates disable it until Apply.
+  const datesPending = draft.from !== filters.from || draft.to !== filters.to;
+  const moneyIn = period ? period.openingEntryPaise + period.receiptsPaise : 0;
 
   return (
     <div className="space-y-4">
@@ -109,7 +116,8 @@ export function FundStatementTab({ isGifsy, refreshKey }: { isGifsy: boolean; re
         <Field id="st-event" label="Event">
           <select id="st-event" value={draft.event} onChange={set('event')} className={inputCls}>
             <option value="">All events</option>
-            {(Object.keys(EVENT_LABELS) as FundEvent[]).map((ev) => <option key={ev} value={ev}>{EVENT_LABELS[ev]}</option>)}
+            {/* RATE_CHANGE is informational and not a filter the API accepts (FundStatementQueryDto.event). */}
+            {(Object.keys(EVENT_LABELS) as FundEvent[]).filter((ev) => ev !== 'RATE_CHANGE').map((ev) => <option key={ev} value={ev}>{EVENT_LABELS[ev]}</option>)}
           </select>
         </Field>
         <Field id="st-q" label="Search"><input id="st-q" type="search" value={draft.q} onChange={set('q')} placeholder="Reference, outlet, UTR…" className={inputCls} /></Field>
@@ -120,10 +128,16 @@ export function FundStatementTab({ isGifsy, refreshKey }: { isGifsy: boolean; re
       </form>
 
       <div className="flex flex-wrap items-center gap-3">
-        <Button type="button" variant="outline" size="sm" onClick={exportExcel} loading={exporting}>
+        <Button type="button" variant="outline" size="sm" onClick={exportExcel} loading={exporting} disabled={datesPending || exporting}>
           <Download className="h-4 w-4" aria-hidden /> {exporting ? 'Preparing…' : 'Download Excel'}
         </Button>
-        <span className="text-xs text-gray-500">Excel covers the From / To dates above (all dates when blank).</span>
+        <span data-testid="fund-export-range" className="text-xs text-gray-500">
+          {datesPending
+            ? 'Press Apply first — the Excel covers the dates applied on screen.'
+            : filters.from || filters.to
+              ? `Excel covers ${filters.from ? formatISTDate(filters.from) : 'the start'} to ${filters.to ? formatISTDate(filters.to) : 'today'} (the applied dates).`
+              : 'Excel covers all dates (no dates applied).'}
+        </span>
         {exportMsg?.kind === 'queued' && (
           <span role="status" className="text-xs text-sky-800">
             {exportMsg.text} <Link href={DOWNLOADS_PAGE_HREF} className="font-medium underline">Go to Downloads</Link>
@@ -135,23 +149,33 @@ export function FundStatementTab({ isGifsy, refreshKey }: { isGifsy: boolean; re
 
       {error && <ErrorBlock message={error} onRetry={() => void load()} />}
       {loading && !data && <LoadingBlock label="Loading statement…" />}
+      {loading && data && <p role="status" data-testid="fund-statement-updating" className="text-xs text-gray-500">Updating…</p>}
 
       {period && (
-        <div data-testid="fund-period" className="grid grid-cols-2 gap-3 md:grid-cols-5">
-          {[
-            ['Opening balance for the period', period.openingBalancePaise],
-            ['Money in (opening + receipts + adjustments)', period.openingEntryPaise + period.receiptsPaise + period.adjustmentsPaise],
-            ['Charges', -Math.abs(period.chargesPaise)],
-            ['Returns', Math.abs(period.returnsPaise)],
-            ['Closing balance', period.closingBalancePaise],
-          ].map(([label, v]) => (
-            <div key={label as string} className="rounded-xl border border-gray-200 bg-white p-3">
-              <p className="text-xs text-gray-500">{label}</p>
-              <p className="mt-1 text-sm font-bold"><Money paise={v as number} /></p>
-            </div>
-          ))}
-        </div>
+        <section aria-label="Period totals" className="space-y-1">
+          <p data-testid="fund-period-scope" className="text-xs font-medium text-gray-600">
+            Totals cover all types for the period{period.from || period.to ? '' : ' (all dates)'} — the Type / Status / Event / Search filters change only the lines below.
+          </p>
+          <div data-testid="fund-period" className={`grid grid-cols-2 gap-3 md:grid-cols-6 ${loading ? 'opacity-60' : ''}`}>
+            {([
+              ['Opening balance for the period', period.openingBalancePaise],
+              // C15: "Money in" never shows a negative — a negative opening entry is labelled as a net figure.
+              [moneyIn >= 0 ? 'Money in (opening + receipts)' : 'Opening + receipts (net)', moneyIn],
+              ['Adjustments (±)', period.adjustmentsPaise],
+              ['Charges', -Math.abs(period.chargesPaise)],
+              ['Returns', Math.abs(period.returnsPaise)],
+              ['Closing balance', period.closingBalancePaise],
+            ] as Array<[string, number]>).map(([label, v]) => (
+              <div key={label} className="rounded-xl border border-gray-200 bg-white p-3">
+                <p className="text-xs text-gray-500">{label}</p>
+                <p className="mt-1 text-sm font-bold"><Money paise={v} /></p>
+              </div>
+            ))}
+          </div>
+        </section>
       )}
+
+      {data && <FlagLegend testId="fund-flag-legend" flags={data.lines.flatMap((l) => l.flags ?? [])} />}
 
       {data && (
         <Card>
@@ -169,6 +193,21 @@ export function FundStatementTab({ isGifsy, refreshKey }: { isGifsy: boolean; re
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {data.lines.map((l) => {
+                    if (l.event === 'RATE_CHANGE') {
+                      // D1: an informational line (amount 0) — a back-dated rate re-priced earlier lines.
+                      return (
+                        <tr key={l.seq} data-testid="fund-rate-change-row" className="bg-sky-50 text-sky-900">
+                          <td className="whitespace-nowrap px-3 py-2">{formatISTDate(l.date)}</td>
+                          <td className="px-3 py-2 font-medium">{EVENT_LABELS.RATE_CHANGE}</td>
+                          <td colSpan={12} className="px-3 py-2">
+                            <span className="inline-flex items-start gap-1.5">
+                              <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" aria-hidden />
+                              <span>{l.description} <span className="text-xs text-sky-700">(for information — the re-priced lines carry the change)</span></span>
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    }
                     const href = sourceHref(l, isGifsy);
                     return (
                       <tr key={l.seq} data-testid="fund-statement-row">
@@ -180,8 +219,8 @@ export function FundStatementTab({ isGifsy, refreshKey }: { isGifsy: boolean; re
                         </td>
                         <td className="px-3 py-2 text-gray-700">
                           {l.description}
-                          {(l.brandLabel || l.rateLabel) && (
-                            <span className="block text-xs text-gray-500">{[l.brandLabel, l.rateLabel].filter(Boolean).join(' · ')}</span>
+                          {(l.itemLabel || l.rateLabel) && (
+                            <span className="block text-xs text-gray-500">{[l.itemLabel, l.rateLabel].filter(Boolean).join(' · ')}</span>
                           )}
                           {l.receivablePaise > 0 && (
                             <span className="block text-xs font-medium text-red-700">To recover: <Money paise={l.receivablePaise} /></span>

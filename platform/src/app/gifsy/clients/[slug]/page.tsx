@@ -6,7 +6,7 @@ import {
   ArrowLeft, CheckCircle, Clock, AlertCircle,
   Pencil, Save, X, ChevronDown, ChevronUp,
   Palette, Shield, Users, Bell, FileText, Wallet, Building2, ShoppingBag, Loader2,
-  Settings, Power, Globe, Plus, Trash2, Star, Image as ImageIcon, Upload, ExternalLink,
+  Settings, Power, Globe, Plus, Trash2, Star, Image as ImageIcon, Upload, ExternalLink, PiggyBank,
 } from 'lucide-react';
 import { validateTenantDomain, normalizeTenantDomain, TENANT_DOMAIN_SUFFIX, tenantSiteUrl } from '@/lib/platform/platform-admin';
 import type { ClientConfig, FeatureKey, FeatureFlags } from '@/lib/platform/client-config';
@@ -17,6 +17,7 @@ import { useCanManageHelpVideos } from '@/lib/help-videos-access';
 import { useIsGifsyAdmin } from '@/lib/use-is-gifsy-admin';
 import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
 import { TicketRemarksEmailCard } from '@/components/operator/ticket-remarks-email-card';
+import { FundConsoleSection } from '@/components/operator/fund-console-section';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feature metadata — label + description for each toggle
@@ -555,6 +556,12 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
       <Section icon={ShoppingBag} title="Outlet Type Configuration">
         <OutletTypeConfigSection clientId={config.slug} />
       </Section>
+
+      {/* Fund — agency fee, voucher item discounts, low-balance alert (owner D6; /admin/fund shows them read-only).
+          Deep link: /gifsy/clients/<slug>#fund opens + scrolls to this section. API-enforced (payouts:read / manage_fund). */}
+      <Section icon={PiggyBank} title="Fund" id="fund">
+        <FundConsoleSection slug={config.slug} />
+      </Section>
     </div>
   );
 }
@@ -564,17 +571,27 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
 // ─────────────────────────────────────────────────────────────────────────────
 
 function Section({
-  icon: Icon, title, children, defaultOpen = false,
+  icon: Icon, title, children, defaultOpen = false, id,
 }: {
   icon: React.ElementType;
   title: string;
   children: React.ReactNode;
   defaultOpen?: boolean;
+  /** Anchor id — a URL hash matching it (#id) opens the section and scrolls to it. */
+  id?: string;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const hashHit = () => !!id && typeof window !== 'undefined' && window.location.hash === `#${id}`;
+  const [open, setOpen] = useState(() => defaultOpen || hashHit());
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!hashHit()) return;
+    setOpen(true);
+    ref.current?.scrollIntoView?.({ block: 'start' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   return (
-    <div className="border border-white/10 rounded-xl overflow-hidden">
+    <div id={id} ref={ref} className="border border-white/10 rounded-xl overflow-hidden">
       <button
         onClick={() => setOpen((v) => !v)}
         className="w-full flex items-center justify-between px-5 py-4 hover:bg-white/5 transition-colors"

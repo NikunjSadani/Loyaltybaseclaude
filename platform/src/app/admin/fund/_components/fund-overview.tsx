@@ -1,12 +1,13 @@
 'use client';
 
 import React from 'react';
+import Link from 'next/link';
 import { AlertTriangle, Info } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { formatISTDate } from '@/lib/ist-date';
 import { formatInrPaise } from '@/lib/money-format';
-import { FLAG_TEXT, SPEND_TYPE_LABELS, type FundSummary } from '@/lib/fund';
-import { Money } from './fund-ui';
+import { FLAG_TEXT, SPEND_TYPE_LABELS, type FundFlag, type FundSummary } from '@/lib/fund';
+import { EmptyBlock, Money } from './fund-ui';
 
 function StatCard({ label, paise, sub, tone = 'default', testId }: {
   label: string; paise: number; sub?: string; tone?: 'default' | 'good' | 'bad' | 'muted'; testId?: string;
@@ -31,9 +32,25 @@ function Warning({ title, children, testId }: { title: string; children?: React.
   );
 }
 
-export function LowBalanceBanner({ summary }: { summary: FundSummary }) {
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** Where the settings are changed: Gifsy gets the console link; a client admin is told Gifsy manages them. */
+function SettingsPointer({ summary, internal, what }: { summary: FundSummary; internal: boolean; what: string }) {
+  if (!internal) return <> Gifsy sets {what}.</>;
+  if (summary.settingsConsoleHref) {
+    return <> Set {what} in the <Link href={summary.settingsConsoleHref} className="font-medium underline">Gifsy console (Fund section)</Link>.</>;
+  }
+  return <> Set {what} in the Gifsy console (client page → Fund).</>;
+}
+
+/**
+ * Low-balance banner. `internal` = a Gifsy operator; a client admin gets client-appropriate copy (C11): no Gifsy
+ * instructions, and the server already sends a client-safe sentence in place of a raw mail error.
+ */
+export function LowBalanceBanner({ summary, internal }: { summary: FundSummary; internal: boolean }) {
   const lb = summary.lowBalance;
   if (!lb?.isLow) return null;
+  const sentTo = lb.lastAlertRecipients ?? lb.recipients;
   return (
     <div role="alert" data-testid="fund-low-balance" className="rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
       <p className="flex items-center gap-2 font-semibold">
@@ -42,27 +59,39 @@ export function LowBalanceBanner({ summary }: { summary: FundSummary }) {
         {lb.thresholdPaise != null ? ` of ${formatInrPaise(lb.thresholdPaise)}` : ''}.
       </p>
       <p className="mt-1 text-xs">
-        Spend is never blocked — vouchers and payouts carry on. Gifsy decides case by case whether to ask the client for a top-up.
+        {internal
+          ? 'Spend is never blocked — vouchers and payouts carry on. Gifsy decides case by case whether to ask the client for a top-up.'
+          : 'Spend is never blocked — vouchers and payouts carry on. Gifsy may contact you about a top-up of the advance.'}
       </p>
       <p className="mt-1 text-xs">
-        {lb.lastAlertSentOn
-          ? `Last low-balance email sent on ${formatISTDate(lb.lastAlertSentOn)} to ${lb.recipients} recipient${lb.recipients === 1 ? '' : 's'}.`
-          : lb.recipients > 0
-            ? 'No low-balance email has been sent yet.'
-            : 'No alert recipients are set, so no low-balance email is sent. Add recipients under Rates & alerts.'}
+        {lb.alertsPaused === 'NO_OPENING'
+          ? 'Low-balance e-mails start once an opening balance is recorded.'
+          : lb.alertsPaused === 'CLIENT_INACTIVE'
+            ? 'Low-balance e-mails are paused while this client is not active.'
+            : lb.lastAlertSentOn
+              ? `Last low-balance e-mail sent on ${formatISTDate(lb.lastAlertSentOn)} to ${plural(sentTo, 'recipient')}. E-mails go Monday to Saturday while the balance stays low.`
+              : lb.recipients > 0
+                ? 'No low-balance e-mail has been sent yet. E-mails go Monday to Saturday while the balance stays low.'
+                : internal
+                  ? 'No alert recipients are set, so no low-balance e-mail is sent. Add recipients in the Gifsy console (client page → Fund).'
+                  : 'No low-balance e-mail recipients are set up yet.'}
       </p>
       {lb.lastAlertError && (
         <p data-testid="fund-alert-error" className="mt-1 text-xs font-semibold">
-          The last low-balance email FAILED: {lb.lastAlertError}
+          {internal ? `The last low-balance e-mail FAILED: ${lb.lastAlertError}` : lb.lastAlertError}
         </p>
       )}
     </div>
   );
 }
 
-export function FundOverview({ summary }: { summary: FundSummary }) {
+/** Flags with their own warning below (the rest are listed in the generic flag block). */
+const OWN_WARNING: FundFlag[] = ['NO_ITEM_RATE', 'NO_FEE_RATE'];
+
+export function FundOverview({ summary, internal }: { summary: FundSummary; internal: boolean }) {
   const t = summary.totals;
   const flagCounts = summary.flagCounts ?? {};
+  const itemsWithoutRate = summary.itemsWithoutRate ?? [];
   const totalsRow = summary.byType.reduce(
     (a, r) => ({
       count: a.count + r.count,
@@ -76,6 +105,7 @@ export function FundOverview({ summary }: { summary: FundSummary }) {
     }),
     { count: 0, face: 0, discount: 0, fee: 0, committed: 0, paid: 0, returned: 0, net: 0 },
   );
+  const otherFlags = (Object.keys(FLAG_TEXT) as FundFlag[]).filter((f) => !OWN_WARNING.includes(f) && (flagCounts[f] ?? 0) > 0);
 
   return (
     <div className="space-y-5">
@@ -109,7 +139,10 @@ export function FundOverview({ summary }: { summary: FundSummary }) {
       <Card>
         <CardHeader><CardTitle className="text-base">Spend by type</CardTitle></CardHeader>
         <CardContent className="overflow-x-auto">
-          <table className="w-full min-w-[820px] text-sm">
+          {summary.byType.length === 0 ? (
+            <EmptyBlock>No spend yet — no vouchers or payouts have been charged to the advance.</EmptyBlock>
+          ) : (
+          <table className="w-full min-w-[820px] text-sm" data-testid="fund-by-type">
             <thead>
               <tr className="border-b border-gray-100 text-left text-xs text-gray-500">
                 <th className="pb-2 font-medium">Type</th>
@@ -150,38 +183,40 @@ export function FundOverview({ summary }: { summary: FundSummary }) {
               </tr>
             </tbody>
           </table>
+          )}
         </CardContent>
       </Card>
 
       <div className="space-y-3" aria-label="Warnings">
-        {summary.brandsWithoutRate.length > 0 && (
-          <Warning testId="fund-warn-brands" title={`${summary.brandsWithoutRate.length} voucher brand${summary.brandsWithoutRate.length === 1 ? '' : 's'} without a discount rate — charged at face value`}>
-            {summary.brandsWithoutRate.map((b) => `${b.brandLabel} (${b.count})`).join(', ')}. Set a rate under Rates &amp; alerts.
+        {itemsWithoutRate.length > 0 && (
+          <Warning testId="fund-warn-items" title={`${plural(itemsWithoutRate.length, 'voucher item')} without a discount — charged at face value`}>
+            {itemsWithoutRate.map((b) => `${b.itemLabel} (${b.count})`).join(', ')}.
+            <SettingsPointer summary={summary} internal={internal} what="the voucher item discounts" />
           </Warning>
         )}
         {(flagCounts.NO_FEE_RATE ?? 0) > 0 && (
-          <Warning testId="fund-warn-fee" title={`${flagCounts.NO_FEE_RATE} payout${flagCounts.NO_FEE_RATE === 1 ? '' : 's'} with no agency fee set`}>
+          <Warning testId="fund-warn-fee" title={`${plural(flagCounts.NO_FEE_RATE ?? 0, 'payout')} with no agency fee set`}>
             {FLAG_TEXT.NO_FEE_RATE.detail}
+            <SettingsPointer summary={summary} internal={internal} what="the agency fee" />
           </Warning>
         )}
-        {(flagCounts.HUBBLE_NEEDS_RECONCILE ?? 0) > 0 && (
-          <Warning title={`${flagCounts.HUBBLE_NEEDS_RECONCILE} Hubble order${flagCounts.HUBBLE_NEEDS_RECONCILE === 1 ? '' : 's'} awaiting reconcile`}>
-            {FLAG_TEXT.HUBBLE_NEEDS_RECONCILE.detail}
-          </Warning>
-        )}
-        {(flagCounts.FAILED_AWAITING_REBANK ?? 0) > 0 && (
-          <Warning title={`${flagCounts.FAILED_AWAITING_REBANK} failed credit payout${flagCounts.FAILED_AWAITING_REBANK === 1 ? '' : 's'} awaiting re-bank`}>
-            {FLAG_TEXT.FAILED_AWAITING_REBANK.detail}
-          </Warning>
-        )}
-        {(flagCounts.FACE_UNKNOWN ?? 0) > 0 && (
-          <Warning title={`${flagCounts.FACE_UNKNOWN} item${flagCounts.FACE_UNKNOWN === 1 ? '' : 's'} with an unknown face value (₹0 charged)`}>
-            {FLAG_TEXT.FACE_UNKNOWN.detail}
-          </Warning>
+        {otherFlags.length > 0 && (
+          <div data-testid="fund-warn-flags" className="rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-900">
+            <p className="flex items-center gap-2 font-semibold"><AlertTriangle className="h-4 w-4 flex-shrink-0" aria-hidden />Flagged lines</p>
+            <ul className="mt-1 space-y-0.5 text-xs">
+              {otherFlags.map((f) => (
+                <li key={f}><strong>{FLAG_TEXT[f].chip} ({flagCounts[f]})</strong>: {FLAG_TEXT[f].detail}</li>
+              ))}
+            </ul>
+          </div>
         )}
         {summary.receivables.items.length > 0 && (
           <Warning testId="fund-warn-receivables" title={`To recover: ${formatInrPaise(summary.receivables.totalPaise)} — paid, then reversed`}>
-            <p>These were paid out and later reversed. Recover the money off-platform, then record an Adjustment (a positive amount) with the reason.</p>
+            <p>
+              {internal
+                ? 'These were paid out and later reversed. Recover the money off-platform, then record an Adjustment (a positive amount) with the reason.'
+                : 'These were paid out and later reversed. Gifsy recovers the money and records it as an adjustment to your advance.'}
+            </p>
             <ul className="mt-1 list-disc pl-5">
               {summary.receivables.items.map((r) => (
                 <li key={`${r.sourceKind}:${r.sourceId}`}>
@@ -193,7 +228,11 @@ export function FundOverview({ summary }: { summary: FundSummary }) {
         )}
         {summary.preOpeningReturns.items.length > 0 && (
           <Warning testId="fund-warn-preopening" title={`Returned after the opening date, but committed before it: ${formatInrPaise(summary.preOpeningReturns.facePaise)}`}>
-            <p>This spend was committed before the opening balance date and returned after it. It is NOT credited automatically — record an Adjustment if the client should get it back.</p>
+            <p>
+              {internal
+                ? 'This spend was committed before the opening balance date and returned after it. It is NOT credited automatically — record an Adjustment if the client should get it back.'
+                : 'This spend was committed before the opening balance date and returned after it. It is not credited automatically — Gifsy reviews these and records an adjustment where due.'}
+            </p>
             <ul className="mt-1 list-disc pl-5">
               {summary.preOpeningReturns.items.map((r) => (
                 <li key={`${r.sourceKind}:${r.sourceId}`}>

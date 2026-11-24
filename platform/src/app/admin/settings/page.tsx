@@ -1418,11 +1418,18 @@ export default function SettingsPage() {
         <CardHeader><CardTitle className="text-base">Fund Reconciliation</CardTitle><CardDescription>Client fund (advance) settings moved</CardDescription></CardHeader>
         <CardContent>
           {/* The old "Low Balance Alert Threshold" here was never read by anything (retired 2026-11-23). The threshold,
-              alert recipients, agency fee and voucher brand discounts now live on the Fund Reconciliation page. */}
+              alert recipients, agency fee and voucher item discounts are managed by Gifsy in the console (client page →
+              Fund, owner D6) and shown read-only on /admin/fund. MIS_USER cannot open /admin/fund → no link for them (C13). */}
           <p className="text-sm text-gray-600">
-            The low-balance alert threshold, alert recipients, agency fee and voucher brand discounts are set on the{' '}
-            <a href="/admin/fund" className="font-medium text-[var(--brand-primary)] underline">Fund Reconciliation</a> page
-            (Rates &amp; alerts tab).
+            The low-balance alert threshold, alert recipients, agency fee and voucher item discounts are managed by Gifsy in
+            the Gifsy console
+            {adminSession.role === 'MIS_USER' ? '.' : (
+              <>
+                {' '}and shown read-only on the{' '}
+                <a href="/admin/fund" className="font-medium text-[var(--brand-primary)] underline">Fund Reconciliation</a> page
+                (Rates &amp; alerts tab).
+              </>
+            )}
           </p>
         </CardContent>
       </Card>

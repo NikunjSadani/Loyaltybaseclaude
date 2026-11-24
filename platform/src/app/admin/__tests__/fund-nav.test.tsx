@@ -1,7 +1,8 @@
 /// <reference types="vitest/globals" />
 /**
- * Admin nav — "Fund Reconciliation" (FUND-RECONCILIATION-DESIGN.md). Top-level item shown to GIFSY_ADMIN +
- * CLIENT_ADMIN only (same two roles as admin/fund/layout.tsx).
+ * Admin nav — "Fund Reconciliation" (FUND-RECONCILIATION-DESIGN.md). Top-level item shown to GIFSY_ADMIN,
+ * GIFSY_STAFF (B4/C1 — a staff member without payouts:read lands on AccessDenied, RBAC Option-X keeps nav visible)
+ * and CLIENT_ADMIN (same roles as admin/fund/layout.tsx); hidden from MIS_USER.
  * Run: npx vitest run src/app/admin/__tests__/fund-nav.test.tsx
  */
 import React from 'react';
@@ -60,14 +61,14 @@ beforeEach(() => {
 });
 
 describe('Admin nav — Fund Reconciliation', () => {
-  it.each([['CLIENT_ADMIN'], ['GIFSY_ADMIN']])('shown to %s (no feature flag needed)', (role) => {
+  it.each([['CLIENT_ADMIN'], ['GIFSY_ADMIN'], ['GIFSY_STAFF']])('shown to %s (no feature flag needed)', (role) => {
     roleRef.current = role;
     featuresRef.current = {};
     render(<AdminLayout><div /></AdminLayout>);
     expect(fundLink()).toHaveAttribute('href', '/admin/fund');
   });
 
-  it.each([['MIS_USER'], ['GIFSY_STAFF']])('hidden from %s', (role) => {
+  it.each([['MIS_USER']])('hidden from %s', (role) => {
     roleRef.current = role;
     render(<AdminLayout><div /></AdminLayout>);
     expect(fundLink()).not.toBeInTheDocument();

@@ -8,15 +8,17 @@
  */
 
 export type FundSpendType = 'VOUCHER' | 'CASH_REDEMPTION' | 'CREDIT_PAYOUT' | 'VISIBILITY_PAYOUT' | 'TDS_194C';
-export type FundEvent = 'OPENING' | 'RECEIPT' | 'ADJUSTMENT' | 'CHARGE' | 'RETURN';
+export type FundEvent = 'OPENING' | 'RECEIPT' | 'ADJUSTMENT' | 'CHARGE' | 'RETURN' | 'RATE_CHANGE';
 export type FundStatus = 'COMMITTED' | 'PAID' | 'RETURNED';
 export type FundFlag =
-  | 'NO_BRAND_RATE'
+  | 'NO_ITEM_RATE'
   | 'NO_FEE_RATE'
   | 'HUBBLE_NEEDS_RECONCILE'
   | 'FAILED_AWAITING_REBANK'
   | 'FACE_RECOMPUTED'
-  | 'FACE_UNKNOWN';
+  | 'FACE_UNKNOWN'
+  | 'DATE_ESTIMATED'
+  | 'TDS_UNALLOCATED';
 
 export const SPEND_TYPE_LABELS: Record<FundSpendType, string> = {
   VOUCHER: 'Vouchers',
@@ -32,6 +34,7 @@ export const EVENT_LABELS: Record<FundEvent, string> = {
   ADJUSTMENT: 'Adjustment',
   CHARGE: 'Charge',
   RETURN: 'Returned',
+  RATE_CHANGE: 'Rate change',
 };
 
 export const STATUS_LABELS: Record<FundStatus, string> = {
@@ -40,15 +43,24 @@ export const STATUS_LABELS: Record<FundStatus, string> = {
   RETURNED: 'Returned',
 };
 
-/** Plain-English flag text (short chip label + longer explanation). */
+/**
+ * Plain-English flag text (short chip label + longer explanation). Shown as VISIBLE text (C4), never hover-only.
+ * Client-safe wording everywhere: the voucher supplier is "the voucher provider" (C11).
+ */
 export const FLAG_TEXT: Record<FundFlag, { chip: string; detail: string }> = {
-  NO_BRAND_RATE: { chip: 'No brand rate', detail: 'No voucher discount is set for this brand — charged at face value.' },
+  NO_ITEM_RATE: { chip: 'No item discount', detail: 'No voucher discount is set for this voucher item — charged at face value.' },
   NO_FEE_RATE: { chip: 'No agency fee', detail: 'No agency fee is set — no fee was charged on this payout.' },
-  HUBBLE_NEEDS_RECONCILE: { chip: 'Hubble: reconcile', detail: 'The Hubble outcome is unknown — counted as committed until reconciled.' },
-  FAILED_AWAITING_REBANK: { chip: 'Failed: re-bank', detail: 'Failed at the bank and not reversed — still committed until it is re-banked.' },
-  FACE_RECOMPUTED: { chip: 'Face recomputed', detail: "The order's value was re-derived from its snapshot." },
-  FACE_UNKNOWN: { chip: 'Face unknown', detail: 'No face value could be found (₹0 charged) — check the source record.' },
+  HUBBLE_NEEDS_RECONCILE: { chip: 'Awaiting voucher provider', detail: "The voucher provider's outcome is not known yet — counted as committed until it is confirmed." },
+  FAILED_AWAITING_REBANK: { chip: 'Failed: re-bank', detail: 'Failed at the bank and not reversed — still committed until it is paid again.' },
+  FACE_RECOMPUTED: { chip: 'Face recomputed', detail: "The order's value was worked out again from the copy saved when it was ordered (the stored value had been cleared by a refund)." },
+  FACE_UNKNOWN: { chip: 'Face unknown', detail: 'No face value could be found (₹0 charged) — the source record needs checking.' },
+  DATE_ESTIMATED: { chip: 'Date estimated', detail: 'The source record has no date for this event: a return is shown on the day it was committed, and a paid date is left blank.' },
+  TDS_UNALLOCATED: { chip: 'TDS not matched', detail: 'This TDS could not be matched to a payout — it is shown on the day it was recorded.' },
 };
+
+export function flagDetail(flag: string): string {
+  return (FLAG_TEXT as Record<string, { detail: string }>)[flag]?.detail ?? flag;
+}
 
 export function flagChip(flag: string): string {
   return (FLAG_TEXT as Record<string, { chip: string }>)[flag]?.chip ?? flag;
@@ -100,11 +112,18 @@ export interface FundSummary {
   };
   excludedEntries: Array<{ id: string; kind: string; amountPaise: number; date: string; ref: string }>;
   flagCounts: Partial<Record<FundFlag, number>>;
-  brandsWithoutRate: Array<{ brandKey: string; brandLabel: string; count: number }>;
+  itemsWithoutRate: Array<{ rewardId: string; itemLabel: string; count: number }>;
+  /** The Gifsy console link to this client's fund settings — Gifsy operators only, else null. */
+  settingsConsoleHref?: string | null;
   lowBalance: {
     thresholdPaise: number | null;
     isLow: boolean;
+    /** Why daily e-mails are paused: no opening balance yet, or the client is not active. */
+    alertsPaused?: 'NO_OPENING' | 'CLIENT_INACTIVE' | null;
     lastAlertSentOn: string | null;
+    /** How many recipients the last e-mail went to (at send time). */
+    lastAlertRecipients?: number | null;
+    /** Already a client-safe sentence for a client admin (the raw error for Gifsy). */
     lastAlertError: string | null;
     recipients: number;
   };
@@ -131,7 +150,7 @@ export interface FundStatementLine {
   paidAt: string | null;
   returnedAt: string | null;
   utr: string | null;
-  brandLabel: string | null;
+  itemLabel: string | null;
   rateLabel: string | null;
   receivablePaise: number;
   flags: string[];
@@ -143,6 +162,8 @@ export interface FundStatement {
   period: {
     from: string | null;
     to: string | null;
+    /** The period figures always cover ALL types / statuses of the date range — never the other filters. */
+    scope?: 'ALL_TYPES_FOR_PERIOD';
     openingBalancePaise: number;
     closingBalancePaise: number;
     openingEntryPaise: number;
@@ -169,38 +190,71 @@ export interface FundEntry {
   createdByName: string | null;
 }
 
-export interface FundFeeRate {
+/** One saved rate (agency fee or voucher item discount). Rates are never edited — a change is a new row. */
+export interface FundRateRow {
   id: string;
-  feeType: 'PERCENT' | 'FLAT';
+  feeType: 'PERCENT' | 'FLAT' | null;
+  rewardId: string | null;
+  rewardLabel: string | null;
   rateBps: number | null;
   flatPaise: number | null;
   effectiveFrom: string;
   note: string | null;
+  /** Set when the rate was back-dated: how many committed lines it re-priced and the balance change. */
+  repricedLines: number | null;
+  repriceDeltaPaise: number | null;
   createdAt: string;
   createdByName: string | null;
 }
 
-export interface FundDiscountRate {
-  id: string;
-  brandKey: string;
-  brandLabel: string;
-  rateBps: number;
-  effectiveFrom: string;
-  note: string | null;
-  createdAt: string;
-  createdByName: string | null;
+export interface FundFeeView { feeType: 'PERCENT' | 'FLAT'; rateBps: number | null; flatPaise: number | null; effectiveFrom: string }
+
+export interface FundVoucherItem {
+  rewardId: string;
+  name: string;
+  code: string | null;
+  brandText: string | null;
+  deleted: boolean;
+  active: boolean;
+  currentRateBps: number | null;
+  currentEffectiveFrom: string | null;
+  scheduledRateBps: number | null;
+  scheduledFrom: string | null;
 }
 
+/** GET /api/fund/settings (read-only) and GET /api/gifsy/clients/:slug/fund (console) — the same shape. */
 export interface FundSettings {
+  clientId: string;
   canManage: boolean;
+  managedInConsole: boolean;
+  consoleHref: string | null;
   thresholdPaise: number | null;
   alertRecipients: string[];
   lastAlertSentOn: string | null;
+  lastAlertRecipients: number | null;
   lastAlertError: string | null;
-  currentFee: { feeType: 'PERCENT' | 'FLAT'; rateBps: number | null; flatPaise: number | null; effectiveFrom: string } | null;
-  feeRates: FundFeeRate[];
-  discountRates: FundDiscountRate[];
-  brands: Array<{ brandKey: string; brandLabel: string; items: string[]; currentRateBps: number | null; currentEffectiveFrom: string | null }>;
+  /** Where low-balance e-mails go in this environment — Gifsy only (null for a client admin). */
+  alertEnvironment: 'live' | 'test' | 'off' | null;
+  currentFee: FundFeeView | null;
+  scheduledFee: FundFeeView | null;
+  feeRates: FundRateRow[];
+  discountRates: FundRateRow[];
+  items: FundVoucherItem[];
+}
+
+/** A console rate save: saved, or (back-dated) a preview that needs an explicit confirm (owner D1). */
+export type FundRateSaveResult =
+  | { saved: true; id: string; scheduled: boolean; effectiveFrom: string; linesRepriced?: number; deltaPaise?: number }
+  | {
+      saved: false;
+      requiresConfirmation: true;
+      preview: { linesRepriced: number; deltaPaise: number; effectiveFrom: string; from: string; to: string };
+      confirmToken: string;
+    };
+
+/** Agency fee in words: "3% of each payout" / "₹25.00 flat per payout". */
+export function feeLabelOf(f: { feeType: 'PERCENT' | 'FLAT' | null; rateBps: number | null; flatPaise: number | null }, formatPaise: (p: number) => string): string {
+  return f.feeType === 'FLAT' ? `${formatPaise(f.flatPaise ?? 0)} flat per payout` : `${bpsToPercentLabel(f.rateBps)} of each payout`;
 }
 
 /** 300 bps → "3%", 250 → "2.5%", 275 → "2.75%". */
@@ -219,7 +273,8 @@ export function todayIstKey(now: Date = new Date()): string {
  * more than 2 decimals. The value is sent AS RUPEES — never converted to paise on the client.
  */
 export function parseRupees(input: string): number | null {
-  const s = input.replace(/[,\s₹]/g, '');
+  // C10: accept a leading "+" and the Unicode minus "−" (U+2212) that some keyboards / copied text produce.
+  const s = input.replace(/[,\s₹]/g, '').replace(/\u2212/g, '-').replace(/^\+/, '');
   if (!/^-?\d+(\.\d{1,2})?$/.test(s)) return null;
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
@@ -266,3 +321,17 @@ export const fundApi = {
   post: <T = unknown>(path: string, body: unknown, method: 'POST' | 'PUT' = 'POST') =>
     call<T>(`/api/fund/${path}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
 };
+
+/** Gifsy console — a client's fund settings (owner D6). `slug` is the client id. */
+export function fundConsoleApi(slug: string) {
+  const base = `/api/gifsy/clients/${encodeURIComponent(slug)}/fund`;
+  const send = <T,>(path: string, method: 'POST' | 'PUT', body: unknown) =>
+    call<T>(`${base}${path}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return {
+    get: () => call<FundSettings>(base),
+    saveAlerts: (body: { thresholdRupees: number | null; alertRecipients: string[] }) =>
+      send<{ thresholdPaise: number | null; alertRecipients: string[] }>('/alerts', 'PUT', body),
+    saveFee: (body: Record<string, unknown>) => send<FundRateSaveResult>('/rates/fee', 'POST', body),
+    saveDiscount: (body: Record<string, unknown>) => send<FundRateSaveResult>('/rates/discount', 'POST', body),
+  };
+}
