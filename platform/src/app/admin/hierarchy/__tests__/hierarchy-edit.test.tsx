@@ -99,14 +99,103 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('Employee Hierarchy — edit affordance', () => {
   beforeEach(() => { localStorage.clear(); });
 
-  it('HE1: edit pencil shows for an ACTIVE named row and is ABSENT for a PLACEHOLDER row', async () => {
+  it('HE1: edit pencil shows for an ACTIVE named row, and a PLACEHOLDER row offers "Fill vacant position"', async () => {
     installFetch();
     render(<HierarchyPage />);
     // Wait for the list to load from hierarchy-config.
     expect(await screen.findByTestId('hierarchy-edit-Pune101')).toBeInTheDocument();
-    expect(screen.queryByTestId('hierarchy-edit-Pune102')).not.toBeInTheDocument();
     // The pencil is labelled for the specific employee.
     expect(await screen.findByRole('button', { name: /edit asha patel/i })).toBeInTheDocument();
+    // A vacant position can be opened to be filled with a new person.
+    expect(screen.getByRole('button', { name: /fill vacant position pune102/i })).toBeInTheDocument();
+  });
+
+  it('HE5: clearing BOTH name and phone asks for confirmation (exact wording), then PATCHes name/phone blank', async () => {
+    const { calls } = installFetch();
+    render(<HierarchyPage />);
+    await userEvent.click(await screen.findByTestId('hierarchy-edit-Pune101'));
+    const scope = within(await screen.findByRole('dialog'));
+    await waitFor(() => expect((scope.getByLabelText('Full name') as HTMLInputElement).value).toBe('Asha Patel'));
+
+    // The hint tells the admin how to mark the position vacant.
+    expect(scope.getByText('Leave name and phone blank to mark the position vacant (e.g. the employee left)')).toBeInTheDocument();
+
+    await userEvent.clear(scope.getByLabelText('Full name'));
+    await userEvent.clear(scope.getByLabelText('Phone (10 digits)'));
+    await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
+
+    // Confirmation first — nothing sent yet.
+    const confirm = await scope.findByTestId('confirm-vacate');
+    expect(confirm).toHaveTextContent(
+      'Mark XSR Pune101 as vacant? Asha Patel will be signed out and can no longer log in, and their phone number will be freed. The position keeps its place in the hierarchy.',
+    );
+    expect(calls.some((c) => c.init?.method === 'PATCH')).toBe(false);
+
+    await userEvent.click(scope.getByRole('button', { name: /yes, mark vacant/i }));
+    await waitFor(() => {
+      const patch = calls.find((c) => /\/api\/admin\/sales-users\/s1$/.test(c.url) && c.init?.method === 'PATCH');
+      expect(patch).toBeTruthy();
+      expect(JSON.parse(String(patch!.init!.body))).toEqual({ name: '', phone: '' });
+    });
+  });
+
+  it('HE5b: "Back" on the confirmation sends nothing and returns to the form', async () => {
+    const { calls } = installFetch();
+    render(<HierarchyPage />);
+    await userEvent.click(await screen.findByTestId('hierarchy-edit-Pune101'));
+    const scope = within(await screen.findByRole('dialog'));
+    await waitFor(() => expect((scope.getByLabelText('Full name') as HTMLInputElement).value).toBe('Asha Patel'));
+    await userEvent.clear(scope.getByLabelText('Full name'));
+    await userEvent.clear(scope.getByLabelText('Phone (10 digits)'));
+    await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
+    await scope.findByTestId('confirm-vacate');
+    await userEvent.click(scope.getByRole('button', { name: /^back$/i }));
+    expect(scope.queryByTestId('confirm-vacate')).not.toBeInTheDocument();
+    expect(calls.some((c) => c.init?.method === 'PATCH')).toBe(false);
+  });
+
+  it('HE6: clearing only ONE of name / phone shows the plain-words error and blocks Save', async () => {
+    installFetch();
+    render(<HierarchyPage />);
+    await userEvent.click(await screen.findByTestId('hierarchy-edit-Pune101'));
+    const scope = within(await screen.findByRole('dialog'));
+    await waitFor(() => expect((scope.getByLabelText('Full name') as HTMLInputElement).value).toBe('Asha Patel'));
+
+    await userEvent.clear(scope.getByLabelText('Phone (10 digits)'));
+    expect(scope.getByRole('alert')).toHaveTextContent(
+      'To mark this position vacant, clear both the name and the phone. Otherwise enter a 10-digit phone.',
+    );
+    expect(scope.getByRole('button', { name: /^save changes$/i })).toBeDisabled();
+  });
+
+  it('HE7: a vacant position opens blank and is filled by entering a new name + phone', async () => {
+    const VACANT_USER = {
+      id: 'u2', name: '(vacant) Pune102', email: null, phone: '__vacant__:Pune102',
+      role: 'SALES_SO', status: 'INACTIVE',
+      salesUser: { id: 's1', employeeCode: 'Pune102', hierarchyLevelId: 'lvl1', reportingToId: null },
+    };
+    const { calls } = installFetch((url, init) => {
+      if (url.startsWith('/api/admin/sales-users/by-code/') && (!init || !init.method || init.method === 'GET')) {
+        return jsonRes(true, 200, { success: true, data: { user: VACANT_USER } });
+      }
+      return undefined;
+    });
+    render(<HierarchyPage />);
+    await userEvent.click(await screen.findByRole('button', { name: /fill vacant position pune102/i }));
+    const scope = within(await screen.findByRole('dialog'));
+    expect(scope.getByText(/this position is vacant/i)).toBeInTheDocument();
+    // Synthetic placeholder values are never shown.
+    expect((scope.getByLabelText('Full name') as HTMLInputElement).value).toBe('');
+    expect((scope.getByLabelText('Phone (10 digits)') as HTMLInputElement).value).toBe('');
+
+    await userEvent.type(scope.getByLabelText('Full name'), 'New Person');
+    await userEvent.type(scope.getByLabelText('Phone (10 digits)'), '9833333333');
+    await userEvent.click(scope.getByRole('button', { name: /^save changes$/i }));
+    await waitFor(() => {
+      const patch = calls.find((c) => /\/api\/admin\/sales-users\/s1$/.test(c.url) && c.init?.method === 'PATCH');
+      expect(patch).toBeTruthy();
+      expect(JSON.parse(String(patch!.init!.body))).toEqual({ name: 'New Person', phone: '9833333333' });
+    });
   });
 
   it('HE2/HE3: clicking edit fetches user + options, opens the modal, and saving PATCHes the employee endpoint', async () => {
