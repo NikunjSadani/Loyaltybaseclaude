@@ -868,6 +868,48 @@ describe('RewardsService', () => {
       for (const frag of ['AMZN', '1234', '5678', 'WXYZ', 'ABC12', 'BC12']) expect(body).not.toContain(frag);
     });
 
+    it('Outlet ID + Phone: operator and CLIENT_ADMIN rows carry partner.outletCode + partner.phone; the member view does not', async () => {
+      const at = new Date('2026-10-01T10:00:00.000Z');
+      const rows = () => [
+        {
+          id: 'o1', status: 'DELIVERED', voucherCode: null, createdAt: at, updatedAt: at,
+          partner: { id: 'cp1', businessName: 'Shree Stores', phone: '9811111111', user: { phone: '9000000000' }, outlets: [{ outletCode: 'BJ-0042' }] },
+        },
+        {
+          id: 'o2', status: 'DELIVERED', voucherCode: null, createdAt: at, updatedAt: at,
+          // No partner phone → the login's phone; no live outlet → null (the UI shows "—").
+          partner: { id: 'cp2', businessName: 'Sibling', phone: null, user: { phone: '9822222222' }, outlets: [] },
+        },
+      ];
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.redemptionOrder.count.mockResolvedValue(2);
+
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce(rows());
+      const g = await service.listOrders(gifsy, {});
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce(rows());
+      const ca = await service.listOrders(clientAdminA, {});
+      mockPrisma.redemptionOrder.findMany.mockResolvedValueOnce(rows());
+      const m = await service.listOrders(partner, {});
+
+      // The primary live outlet is picked exactly like the redemption report.
+      const sel = mockPrisma.redemptionOrder.findMany.mock.calls[0][0].select.partner.select;
+      expect(sel.outlets).toEqual({
+        where: { deletedAt: null },
+        orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        take: 1,
+        select: { outletCode: true },
+      });
+
+      for (const res of [g, ca]) {
+        expect(res.orders[0].partner).toEqual({ id: 'cp1', businessName: 'Shree Stores', outletCode: 'BJ-0042', phone: '9811111111' });
+        expect(res.orders[1].partner).toEqual({ id: 'cp2', businessName: 'Sibling', outletCode: null, phone: '9822222222' });
+      }
+      // Member view: unchanged shape — no outlet / phone / raw relation fields.
+      expect(m.orders[0].partner).toEqual({ id: 'cp1', businessName: 'Shree Stores' });
+      expect(JSON.stringify(m)).not.toContain('9811111111');
+      expect(JSON.stringify(m)).not.toContain('BJ-0042');
+    });
+
     it('GIFSY and the member (own orders) still receive the real voucher code', async () => {
       const at = new Date('2026-10-01T10:00:00.000Z');
       const row = { id: 'o1', status: 'DELIVERED', voucherCode: 'AMZN-1234-5678-WXYZ', createdAt: at, updatedAt: at };
@@ -5140,6 +5182,39 @@ describe('RewardsService', () => {
       expect(Buffer.isBuffer(buf)).toBe(true);
       const parsed = parseFulfilmentUploadBuffer(buf);
       expect(parsed.rows[0].orderNumber).toBe('RDM-1');
+    });
+
+    it('adds the partner Outlet ID (primary live outlet) and registered phone columns', async () => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([
+        {
+          orderNumber: 'RDM-1', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED',
+          reward: { name: 'Amazon ₹500' },
+          partner: { phone: '9811111111', user: { phone: '9000000000' }, outlets: [{ outletCode: 'BJ-0042' }] },
+        },
+        {
+          orderNumber: 'RDM-2', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED',
+          reward: { name: 'Amazon ₹500' },
+          // No partner phone → the login's phone; no live outlet → blank.
+          partner: { phone: null, user: { phone: '9822222222' }, outlets: [] },
+        },
+      ]);
+      const buf = await service.getFulfilmentTemplate(assumedGifsy, {});
+
+      const call = mockPrisma.redemptionOrder.findMany.mock.calls?.[0]?.[0];
+      expect(call.include.partner.select.outlets).toEqual({
+        where: { deletedAt: null },
+        orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        take: 1,
+        select: { outletCode: true },
+      });
+      const XLSX = require('xlsx');
+      const wb = XLSX.read(buf, { type: 'buffer' });
+      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: false });
+      const h = aoa[0] as string[];
+      expect(aoa[1][h.indexOf('Outlet ID')]).toBe('BJ-0042');
+      expect(aoa[1][h.indexOf('Phone')]).toBe('9811111111');
+      expect(aoa[2][h.indexOf('Outlet ID')]).toBe('');
+      expect(aoa[2][h.indexOf('Phone')]).toBe('9822222222');
     });
 
     it('honours an explicit ?status= and ?mode= filter', async () => {

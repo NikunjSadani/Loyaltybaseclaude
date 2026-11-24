@@ -8,10 +8,11 @@
  * guarded `transitionOrder` (one call per row) so no status logic lives here.
  *
  * Layout (single header row, then one row per order):
- *   Order Number | Reward | Mode | Current Status |
+ *   Order Number | Reward | Outlet ID | Phone | Mode | Current Status |
  *   Voucher Code | Voucher PIN | Voucher Provider | Tracking Number | Tracking URL | New Status
  *
- * The first four columns are the locked context the ops user reads; the last six
+ * The first six columns are the locked context the ops user reads (Outlet ID + Phone added
+ * 2026-11-24 — ignored on upload, like the other context columns); the last six
  * are blank fill columns. `Order Number` is the row key. `Voucher PIN` is OPTIONAL (card number
  * + PIN gift cards only) and text-formatted so a leading-zero PIN survives Excel; the parser is
  * header-based, so a sheet downloaded before the column existed still uploads unchanged.
@@ -27,6 +28,8 @@ export const FULFILMENT_KEY_COL = 'Order Number';
 export const FULFILMENT_COLS = [
   'Order Number',
   'Reward',
+  'Outlet ID',
+  'Phone',
   'Mode',
   'Current Status',
   'Voucher Code',
@@ -50,6 +53,10 @@ export const VOUCHER_CELL_NUMBER_MESSAGE =
 export interface FulfilmentTemplateRow {
   orderNumber: string;
   reward: string;
+  /** The partner's primary outlet code ('' when none). Read-only context. */
+  outletCode?: string;
+  /** The partner's registered mobile ('' when none). Read-only context. */
+  phone?: string;
   mode: string;
   currentStatus: string;
 }
@@ -63,6 +70,8 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
   const dataRows = orders.map((o) => [
     o.orderNumber,
     o.reward,
+    o.outletCode ?? '',
+    o.phone ?? '',
     o.mode,
     o.currentStatus,
     '', // Voucher Code
@@ -87,6 +96,8 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
   ws['!cols'] = [
     { wch: 22 }, // Order Number
     { wch: 28 }, // Reward
+    { wch: 16 }, // Outlet ID
+    { wch: 14 }, // Phone
     { wch: 14 }, // Mode
     { wch: 16 }, // Current Status
     { wch: 22 }, // Voucher Code

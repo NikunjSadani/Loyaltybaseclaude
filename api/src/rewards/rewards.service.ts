@@ -330,6 +330,42 @@ const MEMBER_ORDER_SELECT = {
 } satisfies Prisma.RedemptionOrderSelect;
 
 /**
+ * Partner contact fields for the OPERATOR / ADMIN order views only (Redemption orders console +
+ * fulfilment sheet) — never returned on the member view. The Outlet ID is the partner's primary
+ * live outlet, picked exactly like the redemption report (deletedAt null; isPrimary first, then
+ * oldest) — a RedemptionOrder records no outlet of its own. Phone = the partner's registered
+ * mobile (ChannelPartner.phone), falling back to the login's phone.
+ */
+const ORDER_PARTNER_CONTACT_SELECT = {
+  phone: true,
+  user: { select: { phone: true } },
+  outlets: {
+    where: { deletedAt: null },
+    orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+    take: 1,
+    select: { outletCode: true },
+  },
+} satisfies Prisma.ChannelPartnerSelect;
+
+type OrderPartnerContactRow = {
+  phone: string | null;
+  user: { phone: string | null } | null;
+  outlets: { outletCode: string }[];
+};
+
+/** { outletCode, phone } for the operator/admin order views (null when not recorded). */
+export function orderPartnerContact(p: OrderPartnerContactRow | null | undefined): {
+  outletCode: string | null;
+  phone: string | null;
+} {
+  if (!p) return { outletCode: null, phone: null };
+  return {
+    outletCode: p.outlets?.[0]?.outletCode ?? null,
+    phone: p.phone || p.user?.phone || null,
+  };
+}
+
+/**
  * The RedemptionOrder shape the Hubble auto-issuance helpers operate on (a structural
  * subset of the full row loaded by RewardsService.loadHubbleOrder — extra columns are
  * fine). Keeps the money-path helpers strongly typed without threading Prisma generics.
@@ -954,7 +990,8 @@ export class RewardsService {
           createdAt: true,
           updatedAt: true,
           reward: { select: { id: true, name: true, imageUrls: true, redemptionMode: true } },
-          partner: { select: { id: true, businessName: true } },
+          // Contact fields are read for the operator/admin view only; stripped on the member view.
+          partner: { select: { id: true, businessName: true, ...ORDER_PARTNER_CONTACT_SELECT } },
           // Read for the operator-only Hubble reconcile flags below; NEVER returned as-is.
           metadata: true,
           // Read ONLY to derive the operator-only `voucherFillable` below; never returned.
@@ -982,8 +1019,15 @@ export class RewardsService {
     // member branch (their login resolves to no partner today; this pins it regardless).
     const hideCodes =
       isSalesViewer(user.role) || (!memberView && !(await this.canSeeFullVoucherCode(user)));
-    const mapped = orders.map(({ metadata, pointsDeducted, ...o }) => ({
+    const mapped = orders.map(({ metadata, pointsDeducted, partner, ...o }) => ({
       ...o,
+      // Member view: { id, businessName } only (unchanged). Operator/admin view: + the partner's
+      // Outlet ID (primary outlet code) and registered phone for the Redemption orders console.
+      partner: partner
+        ? memberView
+          ? { id: partner.id, businessName: partner.businessName }
+          : { id: partner.id, businessName: partner.businessName, ...orderPartnerContact(partner) }
+        : partner,
       ...(hideCodes ? hiddenVoucherFields(o.voucherCode) : {}),
       // Operator console only: a Hubble order stuck for ops ("Needs reconcile" + reason). The raw
       // metadata blob (redeem snapshot etc.) is never returned to anyone from this list.
@@ -3344,17 +3388,25 @@ export class RewardsService {
 
     const orders = await this.prisma.redemptionOrder.findMany({
       where,
-      include: { reward: { select: { name: true } } },
+      include: {
+        reward: { select: { name: true } },
+        partner: { select: ORDER_PARTNER_CONTACT_SELECT },
+      },
       orderBy: { createdAt: 'asc' },
     });
 
     return buildFulfilmentTemplateBuffer(
-      orders.map((o) => ({
-        orderNumber: o.orderNumber,
-        reward: o.reward?.name ?? '',
-        mode: o.redemptionMode,
-        currentStatus: o.status,
-      })),
+      orders.map((o) => {
+        const contact = orderPartnerContact(o.partner);
+        return {
+          orderNumber: o.orderNumber,
+          reward: o.reward?.name ?? '',
+          outletCode: contact.outletCode ?? '',
+          phone: contact.phone ?? '',
+          mode: o.redemptionMode,
+          currentStatus: o.status,
+        };
+      }),
     );
   }
 
