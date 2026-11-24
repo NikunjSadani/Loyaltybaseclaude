@@ -1,13 +1,11 @@
 import { Type } from 'class-transformer';
 import {
   IsBoolean,
-  IsDate,
   IsDateString,
   IsEnum,
   IsInt,
   IsNumber,
   IsOptional,
-  IsPositive,
   IsString,
   Min,
   Max,
@@ -127,32 +125,3 @@ export class CreateBatchDto {
   notes?: string;
 }
 
-/** POST /v1/payouts/fund/receive — record a fund receipt (GIFSY-only). */
-export class ReceiveFundDto {
-  @IsNumber()
-  @IsPositive({ message: 'Amount must be positive' })
-  amount!: number;
-
-  @IsOptional()
-  @IsString()
-  referenceNumber?: string;
-
-  // Source coerces the incoming string to a Date.
-  // @IsDate is required so the global forbidNonWhitelisted ValidationPipe keeps
-  // this property instead of rejecting it ("property paymentDate should not exist").
-  @IsDate()
-  @Type(() => Date)
-  paymentDate!: Date;
-
-  @IsOptional()
-  @IsString()
-  paymentMode?: string = 'BANK_TRANSFER';
-
-  @IsOptional()
-  @IsString()
-  bankName?: string;
-
-  @IsOptional()
-  @IsString()
-  notes?: string;
-}

@@ -143,12 +143,20 @@ test.describe('@mis write-denied — core MIS guarantee', () => {
   });
 
   /**
-   * Sub-page confirmation: /admin/payouts/fund is also guarded by the payouts layout.
-   * MIS must not reach the fund-disbursement page either.
+   * Fund reconciliation C13: /admin/payouts/fund (retired) skips the payouts guard and only redirects to
+   * /admin/fund, whose own guard admits GIFSY_ADMIN / GIFSY_STAFF / CLIENT_ADMIN — MIS is still bounced home.
+   * So MIS must not end up on either the old path or /admin/fund.
    */
-  test('Q1 — MIS cannot reach /admin/payouts/fund (GIFSY-only sub-page)', async ({ page }) => {
+  test('Q1 — MIS cannot reach /admin/payouts/fund (redirects to /admin/fund, which bounces MIS)', async ({ page }) => {
     await expectScopedOut(page, '/admin/payouts/fund', {
-      forbiddenMarkers: ['fund', 'disburse', 'payout batch'],
+      forbiddenMarkers: ['Fund reconciliation', 'Advance received', 'payout batch'],
+      safeRedirects: SAFE_REDIRECTS,
+    });
+  });
+
+  test('MIS cannot reach /admin/fund (fund reconciliation is GIFSY + CLIENT_ADMIN only)', async ({ page }) => {
+    await expectScopedOut(page, '/admin/fund', {
+      forbiddenMarkers: ['Fund reconciliation', 'Advance received'],
       safeRedirects: SAFE_REDIRECTS,
     });
   });

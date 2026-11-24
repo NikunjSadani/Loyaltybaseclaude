@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
 import {
   ChevronRight,
   CheckCircle,
@@ -19,6 +20,7 @@ import {
 import { Spinner } from '@/components/ui/spinner';
 import { authHeader } from '@/lib/api-client';
 import { readJsonSafe, FILE_TOO_LARGE_MESSAGE } from '@/lib/safe-response';
+import { formatInrPaise } from '@/lib/money-format';
 
 /** Shown when the UTR APPLY response is lost. Re-uploading is safe: payouts.service uploadPayoutUtr
  *  skips terminal (SUCCESS/FAILED/REVERSED) transactions and compare-and-sets each write, so the same
@@ -122,12 +124,23 @@ interface ApiTransaction {
   providerRefId?:   string | null;
 }
 
+/** Subset of GET /api/fund/summary (fund reconciliation) shown on this page's Fund card. */
 interface FundSummary {
-  totalReceivedPaise:    number;
-  totalUtilisedPaise:    number;
-  closingBalancePaise:   number;
-  pendingLiabilityPaise: number;
-  availablePaise:        number;
+  totals: {
+    openingPaise:     number;
+    receiptsPaise:    number;
+    adjustmentsPaise: number;
+    committedPaise:   number;
+    paidPaise:        number;
+    balancePaise:     number;
+  };
+  lowBalance: { isLow: boolean; thresholdPaise: number | null };
+}
+
+function isFundSummary(v: unknown): v is FundSummary {
+  const t = (v as { totals?: Record<string, unknown> } | null)?.totals;
+  return !!t && ['openingPaise', 'receiptsPaise', 'adjustmentsPaise', 'committedPaise', 'paidPaise', 'balancePaise']
+    .every((k) => typeof t[k] === 'number');
 }
 
 /* ─── Helpers ───────────────────────────────────────────────────────────────── */
@@ -171,6 +184,7 @@ export default function PayoutsPage() {
   const [batches,      setBatches]      = useState<ApiBatch[]>([]);
   const [transactions, setTransactions] = useState<ApiTransaction[]>([]);
   const [fund,         setFund]         = useState<FundSummary | null>(null);
+  const [fundError,    setFundError]    = useState<string | null>(null);
   const [selectedBatch, setSelectedBatch] = useState<ApiBatch | null>(null);
 
   const [loading,  setLoading]  = useState(true);
@@ -207,11 +221,24 @@ export default function PayoutsPage() {
     setLoading(true);
     setError(null);
     const headers = { ...authHeader() };
+    // Fund card: loaded on its own so a fund failure never hides the batches, and a failed load shows an
+    // inline error — never stale or made-up numbers.
+    setFundError(null);
+    fetch('/api/fund/summary', { headers })
+      .then(async (r) => {
+        const json = await r.json().catch(() => null);
+        if (r.ok && json?.success && isFundSummary(json.data)) {
+          setFund(json.data);
+        } else {
+          setFund(null);
+          setFundError(json?.error ?? json?.message ?? `Could not load the fund balance (error ${r.status}).`);
+        }
+      })
+      .catch(() => { setFund(null); setFundError('Could not load the fund balance.'); });
     Promise.all([
       fetch('/api/payouts/batches', { headers }).then(r => r.json()),
-      fetch('/api/payouts/fund',    { headers }).then(r => r.json()),
     ])
-      .then(([batchJson, fundJson]) => {
+      .then(([batchJson]) => {
         if (batchJson.success && batchJson.data) {
           const list: ApiBatch[] = batchJson.data.batches;
           setBatches(list);
@@ -226,9 +253,6 @@ export default function PayoutsPage() {
           });
         } else {
           setError(batchJson.error ?? 'Failed to load payout batches');
-        }
-        if (fundJson.success && fundJson.data) {
-          setFund(fundJson.data);
         }
       })
       .catch(() => setError('Failed to load payouts'))
@@ -473,46 +497,60 @@ export default function PayoutsPage() {
   return (
     <div className="space-y-5 fade-in">
 
-      {/* ── Fund Ledger Summary card (real data from GET /api/payouts/fund) ── */}
+      {/* ── Fund card (GET /api/fund/summary — full detail on /admin/fund) ── */}
+      {fundError && !fund && (
+        <div role="alert" className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          <span>Fund balance unavailable: {fundError}</span>
+          <Link href="/admin/fund" className="ml-auto font-medium underline">Open fund reconciliation →</Link>
+        </div>
+      )}
       {fund && (
-        <div className="bg-gradient-to-r from-[#1A1A2E] to-[#16213E] rounded-2xl p-6 text-white">
-          <div className="flex items-center gap-3 mb-4">
+        <div
+          data-testid="fund-card"
+          className={`rounded-2xl p-6 text-white ${fund.lowBalance?.isLow ? 'bg-gradient-to-r from-red-900 to-red-700' : 'bg-gradient-to-r from-[#1A1A2E] to-[#16213E]'}`}
+        >
+          <div className="flex items-center gap-3 mb-4 flex-wrap">
             <div className="p-2.5 bg-white/10 rounded-xl">
               <Wallet className="w-5 h-5" />
             </div>
             <div>
-              <p className="text-sm font-semibold">Fund Ledger Summary</p>
-              <p className="text-xs text-slate-400">Live totals from the fund ledger</p>
+              <p className="text-sm font-semibold">Client fund</p>
+              <p className="text-xs text-slate-300">Balance = advance received + adjustments − committed − paid out</p>
             </div>
+            <Link href="/admin/fund" className="ml-auto text-xs font-medium text-white underline">
+              Open fund reconciliation →
+            </Link>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
             <div>
-              <p className="text-xs text-slate-400">Total Received</p>
-              <p className="text-lg font-bold text-white mt-0.5">{formatPaise(fund.totalReceivedPaise)}</p>
+              <p className="text-xs text-slate-300">Balance</p>
+              <p className="text-lg font-bold text-white mt-0.5">{formatInrPaise(fund.totals.balancePaise)}</p>
+              {fund.lowBalance?.isLow && (
+                <p className="text-xs text-red-200 flex items-center gap-1 mt-0.5">
+                  <AlertCircle className="w-3 h-3" /> Low balance
+                </p>
+              )}
             </div>
             <div>
-              <p className="text-xs text-slate-400">Total Utilised</p>
-              <p className="text-lg font-bold text-white mt-0.5">{formatPaise(fund.totalUtilisedPaise)}</p>
+              <p className="text-xs text-slate-300">Committed (not yet paid)</p>
+              <p className="text-lg font-bold text-white mt-0.5">{formatInrPaise(fund.totals.committedPaise)}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-400">Closing Balance</p>
-              <p className="text-lg font-bold text-white mt-0.5">{formatPaise(fund.closingBalancePaise)}</p>
+              <p className="text-xs text-slate-300">Paid out</p>
+              <p className="text-lg font-bold text-white mt-0.5">{formatInrPaise(fund.totals.paidPaise)}</p>
             </div>
             <div>
-              <p className="text-xs text-slate-400">Available (after pending)</p>
-              <p className={`text-lg font-bold mt-0.5 ${fund.availablePaise <= 0 ? 'text-red-400' : fund.availablePaise < fund.pendingLiabilityPaise ? 'text-amber-400' : 'text-white'}`}>
-                {formatPaise(fund.availablePaise)}
+              <p className="text-xs text-slate-300">Advance received</p>
+              <p className="text-lg font-bold text-white mt-0.5">
+                {formatInrPaise(fund.totals.openingPaise + fund.totals.receiptsPaise)}
               </p>
-              {fund.availablePaise < fund.pendingLiabilityPaise && fund.availablePaise > 0 && (
-                <p className="text-xs text-amber-400 flex items-center gap-1 mt-0.5">
-                  <AlertCircle className="w-3 h-3" /> Below pending liability
-                </p>
-              )}
-              {fund.availablePaise <= 0 && (
-                <p className="text-xs text-red-400 flex items-center gap-1 mt-0.5">
-                  <AlertCircle className="w-3 h-3" /> Insufficient funds
-                </p>
-              )}
+            </div>
+            <div>
+              <p className="text-xs text-slate-300">Adjustments (±)</p>
+              <p data-testid="fund-card-adjustments" className="text-lg font-bold text-white mt-0.5">
+                {formatInrPaise(fund.totals.adjustmentsPaise)}
+              </p>
             </div>
           </div>
         </div>

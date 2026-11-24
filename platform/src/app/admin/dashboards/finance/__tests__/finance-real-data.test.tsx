@@ -39,11 +39,15 @@ const PAYLOAD = {
     sec194C: { liabilityRupees: 25_000, depositedRupees: 5_000, outstandingRupees: 20_000 },
   },
   fund: {
-    totalReceivedRupees: 100_000,
-    totalUtilisedRupees: 70_000,
-    closingBalanceRupees: 30_000,
-    pendingLiabilityRupees: 8_000,
-    availableRupees: 22_000,
+    receivedRupees: 100_000,
+    adjustmentsRupees: -1_000,
+    committedRupees: 8_000,
+    paidRupees: 70_000,
+    returnedRupees: 1_000,
+    balanceRupees: 22_000,
+    lowBalance: false,
+    thresholdRupees: null,
+    hasSettings: true,
   },
 };
 
@@ -133,9 +137,42 @@ describe('Admin Finance Dashboard — real data', () => {
   it('RD4: renders a fund balance value', async () => {
     mockFetchOk();
     render(<FinanceDashboardPage />);
-    // available ₹22,000 is unique to the fund ledger (and the headline card)
+    // balance ₹22,000 is unique to the fund block (and the headline card)
     expect((await screen.findAllByText('₹22,000.00')).length).toBeGreaterThan(0);
-    expect(await screen.findByText('Total Received')).toBeInTheDocument();
+    expect(await screen.findByText('Advance received')).toBeInTheDocument();
+    expect(screen.getByText('Fund balance')).toBeInTheDocument();
+    expect(screen.getByText('₹8,000.00 committed, not yet paid')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /open fund reconciliation/i })).toHaveAttribute('href', '/admin/fund');
+    expect(screen.queryByTestId('finance-fund-low')).not.toBeInTheDocument();
+  });
+
+  function mockFund(fund: unknown) {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ...PAYLOAD, fund }) }));
+  }
+
+  it('RD4b (B1/C5): fund === null (caller may not see the fund) → no fund card, no fund stat, rest renders', async () => {
+    mockFund(null);
+    render(<FinanceDashboardPage />);
+    expect(await screen.findByText('Section 194R')).toBeInTheDocument();
+    expect(screen.queryByTestId('finance-fund-card')).not.toBeInTheDocument();
+    expect(screen.queryByText('Fund balance')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /open fund reconciliation/i })).not.toBeInTheDocument();
+  });
+
+  it('RD4c: noClientContext → "Open a client first", no ₹ fund figures', async () => {
+    mockFund({ ...PAYLOAD.fund, balanceRupees: 0, hasSettings: false, noClientContext: true });
+    render(<FinanceDashboardPage />);
+    expect(await screen.findByTestId('finance-fund-no-client')).toHaveTextContent(/Open a client first/);
+    expect(screen.queryByText('Fund balance')).not.toBeInTheDocument();
+    expect(screen.queryByText('Advance received')).not.toBeInTheDocument();
+  });
+
+  it('RD4d: hasSettings=false → "Not set up", no ₹ fund figures', async () => {
+    mockFund({ ...PAYLOAD.fund, hasSettings: false, noClientContext: false });
+    render(<FinanceDashboardPage />);
+    expect(await screen.findByTestId('finance-fund-not-set-up')).toHaveTextContent(/Not set up/);
+    expect(screen.queryByText('Fund balance')).not.toBeInTheDocument();
+    expect(screen.queryByText('₹22,000.00')).not.toBeInTheDocument();
   });
 
   it('RD5: on fetch failure shows an error state and NO real payload numbers', async () => {

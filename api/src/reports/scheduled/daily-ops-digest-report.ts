@@ -24,6 +24,7 @@ const PERSISTENT_FAILURE_RUNS = 3;
 import type {
   BillingSection,
   DigestInput,
+  FundSection,
   HeldBalancesSection,
   DigestResult,
   DigestWindow,
@@ -310,6 +311,27 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
     const amb = h.waitingByState?.AMBIGUOUS_OUTLET ?? 0;
     if (amb > 0) push(`${plural(amb, 'held opening balance', 'held opening balances')} blocked: the outlet code matches more than one outlet — fix the outlet codes`, amb);
   }
+
+  failed('Fund', t.fund);
+  if (t.fund?.ok) {
+    const f = t.fund.data;
+    if (f.isLow) {
+      push(`Fund balance LOW: ${rupees(f.balancePaise)} (threshold ${rupees(f.thresholdPaise ?? 0n)}) — nothing is blocked`, 1);
+    }
+    const a = f.alert;
+    if (a && (a.status === 'failed' || a.status === 'email-not-configured' || a.status === 'test-recipient-not-internal' || a.status === 'not-checked-time-budget')) {
+      push(`Fund low-balance e-mail to the client NOT sent: ${a.error ?? a.status}`, 1);
+    } else if (f.isLow && a?.status === 'no-recipients') {
+      push('Fund low-balance e-mail not sent: no alert recipients configured', 1);
+    } else if (a?.status === 'no-opening') {
+      push('Fund: set the opening balance to start low-balance alerts', 1);
+    } else if (f.isLow && a?.status === 'disabled-in-environment') {
+      push('Fund low-balance e-mail not sent: client e-mails are switched off on this server (FUND_ALERTS_LIVE / FUND_ALERTS_TEST_RECIPIENT)', 1);
+    }
+    if (f.missingRates > 0) {
+      push(`Fund: ${plural(f.missingRates, 'spend line', 'spend lines')} charged without a rate (voucher brand discount / agency fee not set)`, f.missingRates);
+    }
+  }
   return out;
 }
 
@@ -489,6 +511,7 @@ const SECTION_KEYS: Array<[keyof TenantDigest, string]> = [
   // A failed TDS (194R excess) section makes the run DEGRADED like any other section.
   ['tds', 'TDS (194R)'],
   ['heldBalances', 'Held opening balances'],
+  ['fund', 'Fund'],
 ];
 
 /**
@@ -595,6 +618,51 @@ export function heldBalancesLine(h: HeldBalancesSection): string {
     (h.failed > 0 ? ` (${intIN(h.failedPoints)} pts)` : '') +
     '.'
   );
+}
+
+/** The fund line: balance · committed · LOW (threshold) — every part escaped by metricLine. */
+export function fundParts(f: FundSection): Array<[string, string, ('red' | 'amber')?]> {
+  const parts: Array<[string, string, ('red' | 'amber')?]> = [
+    ['balance', rupees(f.balancePaise), f.isLow || f.balancePaise < 0n ? 'red' : undefined],
+    ['committed, not yet paid', rupees(f.committedPaise)],
+  ];
+  if (f.thresholdPaise != null) parts.push([f.isLow ? 'LOW — threshold' : 'threshold', rupees(f.thresholdPaise), f.isLow ? 'red' : undefined]);
+  if (!f.hasOpening) parts.push(['opening balance', 'not recorded', 'amber']);
+  return parts;
+}
+
+/** Today's low-balance e-mail outcome, in words. */
+export function fundAlertNote(f: FundSection): string {
+  const a = f.alert!;
+  switch (a.status) {
+    case 'sent':
+      return `Low-balance e-mail sent to ${plural(a.recipients ?? 0, 'recipient', 'recipients')}.`;
+    case 'sent-to-test-address':
+      return 'Low-balance e-mail sent to the TEST address only (this server does not e-mail clients).';
+    case 'no-threshold':
+      return 'No low-balance threshold set — no e-mail.';
+    case 'no-opening':
+      return 'No opening balance yet — low-balance e-mails start once it is recorded.';
+    case 'client-inactive':
+      return 'Client is not active — no low-balance e-mail.';
+    case 'not-checked-time-budget':
+      return 'NOT checked today — the low-balance step ran out of time.';
+    case 'test-recipient-not-internal':
+      return `Low-balance e-mail NOT sent: ${a.error ?? 'the test address is not internal'}.`;
+    case 'disabled-in-environment':
+      return 'Client e-mails are switched off on this server — no e-mail.';
+    case 'already-sent-today':
+      return 'Low-balance e-mail already sent today.';
+    case 'not-low':
+      return 'Balance above the threshold — no e-mail.';
+    case 'no-recipients':
+      return 'No alert recipients configured — no e-mail.';
+    case 'email-not-configured':
+    case 'failed':
+      return `Low-balance e-mail NOT sent: ${a.error ?? a.status}.`;
+    default:
+      return a.status;
+  }
 }
 
 /** Billing progress block (always rendered when present: an empty month is itself worth saying). */
@@ -891,6 +959,8 @@ function tenantSections(t: TenantDigest): string {
     renderSection('Billing progress', t.billing, () => false, billingBody),
     // Always rendered for a tenant that HAS held rows (the collector omits the section otherwise).
     renderSection('Held opening balances', t.heldBalances, () => false, (h) => note(heldBalancesLine(h), h.failed > 0 ? '#b91c1c' : '#374151')),
+    // Client fund — always rendered for a client with a fund set-up (the collector omits it otherwise).
+    renderSection('Fund', t.fund, () => false, (f) => metricLine('Fund', fundParts(f)) + (f.alert ? note(fundAlertNote(f), f.alert.status === 'failed' || f.alert.status === 'email-not-configured' ? '#b91c1c' : MUTED) : '')),
     renderSection(
       'TDS (194R)',
       t.tds,

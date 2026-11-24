@@ -32,6 +32,10 @@ describe('Help & Guides registry', () => {
     }
   });
 
+  it('registers the Fund Reconciliation guide', () => {
+    expect(getGuide('fund')?.title).toBe('Fund Reconciliation — Step by Step');
+  });
+
   it('registers the Sales Import guide', () => {
     expect(getGuide('sales-import')?.title).toBe('Sales Import — Step by Step');
   });

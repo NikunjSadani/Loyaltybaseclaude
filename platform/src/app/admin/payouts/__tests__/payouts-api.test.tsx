@@ -6,6 +6,7 @@
  * PAY2: renders batch code from API response
  * PAY3: renders transaction partner name from API response
  * PAY4: shows error message when fetch fails
+ * PAY8/9: Fund card reads GET /api/fund/summary; a failed load shows an inline error, not numbers
  * PAY5/6: UTR upload result lists rows skipped by an overlapping upload (row number + reason)
  */
 
@@ -52,11 +53,17 @@ const MOCK_TRANSACTIONS = [
   },
 ];
 
+/* GET /api/fund/summary (fund reconciliation) — only the fields the Fund card reads. */
 const MOCK_FUND = {
-  totalReceivedPaise:  10000000,
-  totalUtilisedPaise:   4000000,
-  closingBalancePaise:  6000000,
-  availablePaise:       6000000,
+  totals: {
+    openingPaise:    2000000,
+    receiptsPaise:   8000000,
+    adjustmentsPaise: -500000,
+    committedPaise:  1500000,
+    paidPaise:       2500000,
+    balancePaise:    5500000, // 1,00,000 + (−5,000) − 15,000 − 25,000 (C12: the card's figures add up)
+  },
+  lowBalance: { isLow: false, thresholdPaise: null },
 };
 
 /* URL-aware fetch stub matching the rewritten page: load() fetches batches + fund,
@@ -67,7 +74,7 @@ function stubPayoutFetch() {
     let body: unknown = { success: true, data: {} };
     if (u.includes('/api/payouts/batches')) {
       body = { success: true, data: { batches: MOCK_BATCHES, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };
-    } else if (u.includes('/api/payouts/fund')) {
+    } else if (u.includes('/api/fund/summary')) {
       body = { success: true, data: MOCK_FUND };
     } else if (u.includes('/api/payouts/transactions')) {
       body = { success: true, data: { transactions: MOCK_TRANSACTIONS, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };
@@ -103,6 +110,40 @@ describe('PAY — Admin Payouts API wiring', () => {
     expect(await screen.findByText('K. Krishnamurthy & Sons')).toBeInTheDocument();
   });
 
+  it('PAY8: Fund card shows balance / committed / paid / advance received / adjustments from /api/fund/summary', async () => {
+    stubPayoutFetch();
+    render(<PayoutsPage />);
+    const card = await screen.findByTestId('fund-card');
+    expect(within(card).getByText('₹55,000.00')).toBeInTheDocument();   // balance
+    expect(within(card).getByTestId('fund-card-adjustments')).toHaveTextContent('-₹5,000.00'); // C12
+    expect(within(card).getByText('₹15,000.00')).toBeInTheDocument();   // committed
+    expect(within(card).getByText('₹25,000.00')).toBeInTheDocument();   // paid out
+    expect(within(card).getByText('₹1,00,000.00')).toBeInTheDocument(); // opening + receipts
+    expect(within(card).getByRole('link', { name: /open fund reconciliation/i })).toHaveAttribute('href', '/admin/fund');
+    const urls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes('/api/payouts/fund'))).toBe(false);
+  });
+
+  it('PAY9: a failed fund load shows an inline error and no fund numbers (batches still render)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes('/api/fund/summary')) {
+        return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ success: false, error: 'Fund engine down' }) });
+      }
+      let body: unknown = { success: true, data: {} };
+      if (u.includes('/api/payouts/batches')) {
+        body = { success: true, data: { batches: MOCK_BATCHES, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };
+      } else if (u.includes('/api/payouts/transactions')) {
+        body = { success: true, data: { transactions: MOCK_TRANSACTIONS, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+    }));
+    render(<PayoutsPage />);
+    expect(await screen.findByText(/Fund balance unavailable: Fund engine down/)).toBeInTheDocument();
+    expect(screen.queryByTestId('fund-card')).not.toBeInTheDocument();
+    expect((await screen.findAllByText('BAT-2026-05')).length).toBeGreaterThanOrEqual(1);
+  });
+
   it('PAY4: shows error message when fetch fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')));
     render(<PayoutsPage />);
@@ -123,7 +164,7 @@ describe('PAY — UTR upload skipped rows', () => {
         body = { success: true, data: applyData };
       } else if (u.includes('/api/payouts/batches')) {
         body = { success: true, data: { batches: submitted, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };
-      } else if (u.includes('/api/payouts/fund')) {
+      } else if (u.includes('/api/fund/summary')) {
         body = { success: true, data: MOCK_FUND };
       } else if (u.includes('/api/payouts/transactions')) {
         body = { success: true, data: { transactions: MOCK_TRANSACTIONS, pagination: { page: 1, limit: 20, total: 1, pages: 1 } } };

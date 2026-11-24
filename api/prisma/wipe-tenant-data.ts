@@ -743,6 +743,25 @@ function buildSteps(clientIds: string[]): Step[] {
           .then((r) => r.count),
     },
     {
+      // Fund reconciliation settings + effective-dated rate history (direct clientId, no children).
+      model: 'FundSettings',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.fundSettings.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.fundSettings
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
+      model: 'FundRate',
+      scope: 'clientId in tenants (direct)',
+      count: (tx) => tx.fundRate.count({ where: { clientId: In } }),
+      del: (tx) =>
+        tx.fundRate
+          .deleteMany({ where: { clientId: In } })
+          .then((r) => r.count),
+    },
+    {
       model: 'FundReceipt',
       scope: 'clientId in tenants (direct)',
       count: (tx) => tx.fundReceipt.count({ where: { clientId: In } }),

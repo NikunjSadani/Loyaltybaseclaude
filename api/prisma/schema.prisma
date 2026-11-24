@@ -2130,6 +2130,9 @@ model PayoutTransaction {
   @@map("payout_transactions")
 }
 
+/// DEPRECATED (fund reconciliation, 2026-11-23): nothing reads or writes this table any more — the client fund
+/// statement is COMPUTED from the source records + fund_receipts + fund_rates (FUND-RECONCILIATION-DESIGN.md §5).
+/// Kept (empty on prod) only so the demo seed still compiles; never use its balancePaise for anything.
 model FundLedger {
   id            String         @id @default(cuid())
   clientId      String
@@ -2149,9 +2152,21 @@ model FundLedger {
   @@map("fund_ledger")
 }
 
+/// What a fund_receipts row is (fund reconciliation, FUND-RECONCILIATION-DESIGN.md §2).
+enum FundEntryType {
+  RECEIPT // an advance received from the client (amount > 0)
+  ADJUSTMENT // a manual ± correction with a mandatory reason (e.g. "recovered ₹X for a reversed payout")
+  OPENING_BALANCE // the balance as of the START of receivedAt's IST day — one per client; spend before it is ignored
+}
+
+/// One money-in / correction row Gifsy records for a client's fund (the ONLY stored part of the fund statement —
+/// spend is computed from the source records). Rows are never edited or deleted: a correction is a new ADJUSTMENT.
+/// amountPaise: RECEIPT > 0; ADJUSTMENT ≠ 0 (signed); OPENING_BALANCE any sign. receivedAt = the effective date
+/// (receipt date / adjustment date / opening as-of date), stored as the start of that IST day.
 model FundReceipt {
-  id              String   @id @default(cuid())
+  id              String        @id @default(cuid())
   clientId        String
+  entryType       FundEntryType @default(RECEIPT)
   receiptNumber   String
   amountPaise     BigInt
   receivedAt      DateTime
@@ -2159,14 +2174,86 @@ model FundReceipt {
   referenceNumber String?
   bankName        String?
   notes           String?
+  /// ADJUSTMENT only — why (mandatory for adjustments).
+  reason          String?
   createdByUserId String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
+  @@unique([clientId, receiptNumber])
   @@index([clientId])
+  @@index([clientId, entryType])
   @@index([receivedAt])
   @@index([referenceNumber])
   @@map("fund_receipts")
+}
+
+/// Per-client fund alert settings (fund reconciliation). Gifsy-only writes (audited); read-only for the client admin.
+model FundSettings {
+  clientId                 String   @id
+  /// Low-balance alert threshold (paise). Null = no alert.
+  lowBalanceThresholdPaise BigInt?
+  /// JSON array of e-mail addresses that get the once-a-day low-balance e-mail.
+  alertRecipients          Json     @default("[]")
+  /// IST date key (YYYY-MM-DD) of the last low-balance e-mail sent — at most one per IST day.
+  lowAlertLastSentOn       String?
+  /// The last low-balance e-mail failure (shown on the screen + in the Daily Ops Digest); null after a success.
+  lowAlertLastError        String?
+  /// How many recipients the last low-balance e-mail was sent to (at send time).
+  lowAlertLastRecipients   Int?
+  /// The outcome of the last daily low-balance check (sent / not-low / no-opening / switched off / failed …) and when —
+  /// shown in the console and the client view so a skip is never silent.
+  lowAlertLastStatus       String?
+  lowAlertLastCheckedAt    DateTime?
+  updatedById              String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+
+  @@map("fund_settings")
+}
+
+enum FundRateKind {
+  AGENCY_FEE // on every cash redemption, target/credit payout and visibility payout
+  VOUCHER_DISCOUNT // per voucher ITEM (catalogue reward) — owner D4 2026-11-23
+}
+
+enum FundFeeType {
+  PERCENT
+  FLAT // ₹ per payout (per payout line)
+}
+
+/// Effective-dated rate history (fund reconciliation, decisions 3/4/14). Rows are never edited: a change is a NEW row
+/// with its own effectiveFrom; spend is charged at the row in force on its COMMIT date (latest effectiveFrom ≤ commit,
+/// ties → latest createdAt). A BACK-DATED row (effectiveFrom ≤ the time it is saved) re-prices already-committed lines:
+/// the operator confirms a preview first (owner D1) and the re-pricing is recorded on the row (repriced*).
+model FundRate {
+  id            String       @id @default(cuid())
+  clientId      String
+  kind          FundRateKind
+  /// VOUCHER_DISCOUNT only — the voucher item (RewardCatalog id; no FK: a deleted item keeps its rate history) and
+  /// its name at the time.
+  rewardId      String?
+  rewardLabel   String?
+  /// AGENCY_FEE only.
+  feeType       FundFeeType?
+  /// Percent in basis points (3% = 300; 2.5% = 250) — AGENCY_FEE PERCENT and VOUCHER_DISCOUNT.
+  rateBps       Int?
+  /// AGENCY_FEE FLAT — paise per payout line.
+  flatPaise     BigInt?
+  /// Start of the IST day the rate applies from.
+  effectiveFrom DateTime
+  note          String?
+  /// Back-dated rows only (owner D1): how many already-committed lines the change re-priced, the balance change
+  /// (paise; negative = the advance went down) and the earliest re-priced commit date — set on the confirmed save.
+  repricedLines     Int?
+  repriceDeltaPaise BigInt?
+  repricedFrom      DateTime?
+  createdById   String?
+  createdAt     DateTime     @default(now())
+
+  @@index([clientId, kind, effectiveFrom])
+  @@index([clientId, rewardId])
+  @@map("fund_rates")
 }
 
 model TdsRecord {
@@ -2300,9 +2387,15 @@ model TdsRecoveryEntry {
   tenantBasePaise  BigInt // this tenant's contribution (pro-rata numerator)
   panBasePaise     BigInt // PAN aggregate base (denominator)
   tenantSharePaise BigInt // pro-rata recovery amount
+  /// The payout bank run (CreditPayoutDownload.id) whose transaction wrote this row — same name as
+  /// CreditPayoutEntry.downloadId. Set by every writer (both are inside the bank-file download transaction);
+  /// NULL for rows written before 2026-11-24 (no backfill). No FK on purpose (additive; a download row is never
+  /// deleted). Read by the fund statement to date the TDS line with its own run exactly.
+  downloadId       String?
   createdAt        DateTime   @default(now())
 
   @@index([clientId, fyLabel])
+  @@index([downloadId])
   @@index([panNumber, section, fyLabel])
   @@index([tdsInvoiceId])
   @@map("tds_recovery_entries")

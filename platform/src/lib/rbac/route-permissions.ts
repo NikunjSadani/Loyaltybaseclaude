@@ -58,6 +58,8 @@ export const ROUTE_PERMISSIONS: Record<string, string> = {
 
   // Redemption payouts + fund
   '/admin/payouts':                  'payouts:read',
+  // Fund reconciliation (the client advance) — the same read permission as the backend (@RequirePermission).
+  '/admin/fund':                     'payouts:read',
 
   // Gift catalogue
   '/admin/gifts':                    'rewards:read',

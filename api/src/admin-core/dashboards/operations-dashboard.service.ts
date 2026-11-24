@@ -187,7 +187,7 @@ export class OperationsDashboardService {
     }
 
     // pending value — Σ netAmountPaise over the dashboard's pending bucket (PENDING/
-    // INITIATED/PROCESSING). NOTE: PayoutsService.getFundSummary.pendingLiability counts
+    // INITIATED/PROCESSING). NOTE: the retired PayoutsService.getFundSummary.pendingLiability counted
     // only status='PENDING', a NARROWER set, so it does not match this bucket — compute here.
     const pendingValue = await this.prisma.payoutTransaction.aggregate({
       where: {

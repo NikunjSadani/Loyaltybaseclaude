@@ -936,3 +936,44 @@ describe('Held opening balances (client migration) — digest line', () => {
     expect(needsAttention(t)).toEqual(["Couldn't load the Held opening balances section"]);
   });
 });
+
+describe('Daily Ops Digest — client fund line (fund reconciliation)', () => {
+  const fund = (o: Record<string, unknown> = {}) => ({
+    balancePaise: 50_000_00n,
+    committedPaise: 12_000_00n,
+    thresholdPaise: 1_00_000_00n,
+    isLow: true,
+    hasOpening: true,
+    missingRates: 0,
+    recipients: 2,
+    ...o,
+  });
+
+  it('renders balance, committed and LOW + today\'s e-mail outcome; LOW is a needs-attention item', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), fund: ok({ ...fund(), alert: { status: 'sent', recipients: 2 } }) };
+    const html = buildDailyOpsDigest(input([t])).html;
+    expect(html).toContain('Fund');
+    expect(html).toContain('LOW — threshold');
+    expect(html).toContain('Low-balance e-mail sent to 2 recipients.');
+    expect(needsAttention(t)[0]).toMatch(/^Fund balance LOW: .*nothing is blocked$/);
+  });
+
+  it('a failed client e-mail and lines without a rate are called out loudly', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), fund: ok({ ...fund({ isLow: true, missingRates: 3 }), alert: { status: 'failed', error: 'SMTP down' } }) };
+    const items = needsAttention(t);
+    expect(items).toContain('Fund low-balance e-mail to the client NOT sent: SMTP down');
+    expect(items).toContain('Fund: 3 spend lines charged without a rate (voucher brand discount / agency fee not set)');
+  });
+
+  it('not low → a plain line, no attention; a failed fund section degrades the run', () => {
+    const t = { ...quietTenant('bajaj', 'Bajaj'), fund: ok(fund({ isLow: false, balancePaise: 5_00_000_00n })) };
+    expect(needsAttention(t)).toEqual([]);
+    expect(buildDailyOpsDigest(input([t])).html).toContain('committed, not yet paid');
+    const bad = { ...quietTenant('bajaj', 'Bajaj'), fund: { ok: false as const, error: 'db timeout' } };
+    expect(failedSections(input([bad]))).toEqual([{ key: 'bajaj/fund', label: 'Bajaj: Fund' }]);
+  });
+
+  it('a client without a fund set-up gets no fund line', () => {
+    expect(buildDailyOpsDigest(input([quietTenant('deoleo', 'Deoleo')])).html).not.toContain('committed, not yet paid');
+  });
+});
