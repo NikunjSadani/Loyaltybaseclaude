@@ -8,7 +8,7 @@ import {
   type FundRateRow,
   type FundSpendItem,
 } from './fund-statement.engine';
-import { cashItem, creditItem, tdsItems, voucherItem, type CreditEntryRow, type Tds194cEntry, type VoucherOrderRow } from './fund-sources.loader';
+import { cashItem, creditItem, groupEntriesByKey, tdsItems, voucherItem, type CreditEntryRow, type Tds194cEntry, type VoucherOrderRow } from './fund-sources.loader';
 
 // Dates are computed relative to a fixed anchor inside the test (never a hard-coded "future" date — the engine is
 // pure and has no clock, so any anchor works).
@@ -458,7 +458,7 @@ describe('fund sources — mapping the source records', () => {
   });
 
   describe('194C TDS — what Gifsy actually pays, with its bank run (owner 2026-11-24)', () => {
-    const run = (id: string, at: Date, period = '2026-10') => ({ id, downloadCode: `PD-${id}`, downloadedAt: at, period });
+    const run = (id: string, at: Date, period = '2026-10', fieldId: string | null = null) => ({ id, downloadCode: `PD-${id}`, downloadedAt: at, period, fieldId });
     const entryOf = (id: string, o: Partial<Omit<Tds194cEntry, 'item'>> & { item?: Partial<FundSpendItem> } = {}): Tds194cEntry => ({
       id,
       outletId: 'OUT1',
@@ -584,6 +584,57 @@ describe('fund sources — mapping the source records', () => {
       const later = entryOf('p5', { downloadId: 'd5', item: { committedAt: new Date(recAt.getTime() + 86_400_000) } });
       const [noEarlier] = tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt, 'foreign')], [run('d5', at(23))], [later]);
       expect(noEarlier.flags).not.toContain('TDS_INCLUDES_EARLIER');
+    });
+
+    it('round 6: reversed payouts are tied to a run by period AND field; two runs that could own them → never "reversed"', () => {
+      const rev = (id: string, fieldId: string) => entryOf(id, { downloadId: null, status: 'REVERSED', fieldId, item: { status: 'RETURNED', paidAt: null } });
+      // Two SEPARATE runs in the same period for different fields: f1's reversal belongs to d1 only.
+      const sep = [run('d1', runAt, '2026-10', 'f1'), run('d2', new Date(runAt.getTime() + 60_000), '2026-10', 'f2')];
+      const [a] = tdsItems([rec('r1', 'ABCDE1234F', 1_000n, recAt, 'd1')], sep, [rev('p1', 'f1')]);
+      expect(a.flags).toContain('TDS_PAYOUTS_REVERSED');
+      const [b] = tdsItems([rec('r2', 'ABCDE1234F', 1_000n, new Date(runAt.getTime() + 61_000), 'd2')], sep, [rev('p1', 'f1')]);
+      expect(b.flags ?? []).not.toContain('TDS_PAYOUTS_REVERSED');
+      expect(b.description).toContain('re-banked in a later run');
+      // A SEPARATE f1 run and a COMBINED run in the same period could both own the reversal → ambiguous → not "reversed".
+      const amb = [run('d1', runAt, '2026-10', 'f1'), run('d3', new Date(runAt.getTime() + 60_000), '2026-10', null)];
+      const [c] = tdsItems([rec('r3', 'ABCDE1234F', 1_000n, recAt, 'd1')], amb, [rev('p1', 'f1')]);
+      expect(c.flags ?? []).not.toContain('TDS_PAYOUTS_REVERSED');
+      const [d] = tdsItems([rec('r4', 'ABCDE1234F', 1_000n, recAt)], amb, [rev('p1', 'f1')]); // NULL id
+      expect(d.flags).toContain('TDS_RUN_UNMATCHED');
+    });
+
+    it('round 6: unmatched rows of THIS client never get the earlier-payouts note; reversed payouts never count as earlier', () => {
+      const earlier = entryOf('p0', { downloadId: 'd0', item: { committedAt: new Date(recAt.getTime() - 86_400_000) } });
+      const [u] = tdsItems([rec('r1', 'ZZZZZ0000Z', 2_000n, recAt)], [run('d0', at(1))], [entryOf('px', { payeePan: 'ZZZZZ0000Z', downloadId: null, item: { committedAt: new Date(recAt.getTime() - 86_400_000) } }), earlier]);
+      expect(u.flags).toContain('TDS_RUN_UNMATCHED');
+      expect(u.flags).not.toContain('TDS_INCLUDES_EARLIER');
+      const revEarlier = entryOf('p0', { downloadId: 'd0', status: 'REVERSED', item: { committedAt: new Date(recAt.getTime() - 86_400_000) } });
+      const [o] = tdsItems([rec('r2', 'ABCDE1234F', 2_000n, recAt, 'foreign')], [run('d0', at(1))], [revEarlier]);
+      expect(o.flags).toContain('TDS_OTHER_CLIENT_RUN');
+      expect(o.flags).not.toContain('TDS_INCLUDES_EARLIER');
+    });
+
+    it('round 6: the single-pass grouping equals the old per-row scan on a randomized set', () => {
+      let seed = 42;
+      const rnd = (n: number) => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return seed % n;
+      };
+      const pans = ['ABCDE1234F', 'abcde1234f ', 'PQRSX9999Z', '__NO_PAN__:p7', '', null];
+      const ents: Tds194cEntry[] = Array.from({ length: 400 }, (_, i) =>
+        entryOf('e' + i, { outletId: 'OUT' + rnd(5), payeePan: pans[rnd(pans.length)] as string | null }),
+      );
+      // The old per-row predicate (rounds 3–4), verbatim in meaning.
+      const oldMatch = (pan: string) => {
+        const outlet = pan.startsWith('__NO_PAN__') ? pan.slice('__NO_PAN__'.length + 1) : null;
+        return (e: Tds194cEntry) =>
+          outlet != null ? e.outletId === outlet && (!e.payeePan || e.payeePan.startsWith('__NO_PAN__')) : (e.payeePan ?? '').trim().toUpperCase() === pan;
+      };
+      const grouped = groupEntriesByKey(ents);
+      const keys = ['ABCDE1234F', 'PQRSX9999Z', ...Array.from({ length: 5 }, (_, i) => '__NO_PAN__:OUT' + i)];
+      for (const k of keys) {
+        expect((grouped.get(k) ?? []).map((e) => e.id).sort()).toEqual(ents.filter(oldMatch(k)).map((e) => e.id).sort());
+      }
     });
 
     it('N7: realistic volume — 2,000 recovery rows × 50,000 payout entries — grouped once, runs quickly', () => {

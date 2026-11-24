@@ -304,6 +304,9 @@ describe('FundService — console settings + rates (D1, D4, D6)', () => {
     const body = { feeType: 'PERCENT' as const, percent: 2, effectiveFrom: daysFromToday(-5) };
     const pv = (await svc.setAgencyFee(gifsyHome, 'bajaj', body)) as { confirmToken: string; preview: { linesRepriced: number } };
     expect(pv.confirmToken).toMatch(/^\d{10,16}\.[0-9a-f]{32}$/);
+    // Round 6: a preview older than 30 minutes is refused with a clear message.
+    const stale = `${Date.now() - 31 * 60_000}.${'a'.repeat(32)}`;
+    await expect(svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: stale })).rejects.toThrow(/preview expired/);
     // N6: the token is an HMAC — a forged one with the right shape is refused.
     const [ms] = pv.confirmToken.split('.');
     await expect(svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: `${ms}.${'0'.repeat(32)}` })).rejects.toBeInstanceOf(ConflictException);
@@ -315,7 +318,7 @@ describe('FundService — console settings + rates (D1, D4, D6)', () => {
     const saved = await svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: pv.confirmToken });
     // The token still verifies (only pre-preview spend is in it) — and the figures STORED are recomputed at the confirm,
     // so they include the new line committed in between (round 5 N6).
-    expect(saved).toMatchObject({ saved: true, linesRepriced: 2, deltaPaise: -4_000 });
+    expect(saved).toMatchObject({ saved: true, linesRepriced: 2, deltaPaise: -4_000, previewLinesRepriced: 1, previewDeltaPaise: -2_000, includesSpendAfterPreview: true });
     expect(prisma.fundRate.create.mock.calls[0][0].data).toMatchObject({ repricedLines: 2, repriceDeltaPaise: -4_000n });
   });
 
@@ -538,6 +541,19 @@ describe('FundService — digest line + daily low-balance e-mail (A7 / B5 / B6)'
     const out = await svc.runLowBalanceAlerts(Date.now(), 30);
     expect(out.results.get('bajaj')!.alert!.status).toBe('not-checked-time-budget');
     expect(prisma.fundSettings.update.mock.calls[0][0].data.lowAlertLastStatus).toBe('not-checked-time-budget');
+  });
+
+  it('round 6: once the day\'s e-mail is CLAIMED, a send that outlasts the budget is awaited and recorded as SENT', async () => {
+    process.env.FUND_ALERTS_LIVE = 'true';
+    const { svc, prisma, mail } = lowClient();
+    prisma.fundSettings.findMany.mockResolvedValue([{ clientId: 'bajaj' }]);
+    mail.sendEmail.mockImplementation(() => new Promise((r) => setTimeout(() => r({ skipped: false, accepted: ['ops@bajaj.test'], rejected: [] }), 150)));
+    const out = await svc.runLowBalanceAlerts(Date.now(), 60); // the budget ends while the e-mail is being sent
+    expect(mail.sendEmail).toHaveBeenCalledTimes(1);
+    expect(out.results.get('bajaj')!.alert!.status).toBe('sent');
+    const statuses = prisma.fundSettings.update.mock.calls.map(([a]) => (a as { data: { lowAlertLastStatus?: string } }).data.lowAlertLastStatus).filter(Boolean);
+    expect(statuses).not.toContain('not-checked-time-budget');
+    expect(statuses).toContain('sent');
   });
 
   it('round 5 N5: past the deadline, digestAndAlert never sends (a late computation cannot e-mail)', async () => {

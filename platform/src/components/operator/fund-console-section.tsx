@@ -82,7 +82,9 @@ function useRateSave(save: (body: Record<string, unknown>) => ReturnType<ReturnT
       onSaved(
         d.scheduled
           ? `Saved. Scheduled from ${formatISTDate(d.effectiveFrom)} — nothing already committed changes.`
-          : `Saved, in force from ${formatISTDate(d.effectiveFrom)}${d.linesRepriced != null ? ` — ${d.linesRepriced} line${d.linesRepriced === 1 ? '' : 's'} re-priced, balance ${signedRs(d.deltaPaise ?? 0)}` : ''}.`,
+          : d.includesSpendAfterPreview
+            ? `Saved — ${d.linesRepriced} line${d.linesRepriced === 1 ? '' : 's'} / ${signedRs(d.deltaPaise ?? 0)} re-priced (includes spend made after the preview).`
+            : `Saved, in force from ${formatISTDate(d.effectiveFrom)}${d.linesRepriced != null ? ` — ${d.linesRepriced} line${d.linesRepriced === 1 ? '' : 's'} re-priced, balance ${signedRs(d.deltaPaise ?? 0)}` : ''}.`,
       );
     }
   }, [save, onSaved]);
