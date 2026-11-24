@@ -127,18 +127,19 @@ interface ApiTransaction {
 /** Subset of GET /api/fund/summary (fund reconciliation) shown on this page's Fund card. */
 interface FundSummary {
   totals: {
-    openingPaise:   number;
-    receiptsPaise:  number;
-    committedPaise: number;
-    paidPaise:      number;
-    balancePaise:   number;
+    openingPaise:     number;
+    receiptsPaise:    number;
+    adjustmentsPaise: number;
+    committedPaise:   number;
+    paidPaise:        number;
+    balancePaise:     number;
   };
   lowBalance: { isLow: boolean; thresholdPaise: number | null };
 }
 
 function isFundSummary(v: unknown): v is FundSummary {
   const t = (v as { totals?: Record<string, unknown> } | null)?.totals;
-  return !!t && ['openingPaise', 'receiptsPaise', 'committedPaise', 'paidPaise', 'balancePaise']
+  return !!t && ['openingPaise', 'receiptsPaise', 'adjustmentsPaise', 'committedPaise', 'paidPaise', 'balancePaise']
     .every((k) => typeof t[k] === 'number');
 }
 
@@ -515,13 +516,13 @@ export default function PayoutsPage() {
             </div>
             <div>
               <p className="text-sm font-semibold">Client fund</p>
-              <p className="text-xs text-slate-300">Advance received less committed and paid spend</p>
+              <p className="text-xs text-slate-300">Balance = advance received + adjustments − committed − paid out</p>
             </div>
             <Link href="/admin/fund" className="ml-auto text-xs font-medium text-white underline">
               Open fund reconciliation →
             </Link>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
             <div>
               <p className="text-xs text-slate-300">Balance</p>
               <p className="text-lg font-bold text-white mt-0.5">{formatInrPaise(fund.totals.balancePaise)}</p>
@@ -543,6 +544,12 @@ export default function PayoutsPage() {
               <p className="text-xs text-slate-300">Advance received</p>
               <p className="text-lg font-bold text-white mt-0.5">
                 {formatInrPaise(fund.totals.openingPaise + fund.totals.receiptsPaise)}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-300">Adjustments (±)</p>
+              <p data-testid="fund-card-adjustments" className="text-lg font-bold text-white mt-0.5">
+                {formatInrPaise(fund.totals.adjustmentsPaise)}
               </p>
             </div>
           </div>

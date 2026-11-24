@@ -146,6 +146,35 @@ describe('Admin Finance Dashboard — real data', () => {
     expect(screen.queryByTestId('finance-fund-low')).not.toBeInTheDocument();
   });
 
+  function mockFund(fund: unknown) {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve({ ...PAYLOAD, fund }) }));
+  }
+
+  it('RD4b (B1/C5): fund === null (caller may not see the fund) → no fund card, no fund stat, rest renders', async () => {
+    mockFund(null);
+    render(<FinanceDashboardPage />);
+    expect(await screen.findByText('Section 194R')).toBeInTheDocument();
+    expect(screen.queryByTestId('finance-fund-card')).not.toBeInTheDocument();
+    expect(screen.queryByText('Fund balance')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /open fund reconciliation/i })).not.toBeInTheDocument();
+  });
+
+  it('RD4c: noClientContext → "Open a client first", no ₹ fund figures', async () => {
+    mockFund({ ...PAYLOAD.fund, balanceRupees: 0, hasSettings: false, noClientContext: true });
+    render(<FinanceDashboardPage />);
+    expect(await screen.findByTestId('finance-fund-no-client')).toHaveTextContent(/Open a client first/);
+    expect(screen.queryByText('Fund balance')).not.toBeInTheDocument();
+    expect(screen.queryByText('Advance received')).not.toBeInTheDocument();
+  });
+
+  it('RD4d: hasSettings=false → "Not set up", no ₹ fund figures', async () => {
+    mockFund({ ...PAYLOAD.fund, hasSettings: false, noClientContext: false });
+    render(<FinanceDashboardPage />);
+    expect(await screen.findByTestId('finance-fund-not-set-up')).toHaveTextContent(/Not set up/);
+    expect(screen.queryByText('Fund balance')).not.toBeInTheDocument();
+    expect(screen.queryByText('₹22,000.00')).not.toBeInTheDocument();
+  });
+
   it('RD5: on fetch failure shows an error state and NO real payload numbers', async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error('network down'));
     vi.stubGlobal('fetch', fetchMock);

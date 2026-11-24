@@ -58,9 +58,10 @@ const MOCK_FUND = {
   totals: {
     openingPaise:    2000000,
     receiptsPaise:   8000000,
+    adjustmentsPaise: -500000,
     committedPaise:  1500000,
     paidPaise:       2500000,
-    balancePaise:    6000000,
+    balancePaise:    5500000, // 1,00,000 + (−5,000) − 15,000 − 25,000 (C12: the card's figures add up)
   },
   lowBalance: { isLow: false, thresholdPaise: null },
 };
@@ -109,11 +110,12 @@ describe('PAY — Admin Payouts API wiring', () => {
     expect(await screen.findByText('K. Krishnamurthy & Sons')).toBeInTheDocument();
   });
 
-  it('PAY8: Fund card shows balance / committed / paid / advance received from /api/fund/summary', async () => {
+  it('PAY8: Fund card shows balance / committed / paid / advance received / adjustments from /api/fund/summary', async () => {
     stubPayoutFetch();
     render(<PayoutsPage />);
     const card = await screen.findByTestId('fund-card');
-    expect(within(card).getByText('₹60,000.00')).toBeInTheDocument();   // balance
+    expect(within(card).getByText('₹55,000.00')).toBeInTheDocument();   // balance
+    expect(within(card).getByTestId('fund-card-adjustments')).toHaveTextContent('-₹5,000.00'); // C12
     expect(within(card).getByText('₹15,000.00')).toBeInTheDocument();   // committed
     expect(within(card).getByText('₹25,000.00')).toBeInTheDocument();   // paid out
     expect(within(card).getByText('₹1,00,000.00')).toBeInTheDocument(); // opening + receipts

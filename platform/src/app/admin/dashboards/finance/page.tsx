@@ -57,7 +57,11 @@ interface FinanceDashboardData {
     sec194R: TdsSection;
     sec194C: TdsSection;
   };
-  /** Client fund (fund reconciliation engine — full detail on /admin/fund). received = opening + receipts. */
+  /**
+   * Client fund (fund reconciliation engine — full detail on /admin/fund). received = opening + receipts.
+   * null = the caller may not see the fund (e.g. MIS_USER) → the card is hidden. noClientContext = an un-assumed
+   * Gifsy operator ("Open a client first"); hasSettings=false = nothing set up for this client yet ("Not set up").
+   */
   fund: {
     receivedRupees: number;
     adjustmentsRupees: number;
@@ -68,7 +72,8 @@ interface FinanceDashboardData {
     lowBalance: boolean;
     thresholdRupees: number | null;
     hasSettings: boolean;
-  };
+    noClientContext?: boolean;
+  } | null;
 }
 
 /* ─── Formatting helpers ─────────────────────────────────────────────────────── */
@@ -246,7 +251,10 @@ export default function AdminFinanceDashboardPage() {
     );
   }
 
-  const { scope, liability, breakage, tds, fund } = data;
+  const { scope, liability, breakage, tds } = data;
+  const fund = data.fund ?? null;
+  // The fund figures are real only for a client context with something set up.
+  const fundLive = !!fund && !fund.noClientContext && fund.hasSettings;
 
   return (
     <div className="space-y-6" data-testid="finance-dashboard">
@@ -284,13 +292,15 @@ export default function AdminFinanceDashboardPage() {
           sub={`${fmtInt(breakage.expiredPoints)} expired · ${fmtRs(breakage.expiredRupees)}`}
           icon={TrendingDown} iconBg="bg-rose-100" iconColor="text-rose-600" valColor="text-rose-700"
         />
-        <StatCard
-          label="Fund balance"
-          value={fmtRs(fund.balanceRupees)}
-          sub={`${fmtRs(fund.committedRupees)} committed, not yet paid`}
-          icon={Wallet} iconBg="bg-sky-100" iconColor="text-sky-600"
-          valColor={fund.lowBalance ? 'text-red-700' : 'text-sky-700'}
-        />
+        {fund && fundLive && (
+          <StatCard
+            label="Fund balance"
+            value={fmtRs(fund.balanceRupees)}
+            sub={`${fmtRs(fund.committedRupees)} committed, not yet paid`}
+            icon={Wallet} iconBg="bg-sky-100" iconColor="text-sky-600"
+            valColor={fund.lowBalance ? 'text-red-700' : 'text-sky-700'}
+          />
+        )}
       </div>
 
       {/* ── Points Liability detail + Breakage ── */}
@@ -356,14 +366,33 @@ export default function AdminFinanceDashboardPage() {
         </CardContent>
       </Card>
 
-      {/* ── Fund Reconciliation ── */}
-      <Card className="border border-gray-100 shadow-sm rounded-2xl">
+      {/* ── Fund Reconciliation (hidden when the caller may not see the fund: fund === null) ── */}
+      {fund && (
+      <Card className="border border-gray-100 shadow-sm rounded-2xl" data-testid="finance-fund-card">
         <CardHeader>
           <CardTitle>Fund Reconciliation</CardTitle>
           <p className="text-xs text-gray-400 mt-0.5">
             The client&apos;s advance less spend. Committed spend is already deducted from the balance.
           </p>
         </CardHeader>
+        {fund.noClientContext ? (
+          <CardContent className="pb-5">
+            <p data-testid="finance-fund-no-client" className="text-sm text-gray-600">
+              Open a client first — the fund is per client. Switch into a client from the Gifsy console to see its fund.
+            </p>
+          </CardContent>
+        ) : !fund.hasSettings ? (
+          <CardContent className="pb-5">
+            <p data-testid="finance-fund-not-set-up" className="text-sm text-gray-600">
+              Not set up — no advance, rates or alert have been recorded for this client yet.
+            </p>
+            <div className="pt-2 text-right">
+              <Link href="/admin/fund" className="text-xs font-medium text-[var(--brand-primary)] hover:underline">
+                Open fund reconciliation →
+              </Link>
+            </div>
+          </CardContent>
+        ) : (
         <CardContent className="pb-3">
           {fund.lowBalance && (
             <p data-testid="finance-fund-low" className="mb-2 flex items-center gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
@@ -383,7 +412,9 @@ export default function AdminFinanceDashboardPage() {
             </Link>
           </div>
         </CardContent>
+        )}
       </Card>
+      )}
 
     </div>
   );
