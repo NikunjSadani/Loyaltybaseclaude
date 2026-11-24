@@ -7,8 +7,10 @@
  *
  * Features:
  *   • On mount: GET /api/reports/session-report → JSON (users × months active-day matrix).
- *   • Wide, horizontally-scrollable table: sticky leading columns (User / Role / Mobile /
- *     Last Login) followed by one column per month (oldest → newest) showing active-day counts.
+ *   • Wide, horizontally-scrollable table: leading columns User / Role / Mobile / App Installed /
+ *     <level> ID × ≤5 (tenant level names, e.g. Bajaj ISR · SO · ASM · SM · ZH — owner 2026-11-24,
+ *     same values as the App Adoption installed-users Excel) / Last Login, followed by one column
+ *     per month (oldest → newest) showing active-day counts.
  *   • Zero counts rendered muted; non-zero emphasised so real usage pops.
  *   • Export Excel → downloads /api/reports/session-report?format=xlsx blob.
  *   • Loading skeleton, error state, and empty state.
@@ -31,6 +33,12 @@ interface SessionRow {
   name: string
   phone: string
   role: string
+  /** Opened the app as an installed (home-screen) app — same population as App Adoption's "Installed". */
+  appInstalled?: boolean
+  /** Display labels, fixed order ("Android", "iOS", …). */
+  appPlatforms?: string[]
+  /** One cell per `idHeaders` entry ('' = blank). */
+  levelIds?: string[]
   lastLoginAt: string | null
   activeDays: Record<string, number>
 }
@@ -38,6 +46,8 @@ interface SessionReport {
   generatedAt: string
   timezone: string
   months: SessionMonth[]
+  /** Level-ID headers in the tenant's own level names ("ISR ID" … "ZH ID"); [] when the tenant has no levels. */
+  idHeaders?: string[]
   rows: SessionRow[]
 }
 
@@ -60,6 +70,12 @@ function formatLastLogin(iso: string | null): string {
 
 function roleLabel(role: string): string {
   return role.replace(/_/g, ' ')
+}
+
+/** "Yes — Android, iOS" / "No" — same wording as the Excel's App Installed column. */
+function appInstalledLabel(row: SessionRow): string {
+  const p = row.appPlatforms ?? []
+  return row.appInstalled && p.length ? `Yes — ${p.join(', ')}` : 'No'
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -111,6 +127,8 @@ export default function SessionReportPage() {
     }
   }, [])
 
+  const idHeaders = data?.idHeaders ?? []
+
   // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="p-6 space-y-6">
@@ -141,7 +159,9 @@ export default function SessionReportPage() {
         <p>
           &quot;Active&quot; counts days the user actually used the app — not logins (one login can
           span many active days). Active-day tracking is greenfield: it begins when this feature
-          ships, so months before launch read 0 (there is no historical backfill).
+          ships, so months before launch read 0 (there is no historical backfill). &quot;App
+          Installed&quot; = opened as a home-screen app (same users as App Adoption). ID columns show
+          employee codes up the sales hierarchy — see the Excel&apos;s About sheet for how to read them.
         </p>
       </div>
 
@@ -200,6 +220,11 @@ export default function SessionReportPage() {
                       <th className="sticky left-0 z-10 bg-gray-50 px-3 py-2 font-medium whitespace-nowrap text-left">User</th>
                       <th className="px-3 py-2 font-medium whitespace-nowrap text-left">Role</th>
                       <th className="px-3 py-2 font-medium whitespace-nowrap text-left">Mobile</th>
+                      <th className="px-2 py-2 font-medium whitespace-nowrap text-left">App Installed</th>
+                      {/* Level-ID columns (the tenant's own level names) — compact */}
+                      {idHeaders.map(h => (
+                        <th key={h} className="px-2 py-2 font-medium whitespace-nowrap text-left">{h}</th>
+                      ))}
                       <th className="px-3 py-2 font-medium whitespace-nowrap text-left border-r border-gray-300">Last Login</th>
                       {/* Month columns (oldest → newest) */}
                       {data.months.map(m => (
@@ -221,6 +246,22 @@ export default function SessionReportPage() {
                         <td className={`sticky left-0 z-10 px-3 py-1.5 font-medium whitespace-nowrap max-w-[180px] truncate ${ri % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}`} title={row.name}>{row.name}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-600">{roleLabel(row.role)}</td>
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-500 font-mono">{row.phone || '—'}</td>
+                        <td className={`px-2 py-1.5 whitespace-nowrap ${row.appInstalled ? 'text-green-700' : 'text-gray-400'}`}>
+                          {appInstalledLabel(row)}
+                        </td>
+                        {idHeaders.map((h, ci) => {
+                          // Several covering reps join " | " — cap the width, full value on hover.
+                          const v = row.levelIds?.[ci] ?? ''
+                          return (
+                            <td
+                              key={h}
+                              className="px-2 py-1.5 whitespace-nowrap font-mono text-gray-600 max-w-[140px] truncate"
+                              title={v || undefined}
+                            >
+                              {v}
+                            </td>
+                          )
+                        })}
                         <td className="px-3 py-1.5 whitespace-nowrap text-gray-500 border-r border-gray-300">{formatLastLogin(row.lastLoginAt)}</td>
                         {data.months.map(m => {
                           const count = row.activeDays[m.ym] ?? 0
