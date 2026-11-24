@@ -359,8 +359,14 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
   The owner's PowerShell blocks `gcloud.ps1` (execution policy), so hand them commands using **`gcloud.cmd`**.
 - Cloud Run API has **CPU throttling ON** → in-process `@Interval` timers don't run while idle. Every background job
   must be triggered by Cloud Scheduler (push-drain, voucher-dispersal-drain, hubble-sweep, reports-run, expire-sweep).
-- Worktrees share `api/node_modules` (junction to `help-videos`) — `prisma generate` in one worktree replaces the
-  generated client for all. Generate from the worktree whose schema is the superset, and re-generate before tests.
+- Worktrees share packages through junctions. Since 2026-11-24 the REAL `api/node_modules` + `platform/node_modules`
+  live in `.claude/worktrees/rel-next4` (clean `npm ci` from the release lock files); `help-videos` and `vd-int` link to
+  them. `prisma generate` in any linked worktree replaces the generated client for all — generate from the worktree
+  whose schema is the superset, and re-generate before tests.
+- ⚠️ **Before deleting ANY worktree, resolve where its node_modules really live** (links chain: A → B → C). Never
+  `git worktree remove` / `Remove-Item -Recurse` a folder that holds the real packages or contains a junction — unlink
+  junctions with `cmd /c rmdir <link>` first. (2026-11-24: removing merged worktrees deleted the shared packages, which
+  sat in `memory-safety` behind a link chain; rebuilt with `npm ci`.)
 - A Cloud-Scheduler POST with no body gets **411** from Google's front end — create jobs with `--message-body="{}"`.
 
 **Sales Import / targets**
