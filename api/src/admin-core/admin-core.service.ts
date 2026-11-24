@@ -72,11 +72,13 @@ import { HierarchyConfigDto, TaskConfigDto } from './dto/config.dto';
 import {
   DEOLEO_HIERARCHY,
   HierarchyEmployee,
+  isSyntheticPlaceholderPhone,
   isVacantPlaceholderUser,
   mapRoleCodeToUserRole,
   persistHierarchy,
+  formerEmployeeName,
   syntheticPlaceholderPhone,
-  vacantPlaceholderName,
+  vacatedUserData,
   VACANT_PHONE_PREFIX,
 } from './hierarchy-persistence';
 
@@ -84,6 +86,10 @@ import {
 export const VACATE_NEEDS_BOTH_MSG =
   'To mark this position vacant, clear both the name and the phone. Otherwise enter a 10-digit phone.';
 /** 400 when a VACANT position is being filled without both a name and a phone. */
+/** 400 when User Accounts tries to reactivate a vacant / former placeholder login. */
+export const VACANT_LOGIN_REACTIVATE_MSG =
+  'This login belongs to a vacant position and cannot be reactivated. To give the position to someone, use "Fill vacant position" on the Employee Hierarchy page.';
+export const POSITION_CHANGED_MSG = 'This position was changed by someone else — reload and try again.';
 export const FILL_VACANT_NEEDS_BOTH_MSG =
   "To fill this vacant position, enter both the new person's name and a 10-digit phone.";
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
@@ -503,6 +509,11 @@ export class AdminCoreService {
     // Placed after the deactivation guard, before the phone-clash guard. Only an ACTIVE holder
     // reserves the number (partial index users_clientId_phone_active_key).
     const reactivating = dto.status === 'ACTIVE' && target.status !== 'ACTIVE';
+    // A vacant position's (or a former employee's closed) login carries the synthetic placeholder
+    // phone — it is not a person and must never be switched back on here (L1).
+    if (reactivating && isSyntheticPlaceholderPhone(target.phone)) {
+      throw new BadRequestException(VACANT_LOGIN_REACTIVATE_MSG);
+    }
     if (reactivating) {
       const phoneToActivate = dto.phone ?? target.phone;
       const activeHolder = await this.prisma.user.count({
@@ -877,6 +888,10 @@ export class AdminCoreService {
     if (nameBlank || phoneBlank) {
       if (!(nameBlank && phoneBlank)) throw new BadRequestException(VACATE_NEEDS_BOTH_MSG);
       vacating = !wasVacant; // already vacant → name/phone stay as they are (idempotent)
+      // Never lock yourself out through this surface (mirrors updateUser's self-deactivate guard).
+      if (vacating && target.id === caller.sub) {
+        throw new BadRequestException("You can't mark your own position vacant.");
+      }
     } else if (wasVacant && (dto.name !== undefined || dto.phone !== undefined)) {
       if (dto.name === undefined || dto.phone === undefined) {
         throw new BadRequestException(FILL_VACANT_NEEDS_BOTH_MSG);
@@ -896,9 +911,11 @@ export class AdminCoreService {
     }
 
     // ── Email uniqueness — mirror updateUser ──────────────────────────────────
-    if (dto.email && dto.email !== target.email) {
+    // Vacating clears the email (owner decision b), so a sent email is ignored then. Filling
+    // creates a NEW login, so ANY holder (incl. the old record) is a clash.
+    if (!vacating && dto.email && (filling || dto.email !== target.email)) {
       const emailClash = await this.prisma.user.findFirst({
-        where: { email: dto.email, clientId, id: { not: target.id } },
+        where: { email: dto.email, clientId, ...(filling ? {} : { id: { not: target.id } }) },
       });
       if (emailClash) throw new ConflictException('Email address already in use');
     }
@@ -955,9 +972,18 @@ export class AdminCoreService {
       if (newReportingToId === salesUserId) {
         throw new BadRequestException('An employee cannot report to themselves');
       }
-      // (a) must reference an existing ACTIVE SalesUser in the same tenant.
+      // (a) must reference an existing ACTIVE SalesUser in the same tenant — or a VACANT position
+      // (the bulk upload also lets a row report to a vacant manager; approvals skip it upward).
       const manager = await this.prisma.salesUser.findFirst({
-        where: { id: newReportingToId, clientId, isActive: true, deletedAt: null },
+        where: {
+          id: newReportingToId,
+          clientId,
+          deletedAt: null,
+          OR: [
+            { isActive: true },
+            { user: { phone: { startsWith: VACANT_PHONE_PREFIX }, status: { not: 'ACTIVE' } } },
+          ],
+        },
         select: { id: true },
       });
       if (!manager) {
@@ -976,39 +1002,75 @@ export class AdminCoreService {
       }
     }
 
-    // ── Build the two allow-listed update payloads ───────────────────────────
-    const userData: Prisma.UserUpdateInput = { updatedAt: new Date() };
+    // ── Build the allow-listed update payloads ───────────────────────────────
+    const userData: Prisma.UserUpdateManyMutationInput = { updatedAt: new Date() };
     if (dto.name !== undefined && !nameBlank) userData.name = dto.name.trim();
     if (dto.email !== undefined) userData.email = dto.email;
     if (dto.phone !== undefined && !phoneBlank) userData.phone = dto.phone;
     if (levelChanged && newUserRole !== undefined) userData.role = newUserRole;
 
-    const salesData: Prisma.SalesUserUncheckedUpdateInput = {};
+    const salesData: Prisma.SalesUserUncheckedUpdateManyInput = {};
     if (levelChanged) salesData.hierarchyLevelId = dto.hierarchyLevelId;
     if (reportingProvided) salesData.reportingToId = newReportingToId;
 
     if (vacating) {
-      // Same helpers + same values the bulk upload writes for a vacant placeholder.
-      userData.name = vacantPlaceholderName(salesUser.employeeCode);
-      userData.phone = syntheticPlaceholderPhone(salesUser.employeeCode);
-      userData.status = 'INACTIVE';
+      // Same values the bulk upload writes for a vacated person (shared helper): synthetic phone
+      // (frees the real number), placeholder name, INACTIVE, and the person's email / avatar /
+      // language / FCM token cleared (owner decision b). Push subscriptions are deleted in the tx.
+      Object.assign(userData, vacatedUserData(salesUser.employeeCode));
       salesData.isActive = false;
-    } else if (filling) {
-      // A new person takes the vacant position — the login and the position go live again.
-      userData.status = 'ACTIVE';
-      salesData.isActive = true;
     }
 
     const roleChanged = levelChanged && newUserRole !== undefined && newUserRole !== target.role;
+    // FILL (owner decision a): the new person gets a BRAND-NEW login; the old row stays a closed
+    // INACTIVE record (renamed "(former) <code>") keeping its notifications / tickets / login logs /
+    // activity / installs. The position (SalesUser) is re-pointed — code / level / reporting line /
+    // outlet assignments unchanged.
+    let filledUserId: string | null = null;
 
-    // ── ONE transaction: User + SalesUser updated together (can't drift) + audit ──
+    // ── ONE transaction: User + SalesUser together (can't drift) + audit ──────────────────────
+    // M3: every write is CONDITIONAL on the state we validated against (the login's phone + status
+    // and the position still pointing at that login). Someone else saving first → 409, never a
+    // silent overwrite (also covers two admins filling the same vacant position at once).
     try {
       await this.prisma.$transaction(async (tx) => {
-        // UPDATE the existing User row IN PLACE by id — NEVER create a new one (the
-        // documented orphan-User bug: a phone-keyed upsert would strand the old row and
-        // its reserved phone). §phone guard above already cleared any ACTIVE clash.
-        await tx.user.update({ where: { id: target.id }, data: userData });
-        await tx.salesUser.update({ where: { id: salesUserId }, data: salesData });
+        if (filling) {
+          const created = await tx.user.create({
+            data: {
+              clientId,
+              phone: dto.phone as string,
+              name: (dto.name as string).trim(),
+              email: dto.email ?? null,
+              role: newUserRole ?? target.role,
+              status: 'ACTIVE',
+            },
+            select: { id: true },
+          });
+          filledUserId = created.id;
+          const repointed = await tx.salesUser.updateMany({
+            where: { id: salesUserId, clientId, userId: target.id },
+            data: { ...salesData, userId: created.id, isActive: true },
+          });
+          if (repointed.count !== 1) throw new ConflictException(POSITION_CHANGED_MSG);
+          const closed = await tx.user.updateMany({
+            where: { id: target.id, phone: target.phone, status: target.status },
+            data: { name: formerEmployeeName(salesUser.employeeCode), updatedAt: new Date() },
+          });
+          if (closed.count !== 1) throw new ConflictException(POSITION_CHANGED_MSG);
+        } else {
+          const u = await tx.user.updateMany({
+            where: { id: target.id, phone: target.phone, status: target.status },
+            data: userData,
+          });
+          if (u.count !== 1) throw new ConflictException(POSITION_CHANGED_MSG);
+          const su = await tx.salesUser.updateMany({
+            where: { id: salesUserId, clientId, userId: target.id },
+            data: salesData,
+          });
+          if (su.count !== 1) throw new ConflictException(POSITION_CHANGED_MSG);
+          // No push may ever reach a departed person (H1).
+          if (vacating) await tx.pushSubscription.deleteMany({ where: { userId: target.id } });
+        }
 
         await tx.auditLog.create({
           data: {
@@ -1018,20 +1080,29 @@ export class AdminCoreService {
             actorId: caller.sub,
             metadata: {
               event: 'admin_edit_employee',
-              userId: target.id,
+              userId: filledUserId ?? target.id,
               employeeCode: salesUser.employeeCode,
               ...(vacating
-                ? { vacated: true, previous: { name: target.name, phone: target.phone } }
+                ? { vacated: true, previous: { name: target.name, phone: target.phone, email: target.email } }
                 : {}),
-              ...(filling ? { filledVacantPosition: true } : {}),
-              changes: {
-                ...(userData.name !== undefined ? { name: userData.name } : {}),
-                ...(dto.email !== undefined ? { email: dto.email } : {}),
-                ...(userData.phone !== undefined ? { phone: userData.phone } : {}),
-                ...(userData.status !== undefined ? { status: userData.status } : {}),
-                ...(levelChanged ? { hierarchyLevelId: dto.hierarchyLevelId, role: newUserRole } : {}),
-                ...(reportingProvided ? { reportingToId: newReportingToId } : {}),
-              },
+              ...(filling ? { filledVacantPosition: true, previousUserId: target.id, newUserId: filledUserId } : {}),
+              changes: filling
+                ? {
+                    name: (dto.name as string).trim(),
+                    phone: dto.phone,
+                    ...(dto.email !== undefined ? { email: dto.email } : {}),
+                    status: 'ACTIVE',
+                    ...(levelChanged ? { hierarchyLevelId: dto.hierarchyLevelId, role: newUserRole } : {}),
+                    ...(reportingProvided ? { reportingToId: newReportingToId } : {}),
+                  }
+                : {
+                    ...(userData.name !== undefined ? { name: userData.name } : {}),
+                    ...(userData.email !== undefined ? { email: userData.email } : {}),
+                    ...(userData.phone !== undefined ? { phone: userData.phone } : {}),
+                    ...(userData.status !== undefined ? { status: userData.status } : {}),
+                    ...(levelChanged ? { hierarchyLevelId: dto.hierarchyLevelId, role: newUserRole } : {}),
+                    ...(reportingProvided ? { reportingToId: newReportingToId } : {}),
+                  },
             },
           },
         });
@@ -1040,18 +1111,23 @@ export class AdminCoreService {
       // Belt-and-suspenders: a race past the ACTIVE-phone pre-check hits the partial unique
       // index. Map it to the same clean domain error updateUser/createUser use, not a 500.
       if (isActivePhoneConflict(e)) throw new BadRequestException(ACTIVE_PHONE_IN_USE_MSG);
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException('Email address already in use');
+      }
       throw e;
     }
 
-    // Force re-login on all devices when the login identity (phone) or the account's
-    // authority (role) changes — identical to updateUser. Reuses the shared
-    // stamp-before-sweep helper so an in-flight refresh can't out-race the revoke.
+    // ── After the commit: sign the departed / previous login out ─────────────────────────────
+    // Vacate AND fill (M2) use the failure-tolerant helper: the change is already saved, so a
+    // revoke failure is reported LOUDLY in the response (with a working retry) — never a 500.
+    // (The login is INACTIVE either way, and auth refuses a non-ACTIVE user on refresh and on
+    // every request — so a failed revoke cannot leave the person with access.)
     let revokeFailures: Array<{ userId: string; error: string }> = [];
-    if (vacating) {
-      // K3 (same as the bulk upload's vacated placeholders): the person who left is signed out
-      // everywhere. The edit is already committed, so a revoke failure is reported LOUDLY in the
-      // response (and logged) instead of turning a saved change into a 500.
-      revokeFailures = await this.revokeSessionsAfterCommit([target.id], 'employee_vacated');
+    if (vacating || filling) {
+      revokeFailures = await this.revokeSessionsAfterCommit(
+        [target.id],
+        vacating ? 'employee_vacated' : 'vacant_position_filled',
+      );
     } else if (phoneChanged || roleChanged) {
       await this.revokeAllSessionsForUser(target.id);
     }
@@ -1065,14 +1141,52 @@ export class AdminCoreService {
     return {
       employee: updated,
       ...(vacating ? { vacated: true } : {}),
+      ...(filling ? { filled: true } : {}),
       ...(revokeFailures.length
         ? {
             sessionRevokeFailures: revokeFailures,
-            message:
-              'Position marked vacant, but the previous login could not be signed out — use "Log out of all devices" for this user.',
+            signOutUserId: target.id,
+            message: vacating
+              ? 'Position marked vacant, but the previous person could not be signed out yet. Their login is already blocked; use "Retry sign-out" to finish.'
+              : 'Position filled, but the previous login could not be signed out yet. It is already blocked; use "Retry sign-out" to finish.',
           }
         : {}),
     };
+  }
+
+  /**
+   * POST /v1/admin/sales-users/:id/revoke-sessions { userId } — "Retry sign-out" after a vacate /
+   * fill whose after-commit revoke failed. Same permission as the edit. Only a login that belongs
+   * to THIS position may be signed out here: the position's current login, or a closed vacant /
+   * former record of the same employee code (synthetic '__vacant__:<code>' phone).
+   */
+  async retryEmployeeSignOut(caller: JwtPayload, salesUserId: string, userId: string) {
+    const clientId = caller.clientId;
+    const salesUser = await this.prisma.salesUser.findFirst({
+      where: { id: salesUserId, clientId },
+      select: { id: true, userId: true, employeeCode: true },
+    });
+    if (!salesUser) throw new NotFoundException('Employee not found');
+    const target = await this.prisma.user.findFirst({
+      where: { id: userId, clientId },
+      select: { id: true, role: true, phone: true },
+    });
+    const belongs =
+      !!target &&
+      (target.id === salesUser.userId || target.phone === syntheticPlaceholderPhone(salesUser.employeeCode));
+    if (!target || !belongs) throw new NotFoundException('Login not found for this position');
+    this.assertCanManageTarget(caller, target);
+    const revoked = await this.revokeAllSessionsForUser(target.id);
+    await this.prisma.auditLog.create({
+      data: {
+        action: 'LOGOUT',
+        entityType: 'SESSION',
+        entityId: target.id,
+        actorId: caller.sub,
+        metadata: { event: 'employee_sign_out_retry', salesUserId, employeeCode: salesUser.employeeCode, revoked },
+      },
+    });
+    return { revoked };
   }
 
   /**
@@ -1088,25 +1202,38 @@ export class AdminCoreService {
         select: { id: true, code: true, name: true, level: true },
         orderBy: { level: 'asc' },
       }),
+      // Active employees AND vacant positions (L2 — the upload also allows reporting to a vacant
+      // manager; approvals skip a vacant level upward). Vacant ones are labelled "Vacant (code)".
       this.prisma.salesUser.findMany({
-        where: { clientId, isActive: true, deletedAt: null },
+        where: {
+          clientId,
+          deletedAt: null,
+          OR: [
+            { isActive: true },
+            { user: { phone: { startsWith: VACANT_PHONE_PREFIX }, status: { not: 'ACTIVE' } } },
+          ],
+        },
         select: {
           id: true,
           employeeCode: true,
           hierarchyLevelId: true,
-          user: { select: { name: true } },
+          user: { select: { name: true, phone: true, status: true } },
         },
         orderBy: { user: { name: 'asc' } },
       }),
     ]);
     return {
       levels,
-      managers: managers.map((m) => ({
-        id: m.id,
-        name: m.user?.name ?? m.employeeCode,
-        employeeCode: m.employeeCode,
-        hierarchyLevelId: m.hierarchyLevelId,
-      })),
+      managers: managers.map((m) => {
+        const vacant = isVacantPlaceholderUser(m.user);
+        return {
+          id: m.id,
+          name: vacant ? `Vacant (${m.employeeCode})` : (m.user?.name ?? m.employeeCode),
+          employeeCode: m.employeeCode,
+          hierarchyLevelId: m.hierarchyLevelId,
+          ...(vacant ? { vacant: true } : {}),
+        };
+      }),
     };
   }
 

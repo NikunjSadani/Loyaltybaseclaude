@@ -62,15 +62,26 @@ describe('JwtStrategy', () => {
     });
 
     it('S3: returns the JWT payload when an active session exists', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9876543210', name: 'Test' };
       const result  = await strategy.validate(REQ, payload as any);
       expect(result).toEqual(payload);
     });
 
+    it.each(['INACTIVE', 'SUSPENDED', 'PENDING_VERIFICATION'])(
+      'M1: a surviving session of a %s login is refused on every request (no activity stamp)',
+      async (status) => {
+        mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status } });
+        await expect(
+          strategy.validate(REQ, { sub: 'user_1', role: 'SALES_SO', clientId: 'deoleo', sid: 'sess_1' } as any),
+        ).rejects.toThrow(/revoked/);
+        expect(mockActivity.markActive).not.toHaveBeenCalled();
+      },
+    );
+
     // ── H4: first-use mark (set ONCE per session) ─────────────────────────────────
     it('FU1: the FIRST request with a sid-bound token marks firstUsedAt once (set-once WHERE), awaited', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       let marked = false;
       mockPrisma.userSession.updateMany.mockImplementationOnce(async () => {
         marked = true;
@@ -88,7 +99,7 @@ describe('JwtStrategy', () => {
     });
 
     it('FU2: per-instance memo — the 2nd request on the same session makes NO write (never a write per request)', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' };
       await strategy.validate(REQ, payload as any);
       await strategy.validate(REQ, payload as any);
@@ -97,7 +108,7 @@ describe('JwtStrategy', () => {
     });
 
     it('FU3: a failed first-use write never fails the request, but is LOUD (audit row, S-L2)', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       mockPrisma.userSession.updateMany.mockRejectedValueOnce(new Error('db down'));
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' };
       await expect(strategy.validate(REQ, payload as any)).resolves.toEqual(payload);
@@ -110,7 +121,7 @@ describe('JwtStrategy', () => {
     });
 
     it('FU4 (M2): a legacy token WITHOUT sid never marks first use (it could match the wrong session)', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       await strategy.validate(REQ, { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo' } as any);
       expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
     });
@@ -119,7 +130,7 @@ describe('JwtStrategy', () => {
       const prev = process.env.INTERNAL_PROXY_SECRET;
       process.env.INTERNAL_PROXY_SECRET = 'test-internal-secret-0123456789';
       try {
-        mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+        mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
         await strategy.validate(
           { headers: { ...REQ.headers, 'x-gifsy-no-first-use': '1', 'x-internal-proxy-secret': 'test-internal-secret-0123456789' } },
           { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' } as any,
@@ -143,7 +154,7 @@ describe('JwtStrategy', () => {
           else process.env.INTERNAL_PROXY_SECRET = env;
           const s = new JwtStrategy(makeConfig('supersecret'), mockPrisma as any, mockActivity as any);
           mockPrisma.userSession.updateMany.mockClear();
-          mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+          mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
           await s.validate(
             { headers: { ...REQ.headers, 'x-gifsy-no-first-use': '1', ...(presented ? { 'x-internal-proxy-secret': presented } : {}) } },
             { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' } as any,
@@ -158,21 +169,21 @@ describe('JwtStrategy', () => {
       }
     });
 
-    it('FU6 (M3): the session lookup selects only id + expiresAt (no dependency on newer columns)', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+    it('FU6 (M3): the session lookup selects only id + expiresAt + the login status (no dependency on newer columns)', async () => {
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       await strategy.validate(REQ, { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', sid: 'sess_1' } as any);
-      expect(mockPrisma.userSession.findFirst.mock.calls[0][0].select).toEqual({ id: true, expiresAt: true });
+      expect(mockPrisma.userSession.findFirst.mock.calls[0][0].select).toEqual({ id: true, expiresAt: true, user: { select: { status: true } } });
     });
 
     it('S5: stamps the user active (fire-and-forget) on a valid session', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9876543210', name: 'Test' };
       await strategy.validate(REQ, payload as any);
       expect(mockActivity.markActive).toHaveBeenCalledWith('user_1', 'deoleo', { medium: 'app', device: 'phone' });
     });
 
     it('S5b: passes the request medium/device through (browser on a computer; junk header → unknown)', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       const payload = { sub: 'user_1', role: 'CLIENT_ADMIN', clientId: 'bajaj' };
       const pcUa = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
       await strategy.validate({ headers: { 'x-client-medium': 'browser', 'user-agent': pcUa } }, payload as any);
@@ -182,7 +193,7 @@ describe('JwtStrategy', () => {
     });
 
     it('S5d: a BACKGROUND request (X-Background: 1 — bell poll, badge, beacons) is authenticated but NOT activity', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       const payload = { sub: 'user_1', role: 'SSS', clientId: 'bajaj' };
       await expect(
         strategy.validate({ headers: { ...REQ.headers, 'x-background': '1' } }, payload as any),
@@ -194,7 +205,7 @@ describe('JwtStrategy', () => {
     });
 
     it('S5c: HOT PATH — validate resolves even when the activity DB write never settles or throws', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry() });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: freshExpiry(), user: { status: 'ACTIVE' } });
       const payload = { sub: 'user_1', role: 'SSS', clientId: 'bajaj' };
       // A REAL ActivityTrackingService whose DB write hangs forever → validate must not wait for it.
       const hanging = new ActivityTrackingService({ $executeRaw: jest.fn(() => new Promise(() => undefined)) } as any);
@@ -211,7 +222,7 @@ describe('JwtStrategy', () => {
     // ── Sliding-session bump (SESSION_TTL_DAYS = 30) ────────────────────────────
     it('SL1: slides expiresAt to ≈ now + window when the session has decayed by > 1 day', async () => {
       // expiresAt only 2 days out → decayed well past the 1-day throttle → bump fires.
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + 2 * DAY_MS) });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + 2 * DAY_MS), user: { status: 'ACTIVE' } });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9', name: 'T' };
 
       await strategy.validate(REQ, payload as any);
@@ -229,7 +240,7 @@ describe('JwtStrategy', () => {
 
     it('SL2: does NOT slide when the session is still fresh (decayed < 1 day)', async () => {
       // expiresAt half a day inside the full window → decayed < 1 day → within the throttle → no write.
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + (SESSION_TTL_DAYS - 0.5) * DAY_MS) });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + (SESSION_TTL_DAYS - 0.5) * DAY_MS), user: { status: 'ACTIVE' } });
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9', name: 'T' };
 
       await strategy.validate(REQ, payload as any);
@@ -246,7 +257,7 @@ describe('JwtStrategy', () => {
     });
 
     it('SL4: the slide is fire-and-forget — a rejected updateMany never fails validate', async () => {
-      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + 2 * DAY_MS) });
+      mockPrisma.userSession.findFirst.mockResolvedValue({ id: 'sess_1', expiresAt: new Date(Date.now() + 2 * DAY_MS), user: { status: 'ACTIVE' } });
       mockPrisma.userSession.updateMany.mockRejectedValueOnce(new Error('db down'));
       const payload = { sub: 'user_1', role: 'RETAILER', clientId: 'deoleo', phone: '9', name: 'T' };
 

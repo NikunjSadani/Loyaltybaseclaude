@@ -15,6 +15,13 @@ import { IsEmail, IsOptional, IsString, Matches, MinLength, ValidateIf } from 'c
  * employeeCode (immutable identity key), region/zone (dormant — not written by the
  * bulk upload), isActive/deactivation (that's the row toggle / bulk resign path).
  */
+/** Body for POST /v1/admin/sales-users/:id/revoke-sessions ("Retry sign-out"). */
+export class RetrySignOutDto {
+  @IsString()
+  @MinLength(1)
+  userId!: string;
+}
+
 export class UpdateEmployeeDto {
   /**
    * Blank ('' / whitespace) is allowed ONLY together with a blank phone — that marks the

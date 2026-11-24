@@ -1,9 +1,9 @@
-import { Body, Controller, Get, Param, Patch } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
 import { AdminCoreService } from './admin-core.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { UpdateEmployeeDto } from './dto/sales-users.dto';
+import { RetrySignOutDto, UpdateEmployeeDto } from './dto/sales-users.dto';
 
 /**
  * Single-record EMPLOYEE edit — PATCH /v1/admin/sales-users/:id (`:id` = the
@@ -39,6 +39,20 @@ export class AdminSalesUsersController {
   @RequirePermission('sales_org:manage_hierarchy')
   byCode(@CurrentUser() user: JwtPayload, @Param('code') code: string) {
     return this.svc.getEmployeeByCode(user, code);
+  }
+
+  /**
+   * "Retry sign-out" after a vacate / fill whose after-commit session revoke failed. Only a
+   * login belonging to THIS position (current, or its closed vacant/former record) qualifies.
+   */
+  @Post(':id/revoke-sessions')
+  @RequirePermission('sales_org:manage_hierarchy')
+  retrySignOut(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: RetrySignOutDto,
+  ) {
+    return this.svc.retryEmployeeSignOut(user, id, dto.userId);
   }
 
   @Patch(':id')

@@ -38,6 +38,7 @@ import type { UserRole } from '@prisma/client';
 import { istDateTimeCell } from '../../../common/ist-date';
 import { rungDisplayLabel } from '../../../common/hierarchy-labels';
 import { normalizePhoneLast10 } from '../../../common/partner-group.helper';
+import { isSyntheticPlaceholderPhone } from '../../../admin-core/hierarchy-persistence';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
 import {
   InstalledUsersQueryDto,
@@ -320,7 +321,8 @@ async function buildRows(
       const group = roleGroupOf(u.role);
       const outlet = u.channelPartner?.outlets[0];
       const a = area.resolve({ id: u.id, role: u.role });
-      const phone = normalizePhoneLast10(u.phone) ?? u.phone ?? '';
+      // A former employee's closed login carries a synthetic placeholder phone — never print it.
+      const phone = isSyntheticPlaceholderPhone(u.phone) ? '' : (normalizePhoneLast10(u.phone) ?? u.phone ?? '');
       const role = roleLabel(clientId, u, typeDisplay);
       const full = areasFullRow(u.name ?? '', phone, role, a);
       if (full) fullAreas.push(full);

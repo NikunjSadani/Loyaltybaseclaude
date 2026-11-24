@@ -53,9 +53,18 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
     // M3 — explicit select: only the columns this guard needs, so it never depends on newer columns
     // (the deploy runs migrations before the API takes traffic; this keeps the hot path independent of it).
-    const session = await this.prisma.userSession.findFirst({ where, select: { id: true, expiresAt: true } });
+    const session = await this.prisma.userSession.findFirst({
+      where,
+      select: { id: true, expiresAt: true, user: { select: { status: true } } },
+    });
 
     if (!session) {
+      throw new UnauthorizedException('Session expired or revoked — please log in again.');
+    }
+    // M1: a login that is no longer ACTIVE (deactivated, suspended, a vacated position) is refused
+    // on EVERY request, even if its session row survived (e.g. a failed after-commit revoke). Login
+    // itself requires ACTIVE, so this never affects a user in normal operation.
+    if (session.user?.status !== 'ACTIVE') {
       throw new UnauthorizedException('Session expired or revoked — please log in again.');
     }
 

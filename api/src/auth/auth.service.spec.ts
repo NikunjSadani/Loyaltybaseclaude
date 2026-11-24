@@ -790,7 +790,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({
         id: 'sess_d', clientId, refreshToken: 'rt', revokedAt: null,
         expiresAt: new Date(Date.now() + 60000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId },
       });
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 }); // atomic claim wins (session now revoked)
 
@@ -803,7 +803,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({
         id: 'sess_ok', clientId, refreshToken: 'rt', revokedAt: null,
         expiresAt: new Date(Date.now() + 60000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId },
       });
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.userSession.create.mockResolvedValue({ id: 'sess_new' });
@@ -1086,7 +1086,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({
         id: 'sess_a', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' },
+        user: { id: 'op1', status: 'ACTIVE', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' },
       });
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 }); // claim wins
       mockPrisma.userSession.update.mockResolvedValue({});
@@ -1102,7 +1102,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({
         id: 'sess_n', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
       });
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 }); // claim wins
       mockPrisma.userSession.update.mockResolvedValue({});
@@ -1121,7 +1121,7 @@ describe('AuthService', () => {
     const liveSession = {
       id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
       expiresAt: new Date(Date.now() + 3600_000),
-      user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
+      user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
     };
 
     it('revokes via an ATOMIC updateMany claim keyed on the refreshToken (not a read-then-update by id)', async () => {
@@ -1159,7 +1159,7 @@ describe('AuthService', () => {
         id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt',
         revokedAt: new Date(Date.now() - 1_000), // just revoked by the winning sibling
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
       };
       const successor = { id: 'sess_y', token: 'succ.access', refreshToken: 'succ-refresh', revokedAt: null };
       // 1st findFirst → predecessor (already revoked); 2nd findFirst → the live successor.
@@ -1310,7 +1310,7 @@ describe('AuthService', () => {
         revokedAt: new Date(Date.now() - 60_000), // revoked a minute ago — outside the 5s grace
         createdAt: new Date(Date.now() - 3600_000),
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       // Predecessor read → revoked outside grace; the H4 successor lookup finds no live successor → reuse.
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(staleRevoked).mockResolvedValueOnce(null);
@@ -1323,6 +1323,20 @@ describe('AuthService', () => {
       expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
     });
 
+    it.each(['INACTIVE', 'SUSPENDED', 'PENDING_VERIFICATION'])(
+      'M1: a live session of a %s login (e.g. a vacated position whose revoke failed) → 401, nothing claimed or minted',
+      async (status) => {
+        mockPrisma.userSession.findFirst.mockResolvedValueOnce({
+          id: 'sess_v', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
+          createdAt: new Date(Date.now() - 60_000), expiresAt: new Date(Date.now() + 3600_000),
+          user: { id: 'u1', status, role: 'SALES_SO', clientId: 'deoleo', phone: '__vacant__:E1', name: '(vacant) E1', sessionsInvalidBefore: null },
+        });
+        await expect(service.refreshToken('rt')).rejects.toThrow('Session expired');
+        expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+        expect(mockPrisma.userSession.create).not.toHaveBeenCalled();
+      },
+    );
+
     it('unknown token → 401 (no session row at all)', async () => {
       mockPrisma.userSession.findFirst.mockResolvedValue(null);
       await expect(service.refreshToken('nope')).rejects.toThrow('Session expired');
@@ -1334,7 +1348,7 @@ describe('AuthService', () => {
         id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt',
         revokedAt: new Date(Date.now() - 1_000), // within grace
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
       };
       // Predecessor is within grace, but the successor lookup (revokedAt:null) finds nothing
       // because logout-all revoked the successor → no resurrection → 401.
@@ -1350,7 +1364,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({
         id: 'sess_a', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' },
+        user: { id: 'op1', status: 'ACTIVE', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' },
       });
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.userSession.create.mockResolvedValue({});
@@ -1387,7 +1401,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({
         id: 'pred_1', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
         expiresAt: new Date(Date.now() + 60_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P' },
       });
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.userSession.create.mockResolvedValue({});
@@ -1403,7 +1417,7 @@ describe('AuthService', () => {
       mockPrisma.userSession.findFirst.mockResolvedValue({
         id: 'pred_a', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
         expiresAt: new Date(Date.now() + 60_000),
-        user: { id: 'op1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' },
+        user: { id: 'op1', status: 'ACTIVE', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '98', name: 'Op' },
       });
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 1 });
       mockPrisma.userSession.create.mockResolvedValue({});
@@ -1482,7 +1496,7 @@ describe('AuthService', () => {
       id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
       createdAt: new Date(Date.now() - 60_000), // created a minute ago (before any logout)
       expiresAt: new Date(Date.now() + 3600_000),
-      user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null as Date | null },
+      user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null as Date | null },
     });
 
     beforeEach(() => {
@@ -1570,7 +1584,7 @@ describe('AuthService', () => {
         revokedAt: new Date(Date.now() - 3 * 24 * 3600_000), // rotated 3 days ago
         createdAt: new Date(Date.now() - 4 * 24 * 3600_000),
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       // Its successor is live but was created 3 days ago and has been USED → strict.
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(rotatedLongAgo).mockResolvedValueOnce({
@@ -1601,7 +1615,7 @@ describe('AuthService', () => {
         revokedAt: new Date(Date.now() - 1_000), // 1s ago — inside the 5s grace
         createdAt: new Date(Date.now() - 3600_000),
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       const successor = { id: 'sess_y', token: 'succ.access', refreshToken: 'succ-refresh', revokedAt: null };
       mockPrisma.userSession.findFirst
@@ -1625,7 +1639,7 @@ describe('AuthService', () => {
         revokedAt: new Date(Date.now() - 7_000), // 7s ago: inside the OLD 10s grace, OUTSIDE the new 5s
         createdAt: new Date(Date.now() - 60_000),
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       // Predecessor revoked, NO live successor (already rotated away) → genuine theft signal.
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(staleRevoked).mockResolvedValueOnce(null);
@@ -1661,7 +1675,7 @@ describe('AuthService', () => {
         id: 'sess_e', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
         createdAt: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000),
         expiresAt: new Date(Date.now() - 1_000), // expired
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       // Predecessor read → expired; successor lookup (a login session has no rotation) → none.
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(expired);
@@ -1690,7 +1704,7 @@ describe('AuthService', () => {
         revokedAt: new Date(Date.now() - 7_000),
         createdAt: new Date(Date.now() - 60_000),
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(staleRevoked).mockResolvedValueOnce(null);
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
@@ -1718,7 +1732,7 @@ describe('AuthService', () => {
         revokedAt: new Date(Date.now() - 7_000),
         createdAt: new Date(Date.now() - 60_000),
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(staleRevoked).mockResolvedValueOnce(null);
       mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
@@ -1735,7 +1749,7 @@ describe('AuthService', () => {
         revokedAt: new Date(Date.now() - 7_000),
         createdAt: new Date(Date.now() - 3600_000),
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       mockPrisma.userSession.findFirst.mockResolvedValueOnce(revokedPredecessor).mockResolvedValueOnce({
         id: 'sess_y', token: 'succ.access', refreshToken: 'succ-refresh', revokedAt: null,
@@ -1757,7 +1771,7 @@ describe('AuthService', () => {
       revokedAt: new Date(Date.now() - rotatedAgoMs),
       createdAt: new Date(Date.now() - rotatedAgoMs - HOUR),
       expiresAt: new Date(Date.now() + 30 * 24 * HOUR),
-      user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+      user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
     });
     const sessionB = (over: Record<string, unknown> = {}) => ({
       id: 'sess_b', clientId: 'deoleo', userId: 'u1', token: 'b.access', refreshToken: 'rt-b',
@@ -2036,7 +2050,7 @@ describe('AuthService', () => {
     const rotated30sAgoLive = () => ({
       id: 'sess_x', clientId: 'deoleo', refreshToken: 'rt', revokedAt: null,
       createdAt: new Date(Date.now() - HOUR), expiresAt: new Date(Date.now() + HOUR),
-      user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+      user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
     });
 
     it('in-grace loser (revoked < 5s ago, no live successor) writes NO SECURITY_EVENT row', async () => {
@@ -2045,7 +2059,7 @@ describe('AuthService', () => {
         revokedAt: new Date(Date.now() - 1_000), // 1s ago — INSIDE the 5s grace
         createdAt: new Date(Date.now() - 60_000),
         expiresAt: new Date(Date.now() + 3600_000),
-        user: { id: 'u1', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
+        user: { id: 'u1', status: 'ACTIVE', role: 'WHOLESALER', clientId: 'deoleo', phone: '99', name: 'P', sessionsInvalidBefore: null },
       };
       mockPrisma.userSession.findFirst
         .mockResolvedValueOnce(recentlyRevoked)

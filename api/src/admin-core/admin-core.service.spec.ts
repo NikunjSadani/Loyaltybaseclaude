@@ -40,7 +40,7 @@ const mockPrisma = {
   userSession: { updateMany: jest.fn() },
   salesUser: { findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn() },
   salesUserAssignment: { count: jest.fn() },
-  salesHierarchyLevel: { findFirst: jest.fn() },
+  salesHierarchyLevel: { findFirst: jest.fn(), findMany: jest.fn() },
   outlet: { findMany: jest.fn(), count: jest.fn() },
   kycSubmission: { count: jest.fn() },
   kycStatusHistory: { findMany: jest.fn() },
@@ -189,6 +189,25 @@ describe('AdminCoreService', () => {
 
     it('rejects a blank code', async () => {
       await expect(service.getEmployeeByCode(clientAdmin, '   ')).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('getEmployeeOptions (Reports-to candidates)', () => {
+    it('L2: includes VACANT positions, labelled "Vacant (code)" and flagged', async () => {
+      mockPrisma.salesHierarchyLevel.findMany.mockResolvedValue([]);
+      mockPrisma.salesUser.findMany.mockResolvedValue([
+        { id: 's1', employeeCode: 'Pune001', hierarchyLevelId: 'l2', user: { name: 'Boss', phone: '9800000001', status: 'ACTIVE' } },
+        { id: 's2', employeeCode: 'Pune002', hierarchyLevelId: 'l2', user: { name: '(vacant) Pune002', phone: '__vacant__:Pune002', status: 'INACTIVE' } },
+      ]);
+      const res = await service.getEmployeeOptions(clientAdmin);
+      expect(mockPrisma.salesUser.findMany.mock.calls.at(-1)[0].where).toEqual({
+        clientId: 'deoleo', deletedAt: null,
+        OR: [{ isActive: true }, { user: { phone: { startsWith: '__vacant__:' }, status: { not: 'ACTIVE' } } }],
+      });
+      expect(res.managers).toEqual([
+        { id: 's1', name: 'Boss', employeeCode: 'Pune001', hierarchyLevelId: 'l2' },
+        { id: 's2', name: 'Vacant (Pune002)', employeeCode: 'Pune002', hierarchyLevelId: 'l2', vacant: true },
+      ]);
     });
   });
 
@@ -718,6 +737,16 @@ describe('AdminCoreService', () => {
         status: 'ACTIVE',
         id: { not: 'u1' },
       });
+    });
+
+    it('L1: reactivating a vacant position\'s (synthetic-phone) login is refused with a pointer to "Fill vacant position"', async () => {
+      mockPrisma.user.findFirst.mockResolvedValueOnce({
+        id: 'u1', phone: '__vacant__:Pune101', role: 'SALES_SO', status: 'INACTIVE',
+      });
+      const err = await service.updateUser(clientAdmin, 'u1', { status: 'ACTIVE' as never }).catch((e) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.message).toMatch(/vacant position and cannot be reactivated.*Fill vacant position.*Employee Hierarchy/);
+      expect(mockPrisma.user.update).not.toHaveBeenCalled();
     });
 
     it('REACT-1: reactivation is BLOCKED when the phone is held by another ACTIVE user', async () => {
