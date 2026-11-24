@@ -1589,7 +1589,7 @@ const HUBBLE_REASON_LABEL: Record<string, string> = {
   // Set by the automatic re-check when an order is still not delivered an hour after it reached Hubble.
   HUBBLE_STILL_OPEN_STALE: 'Still processing at Hubble',
   // The auto re-check found the order no longer eligible for Hubble (tenant flag off / product gone).
-  HUBBLE_NOT_ELIGIBLE_NOW: 'Hubble can’t be checked — fulfil manually or refund',
+  HUBBLE_NOT_ELIGIBLE_NOW: 'Hubble can’t be checked — fulfil manually',
 };
 
 /** "just now" / "4 min ago" / "3 h ago" / "2 d ago" — for the "last checked" hint. */

@@ -169,6 +169,12 @@ describe('RewardsService.sweepHubbleOrders', () => {
     // Audit E: manual overrides after a Hubble hand-off are kept (check-only), until a double issue is seen.
     expect(sql).toContain(`= 'MANUAL_OVERRIDE'`);
     expect(sql).toContain(`'hubbleDoubleIssueSeen'`);
+    // Follow-up 3: the 7-day hand-off window is applied IN SQL (no out-of-window rows filling the LIMIT).
+    expect(sql).toContain(`("metadata"->>'hubblePlaceAttemptAt') > `);
+    const vals = tx.$queryRaw.mock.calls[1].slice(1) as unknown[];
+    expect(vals).toEqual(expect.arrayContaining([new Date(NOW - 7 * 24 * 60 * MIN).toISOString()]));
+    // A manual code that matched Hubble's own voucher leaves the check-only band.
+    expect(sql).toContain(`'hubbleManualMatchesHubble'`);
     expect(sql).toContain(`ORDER BY ("metadata"->>'hubbleLastSweepAt') ASC NULLS FIRST`);
   });
 
@@ -280,6 +286,13 @@ describe('RewardsService.sweepHubbleOrders', () => {
     expect(rec).not.toHaveBeenCalled();
     expect(flag).toHaveBeenCalledWith('m', 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT');
     expect(res.outcomes).toEqual({ DOUBLE_ISSUE_FLAGGED: 1 });
+    // Same code as Hubble's own voucher (ops copied it) → ONE voucher: no flag, recorded "matches Hubble".
+    flag.mockClear();
+    mockHubble.getOrderByReference.mockResolvedValueOnce({ status: 'SUCCESS', id: 'h1', vouchers: [{ cardNumber: 'manual-1' }] });
+    const res2 = await service.sweepHubbleOrders(NOW);
+    expect(flag).not.toHaveBeenCalled();
+    expect(res2.outcomes).toEqual({ MATCHES_HUBBLE: 1 });
+    expect(mockPrisma.$executeRaw.mock.calls.some((c) => (c[0] as unknown as string[]).join('?').includes('hubbleManualMatchesHubble'))).toBe(true);
     // Hubble still processing → nothing flagged, nothing changed.
     flag.mockClear();
     candidates = [{ ...cand('m', 30 * MIN, undefined, { hubbleStatus: 'MANUAL_OVERRIDE' }), checkOnly: true } as never];

@@ -26,7 +26,7 @@ import {
   isHubbleHandedOff,
   HUBBLE_FORWARD_BLOCK_MESSAGE,
 } from '../rewards/voucher-write-guard';
-import { notifyVoucherIssued, recordVoucherIssuedAudit } from '../rewards/voucher-issuance';
+import { notifyVoucherIssued, recordVoucherIssuedAudit, recordVoucherNotifyResult } from '../rewards/voucher-issuance';
 import {
   parseVendorUploadBuffer,
   buildVendorUploadTemplateBuffer,
@@ -728,12 +728,14 @@ export class VendorPortalService {
   }
 
   /** Hubble-eligibility (async half of the voucher guard) — only when a voucher field is sent. */
-  private notifyIssued(orderId: string, clientId: string): Promise<void> {
-    return notifyVoucherIssued(
+  private async notifyIssued(orderId: string, clientId: string): Promise<void> {
+    const r = await notifyVoucherIssued(
       { prisma: this.prisma, notifications: this.notifications, logger: this.logger },
       orderId,
       clientId,
     );
+    // A failed send is never silent: recorded for the Daily Ops Digest (same as the Gifsy / Hubble paths).
+    await recordVoucherNotifyResult({ prisma: this.prisma, logger: this.logger }, orderId, r);
   }
 
   /**

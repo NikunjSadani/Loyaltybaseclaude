@@ -63,6 +63,7 @@ import {
   maskVoucherCodeForAudit,
   programLabelFor,
   recordVoucherIssuedAudit,
+  recordVoucherNotifyResult,
 } from './voucher-issuance';
 import { derivePointsCost } from './derive-points-cost.helper';
 import { computeFrozenValuePaise } from './gift-value.helper';
@@ -225,7 +226,7 @@ export const HUBBLE_PROCESSING_STALE_REASON = 'HUBBLE_STILL_OPEN_STALE';
 /** Flag when the re-check finds the order no longer eligible for Hubble (tenant flag off / product gone). */
 export const HUBBLE_NOT_ELIGIBLE_NOW_REASON = 'HUBBLE_NOT_ELIGIBLE_NOW';
 /** Per-pass time budget of the sweep (Cloud Scheduler calls it every 2 min; the request must end in time). */
-export const HUBBLE_SWEEP_BUDGET_MS = 90_000;
+export const HUBBLE_SWEEP_BUDGET_MS = 60_000;
 /** Outcomes after which the order is resolved — never stale-flagged in the same pass (audit D). */
 const HUBBLE_TERMINAL_OUTCOMES: ReadonlySet<string> = new Set(['DELIVERED', 'FAILED_REFUNDED', 'REFUNDED_NO_HUBBLE_ORDER']);
 /** pg advisory-lock key for the sweep's claim phase (one instance claims at a time). */
@@ -486,6 +487,23 @@ export function orderSearchWhere(
     }
   }
   return { OR: or };
+}
+
+/**
+ * Is a stored code (+ PIN) the SAME voucher as Hubble's returned one? Codes compared through the reuse hash
+ * (hashVoucherCode — same normalisation as duplicate detection); PINs only when BOTH sides carry one.
+ */
+export function sameVoucherCredential(
+  storedCode: string | null | undefined,
+  storedPin: string | null | undefined,
+  hubbleCode: string | null | undefined,
+  hubblePin: string | null | undefined,
+): boolean {
+  if (!hasIssuedVoucher(storedCode ?? null) || !hasIssuedVoucher(hubbleCode ?? null)) return false;
+  if (hashVoucherCode(storedCode as string) !== hashVoucherCode(hubbleCode as string)) return false;
+  const sp = (storedPin ?? '').trim();
+  const hp = (hubblePin ?? '').trim();
+  return !sp || !hp || sp === hp;
 }
 
 /** { outletCode, phone } for the operator/admin order views (null when not recorded). */
@@ -3524,11 +3542,15 @@ export class RewardsService {
    * actionable set, narrowable by `?status=` and `?mode=`.
    */
   async getFulfilmentTemplate(user: JwtPayload, q: FulfilmentTemplateQueryDto): Promise<Buffer> {
-    // Audit 7: the SAME tenant scope as the Redemption orders list (listOrders) — partner.clientId = the
-    // caller's tenant — so the sheet never holds orders the list doesn't show (an un-assumed owner used
-    // to get every tenant's orders here). Fail closed on a blank tenant.
-    if (!user.clientId) throw new ForbiddenException('No tenant context for this download.');
-    const where: Prisma.RedemptionOrderWhereInput = { partner: { clientId: user.clientId } };
+    // Tenant scope by partner.clientId (§12) via tenantScope: an ASSUMED operator / tenant caller gets its
+    // tenant; an UN-assumed platform OWNER gets ALL tenants — INTENTIONAL (Gifsy ops fulfils every tenant's
+    // orders from one sheet), and it MUST match uploadFulfilment, which resolves order numbers with the same
+    // tenantScope: a sheet narrower than the upload (or wider) would make download and upload disagree.
+    // (The console list is tenant-scoped by the JWT clientId; that difference is deliberate.)
+    const scope = tenantScope(user);
+    const where: Prisma.RedemptionOrderWhereInput = {
+      ...(scope ? { partner: { clientId: scope } } : {}),
+    };
     if (q.mode) where.redemptionMode = q.mode;
     // The sheet follows the console's active search too (operator view → outlet / phone included).
     const search = orderSearchWhere(q.q, true);
@@ -4256,12 +4278,15 @@ export class RewardsService {
       this.logger.error(`[voucher] order ${orderId}: could not stamp the once-only notification marker — sending anyway: ${e}`);
     }
     // Shared with the vendor portal (voucher-issuance.ts) so every issuance path notifies alike.
-    await notifyVoucherIssuedShared(
+    const r = await notifyVoucherIssuedShared(
       { prisma: this.prisma, notifications: this.notifications, logger: this.logger },
       orderId,
       clientId,
     );
+    await recordVoucherNotifyResult({ prisma: this.prisma, logger: this.logger }, orderId, r);
   }
+
+
 
   /** The outcome of an auto-issuance attempt. */
   private readonly HUBBLE_OUTCOME = {
@@ -4678,8 +4703,12 @@ export class RewardsService {
   /** Sweep step 1 — see sweepHubbleOrders. Returns null when another run holds the lock. */
   private async claimHubbleSweepBatch(nowMs: number): Promise<Array<{ id: string; checkOnly: boolean }> | null> {
     const nowIso = new Date(nowMs).toISOString();
-    // Created ≥ the oldest hand-off still in the window (the place attempt follows creation by seconds).
-    const createdAfter = new Date(nowMs - HUBBLE_SWEEP_MAX_AGE_MS - 24 * 60 * 60_000);
+    // The REAL 7-day hand-off window, in SQL (audit 3): out-of-window orders must never fill the LIMIT and
+    // starve in-window ones. Hand-off = the place attempt (an ISO-8601 UTC string — compares as text in
+    // time order) else creation; creation gets a 1 h margin (the OTP confirm follows creation).
+    const windowStart = new Date(nowMs - HUBBLE_SWEEP_MAX_AGE_MS);
+    const windowStartIso = windowStart.toISOString();
+    const createdAfter = new Date(windowStart.getTime() - 60 * 60_000);
     const createdBefore = new Date(nowMs - HUBBLE_SWEEP_MIN_AGE_MS);
     return this.prisma.$transaction(async (tx) => {
       const lock = await tx.$queryRaw<Array<{ locked: boolean }>>`SELECT pg_try_advisory_xact_lock(${HUBBLE_SWEEP_LOCK_KEY}::bigint) AS "locked"`;
@@ -4693,6 +4722,7 @@ export class RewardsService {
         FROM "redemption_orders"
         WHERE "createdAt" > ${createdAfter} AND "createdAt" < ${createdBefore}
           AND jsonb_typeof("metadata") = 'object'
+          AND (("metadata"->>'hubblePlaceAttemptAt') IS NULL OR ("metadata"->>'hubblePlaceAttemptAt') > ${windowStartIso}::text)
           AND (("metadata"->>'hubblePlaceAttemptAt') IS NOT NULL
                OR lower(btrim(coalesce("voucherProvider", ''))) = 'hubble'
                OR ("metadata"->>'hubbleOrderId') IS NOT NULL)
@@ -4703,7 +4733,8 @@ export class RewardsService {
             OR
             ("status" IN ('CONFIRMED', 'PROCESSING', 'DISPATCHED', 'DELIVERED')
               AND coalesce("metadata"->>'hubbleStatus', '') = 'MANUAL_OVERRIDE'
-              AND coalesce("metadata"->>'hubbleDoubleIssueSeen', '') <> 'true')
+              AND coalesce("metadata"->>'hubbleDoubleIssueSeen', '') <> 'true'
+              AND coalesce("metadata"->>'hubbleManualMatchesHubble', '') <> 'true')
           )
         ORDER BY ("metadata"->>'hubbleLastSweepAt') ASC NULLS FIRST, "createdAt" ASC
         LIMIT 500`;
@@ -4736,7 +4767,7 @@ export class RewardsService {
   private async checkManualOverrideAtHubble(orderId: string): Promise<string> {
     const o = await this.prisma.redemptionOrder.findFirst({
       where: { id: orderId },
-      select: { id: true, orderNumber: true, metadata: true },
+      select: { id: true, orderNumber: true, metadata: true, voucherCode: true, voucherPin: true, reward: { select: { metadata: true } } },
     });
     if (!o || this.metaOf(o).hubbleStatus !== 'MANUAL_OVERRIDE') return 'SKIPPED';
     let body: HubbleOrderResult | null;
@@ -4748,13 +4779,30 @@ export class RewardsService {
     }
     const status = (body?.status ?? '').toUpperCase();
     if (status === 'SUCCESS') {
+      // Ops copied Hubble's own code into "Fulfil manually" → ONE voucher: record it (stops re-checks), no alarm.
+      const hub = hubbleVoucherCredentials((body?.vouchers ?? [])[0], this.extractHubbleProductId(o.reward?.metadata));
+      if (hub.code && sameVoucherCredential(o.voucherCode, o.voucherPin ?? null, hub.code, hub.pin ?? null)) {
+        await this.markManualMatchesHubble(o.id);
+        return 'MATCHES_HUBBLE';
+      }
       this.logger.error(
-        `[hubble] order ${o.orderNumber}: fulfilled by hand, but Hubble now reports SUCCESS for its own order — possible double issuance; flagged for ops`,
+        `[hubble] order ${o.orderNumber}: fulfilled by hand with a DIFFERENT code, and Hubble now reports SUCCESS for its own order — possible double issuance; flagged for ops`,
       );
       await this.markHubblePendingReconcile(o.id, 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT');
       return 'DOUBLE_ISSUE_FLAGGED';
     }
     return body === null ? 'NO_HUBBLE_ORDER' : status || 'UNKNOWN';
+  }
+
+  /** The manual code IS Hubble's own voucher: recorded once (hubbleManualMatchesHubble) — leaves the check-only re-check. */
+  private async markManualMatchesHubble(orderId: string): Promise<void> {
+    const at = new Date().toISOString();
+    await this.prisma.$executeRaw`
+      UPDATE "redemption_orders"
+      SET "metadata" = (CASE WHEN jsonb_typeof("metadata") = 'object' THEN "metadata" ELSE '{}'::jsonb END)
+                       || jsonb_build_object('hubbleManualMatchesHubble', true, 'hubbleManualMatchesHubbleAt', ${at}::text)
+      WHERE "id" = ${orderId}`.catch((e: unknown) => this.logger.warn(`[hubble] could not record "matches Hubble" on ${orderId}: ${e}`));
+    this.logger.log(`[hubble] order ${orderId}: the manual code matches Hubble's own voucher — one voucher, no double issuance`);
   }
 
   /** Flag an order that is still open + code-less with `reason` (a no-op if any flag is open). true = flagged now. */
@@ -5055,7 +5103,7 @@ export class RewardsService {
       // still-open order — Hubble issued a 2nd voucher. Never overwrite; flag it for ops loudly.
       const now2 = await this.prisma.redemptionOrder.findFirst({
         where: { id: order.id },
-        select: { status: true, voucherCode: true, voucherProvider: true, metadata: true },
+        select: { status: true, voucherCode: true, voucherPin: true, voucherProvider: true, metadata: true },
       });
       // Lost to a REFUND / terminal move (ops no-order refund, a Hubble FAILED, a cancel…) and now
       // Hubble reports SUCCESS: never applied — re-check Hubble and flag HUBBLE_ISSUED_AFTER_REFUND.
@@ -5085,6 +5133,12 @@ export class RewardsService {
         hasIssuedVoucher(now2.voucherCode) &&
         !isHubbleProvider(now2.voucherProvider)
       ) {
+        // Ops are told to copy Hubble's own code into "Fulfil manually": the SAME code (and PIN, when both
+        // carry one) is ONE voucher — record it, no alarm.
+        if (sameVoucherCredential(now2.voucherCode, now2.voucherPin ?? null, voucherCode, voucherPin ?? null)) {
+          await this.markManualMatchesHubble(order.id);
+          return this.HUBBLE_OUTCOME.DELIVERED;
+        }
         this.logger.error(
           `[hubble] order ${order.orderNumber}: Hubble SUCCESS on an order already delivered with a non-Hubble code — possible double issuance; flagged for ops`,
         );

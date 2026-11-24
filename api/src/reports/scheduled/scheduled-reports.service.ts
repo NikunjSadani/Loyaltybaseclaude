@@ -749,7 +749,21 @@ export class ScheduledReportsService {
     const needsReconcile = await this.prisma.redemptionOrder.count({
       where: { partner: { clientId }, metadata: { path: ['hubbleNeedsReconcile'], equals: true } },
     });
-    return { issued, failed, stuckProcessing, needsReconcile };
+    // No silent pass-through: orders whose code message to the member failed (rewards.service
+    // recordVoucherNotifyResult) — an ISO timestamp, so "starts with 20" = set; cleared on a later send.
+    const notifyFailedWhere = { partner: { clientId }, metadata: { path: ['voucherNotifyFailedAt'], string_starts_with: '20' } };
+    const voucherNotifyFailed = await this.prisma.redemptionOrder.count({ where: notifyFailedWhere });
+    const voucherNotifyFailedOrders = voucherNotifyFailed
+      ? (
+          await this.prisma.redemptionOrder.findMany({
+            where: notifyFailedWhere,
+            select: { orderNumber: true },
+            orderBy: { createdAt: 'desc' },
+            take: 10,
+          })
+        ).map((o) => o.orderNumber)
+      : [];
+    return { issued, failed, stuckProcessing, needsReconcile, voucherNotifyFailed, voucherNotifyFailedOrders };
   }
 
   /** Owner 2026-11-18: 194R retailers with TDS taken in excess this FY (flag only — no refund). */

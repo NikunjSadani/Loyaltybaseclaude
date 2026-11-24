@@ -232,6 +232,10 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
     const v = t.vouchers.data;
     if (v.stuckProcessing > 0) push(`Hubble: ${plural(v.stuckProcessing, 'voucher', 'vouchers')} stuck in processing > 30 min`, v.stuckProcessing);
     if (v.needsReconcile > 0) push(`Hubble: ${plural(v.needsReconcile, 'order needs', 'orders need')} reconcile`, v.needsReconcile);
+    if ((v.voucherNotifyFailed ?? 0) > 0) {
+      const n = v.voucherNotifyFailed ?? 0;
+      push(`Vouchers: ${plural(n, 'code message', 'code messages')} to members not sent`, n);
+    }
   }
 
   failed('Payouts', t.payouts);
@@ -739,7 +743,7 @@ function tenantSections(t: TenantDigest): string {
     renderSection(
       t.hubbleEnabled === false ? 'Vouchers (Hubble) — integration switched off' : 'Vouchers (Hubble)',
       t.vouchers,
-      (v) => v.issued === 0 && v.failed === 0 && v.stuckProcessing === 0 && v.needsReconcile === 0,
+      (v) => v.issued === 0 && v.failed === 0 && v.stuckProcessing === 0 && v.needsReconcile === 0 && !(v.voucherNotifyFailed ?? 0),
       (v) =>
         metricLine('In window', [
           ['issued', intIN(v.issued)],
@@ -748,7 +752,14 @@ function tenantSections(t: TenantDigest): string {
         metricLine('Right now', [
           ['stuck > 30 min', intIN(v.stuckProcessing), accentIf(v.stuckProcessing, 'red')],
           ['needs reconcile', intIN(v.needsReconcile), accentIf(v.needsReconcile, 'red')],
-        ]),
+          // Shown only when some exist (keeps a quiet tenant's section unchanged).
+          ...((v.voucherNotifyFailed ?? 0) > 0
+            ? ([['voucher message not sent', intIN(v.voucherNotifyFailed ?? 0), 'red']] as Array<[string, string, 'red']>)
+            : []),
+        ]) +
+        ((v.voucherNotifyFailedOrders ?? []).length
+          ? metricLine('Message not sent', [['orders', (v.voucherNotifyFailedOrders ?? []).join(', ')]])
+          : ''),
     ),
     renderSection(
       'Payouts',

@@ -80,13 +80,13 @@ describe('GIFHR — Retry with Hubble visibility', () => {
     expect(await screen.findByText(/Fulfil this Hubble order manually/)).toBeInTheDocument();
   });
 
-  it('audit J: HUBBLE_NOT_ELIGIBLE_NOW reads "Hubble can’t be checked — fulfil manually or refund"', async () => {
+  it('audit J: HUBBLE_NOT_ELIGIBLE_NOW reads "Hubble can’t be checked — fulfil manually" (no refund promise)', async () => {
     ORDERS.push({ ...base, id: 'n', orderNumber: 'NOTELIG', status: 'CONFIRMED', voucherProvider: null,
       hubbleHanded: true, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_ELIGIBLE_NOW' } as never);
     try {
       installFetch();
       await open();
-      expect(within(row('NOTELIG')).getByText(/Hubble can’t be checked — fulfil manually or refund/)).toBeInTheDocument();
+      expect(within(row('NOTELIG')).getByText(/Hubble can’t be checked — fulfil manually$/)).toBeInTheDocument();
     } finally {
       ORDERS.pop();
     }
