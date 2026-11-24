@@ -103,7 +103,9 @@ interface OrderItem {
   id: string;
   orderNumber?: string;
   reward?: { id: string; name: string; redemptionMode?: PayoutMode | null } | null;
-  partner?: { id: string; businessName?: string } | null;
+  /** outletCode / phone: operator + tenant-admin view only (the partner's primary outlet code
+   *  and registered mobile); null when not recorded. */
+  partner?: { id: string; businessName?: string; outletCode?: string | null; phone?: string | null } | null;
   status: string;
   redemptionMode?: PayoutMode | string | null;
   totalPointsCost: number;
@@ -1829,7 +1831,15 @@ function OrderRow({
           <p className="font-mono text-xs text-gray-600">{order.orderNumber ?? order.id.slice(-8)}</p>
         </td>
         <td className="px-4 py-3 text-gray-900">{order.reward?.name ?? '—'}</td>
-        <td className="px-4 py-3 text-xs text-gray-600">{order.partner?.businessName ?? '—'}</td>
+        <td className="px-4 py-3 text-xs text-gray-600">
+          <p>{order.partner?.businessName ?? '—'}</p>
+          <p className="mt-0.5 font-mono text-[11px] text-gray-400" data-testid="order-outlet-id">
+            <span className="sr-only">Outlet ID: </span>{order.partner?.outletCode || '—'}
+          </p>
+        </td>
+        <td className="px-4 py-3 text-xs text-gray-600 font-mono whitespace-nowrap" data-testid="order-partner-phone">
+          {order.partner?.phone || '—'}
+        </td>
         <td className="px-4 py-3 text-xs text-gray-600">{redemptionModeLabel(order.redemptionMode)}</td>
         <td className="px-4 py-3 font-semibold text-gray-900">{fmtPts(order.totalPointsCost)}</td>
         <td className="px-4 py-3">
@@ -1946,7 +1956,7 @@ function OrderRow({
       </tr>
       {canManage && canCancelVoucher && postRefundFlag && ackOpen && (
         <tr>
-          <td colSpan={7} className="px-4 py-4 bg-red-50/50">
+          <td colSpan={canManage ? 8 : 7} className="px-4 py-4 bg-red-50/50">
             <div className="space-y-2 max-w-2xl">
               <p className="text-xs text-gray-700">
                 Retry can&apos;t act on this order any more. Check the order in Hubble&apos;s portal, then record what you
@@ -1990,7 +2000,7 @@ function OrderRow({
       )}
       {canManage && canCancelVoucher && needsReconcile && !postRefundFlag && manualOpen && (
         <tr>
-          <td colSpan={7} className="px-4 py-4 bg-amber-50/50">
+          <td colSpan={canManage ? 8 : 7} className="px-4 py-4 bg-amber-50/50">
             <div className="space-y-2 max-w-2xl">
               <p className="text-xs text-gray-700">
                 Fulfil this Hubble order manually: issue a voucher code yourself. This takes the order over from Hubble
@@ -2063,7 +2073,7 @@ function OrderRow({
       )}
       {canManage && canCancelVoucher && cancelOpen && (
         <tr>
-          <td colSpan={7} className="px-4 py-4 bg-red-50/40">
+          <td colSpan={canManage ? 8 : 7} className="px-4 py-4 bg-red-50/40">
             <div className="space-y-2 max-w-2xl">
               <p className="text-xs text-gray-700">
                 Record that voucher <span className="font-mono">{order.voucherCode}</span> was cancelled with the vendor.
@@ -2104,7 +2114,7 @@ function OrderRow({
       )}
       {canManage && open && (
         <tr>
-          <td colSpan={7} className="px-4 py-4 bg-gray-50/70">
+          <td colSpan={canManage ? 8 : 7} className="px-4 py-4 bg-gray-50/70">
             <div className="space-y-3 max-w-2xl">
               <div className="flex flex-wrap items-end gap-3">
                 <div className="space-y-1">
@@ -2727,7 +2737,8 @@ function FulfilmentQueue({
                 <tr className="border-b border-gray-100 text-left text-xs text-gray-400">
                   <th className="px-4 py-3 font-medium">Order</th>
                   <th className="px-4 py-3 font-medium">Reward</th>
-                  <th className="px-4 py-3 font-medium">Partner</th>
+                  <th className="px-4 py-3 font-medium">Partner · Outlet ID</th>
+                  <th className="px-4 py-3 font-medium">Phone</th>
                   <th className="px-4 py-3 font-medium">Mode</th>
                   <th className="px-4 py-3 font-medium">Points</th>
                   <th className="px-4 py-3 font-medium">Status</th>
