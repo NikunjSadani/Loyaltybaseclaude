@@ -144,8 +144,26 @@ export function resolveReportingLinks(
 
 // ─── Pure: synthetic placeholder phone ────────────────────────────────────────
 
+export const VACANT_PHONE_PREFIX = '__vacant__:';
+
 export function syntheticPlaceholderPhone(employeeCode: string): string {
-  return `__vacant__:${employeeCode}`;
+  return `${VACANT_PHONE_PREFIX}${employeeCode}`;
+}
+
+/** The display name a vacant placeholder's login row carries (same as the bulk upload writes). */
+export function vacantPlaceholderName(employeeCode: string): string {
+  return `(vacant) ${employeeCode}`;
+}
+
+/**
+ * The ONE notion of a "vacant position": the login row carries the synthetic placeholder phone
+ * and is not ACTIVE. This is the state the bulk upload writes for a blank name + blank mobile row,
+ * and the state the single-record edit writes when the admin clears both name and phone.
+ */
+export function isVacantPlaceholderUser(
+  user: { phone?: string | null; status?: string | null } | null | undefined,
+): boolean {
+  return !!user && typeof user.phone === 'string' && user.phone.startsWith(VACANT_PHONE_PREFIX) && user.status !== 'ACTIVE';
 }
 
 // ─── Wired: persist into relational tables ────────────────────────────────────
@@ -315,7 +333,7 @@ export async function persistHierarchy(
     if (isPlaceholder) placeholders++;
 
     const phone = realMobile !== '' ? realMobile : syntheticPlaceholderPhone(emp.id);
-    const name = emp.name ?? `(vacant) ${emp.id}`;
+    const name = emp.name ?? vacantPlaceholderName(emp.id);
     const userRole = mapRoleCodeToUserRole(emp.roleCode);
     const userStatus = isPlaceholder ? 'INACTIVE' : 'ACTIVE';
 

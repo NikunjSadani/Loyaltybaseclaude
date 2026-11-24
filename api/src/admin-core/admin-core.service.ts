@@ -72,9 +72,20 @@ import { HierarchyConfigDto, TaskConfigDto } from './dto/config.dto';
 import {
   DEOLEO_HIERARCHY,
   HierarchyEmployee,
+  isVacantPlaceholderUser,
   mapRoleCodeToUserRole,
   persistHierarchy,
+  syntheticPlaceholderPhone,
+  vacantPlaceholderName,
+  VACANT_PHONE_PREFIX,
 } from './hierarchy-persistence';
+
+/** 400 when the admin clears only ONE of name / phone on an employee edit. */
+export const VACATE_NEEDS_BOTH_MSG =
+  'To mark this position vacant, clear both the name and the phone. Otherwise enter a 10-digit phone.';
+/** 400 when a VACANT position is being filled without both a name and a phone. */
+export const FILL_VACANT_NEEDS_BOTH_MSG =
+  "To fill this vacant position, enter both the new person's name and a 10-digit phone.";
 import { descendantSalesUserIds } from '../sales/sales-hierarchy-access.helper';
 import { UpdateEmployeeDto } from './dto/sales-users.dto';
 import {
@@ -850,10 +861,33 @@ export class AdminCoreService {
     // must never mutate a platform-operator login through this surface (Finding A family).
     this.assertCanManageTarget(caller, target);
 
+    // ── Vacate / fill a position (owner rule 2026-11-24) ──────────────────────
+    // Clearing BOTH name and phone marks the position VACANT (the employee left) — the exact
+    // end state the bulk upload writes for a blank-name + blank-mobile row (persistHierarchy):
+    // User → synthetic '__vacant__:<code>' phone + '(vacant) <code>' name + INACTIVE (frees the
+    // real phone: only an ACTIVE row reserves (clientId, phone)); SalesUser → isActive:false.
+    // Employee code, level, reporting line and outlet assignments are untouched, and sessions
+    // are revoked after the commit (K3). Clearing only ONE of the two is ambiguous → 400.
+    // A vacant position is FILLED by entering both a new name and a real phone (→ ACTIVE again).
+    const nameBlank = typeof dto.name === 'string' && dto.name.trim() === '';
+    const phoneBlank = typeof dto.phone === 'string' && dto.phone.trim() === '';
+    const wasVacant = isVacantPlaceholderUser(target);
+    let vacating = false;
+    let filling = false;
+    if (nameBlank || phoneBlank) {
+      if (!(nameBlank && phoneBlank)) throw new BadRequestException(VACATE_NEEDS_BOTH_MSG);
+      vacating = !wasVacant; // already vacant → name/phone stay as they are (idempotent)
+    } else if (wasVacant && (dto.name !== undefined || dto.phone !== undefined)) {
+      if (dto.name === undefined || dto.phone === undefined) {
+        throw new BadRequestException(FILL_VACANT_NEEDS_BOTH_MSG);
+      }
+      filling = true;
+    }
+
     // ── Phone uniqueness (ACTIVE-scoped) — mirror updateUser ──────────────────
     // Only an ACTIVE user reserves a phone (partial index users_clientId_phone_active_key),
     // so collide only with an ACTIVE holder other than this same User row.
-    const phoneChanged = Boolean(dto.phone && dto.phone !== target.phone);
+    const phoneChanged = !phoneBlank && Boolean(dto.phone && dto.phone !== target.phone);
     if (phoneChanged) {
       const clash = await this.prisma.user.findFirst({
         where: { phone: dto.phone, clientId, status: 'ACTIVE', id: { not: target.id } },
@@ -944,14 +978,26 @@ export class AdminCoreService {
 
     // ── Build the two allow-listed update payloads ───────────────────────────
     const userData: Prisma.UserUpdateInput = { updatedAt: new Date() };
-    if (dto.name !== undefined) userData.name = dto.name;
+    if (dto.name !== undefined && !nameBlank) userData.name = dto.name.trim();
     if (dto.email !== undefined) userData.email = dto.email;
-    if (dto.phone !== undefined) userData.phone = dto.phone;
+    if (dto.phone !== undefined && !phoneBlank) userData.phone = dto.phone;
     if (levelChanged && newUserRole !== undefined) userData.role = newUserRole;
 
     const salesData: Prisma.SalesUserUncheckedUpdateInput = {};
     if (levelChanged) salesData.hierarchyLevelId = dto.hierarchyLevelId;
     if (reportingProvided) salesData.reportingToId = newReportingToId;
+
+    if (vacating) {
+      // Same helpers + same values the bulk upload writes for a vacant placeholder.
+      userData.name = vacantPlaceholderName(salesUser.employeeCode);
+      userData.phone = syntheticPlaceholderPhone(salesUser.employeeCode);
+      userData.status = 'INACTIVE';
+      salesData.isActive = false;
+    } else if (filling) {
+      // A new person takes the vacant position — the login and the position go live again.
+      userData.status = 'ACTIVE';
+      salesData.isActive = true;
+    }
 
     const roleChanged = levelChanged && newUserRole !== undefined && newUserRole !== target.role;
 
@@ -974,10 +1020,15 @@ export class AdminCoreService {
               event: 'admin_edit_employee',
               userId: target.id,
               employeeCode: salesUser.employeeCode,
+              ...(vacating
+                ? { vacated: true, previous: { name: target.name, phone: target.phone } }
+                : {}),
+              ...(filling ? { filledVacantPosition: true } : {}),
               changes: {
-                ...(dto.name !== undefined ? { name: dto.name } : {}),
+                ...(userData.name !== undefined ? { name: userData.name } : {}),
                 ...(dto.email !== undefined ? { email: dto.email } : {}),
-                ...(dto.phone !== undefined ? { phone: dto.phone } : {}),
+                ...(userData.phone !== undefined ? { phone: userData.phone } : {}),
+                ...(userData.status !== undefined ? { status: userData.status } : {}),
                 ...(levelChanged ? { hierarchyLevelId: dto.hierarchyLevelId, role: newUserRole } : {}),
                 ...(reportingProvided ? { reportingToId: newReportingToId } : {}),
               },
@@ -995,7 +1046,13 @@ export class AdminCoreService {
     // Force re-login on all devices when the login identity (phone) or the account's
     // authority (role) changes — identical to updateUser. Reuses the shared
     // stamp-before-sweep helper so an in-flight refresh can't out-race the revoke.
-    if (phoneChanged || roleChanged) {
+    let revokeFailures: Array<{ userId: string; error: string }> = [];
+    if (vacating) {
+      // K3 (same as the bulk upload's vacated placeholders): the person who left is signed out
+      // everywhere. The edit is already committed, so a revoke failure is reported LOUDLY in the
+      // response (and logged) instead of turning a saved change into a 500.
+      revokeFailures = await this.revokeSessionsAfterCommit([target.id], 'employee_vacated');
+    } else if (phoneChanged || roleChanged) {
       await this.revokeAllSessionsForUser(target.id);
     }
 
@@ -1005,7 +1062,17 @@ export class AdminCoreService {
       include: { user: true, hierarchyLevel: true },
     });
 
-    return { employee: updated };
+    return {
+      employee: updated,
+      ...(vacating ? { vacated: true } : {}),
+      ...(revokeFailures.length
+        ? {
+            sessionRevokeFailures: revokeFailures,
+            message:
+              'Position marked vacant, but the previous login could not be signed out — use "Log out of all devices" for this user.',
+          }
+        : {}),
+    };
   }
 
   /**
@@ -1796,7 +1863,7 @@ export class AdminCoreService {
       where: { clientId: user.clientId, deletedAt: null },
       select: {
         employeeCode: true,
-        user: { select: { name: true, phone: true } },
+        user: { select: { name: true, phone: true, status: true } },
         hierarchyLevel: { select: { code: true, name: true } },
         reportingTo: { select: { employeeCode: true } },
       },
@@ -1806,9 +1873,25 @@ export class AdminCoreService {
     const employees = snapshot.map((e) => {
       if (!e || typeof e !== 'object') return e;
       const live = liveByCode.get(e.id);
-      if (!live) return e; // placeholder / vacant position (no linked SalesUser) → as-is
+      if (!live) return e; // no linked SalesUser → as-is
+      // Vacancy is LIVE state too: a position vacated from the Edit dialog (or one the upload
+      // created vacant) shows as a PLACEHOLDER with no name / mobile — never the synthetic
+      // '(vacant) code' / '__vacant__:code' values — and a vacant position filled from the
+      // Edit dialog shows ACTIVE again before the next upload.
+      if (isVacantPlaceholderUser(live.user)) {
+        return {
+          ...e,
+          name: null,
+          mobile: null,
+          status: 'PLACEHOLDER',
+          roleCode: live.hierarchyLevel?.code ?? e.roleCode,
+          roleLabel: live.hierarchyLevel?.name ?? e.roleLabel,
+          reportsToId: live.reportingTo?.employeeCode ?? null,
+        };
+      }
       return {
         ...e,
+        ...(e.status === 'PLACEHOLDER' && live.user?.status === 'ACTIVE' ? { status: 'ACTIVE' } : {}),
         name: live.user?.name ?? e.name,
         mobile: live.user?.phone ?? e.mobile,
         roleCode: live.hierarchyLevel?.code ?? e.roleCode,
@@ -1825,7 +1908,8 @@ export class AdminCoreService {
    * pagination-free lookup — gated on sales_org:manage_hierarchy (the same permission the
    * edit implies), so a staff member who can edit the hierarchy but lacks users:read can
    * still open the editor, and a large tenant can't push the row off a search page.
-   * ACTIVE + non-deleted only, so a since-deactivated employee resolves to a clean 404.
+   * ACTIVE or VACANT (placeholder) + non-deleted only, so a since-deactivated (resigned)
+   * employee resolves to a clean 404 while a vacant position can still be opened to be filled.
    */
   async getEmployeeByCode(user: JwtPayload, code: string) {
     const trimmed = (code ?? '').trim();
@@ -1835,7 +1919,12 @@ export class AdminCoreService {
         clientId: user.clientId,
         employeeCode: trimmed,
         deletedAt: null,
-        user: { status: 'ACTIVE' },
+        // ACTIVE employees, plus VACANT positions (synthetic placeholder phone, not ACTIVE) so a
+        // vacant position can be opened and filled with a new person from the same editor.
+        OR: [
+          { user: { status: 'ACTIVE' } },
+          { user: { phone: { startsWith: VACANT_PHONE_PREFIX }, status: { not: 'ACTIVE' } } },
+        ],
       },
       select: {
         id: true,

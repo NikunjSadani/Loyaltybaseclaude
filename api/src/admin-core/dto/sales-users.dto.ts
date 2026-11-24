@@ -1,4 +1,4 @@
-import { IsEmail, IsOptional, IsString, Matches, MinLength } from 'class-validator';
+import { IsEmail, IsOptional, IsString, Matches, MinLength, ValidateIf } from 'class-validator';
 
 /**
  * DTO for the single-record EMPLOYEE edit endpoint
@@ -16,15 +16,21 @@ import { IsEmail, IsOptional, IsString, Matches, MinLength } from 'class-validat
  * bulk upload), isActive/deactivation (that's the row toggle / bulk resign path).
  */
 export class UpdateEmployeeDto {
+  /**
+   * Blank ('' / whitespace) is allowed ONLY together with a blank phone — that marks the
+   * position VACANT (the employee left). The both-or-neither rule is enforced in the service
+   * (it needs both fields at once) with a plain-words 400.
+   */
   @IsOptional()
   @IsString()
-  @MinLength(1)
   name?: string;
 
   @IsOptional()
   @IsEmail()
   email?: string;
 
+  /** A 10-digit phone, or '' (blank) to mark the position vacant together with a blank name. */
+  @ValidateIf((o: UpdateEmployeeDto) => o.phone !== '')
   @IsOptional()
   @Matches(/^\d{10}$/, { message: 'Phone must be 10 digits' })
   phone?: string;

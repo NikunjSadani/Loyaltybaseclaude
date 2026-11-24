@@ -12,6 +12,9 @@ import { TenantService } from '../tenant/tenant.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
+import { plainToInstance } from 'class-transformer';
+import { validateSync } from 'class-validator';
+import { UpdateEmployeeDto } from './dto/sales-users.dto';
 
 const mockTx = {
   user: { update: jest.fn() },
@@ -263,6 +266,149 @@ describe('AdminCoreService.updateEmployee', () => {
     });
   });
 
+  // ── Vacate a position (employee left): clear BOTH name and phone ─────────────
+  describe('vacate / fill a position', () => {
+    const active = () => ({
+      id: 'su1', clientId: 'deoleo', hierarchyLevelId: 'lvl-so', employeeCode: 'Pune101', isActive: true,
+      reportingToId: 'boss',
+      user: { id: 'u1', role: 'SALES_SO', name: 'Ravi Kumar', phone: '9811111111', email: null, status: 'ACTIVE' },
+    });
+    const vacant = () => ({
+      id: 'su1', clientId: 'deoleo', hierarchyLevelId: 'lvl-so', employeeCode: 'Pune101', isActive: false,
+      reportingToId: 'boss',
+      user: { id: 'u1', role: 'SALES_SO', name: '(vacant) Pune101', phone: '__vacant__:Pune101', email: null, status: 'INACTIVE' },
+    });
+
+    it('both blank → the SAME placeholder state the bulk upload writes + sessions revoked + phone freed + audit', async () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce(active())
+        .mockResolvedValueOnce({ id: 'su1', user: { id: 'u1' } });
+      mockPrisma.userSession.updateMany.mockResolvedValue({ count: 3 });
+
+      const res = await service.updateEmployee(clientAdmin, 'su1', { name: '', phone: '' });
+
+      // Login row: synthetic phone (frees the real number — only ACTIVE reserves it), placeholder
+      // name, INACTIVE — values produced by the same helpers persistHierarchy uses.
+      const userData = mockTx.user.update.mock.calls[0][0];
+      expect(userData.where).toEqual({ id: 'u1' });
+      expect(userData.data).toMatchObject({
+        name: '(vacant) Pune101', phone: '__vacant__:Pune101', status: 'INACTIVE',
+      });
+      // Position: inactive, but code / level / reporting line untouched (no hierarchyLevelId /
+      // reportingToId written) — and no outlet-assignment writes at all.
+      expect(mockTx.salesUser.update).toHaveBeenCalledWith({ where: { id: 'su1' }, data: { isActive: false } });
+      // No phone-clash lookup for a blank phone.
+      expect(mockPrisma.user.findFirst).not.toHaveBeenCalled();
+      // K3: sessions revoked after commit (stamp-before-sweep).
+      expect(mockPrisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u1' }, data: { sessionsInvalidBefore: expect.any(Date) },
+      });
+      expect(mockPrisma.userSession.updateMany).toHaveBeenCalledWith({
+        where: { userId: 'u1', revokedAt: null }, data: { revokedAt: expect.any(Date) },
+      });
+      // Audit records who left.
+      const audit = mockTx.auditLog.create.mock.calls[0][0].data;
+      expect(audit).toMatchObject({ action: 'UPDATE', entityType: 'SALES_USER', entityId: 'su1', actorId: 'ca1' });
+      expect(audit.metadata).toMatchObject({
+        event: 'admin_edit_employee', employeeCode: 'Pune101', vacated: true,
+        previous: { name: 'Ravi Kumar', phone: '9811111111' },
+        changes: { name: '(vacant) Pune101', phone: '__vacant__:Pune101', status: 'INACTIVE' },
+      });
+      expect(res).toMatchObject({ vacated: true });
+      expect(res).not.toHaveProperty('sessionRevokeFailures');
+    });
+
+    it('both blank (whitespace) is treated as blank too', async () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce(active())
+        .mockResolvedValueOnce({ id: 'su1', user: { id: 'u1' } });
+      await service.updateEmployee(clientAdmin, 'su1', { name: '   ', phone: '' });
+      expect(mockTx.user.update.mock.calls[0][0].data).toMatchObject({ status: 'INACTIVE' });
+    });
+
+    it('a revoke failure after the commit is reported loudly, not a 500', async () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce(active())
+        .mockResolvedValueOnce({ id: 'su1', user: { id: 'u1' } });
+      mockPrisma.user.update.mockRejectedValueOnce(new Error('db down'));
+      const res = await service.updateEmployee(clientAdmin, 'su1', { name: '', phone: '' });
+      expect(res).toMatchObject({ vacated: true, sessionRevokeFailures: [{ userId: 'u1' }] });
+      expect((res as { message?: string }).message).toMatch(/could not be signed out/);
+    });
+
+    it.each([
+      ['name blank, phone missing', { name: '' }],
+      ['phone blank, name missing', { phone: '' }],
+      ['name blank, phone filled', { name: '', phone: '9822222222' }],
+      ['phone blank, name filled', { name: 'Someone', phone: '' }],
+    ])('only ONE cleared (%s) → 400 with plain words, nothing written', async (_l, dto) => {
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(active());
+      const err = await service.updateEmployee(clientAdmin, 'su1', dto).catch((e) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.message).toBe(
+        'To mark this position vacant, clear both the name and the phone. Otherwise enter a 10-digit phone.',
+      );
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('refill: a new name + phone on a vacant position → ACTIVE again, phone-uniqueness checked', async () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce(vacant())
+        .mockResolvedValueOnce({ id: 'su1', user: { id: 'u1' } });
+      mockPrisma.user.findFirst.mockResolvedValueOnce(null); // no ACTIVE holder of the new phone
+
+      await service.updateEmployee(clientAdmin, 'su1', { name: 'Asha New', phone: '9833333333' });
+
+      expect(mockPrisma.user.findFirst.mock.calls[0][0].where).toEqual({
+        phone: '9833333333', clientId: 'deoleo', status: 'ACTIVE', id: { not: 'u1' },
+      });
+      expect(mockTx.user.update.mock.calls[0][0].data).toMatchObject({
+        name: 'Asha New', phone: '9833333333', status: 'ACTIVE',
+      });
+      expect(mockTx.salesUser.update).toHaveBeenCalledWith({ where: { id: 'su1' }, data: { isActive: true } });
+      expect(mockTx.auditLog.create.mock.calls[0][0].data.metadata).toMatchObject({ filledVacantPosition: true });
+    });
+
+    it('refill: a phone already held by another ACTIVE user → Conflict, nothing written', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(vacant());
+      mockPrisma.user.findFirst.mockResolvedValueOnce({ id: 'other' });
+      await expect(
+        service.updateEmployee(clientAdmin, 'su1', { name: 'Asha New', phone: '9833333333' }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('refill: only a name (or only a phone) on a vacant position → 400', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(vacant());
+      await expect(service.updateEmployee(clientAdmin, 'su1', { name: 'Asha New' })).rejects.toThrow(
+        /fill this vacant position/,
+      );
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('a vacant position can still have its reporting line edited without being filled', async () => {
+      mockPrisma.salesUser.findFirst
+        .mockResolvedValueOnce(vacant())
+        .mockResolvedValueOnce({ id: 'boss2', clientId: 'deoleo' })
+        .mockResolvedValueOnce({ id: 'su1', user: { id: 'u1' } });
+      mockPrisma.salesUser.findMany.mockResolvedValueOnce([{ id: 'su1', reportingToId: 'boss' }, { id: 'boss2', reportingToId: null }]);
+      await service.updateEmployee(clientAdmin, 'su1', { reportingToId: 'boss2' });
+      expect(mockTx.salesUser.update).toHaveBeenCalledWith({ where: { id: 'su1' }, data: { reportingToId: 'boss2' } });
+      expect(mockTx.user.update.mock.calls[0][0].data).not.toHaveProperty('status');
+    });
+
+    it('tenant scope: vacating an employee of another tenant 404s (no write, no revoke)', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValueOnce(null);
+      await expect(service.updateEmployee(clientAdmin, 'su-x', { name: '', phone: '' })).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(mockPrisma.salesUser.findFirst.mock.calls[0][0].where).toEqual({ id: 'su-x', clientId: 'deoleo' });
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockPrisma.userSession.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
   // ── Operator-row guard (assertCanManageTarget) ────────────────────────────────
   it('a GIFSY_STAFF cannot edit an employee whose linked User is an operator account', async () => {
     mockPrisma.salesUser.findFirst.mockResolvedValueOnce({
@@ -273,5 +419,20 @@ describe('AdminCoreService.updateEmployee', () => {
       service.updateEmployee(gifsyStaff, 'su1', { name: 'X' }),
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('UpdateEmployeeDto validation (blank allowed for vacate)', () => {
+  const errs = (body: object) => validateSync(plainToInstance(UpdateEmployeeDto, body)).map((e) => e.property);
+  it('accepts blank name + blank phone (vacate)', () => {
+    expect(errs({ name: '', phone: '' })).toEqual([]);
+  });
+  it('accepts a 10-digit phone and an omitted phone', () => {
+    expect(errs({ phone: '9811111111' })).toEqual([]);
+    expect(errs({ name: 'X' })).toEqual([]);
+  });
+  it('still rejects a malformed non-blank phone', () => {
+    expect(errs({ phone: '12345' })).toEqual(['phone']);
+    expect(errs({ phone: '   ' })).toEqual(['phone']);
   });
 });
