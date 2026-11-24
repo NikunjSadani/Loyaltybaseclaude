@@ -411,7 +411,7 @@ describe('FUND — /admin/fund', () => {
     const flags = await screen.findByTestId('fund-warn-flags');
     expect(flags).toHaveTextContent(/Face recomputed \(1\): The order's value was worked out again/);
     expect(flags).toHaveTextContent(/Date estimated \(2\)/);
-    expect(flags).toHaveTextContent(/Bank run not identified \(1\): The bank run this TDS was recorded with could not be identified/);
+    expect(flags).toHaveTextContent(/Bank run not identified \(1\): An older TDS entry whose bank run could not be identified/);
     expect(flags).toHaveTextContent(/Includes earlier TDS \(1\): Includes TDS for earlier payouts this year/);
     expect(flags).toHaveTextContent(/voucher provider/);
     expect(screen.getByTestId('fund-warn-items')).toHaveTextContent('1 voucher item without a discount');
@@ -456,6 +456,14 @@ describe('FUND — /admin/fund', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Rates & alerts' }));
     expect(await screen.findByTestId('fund-emails-off')).toHaveTextContent('Low-balance alert e-mails are switched off on this server');
     expect(screen.getByTestId('fund-last-check')).toHaveTextContent('Waiting for the opening balance');
+  });
+
+  it('R3 (round 4): the spend-by-type breakdown says how many items came back ("N returned, not charged")', async () => {
+    stubFetch(undefined, summary({
+      byType: [{ type: 'VOUCHER', label: 'Vouchers', count: 3, returnedCount: 2, facePaise: 1_000_000, discountPaise: 30_000, feePaise: 0, committedPaise: 0, paidPaise: 970_000, returnedPaise: 40_000, netChargedPaise: 970_000 }],
+    }));
+    render(<FundReconciliationPage />);
+    expect(await screen.findByTestId('fund-type-returned-count')).toHaveTextContent('2 returned, not charged');
   });
 
   it('R2 (re-audit low): the statement Event filter offers "rate change" lines', async () => {
