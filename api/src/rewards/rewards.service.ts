@@ -353,6 +353,37 @@ type OrderPartnerContactRow = {
   outlets: { outletCode: string }[];
 };
 
+/**
+ * WHERE for the orders free-text search (admin Redemption orders + its fulfilment sheet), or null
+ * for a blank term. Case-insensitive "contains" on: reward name, order number, order id (the table's
+ * fallback short ref is the id's tail), partner business name, and — only when `withContact` (the
+ * operator / tenant-admin view, which already shows them) — any live outlet's code or name and the
+ * partner's phone / login phone. Phone search therefore never reaches further than the phone column.
+ * Combined by the caller with AND, so tenant scope, status/mode and the keyset cursor all still apply.
+ */
+export function orderSearchWhere(
+  q: string | undefined | null,
+  withContact: boolean,
+): Prisma.RedemptionOrderWhereInput | null {
+  const term = (q ?? '').trim().slice(0, 100);
+  if (!term) return null;
+  const ci = { contains: term, mode: 'insensitive' as const };
+  const or: Prisma.RedemptionOrderWhereInput[] = [
+    { reward: { name: ci } },
+    { orderNumber: ci },
+    { id: ci },
+    { partner: { businessName: ci } },
+  ];
+  if (withContact) {
+    or.push(
+      { partner: { outlets: { some: { deletedAt: null, OR: [{ outletCode: ci }, { name: ci }] } } } },
+      { partner: { phone: { contains: term } } },
+      { partner: { user: { phone: { contains: term } } } },
+    );
+  }
+  return { OR: or };
+}
+
 /** { outletCode, phone } for the operator/admin order views (null when not recorded). */
 export function orderPartnerContact(p: OrderPartnerContactRow | null | undefined): {
   outletCode: string | null;
@@ -946,6 +977,11 @@ export class RewardsService {
       };
     }
     if (q.status) where.status = q.status;
+    // Server-side free-text search (admin Redemption orders). In the base WHERE so the count, the
+    // page query and the keyset cursor all see it. Outlet / phone parts only on the operator /
+    // tenant-admin view (the member view never shows them, so it can't search by them either).
+    const search = orderSearchWhere(q.q, this.isGifsy(user) || tenantAdmin);
+    if (search) where.AND = [search];
 
     // Member-safe projection (§ member view). Deliberately EXCLUDES the ops-only
     // fulfilment fields (fulfilmentChannel, supplierOrderRef, fulfilledByVendorId, POD)
@@ -3373,6 +3409,9 @@ export class RewardsService {
       ...(scope ? { partner: { clientId: scope } } : {}),
     };
     if (q.mode) where.redemptionMode = q.mode;
+    // The sheet follows the console's active search too (operator view → outlet / phone included).
+    const search = orderSearchWhere(q.q, true);
+    if (search) where.AND = [search];
 
     if (q.status) {
       where.status = q.status;
@@ -3405,6 +3444,7 @@ export class RewardsService {
           phone: contact.phone ?? '',
           mode: o.redemptionMode,
           currentStatus: o.status,
+          redeemedAt: o.createdAt,
         };
       }),
     );

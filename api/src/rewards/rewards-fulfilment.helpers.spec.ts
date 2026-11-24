@@ -68,12 +68,25 @@ describe('buildFulfilmentTemplateBuffer — Outlet ID + Phone context columns', 
         { orderNumber: 'ORD-2', reward: 'R', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
       ]),
     );
-    expect(aoa[0].slice(0, 6)).toEqual(['Order Number', 'Reward', 'Outlet ID', 'Phone', 'Mode', 'Current Status']);
+    expect(aoa[0].slice(0, 7)).toEqual(['Order Number', 'Reward', 'Outlet ID', 'Phone', 'Redeemed on', 'Mode', 'Current Status']);
     expect(aoa[1][2]).toBe('BJ-0042');
     expect(String(aoa[1][3])).toBe('9811111111');
     // Not recorded → blank cells, never "undefined".
     expect(aoa[2][2] ?? '').toBe('');
     expect(aoa[2][3] ?? '').toBe('');
+  });
+
+  it('Redeemed on = the order createdAt in IST (YYYY-MM-DD HH:mm, sortable); blank when unknown', () => {
+    const aoa = readAoa(
+      buildFulfilmentTemplateBuffer([
+        // 10:12 UTC = 15:42 IST
+        { orderNumber: 'ORD-1', reward: 'R', redeemedAt: new Date('2026-11-24T10:12:00.000Z'), mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+        { orderNumber: 'ORD-2', reward: 'R', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+      ]),
+    );
+    const col = (aoa[0] as string[]).indexOf('Redeemed on');
+    expect(aoa[1][col]).toBe('2026-11-24 15:42');
+    expect(aoa[2][col] ?? '').toBe('');
   });
 
   it('the upload parser ignores the new context columns (a filled sheet still round-trips)', () => {

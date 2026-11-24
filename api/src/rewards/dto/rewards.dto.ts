@@ -118,6 +118,9 @@ export class HubbleAcknowledgeDto {
 export const ORDERS_LIST_MAX_LIMIT = 500;
 
 /** Orders listing filters — mirror the source GET /api/rewards/orders params. */
+/** Max characters of the orders free-text search (longer input is cut, not rejected). */
+export const ORDER_SEARCH_MAX_LEN = 100;
+
 export class ListOrdersQueryDto {
   @IsOptional()
   @IsEnum(RedemptionStatus)
@@ -150,6 +153,17 @@ export class ListOrdersQueryDto {
   @IsString()
   @Length(1, 200)
   cursor?: string;
+
+  /**
+   * Free-text SERVER-side search (admin Redemption orders): reward name, order number / id,
+   * outlet code, partner / outlet name, partner phone (the phone/outlet parts only on the
+   * operator / tenant-admin view). Trimmed; capped at ORDER_SEARCH_MAX_LEN characters; blank = no search.
+   */
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().slice(0, ORDER_SEARCH_MAX_LEN) : value))
+  @IsString()
+  @MaxLength(ORDER_SEARCH_MAX_LEN)
+  q?: string;
 }
 
 /**
@@ -472,6 +486,17 @@ export class FulfilmentTemplateQueryDto {
   @IsOptional()
   @IsEnum(PayoutMode)
   mode?: PayoutMode;
+
+  /**
+   * Free-text SERVER-side search (admin Redemption orders): reward name, order number / id,
+   * outlet code, partner / outlet name, partner phone (the phone/outlet parts only on the
+   * operator / tenant-admin view). Trimmed; capped at ORDER_SEARCH_MAX_LEN characters; blank = no search.
+   */
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().slice(0, ORDER_SEARCH_MAX_LEN) : value))
+  @IsString()
+  @MaxLength(ORDER_SEARCH_MAX_LEN)
+  q?: string;
 }
 
 /**

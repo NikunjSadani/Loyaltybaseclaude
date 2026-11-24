@@ -8,10 +8,10 @@
  * guarded `transitionOrder` (one call per row) so no status logic lives here.
  *
  * Layout (single header row, then one row per order):
- *   Order Number | Reward | Outlet ID | Phone | Mode | Current Status |
+ *   Order Number | Reward | Outlet ID | Phone | Redeemed on | Mode | Current Status |
  *   Voucher Code | Voucher PIN | Voucher Provider | Tracking Number | Tracking URL | New Status
  *
- * The first six columns are the locked context the ops user reads (Outlet ID + Phone added
+ * The first seven columns are the locked context the ops user reads (Outlet ID + Phone added
  * 2026-11-24 — ignored on upload, like the other context columns); the last six
  * are blank fill columns. `Order Number` is the row key. `Voucher PIN` is OPTIONAL (card number
  * + PIN gift cards only) and text-formatted so a leading-zero PIN survives Excel; the parser is
@@ -20,6 +20,7 @@
 
 import * as XLSX from 'xlsx';
 import { aoaToSheetSafe } from '../common/xlsx';
+import { istDateTimeCell } from '../common/ist-date';
 
 // ── Column headers (the canonical template shape) ─────────────────────────────
 
@@ -30,6 +31,7 @@ export const FULFILMENT_COLS = [
   'Reward',
   'Outlet ID',
   'Phone',
+  'Redeemed on',
   'Mode',
   'Current Status',
   'Voucher Code',
@@ -57,6 +59,8 @@ export interface FulfilmentTemplateRow {
   outletCode?: string;
   /** The partner's registered mobile ('' when none). Read-only context. */
   phone?: string;
+  /** When the partner placed the redemption (RedemptionOrder.createdAt) — shown in IST. */
+  redeemedAt?: Date | null;
   mode: string;
   currentStatus: string;
 }
@@ -72,6 +76,7 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
     o.reward,
     o.outletCode ?? '',
     o.phone ?? '',
+    o.redeemedAt ? istDateTimeCell(o.redeemedAt) : '',
     o.mode,
     o.currentStatus,
     '', // Voucher Code
@@ -98,6 +103,7 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
     { wch: 28 }, // Reward
     { wch: 16 }, // Outlet ID
     { wch: 14 }, // Phone
+    { wch: 18 }, // Redeemed on (IST)
     { wch: 14 }, // Mode
     { wch: 16 }, // Current Status
     { wch: 22 }, // Voucher Code
