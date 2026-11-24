@@ -122,6 +122,12 @@ interface OrderItem {
   voucherIssued?: boolean;
   /** Operator view: the order was sent to Hubble and needs ops (retry or manual fulfilment). */
   hubbleNeedsReconcile?: boolean;
+  /** Operator view: handed to Hubble and still open (CONFIRMED / PROCESSING, no code) — Retry applies even unflagged. */
+  hubbleHanded?: boolean;
+  /** When the order was handed to Hubble (ISO). */
+  hubbleWaitingSince?: string;
+  /** When the automatic re-check last asked Hubble (ISO), or null when not yet. */
+  hubbleLastCheckedAt?: string | null;
   hubbleReconcileReason?: string | null;
   /** Why Hubble's last "no order" answer was not trusted (it couldn't be checked against a known Hubble order). */
   hubbleNoOrderUnverifiedWhy?: string | null;
@@ -1580,7 +1586,22 @@ const HUBBLE_REASON_LABEL: Record<string, string> = {
   HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND: 'Hubble webhook arrived after the points were refunded — check the order in Hubble’s portal',
   HUBBLE_ISSUED_AFTER_REFUND: 'Hubble may have issued a voucher for refunded points — check the order in Hubble’s portal',
   HUBBLE_WEBHOOK_BUT_NOT_FOUND: 'Hubble sent a webhook but has no order for this reference — check the order in Hubble’s portal',
+  // Set by the automatic re-check when an order is still not delivered an hour after it reached Hubble.
+  HUBBLE_PROCESSING_STALE: 'Still processing at Hubble',
 };
+
+/** "just now" / "4 min ago" / "3 h ago" / "2 d ago" — for the "last checked" hint. */
+function relativeAgo(iso: string | null | undefined, nowMs: number = Date.now()): string {
+  const t = iso ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(t)) return 'not yet';
+  const s = Math.max(0, Math.round((nowMs - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h} h ago`;
+  return `${Math.round(h / 24)} d ago`;
+}
 
 /** Flags on an ALREADY-REFUNDED order (late Hubble webhook): only "Acknowledge — resolved" applies. */
 const HUBBLE_POST_REFUND_FLAGS = new Set(['HUBBLE_ISSUED_AFTER_REFUND', 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND']);
@@ -1670,8 +1691,12 @@ function OrderRow({
     (HUBBLE_POST_REFUND_FLAGS.has(order.hubbleReconcileReason ?? '') ||
       TERMINAL_REFUND_STATUSES.has(order.status) ||
       order.status === 'DELIVERED');
+  // Handed to Hubble and still open, with NO flag yet (e.g. waiting on Hubble's PROCESSING): ops may ask
+  // Hubble again at any time — the automatic re-check does the same every few minutes.
+  const hubbleWaiting = !needsReconcile && order.hubbleHanded === true && !voucherIssued;
   const canRetryHubble =
-    needsReconcile && !postRefundFlag && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '');
+    (needsReconcile && !postRefundFlag && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '')) ||
+    hubbleWaiting;
   const [ackOpen, setAckOpen] = useState(false);
   const [ackNote, setAckNote] = useState('');
   const [ackBusy, setAckBusy] = useState(false);
@@ -1891,6 +1916,11 @@ function OrderRow({
               Newer: {hubbleReasonLabel(order.hubbleLatestReason)}
             </span>
           )}
+          {hubbleWaiting && order.hubbleWaitingSince && (
+            <span className="block mt-0.5 text-[10px] text-gray-400" data-testid="hubble-waiting">
+              Waiting for Hubble since {formatISTDateTime(order.hubbleWaitingSince)} · last checked {relativeAgo(order.hubbleLastCheckedAt)}
+            </span>
+          )}
           {needsReconcile && order.hubbleNoOrderUnverifiedWhy && (
             <span
               className="block mt-0.5 text-[10px] text-amber-700"
@@ -1923,6 +1953,19 @@ function OrderRow({
                 >
                   Voucher cancelled with vendor…
                 </button>
+              )}
+              {canCancelVoucher && !needsReconcile && hubbleWaiting && (
+                <>
+                  <button
+                    onClick={retryWithHubble}
+                    disabled={retryBusy}
+                    aria-busy={retryBusy}
+                    className="text-[10px] font-semibold text-[var(--brand-primary)] hover:underline disabled:opacity-50"
+                  >
+                    {retryBusy ? 'Retrying…' : 'Retry with Hubble'}
+                  </button>
+                  {retryMsg && <span className="text-[10px] text-gray-500" role="status">{retryMsg}</span>}
+                </>
               )}
               {canCancelVoucher && needsReconcile && (
                 <>
