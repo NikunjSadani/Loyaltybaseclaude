@@ -345,7 +345,8 @@ describe('loadUserAreaResolver — reads', () => {
 
 describe('cachedUserAreaResolver — per-tenant ~60 s cache', () => {
   beforeEach(() => clearUserAreaCache());
-  const fake = (tag: string) => ({ asmHeader: tag, resolve: () => fill(tag), notes: [] }) as UserAreaResolver;
+  const fake = (tag: string) =>
+    ({ asmHeader: tag, resolve: () => fill(tag), notes: [], idLevels: [], resolveIds: () => [], idNotes: [] }) as UserAreaResolver;
 
   it('reuses the tenant’s resolver inside the TTL, reloads after it, and keys by tenant', async () => {
     const load = jest.fn(async () => fake('a'));

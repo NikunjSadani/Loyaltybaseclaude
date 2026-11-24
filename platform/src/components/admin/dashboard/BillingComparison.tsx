@@ -486,7 +486,7 @@ function SlowerDrillDown({
             className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
           >
             {exportAction.busy ? <RefreshCw className="h-3 w-3 animate-spin" aria-hidden="true" /> : <Download className="h-3 w-3" aria-hidden="true" />}
-            {downloadButtonLabel(exportAction, 'Download Excel')}
+            {downloadButtonLabel(exportAction, 'Download outlet list (Excel)')}
           </button>
         </div>
         <DownloadActionStatus action={exportAction} />

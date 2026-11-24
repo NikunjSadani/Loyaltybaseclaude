@@ -263,6 +263,12 @@ describe('N3 displayPct + labels', () => {
     [100, 20, 'P20_40', 20],
     [100, 0, 'NOT_STARTED', 0],
     [100, -10, 'NOT_STARTED', -10],
+    // floorPct1 (2026-11-23): binary float noise no longer floors an exact value down a step.
+    [100, 29, 'P20_40', 29], // 29/100*100 = 28.999999999999996 in JS → still 29.0
+    [100, 58, 'P40_60', 58],
+    [100, 19.95, 'P0_20', 19.9],
+    [100, 39.96, 'P20_40', 39.9],
+    [1_000_000, 999_999.99, 'P80_100', 99.9],
   ])('target %p achieved %p → %s shows %p', (t, a, bucketKey, shown) => {
     const bucket = bucketOf(t, a);
     expect(bucket).toBe(bucketKey);

@@ -218,7 +218,7 @@ export function VisibilityCaptureQueue() {
             <table className="w-full text-sm">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
-                  {['Outlet', 'Program', 'Window', 'Geo-fence', 'Rep', 'Status', ''].map((h) => (
+                  {['Outlet', 'Program', 'State / Zone', 'Window', 'Geo-fence', 'Rep', 'Status', ''].map((h) => (
                     <th key={h} className="px-4 py-2.5 text-left text-xs font-medium text-gray-500">{h}</th>
                   ))}
                 </tr>
@@ -235,6 +235,11 @@ export function VisibilityCaptureQueue() {
                     <td className="px-4 py-2.5" data-testid={`row-program-${r.id}`}>
                       <p className="text-xs font-medium text-gray-700">{r.programName || '—'}</p>
                       <p className="text-[11px] text-gray-500">{r.programCategory || '—'}</p>
+                    </td>
+                    {/* State over Zone (outlet master) — the same stacked layout as Program. */}
+                    <td className="px-4 py-2.5" data-testid={`row-state-zone-${r.id}`}>
+                      <p className="text-xs font-medium text-gray-700">{r.outletState || '—'}</p>
+                      <p className="text-[11px] text-gray-500">{r.outletZone || '—'}</p>
                     </td>
                     <td className="px-4 py-2.5 text-xs text-gray-600 font-mono">{r.windowKey}</td>
                     <td className="px-4 py-2.5"><GeoBadge geoFenceOk={r.geoFenceOk} distanceMeters={r.distanceMeters} /></td>
@@ -842,6 +847,14 @@ function CaptureReview({
               <span className="inline-flex items-center gap-1.5 rounded-lg bg-violet-50 border border-violet-200 px-2.5 py-1 text-sm">
                 <span className="text-[11px] uppercase tracking-wide font-medium text-violet-700">Sub-Program</span>
                 <strong className="text-violet-900">{detail.programCategory || '—'}</strong>
+              </span>
+              <span className="inline-flex items-center gap-1.5 rounded-lg bg-sky-50 border border-sky-200 px-2.5 py-1 text-sm" data-testid="capture-review-state">
+                <span className="text-[11px] uppercase tracking-wide font-medium text-sky-700">State</span>
+                <strong className="text-sky-900">{detail.outletState || '—'}</strong>
+              </span>
+              <span className="inline-flex items-center gap-1.5 rounded-lg bg-teal-50 border border-teal-200 px-2.5 py-1 text-sm" data-testid="capture-review-zone">
+                <span className="text-[11px] uppercase tracking-wide font-medium text-teal-700">Zone</span>
+                <strong className="text-teal-900">{detail.outletZone || '—'}</strong>
               </span>
             </div>
             <p className="mt-2 text-xs text-gray-500 flex flex-wrap items-center gap-x-3 gap-y-1">

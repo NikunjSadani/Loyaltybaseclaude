@@ -54,16 +54,23 @@ export const CAPTURE_CHANGED_MESSAGE = 'This visit was just changed by someone e
 export const VISIBILITY_REJECT_REASONS = VISIBILITY_REJECT_REASON_CODES;
 
 /**
- * The outlet's programme (`Outlet.programName`, e.g. Bajaj "Unnati"/"SAMT") and
- * sub-programme (`Outlet.programCategory`, e.g. "Elite"/"Privilege") for the review
- * queue + detail — additive fields; null when the outlet has none (or the relation is absent).
+ * The outlet's programme (`Outlet.programName`, e.g. Bajaj "Unnati"/"SAMT"), sub-programme
+ * (`Outlet.programCategory`, e.g. "Elite"/"Privilege"), and its State / Zone from the outlet master
+ * (owner 2026-11-23: the reviewer needs to see which state / zone a capture belongs to) — reviewer
+ * context for the queue + detail; additive fields; null when the outlet has none (blank values are null).
  */
 function outletProgram(
-  outlet: { programName: string | null; programCategory: string | null } | null | undefined,
-): { programName: string | null; programCategory: string | null } {
+  outlet:
+    | { programName: string | null; programCategory: string | null; state?: string | null; zone?: string | null }
+    | null
+    | undefined,
+): { programName: string | null; programCategory: string | null; outletState: string | null; outletZone: string | null } {
+  const clean = (v: string | null | undefined) => (typeof v === 'string' && v.trim() ? v.trim() : null);
   return {
     programName: outlet?.programName ?? null,
     programCategory: outlet?.programCategory ?? null,
+    outletState: clean(outlet?.state),
+    outletZone: clean(outlet?.zone),
   };
 }
 
@@ -421,7 +428,7 @@ export class VisibilityReviewService {
           photoReviews: true,
           submittedBy: { select: { id: true, employeeCode: true } },
           // The outlet's programme / sub-programme (reviewer context) — flattened below.
-          outlet: { select: { programName: true, programCategory: true } },
+          outlet: { select: { programName: true, programCategory: true, state: true, zone: true } },
         },
         orderBy: { receivedAt: 'desc' },
         skip: (page - 1) * limit,
@@ -460,7 +467,7 @@ export class VisibilityReviewService {
         imageHashes: { select: { hash: true } },
         submittedBy: { select: { id: true, employeeCode: true } },
         approvedBy: { select: { id: true, name: true } },
-        outlet: { select: { programName: true, programCategory: true } },
+        outlet: { select: { programName: true, programCategory: true, state: true, zone: true } },
       },
     });
     if (!capture) throw new NotFoundException('Capture not found.');
