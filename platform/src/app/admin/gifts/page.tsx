@@ -53,6 +53,7 @@ import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product'
 import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
 import { MaskedPin } from '@/components/operator/masked-pin';
 import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
+import { formatISTDateTime } from '@/lib/ist-date';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
 
@@ -1830,6 +1831,10 @@ function OrderRow({
         <td className="px-4 py-3">
           <p className="font-mono text-xs text-gray-600">{order.orderNumber ?? order.id.slice(-8)}</p>
         </td>
+        {/* When the partner placed the redemption (order createdAt), in IST. */}
+        <td className="px-4 py-3 text-xs text-gray-600 whitespace-nowrap" data-testid="order-redeemed-on">
+          {formatISTDateTime(order.createdAt) || '—'}
+        </td>
         <td className="px-4 py-3 text-gray-900">{order.reward?.name ?? '—'}</td>
         <td className="px-4 py-3 text-xs text-gray-600">
           <p>{order.partner?.businessName ?? '—'}</p>
@@ -1956,7 +1961,7 @@ function OrderRow({
       </tr>
       {canManage && canCancelVoucher && postRefundFlag && ackOpen && (
         <tr>
-          <td colSpan={canManage ? 8 : 7} className="px-4 py-4 bg-red-50/50">
+          <td colSpan={canManage ? 9 : 8} className="px-4 py-4 bg-red-50/50">
             <div className="space-y-2 max-w-2xl">
               <p className="text-xs text-gray-700">
                 Retry can&apos;t act on this order any more. Check the order in Hubble&apos;s portal, then record what you
@@ -2000,7 +2005,7 @@ function OrderRow({
       )}
       {canManage && canCancelVoucher && needsReconcile && !postRefundFlag && manualOpen && (
         <tr>
-          <td colSpan={canManage ? 8 : 7} className="px-4 py-4 bg-amber-50/50">
+          <td colSpan={canManage ? 9 : 8} className="px-4 py-4 bg-amber-50/50">
             <div className="space-y-2 max-w-2xl">
               <p className="text-xs text-gray-700">
                 Fulfil this Hubble order manually: issue a voucher code yourself. This takes the order over from Hubble
@@ -2073,7 +2078,7 @@ function OrderRow({
       )}
       {canManage && canCancelVoucher && cancelOpen && (
         <tr>
-          <td colSpan={canManage ? 8 : 7} className="px-4 py-4 bg-red-50/40">
+          <td colSpan={canManage ? 9 : 8} className="px-4 py-4 bg-red-50/40">
             <div className="space-y-2 max-w-2xl">
               <p className="text-xs text-gray-700">
                 Record that voucher <span className="font-mono">{order.voucherCode}</span> was cancelled with the vendor.
@@ -2114,7 +2119,7 @@ function OrderRow({
       )}
       {canManage && open && (
         <tr>
-          <td colSpan={canManage ? 8 : 7} className="px-4 py-4 bg-gray-50/70">
+          <td colSpan={canManage ? 9 : 8} className="px-4 py-4 bg-gray-50/70">
             <div className="space-y-3 max-w-2xl">
               <div className="flex flex-wrap items-end gap-3">
                 <div className="space-y-1">
@@ -2262,13 +2267,20 @@ interface OrdersPage { orders: OrderItem[]; pagination?: Pagination; nextCursor?
  * `cursor` = the backend keyset cursor (createdAt DESC, id DESC) — stable under new orders
  * landing at the top while the admin pages down, unlike page/offset.
  */
-function ordersUrl(status: string, limit: number, cursor?: string | null): string {
+function ordersUrl(status: string, limit: number, cursor?: string | null, q?: string): string {
   const p = new URLSearchParams();
   if (status !== 'all') p.set('status', status);
   p.set('limit', String(limit));
   if (cursor) p.set('cursor', cursor);
+  // Search runs on the SERVER (the list is keyset-paged, so filtering loaded rows would miss older orders).
+  if (q) p.set('q', q);
   return `/api/rewards/orders?${p.toString()}`;
 }
+
+/** Debounce for the orders search box. */
+const ORDER_SEARCH_DEBOUNCE_MS = 300;
+/** Max search length (the API cuts longer input to the same limit). */
+const ORDER_SEARCH_MAX_LEN = 100;
 
 /** What the signed-in user may do on the Fulfilment tab. */
 type OrderAccess =
@@ -2349,6 +2361,9 @@ function FulfilmentQueue({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  // Search: the raw input, and the debounced/trimmed term actually sent to the server.
+  const [searchInput, setSearchInput] = useState('');
+  const [query, setQuery] = useState('');
   // Server-side total for the current status filter (never derived from the loaded rows).
   const [total, setTotal] = useState<number | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -2370,6 +2385,8 @@ function FulfilmentQueue({
   // transition) — their closures may predate a filter change / load-more.
   const statusRef = useRef(statusFilter);
   statusRef.current = statusFilter;
+  const queryRef = useRef(query);
+  queryRef.current = query;
   const ordersRef = useRef<OrderItem[]>(orders);
   ordersRef.current = orders;
   // Short note when a refresh had to shrink the window back to the first page.
@@ -2391,7 +2408,7 @@ function FulfilmentQueue({
     // Any in-flight load-more is now stale (its result is discarded) — release its spinner.
     setLoading(true); setError(''); setLoadMoreErr(''); setLoadingMore(false);
     try {
-      const data = await apiJson<OrdersPage>(ordersUrl(status, limit));
+      const data = await apiJson<OrdersPage>(ordersUrl(status, limit, null, queryRef.current));
       if (gen !== genRef.current) return;
       setOrders(data.orders ?? []);
       setTotal(data.pagination?.total ?? null);
@@ -2412,7 +2429,7 @@ function FulfilmentQueue({
     const gen = genRef.current;
     setLoadingMore(true); setLoadMoreErr('');
     try {
-      const data = await apiJson<OrdersPage>(ordersUrl(statusFilter, ORDERS_PAGE_SIZE, nextCursor));
+      const data = await apiJson<OrdersPage>(ordersUrl(statusFilter, ORDERS_PAGE_SIZE, nextCursor, queryRef.current));
       if (gen !== genRef.current) return;
       const seen = new Set(ordersRef.current.map((o) => o.id));
       const fresh = (data.orders ?? []).filter((o) => !seen.has(o.id));
@@ -2441,7 +2458,15 @@ function FulfilmentQueue({
   }, [orders]);
 
   // Filter change → back to the first page. Also invalidates any in-flight load-more.
-  useEffect(() => { setRefreshNote(''); loadOrders(statusFilter); }, [loadOrders, statusFilter]);
+  // A new search term (debounced) or filter → back to the first page with a fresh cursor. The
+  // request generation (genRef) drops any response for an older term that lands late.
+  useEffect(() => { setRefreshNote(''); loadOrders(statusFilter); }, [loadOrders, statusFilter, query]);
+  useEffect(() => {
+    const term = searchInput.trim().slice(0, ORDER_SEARCH_MAX_LEN);
+    if (term === query) return;
+    const t = setTimeout(() => setQuery(term), ORDER_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [searchInput, query]);
 
   /**
    * Refresh (Refresh button / after a bulk upload): re-fetch the CURRENT filter's loaded window in
@@ -2501,7 +2526,11 @@ function FulfilmentQueue({
   async function downloadTemplate() {
     setDownloading(true); setDownloadErr('');
     try {
-      const qs = statusFilter === 'all' ? '' : `?status=${encodeURIComponent(statusFilter)}`;
+      // The sheet follows the console's active status filter AND search (see the note by the button).
+      const params = new URLSearchParams();
+      if (statusFilter !== 'all') params.set('status', statusFilter);
+      if (query) params.set('q', query);
+      const qs = params.toString() ? `?${params.toString()}` : '';
       const res = await fetch(`/api/admin/rewards/fulfilment/template${qs}`, { headers: authHeader() });
       if (!res.ok) {
         let msg = `HTTP ${res.status}`;
@@ -2614,6 +2643,11 @@ function FulfilmentQueue({
             className="hidden"
           />
         </div>
+        {/* Say exactly what the download contains — it follows the list's filter + search. */}
+        <p className="text-xs text-gray-500" data-testid="fulfilment-export-scope">
+          The sheet includes {statusFilter === 'all' ? 'all orders awaiting fulfilment' : `all ${statusFilter} orders`}
+          {query ? <> matching &ldquo;{query}&rdquo;</> : null} — not just the rows loaded below.
+        </p>
 
         {downloadErr && (
           <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-xl px-3 py-2 text-sm text-red-700">
@@ -2689,7 +2723,29 @@ function FulfilmentQueue({
               </button>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+              <label htmlFor="orders-search" className="sr-only">Search orders</label>
+              <input
+                id="orders-search"
+                type="search"
+                value={searchInput}
+                maxLength={ORDER_SEARCH_MAX_LEN}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder="Reward, order ID, outlet ID, name or phone"
+                className="w-64 max-w-full text-sm border border-gray-200 rounded-lg pl-8 pr-14 py-1.5 bg-white focus:outline-none focus:border-gray-400"
+              />
+              {searchInput && (
+                <button
+                  type="button"
+                  onClick={() => { setSearchInput(''); setQuery(''); }}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 px-1.5 py-0.5 text-[11px] font-semibold text-gray-500 hover:text-gray-800"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
@@ -2729,13 +2785,18 @@ function FulfilmentQueue({
             <div className="w-6 h-6 border-2 border-gray-200 border-t-[var(--brand-primary)] rounded-full animate-spin" />
           </div>
         ) : orders.length === 0 ? (
-          error ? null : <p className="text-sm text-gray-400 text-center py-12">No orders in this view.</p>
+          error ? null : (
+            <p className="text-sm text-gray-400 text-center py-12" role="status">
+              {query ? `No orders match '${query}'` : 'No orders in this view.'}
+            </p>
+          )
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-100 text-left text-xs text-gray-400">
                   <th className="px-4 py-3 font-medium">Order</th>
+                  <th className="px-4 py-3 font-medium">Redeemed on</th>
                   <th className="px-4 py-3 font-medium">Reward</th>
                   <th className="px-4 py-3 font-medium">Partner · Outlet ID</th>
                   <th className="px-4 py-3 font-medium">Phone</th>
