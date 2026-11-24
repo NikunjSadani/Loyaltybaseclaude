@@ -185,6 +185,25 @@ per IST day. **One behaviour change:** background requests (`X-Background: 1`) n
 which a user's only traffic was automatic (e.g. a tab left open with the bell polling, a push re-sync) is NO LONGER
 an active day — Session Report active days now count real use only.
 
+**App Installed + level-ID columns (⚠️ PLATFORM-WIDE, owner-approved 2026-11-24 for all clients incl. Deoleo; branch
+`feat/session-report-ids`).** Screen and Excel columns are now: (Excel `S.No ·`) User/Name · Role · Mobile ·
+**App Installed** · **`<level> ID` × ≤ 5** · Last Login · 13 month columns (the Excel keeps its existing
+Name · Mobile · Role order, so the new columns sit after Role, right before Last Login).
+- **App Installed** = "Yes — Android, iOS" / "No": the user has a `pwa_install` row in the App Adoption population
+  (`tenantInstallWhere`, push/pwa-adoption.service.ts) — one tenant-wide read; platforms worded/ordered by
+  `platformLabels` (shared with the installed-users Excel).
+- **Level-ID columns** = exactly the App Adoption installed-users Excel's columns: `UserAreaResolver.resolveIds` /
+  `idLevels` (reports/area/user-area.ts) — the tenant's levels ranked 1–5, headers = tenant level name + " ID" (Bajaj
+  ISR · SO · ASM · SM · ZH; Deoleo XSR · SO · ASM · RSM · ZNM), headers de-duplicated by `installedUsersIdHeaders`
+  (also against the Session Report's own headers + month labels). The resolver is the per-tenant cached one
+  (`cachedUserAreaResolver`, 60 s, shared with the Usage report) — 4 tenant-wide reads, never per row.
+- The Excel gains an **About** sheet: the App Installed note, the installed-users level-ID notes (same wording, via
+  `levelIdAboutRows`), and the active-days note.
+- JSON adds `idHeaders` (top level) and per row `appInstalled`, `appPlatforms`, `levelIds`. The page has no paging /
+  sorting (it renders every row, as before); a caller with no tenant gets empty new columns and no extra reads.
+- Tests: `api/src/reports/reports.service.spec.ts` (sessionReport → App Installed + level-ID columns),
+  `platform/src/app/admin/reports/session/__tests__/session-page.test.tsx`.
+
 Also: the notification bell's unread count no longer polls while the tab is hidden; it refreshes once when the tab
 becomes visible again (then every 60 s while visible).
 
