@@ -215,7 +215,8 @@ describe('GIFVC — voucher handling', () => {
   it('GIFVC4: a Hubble order never offers voucher inputs nor the vendor-cancel action', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, voucherProvider: 'Hubble' }]);
     const row = await openRow('RDM-1');
-    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
+    // OWNER 2026-11-24: with Hubble and no code → no Advance at all (so no voucher inputs either).
+    expect(within(row).queryByRole('button', { name: /advance/i })).toBeNull();
     expect(screen.queryByLabelText('Card no. / code')).toBeNull();
     expect(screen.queryByRole('button', { name: /voucher cancelled with vendor/i })).toBeNull();
   });
@@ -290,8 +291,9 @@ describe('GIFVC — voucher handling', () => {
       voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' }]);
     const row = await openRow('RDM-1');
     expect(await within(row).findByTestId('hubble-needs-reconcile')).toHaveTextContent('Needs reconcile · Hubble state unknown');
-    await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
-    expect(optionValues(advanceSelect())).toEqual(['PROCESSING']);
+    // No refund targets AND (owner 2026-11-24) no forward move without a code → no Advance; exits are Retry / Fulfil manually.
+    expect(within(row).queryByRole('button', { name: /advance/i })).toBeNull();
+    expect(within(row).getByRole('button', { name: 'Retry with Hubble' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Card no. / code')).toBeNull(); // no plain manual code on a Hubble order
   });
 

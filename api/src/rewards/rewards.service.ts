@@ -243,6 +243,25 @@ export function hubbleSweepDue(order: { createdAt: Date; metadata: unknown }, no
 }
 
 /**
+ * The ONE "handed to Hubble" predicate (sweep, console Retry, Advance block): a place attempt was
+ * recorded, or the provider is Hubble, or Hubble gave an order id — and ops have NOT taken the order
+ * over (manual override) or released it. The sweep's SQL mirrors this.
+ */
+export function isHubbleHandedOff(order: { voucherProvider?: string | null; metadata: unknown }): boolean {
+  const m = metaRecord(order.metadata);
+  if (m.hubbleStatus === 'MANUAL_OVERRIDE' || m.hubbleStatus === 'RELEASED') return false;
+  return (
+    typeof m.hubblePlaceAttemptAt === 'string' ||
+    (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble' ||
+    m.hubbleOrderId != null
+  );
+}
+
+/** 400 for a console / bulk-upload forward move on a Hubble-handed order that has no code (owner 2026-11-24). */
+export const HUBBLE_FORWARD_BLOCK_MESSAGE =
+  "This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.";
+
+/**
  * Operator-console projection: the order was handed to Hubble and is still open (CONFIRMED /
  * PROCESSING, no code) — "Retry with Hubble" applies even without a flag. Plus when it was handed
  * over and when the automatic re-check last looked.
@@ -258,11 +277,7 @@ export function hubbleWaitInfo(order: {
   const handed =
     (HUBBLE_SWEEP_STATUSES as readonly string[]).includes(order.status) &&
     !hasIssuedVoucher(order.voucherCode ?? null) &&
-    m.hubbleStatus !== 'MANUAL_OVERRIDE' &&
-    m.hubbleStatus !== 'RELEASED' &&
-    (typeof m.hubblePlaceAttemptAt === 'string' ||
-      (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble' ||
-      m.hubbleOrderId != null);
+    isHubbleHandedOff(order);
   if (!handed) return { hubbleHanded: false };
   return {
     hubbleHanded: true,
@@ -3090,6 +3105,21 @@ export class RewardsService {
     // Ops exits: "Retry with Hubble" (reconcile) or a GIFSY_ADMIN "Fulfil manually" override.
     // EXCEPT an order whose only Hubble trace proves nothing was ever placed (NOT_CONFIGURED /
     // INVALID_AMOUNT, no code): Hubble never held a voucher, so a manual refund is safe.
+    // OWNER 2026-11-24: no FORWARD move (→PROCESSING / DISPATCHED / DELIVERED) by hand on an order handed
+    // to Hubble while it has no code — Hubble delivers it (reconcile / auto re-check, which do NOT come
+    // through here), or a GIFSY_ADMIN "Fulfil manually" supplies the code (a code on this call is only
+    // accepted with the manual override — planVoucherWrite below). Every entry path routes through here:
+    // the console, the dispatch controller and the bulk fulfilment upload (the row error shows this text).
+    // Refund / cancel exits keep their own rules above/below.
+    if (
+      isForwardDispatchTarget &&
+      isHubbleHandedOff(order) &&
+      !hasIssuedVoucher(order.voucherCode) &&
+      !hasIssuedVoucher(dto.voucherCode)
+    ) {
+      throw new BadRequestException(HUBBLE_FORWARD_BLOCK_MESSAGE);
+    }
+
     if (hasHubbleMarkers(order) && isRefundTarget && !isHubbleNeverPlaced(order)) {
       throw new BadRequestException(
         'An order sent to Hubble cannot be cancelled, returned or failed manually ' +

@@ -37,6 +37,8 @@ export interface TransitionableOrder {
   hubbleNeedsReconcile?: boolean;
   /** Why it is stuck — a "never placed" reason keeps refunds available (mirrors the backend). */
   hubbleReconcileReason?: string | null;
+  /** Server (operator view): handed to Hubble and still open (CONFIRMED / PROCESSING, no code). */
+  hubbleHanded?: boolean;
 }
 
 /** Mirrors backend HUBBLE_NEVER_PLACED_REASONS: set before any Hubble order was placed. */
@@ -56,15 +58,19 @@ export function hasIssuedVoucher(code: string | null | undefined): boolean {
  *    payout rail, so the backend rejects both refund targets and forward dispatch moves;
  *  - a Hubble-issued voucher: no refund targets (non-reversible once issued);
  *  - ANY order holding an issued voucher code: no refund targets until ops records
- *    "Voucher cancelled with vendor" (backend VOUCHER_ISSUED_REFUND_BLOCK, all providers).
+ *    "Voucher cancelled with vendor" (backend VOUCHER_ISSUED_REFUND_BLOCK, all providers);
+ *  - an order handed to Hubble with NO code: no forward targets (owner 2026-11-24, backend
+ *    HUBBLE_FORWARD_BLOCK_MESSAGE) — Hubble delivers it, or ops use Retry / "Fulfil manually".
  */
 export function nextStatusOptions(order: TransitionableOrder): string[] {
   const edges = NEXT_STATUS[order.status] ?? [];
   const isCash = CASH_REDEMPTION_MODES.has(order.redemptionMode ?? '');
   const isHubble = (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble';
   const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
+  const hubbleWithoutCode = (order.hubbleHanded === true || isHubble) && !voucherIssued;
   return edges.filter((to) => {
     if (isCash && (REFUND_TARGETS.has(to) || FORWARD_DISPATCH_TARGETS.has(to))) return false;
+    if (hubbleWithoutCode && FORWARD_DISPATCH_TARGETS.has(to)) return false;
     const hubbleBlocksRefund =
       order.hubbleNeedsReconcile === true &&
       !(HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '') && !voucherIssued && !isHubble);

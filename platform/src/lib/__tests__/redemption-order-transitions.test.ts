@@ -39,8 +39,8 @@ describe('redemption-order transitions', () => {
   });
 
   it('a Hubble-issued voucher offers no refund targets', () => {
-    expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', voucherProvider: 'Hubble' }))
-      .toEqual(['PROCESSING']);
+    expect(nextStatusOptions({ status: 'PROCESSING', redemptionMode: 'GIFT_CARD', voucherProvider: 'Hubble', voucherCode: 'CARD-1' }))
+      .toEqual(['DISPATCHED']);
     expect(nextStatusOptions({ status: 'DELIVERED', redemptionMode: 'GIFT_CARD', voucherProvider: 'Hubble' }))
       .toEqual([]);
   });
@@ -69,7 +69,22 @@ describe('redemption-order transitions', () => {
     expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED', voucherCode: 'X' }))
       .toEqual(['PROCESSING']);
     expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED', voucherProvider: 'Hubble' }))
-      .toEqual(['PROCESSING']);
+      .toEqual([]); // and no forward move either: it is with Hubble without a code
+  });
+
+  it('OWNER 2026-11-24: a Hubble-handed order WITHOUT a code offers no forward move (Advance hidden)', () => {
+    for (const status of ['CONFIRMED', 'PROCESSING', 'DISPATCHED']) {
+      const viaProvider = nextStatusOptions({ status, redemptionMode: 'GIFT_CARD', voucherProvider: 'Hubble' });
+      const viaServerFlag = nextStatusOptions({ status, redemptionMode: 'GIFT_CARD', hubbleHanded: true });
+      for (const opts of [viaProvider, viaServerFlag]) {
+        expect(opts.filter((s) => ['PROCESSING', 'DISPATCHED', 'DELIVERED'].includes(s))).toEqual([]);
+      }
+    }
+    // The server flag alone (place attempt recorded, provider not yet stamped) is enough.
+    expect(nextStatusOptions({ status: 'CONFIRMED', redemptionMode: 'GIFT_CARD', hubbleHanded: true })).toEqual(['CANCELLED', 'RETURNED']);
+    // With a code (Hubble delivered / manual fulfil) the forward moves are back.
+    expect(nextStatusOptions({ status: 'PROCESSING', redemptionMode: 'GIFT_CARD', hubbleHanded: true, voucherCode: 'X' })).toEqual(['DISPATCHED']);
+    expect(nextStatusOptions({ status: 'PROCESSING', redemptionMode: 'GIFT_CARD', hubbleHanded: true, voucherIssued: true })).toEqual(['DISPATCHED']);
   });
 
   it('a physical gift gets the full edge set', () => {

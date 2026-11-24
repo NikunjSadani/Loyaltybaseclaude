@@ -70,6 +70,11 @@ describe('GIFHR — Retry with Hubble visibility', () => {
     // The stale flag reads in plain words and keeps "Fulfil manually".
     expect(within(row('STALE')).getByText(/Still processing at Hubble/)).toBeInTheDocument();
     expect(within(row('STALE')).getByRole('button', { name: /fulfil manually/i })).toBeInTheDocument();
+    // OWNER 2026-11-24: no "Advance" on a Hubble order without a code (backend refuses it too);
+    // a non-Hubble order keeps it.
+    expect(within(row('WAITING')).queryByRole('button', { name: 'Advance' })).not.toBeInTheDocument();
+    expect(within(row('STALE')).queryByRole('button', { name: 'Advance' })).not.toBeInTheDocument();
+    expect(within(row('MANUAL')).getByRole('button', { name: 'Advance' })).toBeInTheDocument();
     // No manual fulfil on an unflagged order (unchanged rule).
     expect(within(row('WAITING')).queryByRole('button', { name: /fulfil manually/i })).not.toBeInTheDocument();
   });

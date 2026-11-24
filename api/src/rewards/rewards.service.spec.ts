@@ -4639,6 +4639,55 @@ describe('RewardsService', () => {
         .rejects.toThrow(/can't be reused/);
     });
 
+    // ── OWNER 2026-11-24: no manual FORWARD move on a Hubble-handed order without a code ──
+    const handedNoFlag = (extra: Record<string, unknown> = {}) =>
+      stuck({ metadata: { hubblePlaceAttemptAt: '2026-11-24T05:15:00.000Z', hubblePlaceResponded: false, hubbleStatus: 'PROCESSING' }, ...extra });
+    it.each([
+      ['CONFIRMED → PROCESSING (place timed out, unflagged)', { status: 'CONFIRMED', voucherProvider: null }, UpdatableOrderStatus.PROCESSING],
+      ['PROCESSING → DISPATCHED', {}, UpdatableOrderStatus.DISPATCHED],
+      ['DISPATCHED → DELIVERED', { status: 'DISPATCHED' }, UpdatableOrderStatus.DELIVERED],
+    ])('forward move refused with the plain message: %s', async (_l, over, to) => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(handedNoFlag(over));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: to }))
+        .rejects.toThrow("This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.");
+      expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('a FLAGGED Hubble order is refused too (any Hubble hand-off marker counts, e.g. hubbleOrderId only)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck({ voucherProvider: null }));
+      await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))
+        .rejects.toThrow(/This voucher is with Hubble/);
+    });
+
+    it('NOT refused: an order ops took over manually (hubbleStatus MANUAL_OVERRIDE) or a Hubble order that holds a code', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(
+        stuck({ voucherProvider: 'Manual', metadata: { hubbleStatus: 'MANUAL_OVERRIDE', hubblePlaceAttemptAt: '2026-11-24T05:15:00.000Z' } }),
+      );
+      // Whatever else happens downstream (mock-dependent), it is never the Hubble forward block.
+      const msgOf = (p: Promise<unknown>) => p.then(() => '', (e: Error) => e.message);
+      expect(await msgOf(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))).not.toMatch(/This voucher is with Hubble/);
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck({ voucherCode: 'HUB-CARD-1', metadata: { hubbleStatus: 'SUCCESS' } }));
+      expect(await msgOf(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))).not.toMatch(/This voucher is with Hubble/);
+    });
+
+    it('the bulk fulfilment upload shows that message as the ROW error (not a silent skip)', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(handedNoFlag({ orderNumber: 'RDM-h' }));
+      const XLSX = require('xlsx');
+      const ws = XLSX.utils.aoa_to_sheet([
+        ['Order Number', 'Reward', 'Mode', 'Current Status', 'Voucher Code', 'Voucher Provider', 'Tracking Number', 'Tracking URL', 'New Status'],
+        ['RDM-h', 'X', 'GIFT_CARD', 'PROCESSING', '', '', '', '', 'DISPATCHED'],
+      ]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Fulfilment');
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+      const res = await service.uploadFulfilment(gifsy, { buffer } as Express.Multer.File);
+      expect(res).toMatchObject({ failed: 1, succeeded: 0 });
+      expect(res.errors[0]).toMatchObject({
+        orderNumber: 'RDM-h',
+        message: "This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.",
+      });
+    });
+
     it('a manual REFUND on any Hubble-marked order is blocked (not just provider=Hubble)', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck({ voucherProvider: null, status: 'CONFIRMED' }));
       await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.CANCELLED }))
