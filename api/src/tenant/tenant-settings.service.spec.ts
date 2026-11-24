@@ -422,6 +422,19 @@ describe('TenantSettingsService', () => {
       });
     });
 
+    it('salesPhotoViewLevels: present only when a non-empty list is stored (absent / empty → no key)', async () => {
+      const withList = await new TenantSettingsService(makePrisma([
+        { settingKey: 'visibilityConfig', settingValue: { outletScope: ['SSS'], salesPhotoViewLevels: [' XSR', 'SO', 'SO', 'ASM'] } },
+      ])).getEffectiveSettings('bajaj');
+      expect(withList.visibilityConfig.salesPhotoViewLevels).toEqual(['XSR', 'SO', 'ASM']);
+      const empty = await new TenantSettingsService(makePrisma([
+        { settingKey: 'visibilityConfig', settingValue: { outletScope: ['SSS'], salesPhotoViewLevels: [] } },
+      ])).getEffectiveSettings('deoleo');
+      expect(empty.visibilityConfig).not.toHaveProperty('salesPhotoViewLevels');
+      const dflt = await new TenantSettingsService(makePrisma([])).getEffectiveSettings('deoleo');
+      expect(dflt.visibilityConfig).not.toHaveProperty('salesPhotoViewLevels');
+    });
+
     it('dedupes/trims the code allow-lists but ALLOWS empty (no default backfill)', async () => {
       const svc = new TenantSettingsService(makePrisma([
         {

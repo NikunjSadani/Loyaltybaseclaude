@@ -15,6 +15,7 @@ import type { Response } from 'express';
 import { streamObjectResponse } from '../common/stream-object';
 import { VisibilityAdminService } from './visibility-admin.service';
 import { VisibilityMediaService } from './visibility-media.service';
+import { VisibilityCaptureService } from './visibility-capture.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -42,6 +43,7 @@ export class VisibilityAdminController {
   constructor(
     private readonly admin: VisibilityAdminService,
     private readonly media: VisibilityMediaService,
+    private readonly capture: VisibilityCaptureService,
   ) {}
 
   // ── Auth-gated media stream (declared FIRST — static path before any :id route) ──
@@ -66,6 +68,9 @@ export class VisibilityAdminController {
     @Query('key') key: string,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
+    // Sales photo view tightening — SALES roles only, and only for a tenant with salesPhotoViewLevels set (see
+    // VisibilityCaptureService.assertSalesMediaAccess). Admin roles / every other tenant: a no-op (unchanged).
+    await this.capture.assertSalesMediaAccess(user, key);
     const { stream, size, contentType, inline } = await this.media.viewMedia(user, key);
     const disposition = inline ? 'inline' : 'attachment; filename="media"';
     res.setHeader('Content-Type', contentType);

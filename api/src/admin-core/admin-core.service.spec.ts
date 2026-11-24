@@ -1196,6 +1196,16 @@ describe('AdminCoreService', () => {
         expect(written()).toBe(base); // same object, untouched
         expect(mockTenantSettings.getEffectiveSettings).not.toHaveBeenCalled();
       });
+
+      it('salesPhotoViewLevels: an ABSENT key carries the stored list; a present one is kept as sent', async () => {
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { ...base, salesPhotoViewLevels: ['XSR', 'SO'] } });
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, frequencyPerMonth: 2 } });
+        expect(written()).toEqual({ ...base, frequencyPerMonth: 2, salesPhotoViewLevels: ['XSR', 'SO'] });
+        mockPrisma.programSetting.upsert.mockClear();
+        mockPrisma.programSetting.findUnique.mockResolvedValueOnce({ settingValue: { ...base, salesPhotoViewLevels: ['XSR', 'SO'] } });
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, salesPhotoViewLevels: [] } });
+        expect(written().salesPhotoViewLevels).toEqual([]);
+      });
     });
 
     // ── VPA safeguard: manual UPI entry requires STORED UPI-ID uniqueness ──

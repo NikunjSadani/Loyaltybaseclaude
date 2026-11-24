@@ -1733,6 +1733,19 @@ export class AdminCoreService {
         if (lists.subPrograms.length || hasSubPrograms) next.subPrograms = lists.subPrograms;
         dto.value = next as typeof dto.value;
       }
+      // Sales photo view levels (tenant-scoped): same stale-writer safety — an ABSENT key carries the stored list.
+      // Untouched when nothing is stored (Deoleo persists exactly what it sent).
+      const storedPhotoLevels = isPlainObj(stored?.settingValue)
+        ? (stored!.settingValue as { salesPhotoViewLevels?: unknown }).salesPhotoViewLevels
+        : undefined;
+      const cur = dto.value as Record<string, unknown>;
+      if (
+        (cur.salesPhotoViewLevels === undefined || cur.salesPhotoViewLevels === null) &&
+        Array.isArray(storedPhotoLevels) &&
+        storedPhotoLevels.length > 0
+      ) {
+        dto.value = { ...cur, salesPhotoViewLevels: storedPhotoLevels } as typeof dto.value;
+      }
     }
 
     // For the TDS policy (a money-path config), capture the PRIOR value BEFORE the write so

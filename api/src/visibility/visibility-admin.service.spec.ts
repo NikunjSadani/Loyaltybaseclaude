@@ -117,6 +117,32 @@ describe('VisibilityAdminService', () => {
       expect(mockSettings.invalidate).toHaveBeenCalledWith('t1');
       expect(res.visibilityConfig).toEqual(defaultConfig);
     });
+
+    describe('salesPhotoViewLevels (sales photo view, tenant-scoped)', () => {
+      const stored = () => mockPrisma.programSetting.upsert.mock.calls[0][0].update.settingValue;
+      beforeEach(() => mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'ps1' }));
+
+      it('a present list is trimmed, de-duplicated and stored', async () => {
+        await service.setConfig(user, { ...defaultConfig, salesPhotoViewLevels: [' XSR', 'SO', 'SO', 'ASM'] } as never);
+        expect(stored().salesPhotoViewLevels).toEqual(['XSR', 'SO', 'ASM']);
+      });
+
+      it('an ABSENT key carries the stored list (a stale editor never wipes it)', async () => {
+        mockSettings.getEffectiveSettings.mockResolvedValue({
+          visibilityConfig: { ...defaultConfig, salesPhotoViewLevels: ['SO'] },
+        });
+        await service.setConfig(user, defaultConfig as never);
+        expect(stored().salesPhotoViewLevels).toEqual(['SO']);
+      });
+
+      it('an empty list turns it OFF — the key is not stored at all', async () => {
+        mockSettings.getEffectiveSettings.mockResolvedValue({
+          visibilityConfig: { ...defaultConfig, salesPhotoViewLevels: ['SO'] },
+        });
+        await service.setConfig(user, { ...defaultConfig, salesPhotoViewLevels: [] } as never);
+        expect(stored()).not.toHaveProperty('salesPhotoViewLevels');
+      });
+    });
   });
 
   // ── Versioned form ───────────────────────────────────────────────────────────

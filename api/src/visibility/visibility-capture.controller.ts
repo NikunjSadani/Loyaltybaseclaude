@@ -58,6 +58,14 @@ export class VisibilityCaptureController {
     return this.capture.getOutletStatus(user, outletId);
   }
 
+  // ── One capture's CURRENT photos (sales photo view — tenant-scoped via salesPhotoViewLevels) ──
+  // Static `sales/captures/…` prefix: never collides with the review controller's `captures/:id`.
+  @Get('sales/captures/:captureId/photos')
+  @RequirePermission('visibility:read')
+  capturePhotos(@CurrentUser() user: JwtPayload, @Param('captureId') captureId: string) {
+    return this.capture.getSalesCapturePhotos(user, captureId);
+  }
+
   // ── Capture-photo upload (sales-reachable; returns the stored key for a CAMERA field) ──
   // The GIFSY `POST media` route (admin form-builder sample images) is unchanged; this is
   // the SALES capture-photo upload. Static two-segment path — no `:id` collision.

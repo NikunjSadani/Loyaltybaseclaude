@@ -95,6 +95,13 @@ export class VisibilityAdminService {
       current.visibilityConfig,
     );
 
+    // Sales photo view levels (tenant-scoped): ABSENT → carry the stored list; present → trimmed + de-duplicated. Stored
+    // only when non-empty, so a tenant that never turns it on keeps exactly today's JSON.
+    const photoLevels =
+      dto.salesPhotoViewLevels === undefined || dto.salesPhotoViewLevels === null
+        ? [...(current.visibilityConfig.salesPhotoViewLevels ?? [])]
+        : [...new Set(dto.salesPhotoViewLevels.map((s) => String(s).trim()).filter(Boolean))];
+
     const value: Prisma.InputJsonValue = {
       outletScope: dto.outletScope,
       frequencyPerMonth: dto.frequencyPerMonth,
@@ -102,6 +109,7 @@ export class VisibilityAdminService {
       geoFence: { enabled: dto.geoFence.enabled, radiusMeters: dto.geoFence.radiusMeters },
       ...(lists.programs.length ? { programs: lists.programs } : {}),
       ...(lists.subPrograms.length ? { subPrograms: lists.subPrograms } : {}),
+      ...(photoLevels.length ? { salesPhotoViewLevels: photoLevels } : {}),
     };
 
     const setting = await this.prisma.programSetting.upsert({
