@@ -308,7 +308,10 @@ describe('FundService — console settings + rates (D1, D4, D6)', () => {
     const [ms] = pv.confirmToken.split('.');
     await expect(svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: `${ms}.${'0'.repeat(32)}` })).rejects.toBeInstanceOf(ConflictException);
     // New spend lands between the preview and the confirm.
-    prisma.payoutTransaction.findMany.mockResolvedValue([txn('t1', committed), txn('t2', new Date(Date.now() + 1_000))]);
+    await new Promise((r) => setTimeout(r, 5));
+    const between = new Date(); // after the preview, before the confirm
+    await new Promise((r) => setTimeout(r, 5));
+    prisma.payoutTransaction.findMany.mockResolvedValue([txn('t1', committed), txn('t2', between)]);
     const saved = await svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: pv.confirmToken });
     // The token still verifies (only pre-preview spend is in it) — and the figures STORED are recomputed at the confirm,
     // so they include the new line committed in between (round 5 N6).
