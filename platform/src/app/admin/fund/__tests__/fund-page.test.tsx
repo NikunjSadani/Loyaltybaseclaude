@@ -375,7 +375,7 @@ describe('FUND — /admin/fund', () => {
     await screen.findByTestId('fund-balance-card');
     fireEvent.click(screen.getByRole('tab', { name: 'Rates & alerts' }));
     expect(await screen.findByTestId('fund-rates-managed')).toHaveTextContent('Managed by Gifsy in the console.');
-    expect(screen.queryByRole('link', { name: /Gifsy console/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Change the fund settings/ })).not.toBeInTheDocument();
     const panel = screen.getByRole('tabpanel', { name: 'Rates & alerts' });
     expect(within(panel).queryByRole('button')).not.toBeInTheDocument();
     expect(within(panel).queryByRole('textbox')).not.toBeInTheDocument();
@@ -392,25 +392,27 @@ describe('FUND — /admin/fund', () => {
   });
 
   it('F10b: a Gifsy operator gets the console link and a loud test-environment notice', async () => {
-    stubFetch(undefined, summary(), settings({ canManage: true, consoleHref: '/gifsy/clients/t#fund', alertEnvironment: 'test' }));
+    stubFetch(undefined, summary(), settings({ canManage: true, consoleHref: '/admin/fund/settings', alertEnvironment: 'test' }));
     render(<FundReconciliationPage />);
     await screen.findByTestId('fund-balance-card');
     fireEvent.click(screen.getByRole('tab', { name: 'Rates & alerts' }));
-    expect(await screen.findByRole('link', { name: /Gifsy console/ })).toHaveAttribute('href', '/gifsy/clients/t#fund');
+    // Re-audit B1: the link lands on /admin/fund/settings — usable by an assumed owner AND by Gifsy staff.
+    expect(await screen.findByRole('link', { name: /Change the fund settings/ })).toHaveAttribute('href', '/admin/fund/settings');
     expect(screen.getByTestId('fund-alert-env')).toHaveTextContent(/TEST environment/);
   });
 
   it('F11 (C4/C15): the overview explains every flag in visible text; empty spend-by-type has an empty state', async () => {
     stubFetch(undefined, summary({
       byType: [],
-      flagCounts: { DATE_ESTIMATED: 2, TDS_UNALLOCATED: 1, FACE_RECOMPUTED: 1, HUBBLE_NEEDS_RECONCILE: 1 },
+      flagCounts: { DATE_ESTIMATED: 2, TDS_RUN_UNMATCHED: 1, TDS_INCLUDES_EARLIER: 1, FACE_RECOMPUTED: 1, HUBBLE_NEEDS_RECONCILE: 1 },
       itemsWithoutRate: [{ rewardId: 'rw2', itemLabel: 'Old Flipkart', count: 4 }],
     }));
     render(<FundReconciliationPage />);
     const flags = await screen.findByTestId('fund-warn-flags');
     expect(flags).toHaveTextContent(/Face recomputed \(1\): The order's value was worked out again/);
     expect(flags).toHaveTextContent(/Date estimated \(2\)/);
-    expect(flags).toHaveTextContent(/TDS not matched \(1\): This TDS could not be matched to a payout/);
+    expect(flags).toHaveTextContent(/Bank run not identified \(1\): The bank run this TDS was recorded with could not be identified/);
+    expect(flags).toHaveTextContent(/Includes earlier TDS \(1\): Includes TDS for earlier payouts this year/);
     expect(flags).toHaveTextContent(/voucher provider/);
     expect(screen.getByTestId('fund-warn-items')).toHaveTextContent('1 voucher item without a discount');
     expect(screen.getByTestId('fund-warn-items')).toHaveTextContent('Old Flipkart (4)');
@@ -444,5 +446,24 @@ describe('FUND — /admin/fund', () => {
     expect(parseRupees('12.345')).toBeNull();
     expect(parseRupees('abc')).toBeNull();
     expect(parseRupees('+-5')).toBeNull();
+  });
+
+  it('R1 (re-audit B4/B2): the client view says plainly when alert e-mails are switched off, and shows the last daily check', async () => {
+    roleRef.current = 'CLIENT_ADMIN';
+    stubFetch(undefined, summary({ canManage: false, settingsConsoleHref: null }), settings({ emailsSwitchedOff: true, lastCheck: { status: 'no-opening', at: '2026-11-24T04:00:00.000Z' } }));
+    render(<FundReconciliationPage />);
+    await screen.findByTestId('fund-balance-card');
+    fireEvent.click(screen.getByRole('tab', { name: 'Rates & alerts' }));
+    expect(await screen.findByTestId('fund-emails-off')).toHaveTextContent('Low-balance alert e-mails are switched off on this server');
+    expect(screen.getByTestId('fund-last-check')).toHaveTextContent('Waiting for the opening balance');
+  });
+
+  it('R2 (re-audit low): the statement Event filter offers "rate change" lines', async () => {
+    stubFetch();
+    render(<FundReconciliationPage />);
+    await screen.findByTestId('fund-balance-card');
+    fireEvent.click(screen.getByRole('tab', { name: 'Statement' }));
+    const select = (await screen.findAllByRole('combobox')).find((el) => within(el).queryByRole('option', { name: 'All events' }))!;
+    expect(within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)).toContain('RATE_CHANGE');
   });
 });

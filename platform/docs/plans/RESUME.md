@@ -285,6 +285,15 @@ worker jobs → jobsExecutor grant → API (1 GiB) → frontend. "Pushed" ≠ "d
 5. A flaky CI test fails the run **before** anything touches prod: fix the test (test-only commit), re-verify, redeploy.
 6. Verify (§7), then update this file + the release log in `DOCS-INDEX.md`.
 
+**Environment variables to set by hand when the fund-reconciliation release ships** (NOT in the workflows; set them on the
+Cloud Run API service with `gcloud run services update … --update-env-vars`, then verify in the console Fund section, which
+says loudly which mode is active):
+- **Production:** `FUND_ALERTS_LIVE=true` — without it NO client receives a low-balance e-mail (the digest and the client
+  view say "switched off on this server").
+- **Staging:** `FUND_ALERTS_TEST_RECIPIENT=<one internal address, e.g. a gifsy.in inbox>` — every client alert goes only
+  there (subject names who it would have reached). It must be on an internal domain (`REPORTS_RECIPIENT_DOMAINS`, default
+  `gifsy.in`) or nothing is sent and the console/digest say so. Never set `FUND_ALERTS_LIVE` on staging.
+
 Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-RECORD.md) (preflight + checklist),
 [`MIGRATIONS.md`](MIGRATIONS.md), [`ENVIRONMENTS.md`](ENVIRONMENTS.md).
 

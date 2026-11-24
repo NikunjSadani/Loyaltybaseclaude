@@ -161,7 +161,8 @@ const tenantSettingsMock = {
 };
 /** Fund reconciliation: no client has a fund set-up in these fixtures (null = no line); no low-balance e-mails. */
 const fundMock = {
-  digestAndAlert: jest.fn(async () => ({ figures: null })),
+  digestAndAlert: jest.fn(async (..._a: unknown[]) => ({ figures: null }) as { figures: unknown; alert?: unknown }),
+  runLowBalanceAlerts: jest.fn(async (..._a: unknown[]) => ({ results: new Map() }) as { results: Map<string, unknown>; error?: string }),
 };
 const tdsMock = {
   report194R: jest.fn().mockResolvedValue({ rows: [], summary: { totalExcessDeductedPaise: 0n, excessRetailerCount: 0 } }),
@@ -557,6 +558,29 @@ describe('ScheduledReportsService — Daily Operations Digest', () => {
       expect(out.reports[0].status).toBe('degraded');
       expect(sendEmail.mock.calls[0][0].html).toContain('per-tenant KYC SLA targets (nope)');
     });
+  });
+
+  it('re-audit B2: the client low-balance step runs BEFORE and independent of the digest — even when the digest has no recipients', async () => {
+    setRecipients({ dailyDigest: [] });
+    fundMock.runLowBalanceAlerts.mockClear();
+    const out = await svc.runDailyReports(NOW);
+    expect(out.reports[0].status).toBe('no-recipients');
+    expect(fundMock.runLowBalanceAlerts).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-audit B2: the digest reuses the step\'s figures + outcome (no second send); others are computed without sending; a step error is a notice', async () => {
+    const figures = { balancePaise: 100n, committedPaise: 0n, thresholdPaise: 1_000n, isLow: true, hasOpening: true, missingRates: 0, recipients: 1, lastAlertSentOn: null, lastAlertError: null };
+    fundMock.digestAndAlert.mockClear();
+    const input = await svc.collect(NOW, '13 Nov 2026', WIN, Infinity, {
+      results: new Map([['bajaj', { figures, alert: { clientId: 'bajaj', status: 'sent', recipients: 1 } }]]) as never,
+    });
+    const bajaj = input.tenants.find((t) => t.clientId === 'bajaj')!;
+    expect(bajaj.fund).toMatchObject({ ok: true, data: { isLow: true, alert: { status: 'sent', recipients: 1 } } });
+    // Only the OTHER tenants were computed here — and never with sending on.
+    expect(fundMock.digestAndAlert.mock.calls.every((c) => (c[2] as { send?: boolean })?.send === false)).toBe(true);
+    expect(fundMock.digestAndAlert.mock.calls.some((c) => c[0] === 'bajaj')).toBe(false);
+    const failed = await svc.collect(NOW, '13 Nov 2026', WIN, Infinity, { results: new Map(), error: 'conn reset' });
+    expect(failed.runNotices!.join(' ')).toContain('The client low-balance e-mail step could not run (conn reset)');
   });
 
   it('section failure is isolated: that tenant shows "couldn\'t load", everything else renders and sends (degraded)', async () => {

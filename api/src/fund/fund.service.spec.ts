@@ -93,7 +93,7 @@ describe('FundService — tenant scope + roles', () => {
     const { svc, prisma } = makeService();
     const s = await svc.summary(gifsyAssumed);
     expect(s.canManage).toBe(true);
-    expect(s.settingsConsoleHref).toBe('/gifsy/clients/bajaj#fund');
+    expect(s.settingsConsoleHref).toBe('/admin/fund/settings');
     expect(new Set(whereClientIds(prisma))).toEqual(new Set(['bajaj']));
   });
 
@@ -267,6 +267,42 @@ describe('FundService — console settings + rates (D1, D4, D6)', () => {
     expect(audit.newValues).toMatchObject({ backdated: true, linesRepriced: 1, balanceDeltaPaise: '-2000' });
   });
 
+  it('A2/B3: the confirm is atomic — lock + preview recomputed INSIDE the transaction; a second confirm with the same token (double-click) is refused', async () => {
+    const { svc, prisma } = makeService();
+    const committed = new Date(Date.now() - 2 * 86_400_000);
+    prisma.payoutTransaction.findMany.mockResolvedValue([
+      { id: 't1', amountPaise: 100_000n, status: 'SUCCESS', payoutMode: 'UPI', createdAt: committed, completedAt: committed, reversedAt: null, updatedAt: committed, providerRefId: 'U', redemptionOrderId: null, batch: null },
+    ]);
+    const saved: Array<Record<string, unknown>> = [];
+    prisma.fundRate.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
+      const row = { id: 'f' + saved.length, createdAt: new Date(), ...data };
+      saved.push(row);
+      return row;
+    });
+    // The rate history the loader sees includes what was saved so far (as the DB would, under the lock).
+    prisma.fundRate.findMany.mockImplementation(async () => saved);
+    const body = { feeType: 'PERCENT' as const, percent: 2, effectiveFrom: daysFromToday(-5) };
+    const { confirmToken } = (await svc.setAgencyFee(gifsyHome, 'bajaj', body)) as { confirmToken: string };
+    await svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken });
+    await expect(svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken })).rejects.toBeInstanceOf(ConflictException);
+    expect(saved).toHaveLength(1);
+    // The lock is taken inside the same transaction that recomputes + writes.
+    const lockCall = prisma.$executeRaw.mock.calls.find((c) => String(c[0]).includes('pg_advisory_xact_lock'));
+    expect(lockCall).toBeDefined();
+    expect(prisma.$transaction.mock.calls.at(-1)![1]).toMatchObject({ timeout: 120_000 });
+  });
+
+  it('B5: the audit row of a FUTURE-dated rate names the rate in force before it', async () => {
+    const { svc, prisma } = makeService();
+    const past = new Date(Date.now() - 30 * 86_400_000);
+    prisma.fundRate.findMany.mockResolvedValue([{ kind: 'AGENCY_FEE', feeType: 'PERCENT', rateBps: 150, flatPaise: null, effectiveFrom: past, createdAt: past, rewardId: null }]);
+    prisma.fundRate.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'f', ...data }));
+    await svc.setAgencyFee(gifsyHome, 'bajaj', { feeType: 'PERCENT', percent: 2, effectiveFrom: daysFromToday(4) });
+    const audit = prisma.auditLog.create.mock.calls[0][0].data;
+    expect(audit.oldValues).toMatchObject({ feeType: 'PERCENT', rateBps: 150, effectiveFrom: past.toISOString() });
+    expect(audit.newValues).toMatchObject({ rateBps: 200, backdated: false });
+  });
+
   it('D1: same-day effective counts as back-dated (re-prices lines committed earlier today)', async () => {
     const { svc } = makeService();
     const res = await svc.setAgencyFee(gifsyHome, 'bajaj', { feeType: 'FLAT', flatRupees: 5, effectiveFrom: daysFromToday(0) });
@@ -305,13 +341,16 @@ describe('FundService — console settings + rates (D1, D4, D6)', () => {
     expect(prisma.rewardCatalog.findMany.mock.calls[0][0].where.clientId).toBe('deoleo');
     const g = await svc.consoleSettings(gifsyHome, 'bajaj');
     expect(g.lastAlertError).toBe('SMTP 550 mailbox unavailable');
-    expect(g.consoleHref).toBe('/gifsy/clients/bajaj#fund');
+    expect(g.consoleHref).toBe('/admin/fund/settings');
   });
 });
 
 describe('FundService — digest line + daily low-balance e-mail (A7 / B5 / B6)', () => {
   const today = () => istDateKey(new Date());
   const ENV = { ...process.env };
+  beforeEach(() => {
+    delete process.env.REPORTS_RECIPIENT_DOMAINS;
+  });
   afterEach(() => {
     process.env = { ...ENV };
   });
@@ -340,7 +379,10 @@ describe('FundService — digest line + daily low-balance e-mail (A7 / B5 / B6)'
   it('fund-alert target is fail-safe: off unless FUND_ALERTS_LIVE=true; a valid test address otherwise', () => {
     expect(fundAlertTarget({})).toEqual({ mode: 'off' });
     expect(fundAlertTarget({ FUND_ALERTS_TEST_RECIPIENT: 'qa@gifsy.in' })).toEqual({ mode: 'test', to: 'qa@gifsy.in' });
-    expect(fundAlertTarget({ FUND_ALERTS_TEST_RECIPIENT: 'junk' })).toEqual({ mode: 'off' });
+    // Re-audit B4: the test address must be INTERNAL (REPORTS_RECIPIENT_DOMAINS, default gifsy.in) — else refused loudly.
+    expect(fundAlertTarget({ FUND_ALERTS_TEST_RECIPIENT: 'junk' })).toEqual({ mode: 'invalid-test', value: 'junk' });
+    expect(fundAlertTarget({ FUND_ALERTS_TEST_RECIPIENT: 'ops@bajaj.test' })).toEqual({ mode: 'invalid-test', value: 'ops@bajaj.test' });
+    expect(fundAlertTarget({ FUND_ALERTS_TEST_RECIPIENT: 'qa@corp.example', REPORTS_RECIPIENT_DOMAINS: 'corp.example' })).toEqual({ mode: 'test', to: 'qa@corp.example' });
     expect(fundAlertTarget({ FUND_ALERTS_LIVE: 'true', FUND_ALERTS_TEST_RECIPIENT: 'qa@gifsy.in' })).toEqual({ mode: 'live' });
   });
 
@@ -411,6 +453,59 @@ describe('FundService — digest line + daily low-balance e-mail (A7 / B5 / B6)'
     const rb = await b.svc.digestAndAlert('bajaj', Date.now());
     expect(rb.alert!.error).toContain('SMTP down');
     expect(b.prisma.fundSettings.update).toHaveBeenCalledWith({ where: { clientId: 'bajaj' }, data: { lowAlertLastSentOn: null, lowAlertLastError: expect.stringContaining('SMTP down') } });
+  });
+
+  it('B4: a non-internal FUND_ALERTS_TEST_RECIPIENT is refused loudly — nothing sent', async () => {
+    delete process.env.FUND_ALERTS_LIVE;
+    process.env.FUND_ALERTS_TEST_RECIPIENT = 'someone@client.example';
+    const { svc, mail } = lowClient();
+    const r = await svc.digestAndAlert('bajaj', Date.now());
+    expect(r.alert).toMatchObject({ status: 'test-recipient-not-internal' });
+    expect(r.alert!.error).toContain('not on an internal domain');
+    expect(mail.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('B4: the client view says plainly when alert e-mails are switched off on this server', async () => {
+    delete process.env.FUND_ALERTS_LIVE;
+    delete process.env.FUND_ALERTS_TEST_RECIPIENT;
+    const off = await makeService().svc.summary(clientAdmin);
+    expect(off.lowBalance.emailsSwitchedOff).toBe(true);
+    process.env.FUND_ALERTS_LIVE = 'true';
+    expect((await makeService().svc.summary(clientAdmin)).lowBalance.emailsSwitchedOff).toBe(false);
+  });
+
+  it('B2: the low-balance step runs on its own — every client with a threshold is checked and the outcome recorded; one failure never stops the rest', async () => {
+    process.env.FUND_ALERTS_LIVE = 'true';
+    const { svc, prisma } = lowClient();
+    prisma.fundSettings.findMany.mockResolvedValue([{ clientId: 'bajaj' }, { clientId: 'deoleo' }]);
+    const spy = jest.spyOn(svc, 'digestAndAlert').mockImplementation(async (c: string) => {
+      if (c === 'deoleo') throw new Error('db timeout');
+      return { figures: null, alert: { clientId: c, status: 'not-low' } };
+    });
+    const out = await svc.runLowBalanceAlerts(Date.now());
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(out.results.get('bajaj')!.alert!.status).toBe('not-low');
+    expect(out.results.get('deoleo')!.alert).toMatchObject({ status: 'failed', error: 'db timeout' });
+    const recorded = prisma.fundSettings.update.mock.calls.map(([a]) => [(a as { where: { clientId: string } }).where.clientId, (a as { data: { lowAlertLastStatus: string } }).data.lowAlertLastStatus]);
+    expect(recorded).toEqual([['bajaj', 'not-low'], ['deoleo', 'failed']]);
+    expect(prisma.fundSettings.findMany.mock.calls[0][0].where).toMatchObject({ lowBalanceThresholdPaise: { not: null }, clientId: { not: 'gifsy' } });
+  });
+
+  it('B2: an unreadable settings table is reported (error), never thrown', async () => {
+    const { svc, prisma } = makeService();
+    prisma.fundSettings.findMany.mockRejectedValue(new Error('conn reset'));
+    const out = await svc.runLowBalanceAlerts(Date.now());
+    expect(out.error).toContain('conn reset');
+    expect(out.results.size).toBe(0);
+  });
+
+  it('digest-only call (send:false) computes figures and never e-mails', async () => {
+    process.env.FUND_ALERTS_LIVE = 'true';
+    const { svc, mail } = lowClient();
+    const r = await svc.digestAndAlert('bajaj', Date.now(), { send: false });
+    expect(r.figures).toMatchObject({ isLow: true });
+    expect(r.alert).toBeUndefined();
+    expect(mail.sendEmail).not.toHaveBeenCalled();
   });
 
   it('e-mail not configured → not sent, error recorded (never reported as delivered)', async () => {

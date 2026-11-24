@@ -129,13 +129,18 @@ are refused (excluded + listed if any exist).
 - **Dates** (A6): only event timestamps (status-history rows, `deliveredAt`/`completedAt`/`paidAt`, reversal
   `approvedAt`, `cancelledAt`/`reversedAt`) — never `updatedAt`. No event → flag DATE_ESTIMATED (a return is placed on
   its commit day, where it nets to zero; a paid date is left blank).
-- **194C TDS** (owner D3): dated WITH ITS PAYOUT. Recovery rows are cumulative deltas per (PAN or no-PAN outlet, FY), so
-  each key's NET recovery (true-ups included) is shared pro rata by amount (largest remainder) over the client's 194C
-  payout entries of that key and FY that went to the bank (status ≠ PENDING; PAN = the entry's `payeePan` snapshot;
-  no-PAN = the outlet). Each piece takes its payout's commit date and status (returned if the payout was reversed
-  before payment; excluded if before the opening date). A key with no matching payout keeps its rows on the day they
-  were recorded, flagged TDS_UNALLOCATED. Limitation: the allocation re-spreads a year's true-up over that year's
-  payouts by amount — it does not reconstruct which bank run produced which delta.
+- **194C TDS — owner decision 2026-11-24 (SUPERSEDES the D3 pro-rata allocation):** charged as WHAT GIFSY ACTUALLY
+  PAYS, WITH ITS BANK RUN. One line per `TdsRecoveryEntry` (194C, Gifsy-borne), in FULL, frozen — it depends only on its
+  own row and its own run, so later payouts never change an earlier line (no re-split). Dated with its bank run: the
+  client's latest `CreditPayoutDownload` made ≤ 10 min before the row (the row is written in the same transaction as the
+  run); its payouts = that run's 194C entries of the same PAN (`payeePan` snapshot) / no-PAN outlet. Status follows those
+  payouts: all paid → paid; ALL reversed before payment → returned (the only case a return is shown); otherwise
+  committed. If the run or its payouts cannot be identified (e.g. a FAILED payout re-banked in a later run, or one
+  reversed by the legacy path, which clears its download link) the line is charged in full on the day recorded, flagged
+  "bank run not identified" (status not tracked). When the row's base is larger than this run's payouts (no-PAN:
+  cumulative base > this run's base; PAN: tenant base > the run's matched amount) the line carries the note "Includes TDS
+  for earlier payouts this year — yearly limit crossed". A negative row (true-up) is a credit line dated when recorded.
+  Rows recorded before the opening date are excluded.
 - **Back-dated rates** (owner D1): a rate whose effective date is on/before the moment it is saved (today included)
   re-prices lines already committed. The first save returns a preview (lines re-priced, balance change, period) and a
   confirm token; only a second call with that token saves (server-enforced; a stale token → 409 + new preview). Audited
@@ -151,7 +156,8 @@ tenant). Writes on `/v1/fund`: `receipts`, `adjustments`, `opening-balance` — 
 UTR check is trimmed + case-insensitive; a receipt-number clash is a clear 409.
 
 **Screens** — `/admin/fund` (Overview · Statement · Receipts & adjustments · Rates & alerts read-only, "Managed by
-Gifsy in the console"); the Gifsy console client page has a **Fund** section (agency fee + history, voucher-item
+Gifsy in the console"); `/admin/fund/settings` (Gifsy operators working in the client — owner or staff); the Gifsy console
+client page has a **Fund** section (agency fee + history, voucher-item
 discounts + history, threshold + recipients, back-dated preview/confirm). Opening balance has a confirmation step
 (owner D2: it can never be changed — corrections are adjustments). The payouts-page Fund card and the Finance dashboard
 fund block read the same engine (the dashboard block is hidden for MIS_USER / staff without `payouts:read`).
@@ -166,10 +172,22 @@ releases the day's claim so a forced re-run retries. **Environment guard (new, f
 shown in the digest). ⚠️ Production deploy must set `FUND_ALERTS_LIVE=true` or clients get no alerts.
 
 **Owner decisions (2026-11-23):** D1 back-dated rates allowed with preview + confirm (above). D2 no opening-balance
-correction path; confirmation before recording. D3 194C TDS dated with its payout (above). D4 voucher discount per
+correction path; confirmation before recording. ~~D3 194C TDS dated with its payout (pro-rata allocation)~~ — superseded
+2026-11-24 by "charged in full with its bank run" (above). D4 voucher discount per
 voucher ITEM (catalogue reward id; the order's `rewardId` is stable, so past orders keep their item); no rate → face
 value + flag. D5 confirmed: flat fee per payout line; digital-voucher gifts not counted; imported vendor history
 excluded. D6 settings live in the Gifsy console client page; `/admin/fund` shows them read-only.
+
+**Re-audit round (2026-11-24):** the back-dated confirm is atomic (per-client advisory lock; the preview is recomputed
+and the token verified inside the same transaction — a double-click or two concurrent confirms can never double-save);
+rate-change lines respect the opening cut-off, keep date order and are not shown for 0 lines re-priced (and can be
+filtered); the breakdown by type counts like the cards (returned items reported separately); a genuine ₹0 receivable
+stays ₹0; client low-balance e-mails run as their OWN step of the daily run (independent of the internal digest's
+early exits), every check's outcome is stored (`lowAlertLastStatus` / `lowAlertLastCheckedAt`) and shown in the
+console, the client view and the digest; `FUND_ALERTS_TEST_RECIPIENT` must be internal (else refused loudly); the client
+view says plainly when alert e-mails are switched off; every rate audit row names the previous rate; Gifsy staff (who
+never see the console client pages) edit a client's fund settings at `/admin/fund/settings` while working in the client
+(same API: permission + tenant grant). Env vars are listed in RESUME §6 (not in the workflows).
 
 **Other build choices:** only `redemptionMode = GIFT_CARD` counts as a voucher; TDS lines carry their payout's status;
 low-balance recipients may be any domain (Gifsy-configured, client addresses).
