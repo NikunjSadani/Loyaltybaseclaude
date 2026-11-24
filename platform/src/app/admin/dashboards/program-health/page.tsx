@@ -144,19 +144,19 @@ interface StatCardProps {
 
 function StatCard({ label, value, sub, icon: Icon, iconBg, iconColor, valColor, tenantWide }: StatCardProps) {
   return (
-    <Card className="border border-gray-100 shadow-sm rounded-2xl">
-      <CardContent className="pt-6">
-        <div className="flex items-center justify-between">
-          <div className="min-w-0">
-            <p className="text-sm text-gray-500">{label}</p>
-            <p className={`text-3xl font-bold mt-1 ${valColor}`}>{value}</p>
-            {sub && <p className="text-[11px] text-gray-400 mt-1">{sub}</p>}
-            {tenantWide && <TenantWideNote className="mt-1" />}
-          </div>
-          <div className={`p-3 rounded-xl ${iconBg} shrink-0`}>
-            <Icon className={`w-6 h-6 ${iconColor}`} />
+    // Layout (owner 2026-11-24): the icon sits on the LABEL row so the value gets the card's full width — a big figure
+    // ("4,40,968", "₹64,14,997") must never run under the icon or clip on a laptop-width row.
+    <Card className="border border-gray-100 shadow-sm rounded-2xl min-w-0">
+      <CardContent className="pt-5">
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-sm text-gray-500 leading-snug min-w-0">{label}</p>
+          <div className={`p-2 rounded-lg ${iconBg} shrink-0`}>
+            <Icon className={`w-4 h-4 ${iconColor}`} />
           </div>
         </div>
+        <p className={`text-2xl xl:text-3xl font-bold mt-2 tabular-nums leading-tight whitespace-nowrap ${valColor}`}>{value}</p>
+        {sub && <p className="text-[11px] text-gray-400 mt-1 leading-snug">{sub}</p>}
+        {tenantWide && <TenantWideNote className="mt-1" />}
       </CardContent>
     </Card>
   );
@@ -558,7 +558,7 @@ export default function AdminProgramHealthDashboardPage() {
           <p className="text-xs text-gray-400 mt-0.5">Issued, redeemed, outstanding liability &amp; breakage for {monthLabel(scope.period)}</p>
         </CardHeader>
         <CardContent className="pb-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6 gap-4">
             <StatCard label="Issued (period)" value={fmtInt(pointsEconomy.issued)} sub="EARN points" tenantWide={tw('pointsEconomy.issued')}
               icon={TrendingUp} iconBg="bg-green-100" iconColor="text-green-700" valColor="text-green-700" />
             <StatCard label="Redeemed (period)" value={fmtInt(pointsEconomy.redeemed)} sub="REDEEM points" tenantWide={tw('pointsEconomy.redeemed')}
