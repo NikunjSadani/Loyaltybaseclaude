@@ -193,6 +193,84 @@ export function isSalesViewer(role: string | null | undefined): boolean {
  */
 export { hubbleVoucherCredentials };
 
+// ── Automatic re-check of Hubble-handed orders (owner 2026-11-24) ─────────────────────────────
+// Prod BAJAJ-26-000050 sat in PROCESSING for hours: the place call timed out, recover-by-reference
+// found Hubble's order PROCESSING, and nothing ever looked again — the design relied on Hubble's
+// webhook, which Hubble has never sent in prod. This sweep is now the safety net. It ONLY calls the
+// idempotent reconcileHubbleOrder (source SWEEP); it never places an order and never refunds.
+
+/** Never re-check an order handed to Hubble less than this long ago (the place call may be in flight). */
+export const HUBBLE_SWEEP_MIN_AGE_MS = 2 * 60_000;
+/** For the first hour after hand-off: re-check on every sweep, at most this often. */
+export const HUBBLE_SWEEP_FAST_EVERY_MS = 2 * 60_000;
+export const HUBBLE_SWEEP_FAST_WINDOW_MS = 60 * 60_000;
+/** After the first hour: about every 15 minutes … */
+export const HUBBLE_SWEEP_SLOW_EVERY_MS = 15 * 60_000;
+/** … until 7 days after hand-off (then the open flag + ops own it). */
+export const HUBBLE_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+/** Orders re-checked per sweep run (oldest-checked first). */
+export const HUBBLE_SWEEP_BATCH = 25;
+/** Still not delivered after this long → flagged for ops (no silent pass-through). */
+export const HUBBLE_SWEEP_STALE_AFTER_MS = 60 * 60_000;
+/** The open-flag reason a stale Hubble order gets ("Still processing at Hubble"). */
+export const HUBBLE_PROCESSING_STALE_REASON = 'HUBBLE_PROCESSING_STALE';
+/** pg advisory-lock key for the sweep's claim phase (one instance claims at a time). */
+export const HUBBLE_SWEEP_LOCK_KEY = 7_241_126_001;
+/** Statuses a Hubble-handed order can still be completed from by reconcile (DELIVERED needs CONFIRMED/PROCESSING). */
+export const HUBBLE_SWEEP_STATUSES: readonly RedemptionStatus[] = [RedemptionStatus.CONFIRMED, RedemptionStatus.PROCESSING];
+
+const metaRecord = (m: unknown): Record<string, unknown> =>
+  m && typeof m === 'object' && !Array.isArray(m) ? (m as Record<string, unknown>) : {};
+const isoMs = (v: unknown): number => (typeof v === 'string' ? Date.parse(v) : NaN);
+
+/** When the order was handed to Hubble: the place attempt, else the order's creation. */
+export function hubbleHandedAt(order: { createdAt: Date; metadata: unknown }): Date {
+  const t = isoMs(metaRecord(order.metadata).hubblePlaceAttemptAt);
+  return Number.isFinite(t) ? new Date(t) : order.createdAt;
+}
+
+/**
+ * Is a Hubble-handed order due for a re-check now? ≥ 2 min after hand-off, ≤ 7 days; every sweep
+ * (2 min) during the first hour, then every 15 min.
+ */
+export function hubbleSweepDue(order: { createdAt: Date; metadata: unknown }, nowMs: number): boolean {
+  const age = nowMs - hubbleHandedAt(order).getTime();
+  if (age < HUBBLE_SWEEP_MIN_AGE_MS || age > HUBBLE_SWEEP_MAX_AGE_MS) return false;
+  const last = isoMs(metaRecord(order.metadata).hubbleLastSweepAt);
+  if (!Number.isFinite(last)) return true;
+  const every = age < HUBBLE_SWEEP_FAST_WINDOW_MS ? HUBBLE_SWEEP_FAST_EVERY_MS : HUBBLE_SWEEP_SLOW_EVERY_MS;
+  return nowMs - last >= every;
+}
+
+/**
+ * Operator-console projection: the order was handed to Hubble and is still open (CONFIRMED /
+ * PROCESSING, no code) — "Retry with Hubble" applies even without a flag. Plus when it was handed
+ * over and when the automatic re-check last looked.
+ */
+export function hubbleWaitInfo(order: {
+  status: string;
+  voucherCode?: string | null;
+  voucherProvider?: string | null;
+  createdAt: Date;
+  metadata: unknown;
+}): { hubbleHanded: boolean; hubbleWaitingSince?: string; hubbleLastCheckedAt?: string | null } {
+  const m = metaRecord(order.metadata);
+  const handed =
+    (HUBBLE_SWEEP_STATUSES as readonly string[]).includes(order.status) &&
+    !hasIssuedVoucher(order.voucherCode ?? null) &&
+    m.hubbleStatus !== 'MANUAL_OVERRIDE' &&
+    m.hubbleStatus !== 'RELEASED' &&
+    (typeof m.hubblePlaceAttemptAt === 'string' ||
+      (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble' ||
+      m.hubbleOrderId != null);
+  if (!handed) return { hubbleHanded: false };
+  return {
+    hubbleHanded: true,
+    hubbleWaitingSince: hubbleHandedAt(order).toISOString(),
+    hubbleLastCheckedAt: typeof m.hubbleLastSweepAt === 'string' ? m.hubbleLastSweepAt : null,
+  };
+}
+
 /** Operator-console projection of an order's Hubble reconcile state (from metadata). */
 export function hubbleReconcileFlags(metadata: unknown): {
   hubbleNeedsReconcile: boolean;
@@ -1068,6 +1146,8 @@ export class RewardsService {
       // Operator console only: a Hubble order stuck for ops ("Needs reconcile" + reason). The raw
       // metadata blob (redeem snapshot etc.) is never returned to anyone from this list.
       ...(memberView ? {} : hubbleReconcileFlags(metadata)),
+      // Operator console only: handed to Hubble + still open → "Retry with Hubble" + "Waiting since".
+      ...(memberView ? {} : hubbleWaitInfo({ ...o, metadata })),
       // Fulfilling operator only (sees the code): the server would accept a set-once PIN / provider
       // on the stored code (F4 — one rule, canFillStoredVoucher; the console row's PIN box uses it).
       ...(memberView || hideCodes ? {} : { voucherFillable: canFillStoredVoucher({ ...o, pointsDeducted, metadata }) }),
@@ -4329,9 +4409,11 @@ export class RewardsService {
    */
   async reconcileHubbleOrder(
     referenceId: string,
-    opts: { actorId?: string; source?: 'WEBHOOK' | 'OPS_RETRY'; webhookStatus?: string | null } = {},
+    opts: { actorId?: string; source?: 'WEBHOOK' | 'OPS_RETRY' | 'SWEEP'; webhookStatus?: string | null } = {},
   ): Promise<string> {
     const source = opts.source ?? 'WEBHOOK';
+    // History notes say how the answer arrived: the automatic re-check reads as "auto re-check".
+    const via = source === 'SWEEP' ? 'auto re-check' : source === 'OPS_RETRY' ? 'ops retry' : 'Hubble webhook';
     try {
       // Resolve the tenant from the order itself (the webhook carries no clientId).
       const owner = await this.prisma.redemptionOrder.findFirst({
@@ -4402,14 +4484,166 @@ export class RewardsService {
           await this.markHubblePendingReconcile(order.id, 'HUBBLE_WEBHOOK_BUT_NOT_FOUND');
           return this.HUBBLE_OUTCOME.NO_HUBBLE_ORDER_NOT_REFUNDABLE;
         }
+        if (source === 'SWEEP') {
+          // The automatic re-check NEVER refunds: "no order" is left for ops (the stale flag surfaces it
+          // after an hour; "Retry with Hubble" runs the aged, canary-gated refund decision).
+          this.logger.warn(`[hubble] auto re-check: no Hubble order yet for ${order.orderNumber} — not refunded; left for ops`);
+          return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
+        }
         // Ops retry: refund ONLY when provably safe (see resolveNoHubbleOrder).
         return await this.resolveNoHubbleOrder(order, clientId, opts.actorId);
       }
-      return await this.applyHubbleBody(order, body, opts.actorId);
+      // Webhook / ops retry / auto re-check deliver through the SAME path, and the member gets the SAME
+      // VOUCHER_ISSUED bell + WhatsApp as the confirm path (which notifies itself, so not passed there).
+      return await this.applyHubbleBody(order, body, opts.actorId, { notifyClientId: clientId, via });
     } catch (e) {
       this.logger.error(`[hubble] reconcileHubbleOrder(${referenceId}) unexpected error: ${e}`);
       return this.HUBBLE_OUTCOME.PENDING_RECONCILE;
     }
+  }
+
+  /**
+   * Automatic re-check of Hubble-handed orders (see HUBBLE_SWEEP_*). Driven by HubbleOrderSweep's
+   * @Interval, the same mechanism as the voucher-dispersal 2-minute reconcile. NEVER throws.
+   *
+   * 1. CLAIM (one short transaction): a pg_try_advisory_xact_lock — another instance already claiming →
+   *    skipped; then ONE indexed read of open orders (status CONFIRMED/PROCESSING, no code) with a Hubble
+   *    hand-off marker, the due ones (age + back-off) picked oldest-checked first, capped at
+   *    HUBBLE_SWEEP_BATCH, and each stamped (hubbleLastSweepAt / hubbleSweepCount) with a CAS on the
+   *    previous stamp — so two instances never check the same order at once.
+   * 2. CHECK each via reconcileHubbleOrder(id, { source: 'SWEEP' }) — the same idempotent path as the
+   *    webhook / ops retry (DELIVERED → VOUCHER_ISSUED bell + WhatsApp; FAILED → refund). One order
+   *    failing never stops the rest; a Hubble lookup error is recorded and retried next time.
+   * 3. STALE: still open ≥ 1 h after hand-off and not yet flagged → HUBBLE_PROCESSING_STALE flag
+   *    (console needs-review list + Daily Ops Digest count). A later SUCCESS clears it as usual.
+   */
+  async sweepHubbleOrders(nowMs: number = Date.now()): Promise<{
+    skipped?: 'NOT_CONFIGURED' | 'LOCKED' | 'ERROR';
+    claimed: number;
+    outcomes: Record<string, number>;
+    flaggedStale: number;
+    errors: number;
+  }> {
+    const res = { claimed: 0, outcomes: {} as Record<string, number>, flaggedStale: 0, errors: 0 };
+    if (!this.hubble.isConfigured()) return { ...res, skipped: 'NOT_CONFIGURED' };
+    let claimed: string[] | null;
+    try {
+      claimed = await this.claimHubbleSweepBatch(nowMs);
+    } catch (e) {
+      this.logger.error(`[hubble] auto re-check: claim phase failed: ${e}`);
+      return { ...res, skipped: 'ERROR' };
+    }
+    if (claimed === null) return { ...res, skipped: 'LOCKED' };
+    res.claimed = claimed.length;
+    for (const id of claimed) {
+      try {
+        const outcome = await this.reconcileHubbleOrder(id, { source: 'SWEEP' });
+        res.outcomes[outcome] = (res.outcomes[outcome] ?? 0) + 1;
+        await this.noteHubbleSweepOutcome(id, outcome);
+        if (await this.flagHubbleStaleIfDue(id, nowMs)) res.flaggedStale++;
+      } catch (e) {
+        res.errors++;
+        this.logger.error(`[hubble] auto re-check of order ${id} failed: ${e}`);
+      }
+    }
+    if (res.claimed > 0) {
+      this.logger.log(`[hubble] auto re-check: ${res.claimed} order(s) checked ${JSON.stringify(res.outcomes)}; ${res.flaggedStale} flagged stale; ${res.errors} error(s)`);
+    }
+    return res;
+  }
+
+  /** Sweep step 1 — see sweepHubbleOrders. Returns null when another instance holds the lock. */
+  private async claimHubbleSweepBatch(nowMs: number): Promise<string[] | null> {
+    const now = new Date(nowMs);
+    const nowIso = now.toISOString();
+    // Created ≥ the oldest hand-off still in the window (the place attempt follows creation by seconds).
+    const createdAfter = new Date(nowMs - HUBBLE_SWEEP_MAX_AGE_MS - 24 * 60 * 60_000);
+    const createdBefore = new Date(nowMs - HUBBLE_SWEEP_MIN_AGE_MS);
+    return this.prisma.$transaction(async (tx) => {
+      const lock = await tx.$queryRaw<Array<{ locked: boolean }>>`SELECT pg_try_advisory_xact_lock(${HUBBLE_SWEEP_LOCK_KEY}::bigint) AS "locked"`;
+      if (!lock?.[0]?.locked) return null;
+      // Index: redemption_orders(status) — a tenant with no Hubble orders (e.g. Deoleo) only costs its
+      // open orders' share of this one read; the hand-off marker is checked on those rows only.
+      const rows = await tx.$queryRaw<Array<{ id: string; createdAt: Date; metadata: unknown }>>`
+        SELECT "id", "createdAt", "metadata" FROM "redemption_orders"
+        WHERE "status"::text IN ('CONFIRMED', 'PROCESSING')
+          AND "voucherCode" IS NULL
+          AND "createdAt" > ${createdAfter} AND "createdAt" < ${createdBefore}
+          AND jsonb_typeof("metadata") = 'object'
+          AND (("metadata"->>'hubblePlaceAttemptAt') IS NOT NULL
+               OR lower(coalesce("voucherProvider", '')) = 'hubble'
+               OR ("metadata"->>'hubbleOrderId') IS NOT NULL)
+          AND coalesce("metadata"->>'hubbleStatus', '') NOT IN ('MANUAL_OVERRIDE', 'RELEASED')
+        ORDER BY ("metadata"->>'hubbleLastSweepAt') ASC NULLS FIRST, "createdAt" ASC
+        LIMIT 500`;
+      const due = rows.filter((r) => hubbleSweepDue(r, nowMs)).slice(0, HUBBLE_SWEEP_BATCH);
+      const won: string[] = [];
+      for (const r of due) {
+        const prev = metaRecord(r.metadata).hubbleLastSweepAt;
+        const prevStamp = typeof prev === 'string' ? prev : null;
+        // CAS on the previous stamp + still open: a concurrent claim / delivery makes this a no-op.
+        // updatedAt is deliberately NOT bumped (the issue path's CAS keys on it; never disturb it).
+        const n = await tx.$executeRaw`
+          UPDATE "redemption_orders"
+          SET "metadata" = "metadata" || jsonb_build_object(
+                'hubbleLastSweepAt', ${nowIso}::text,
+                'hubbleSweepCount', coalesce(("metadata"->>'hubbleSweepCount')::int, 0) + 1)
+          WHERE "id" = ${r.id}
+            AND "status"::text IN ('CONFIRMED', 'PROCESSING')
+            AND "voucherCode" IS NULL
+            AND ("metadata"->>'hubbleLastSweepAt') IS NOT DISTINCT FROM ${prevStamp}::text`;
+        if (n === 1) won.push(r.id);
+      }
+      return won;
+    }, { timeout: 15_000, maxWait: 5_000 });
+  }
+
+  /** Record the latest auto re-check answer on the order (shown to ops; never bumps updatedAt). Never throws. */
+  private async noteHubbleSweepOutcome(orderId: string, outcome: string): Promise<void> {
+    await this.prisma.$executeRaw`
+      UPDATE "redemption_orders"
+      SET "metadata" = (CASE WHEN jsonb_typeof("metadata") = 'object' THEN "metadata" ELSE '{}'::jsonb END)
+                       || jsonb_build_object('hubbleLastSweepOutcome', ${outcome}::text)
+      WHERE "id" = ${orderId}`.catch((e: unknown) => this.logger.warn(`[hubble] could not note the auto re-check outcome on ${orderId}: ${e}`));
+  }
+
+  /**
+   * Sweep step 3 — NO SILENT PASS-THROUGH: an order still open (CONFIRMED / PROCESSING, no code) an hour
+   * after hand-off, with no open flag, is flagged HUBBLE_PROCESSING_STALE ("Still processing at Hubble")
+   * and audited. An existing open flag is never replaced (it already surfaces). true = flagged now.
+   */
+  private async flagHubbleStaleIfDue(orderId: string, nowMs: number): Promise<boolean> {
+    const o = await this.prisma.redemptionOrder.findFirst({
+      where: { id: orderId },
+      select: { id: true, orderNumber: true, status: true, voucherCode: true, createdAt: true, metadata: true },
+    });
+    if (!o || !(HUBBLE_SWEEP_STATUSES as readonly string[]).includes(o.status) || hasIssuedVoucher(o.voucherCode)) return false;
+    const m = metaRecord(o.metadata);
+    if (m.hubbleNeedsReconcile === true) return false;
+    const handedAt = hubbleHandedAt(o);
+    if (nowMs - handedAt.getTime() < HUBBLE_SWEEP_STALE_AFTER_MS) return false;
+    await this.markHubblePendingReconcile(o.id, HUBBLE_PROCESSING_STALE_REASON);
+    this.logger.error(
+      `[hubble] order ${o.orderNumber}: still not delivered ${Math.round((nowMs - handedAt.getTime()) / 60_000)} min after it was handed to Hubble — flagged ${HUBBLE_PROCESSING_STALE_REASON} for ops`,
+    );
+    await this.prisma.auditLog
+      .create({
+        data: {
+          action: 'UPDATE',
+          entityType: 'REDEMPTION_ORDER',
+          entityId: o.id,
+          metadata: {
+            event: 'HUBBLE_PROCESSING_STALE',
+            orderNumber: o.orderNumber,
+            status: o.status,
+            handedToHubbleAt: handedAt.toISOString(),
+            sweepCount: typeof m.hubbleSweepCount === 'number' ? m.hubbleSweepCount : null,
+            lastSweepOutcome: typeof m.hubbleLastSweepOutcome === 'string' ? m.hubbleLastSweepOutcome : null,
+          },
+        },
+      })
+      .catch((e: unknown) => this.logger.warn(`[hubble] could not audit the stale flag on ${o.orderNumber}: ${e}`));
+    return true;
   }
 
   /** The RedemptionOrder shape the Hubble helpers operate on. */
@@ -4497,6 +4731,8 @@ export class RewardsService {
     order: HubbleLoadedOrder,
     body: HubbleOrderResult,
     actorId?: string,
+    /** Reconcile paths: notify the member when THIS call delivers, and say how it arrived in the history. */
+    ctx: { notifyClientId?: string; via?: string } = {},
   ): Promise<string> {
     const status = (body.status ?? '').toUpperCase();
     if (status === 'SUCCESS') {
@@ -4504,11 +4740,11 @@ export class RewardsService {
       // be stored (no code in the payload / a manual code already on the order) was left pending
       // reconcile — report that, so the confirm never tells the member "issued" for a code they
       // can't see.
-      return await this.storeHubbleSuccess(order, body, actorId);
+      return await this.storeHubbleSuccess(order, body, actorId, ctx);
     }
     if (status === 'PROCESSING') {
       // An override outcome when the claim lost to a no-order refund (late-webhook check ran instead).
-      return (await this.markHubbleProcessing(order, body, actorId)) ?? this.HUBBLE_OUTCOME.PROCESSING;
+      return (await this.markHubbleProcessing(order, body, actorId, ctx.via)) ?? this.HUBBLE_OUTCOME.PROCESSING;
     }
     if (status === 'FAILED') {
       const refunded = await this.refundAndFailHubble(
@@ -4544,6 +4780,7 @@ export class RewardsService {
     order: HubbleLoadedOrder,
     body: HubbleOrderResult,
     actorId?: string,
+    ctx: { notifyClientId?: string; via?: string } = {},
   ): Promise<string> {
     const voucher = (body.vouchers ?? [])[0];
     // Product-aware: Amazon Pay's claim code arrives as cardPin — store/send that alone (hubble-voucher.ts).
@@ -4584,7 +4821,7 @@ export class RewardsService {
         fromStatus: null,
         toStatus: RedemptionStatus.DELIVERED,
         changedById: actorId ?? null,
-        notes: 'Hubble voucher issued',
+        notes: ctx.via ? `Hubble voucher issued (${ctx.via})` : 'Hubble voucher issued',
         data: {
           fulfilmentChannel: GiftFulfilmentChannel.DIGITAL_VOUCHER,
           voucherCode,
@@ -4665,6 +4902,9 @@ export class RewardsService {
         hubbleResolvedPreviousReason: reason,
       };
     });
+    // THIS call delivered it (won the claim) → the member's VOUCHER_ISSUED bell + WhatsApp, exactly
+    // once (a lost claim never reaches here). Best-effort: never throws.
+    if (ctx.notifyClientId) await this.notifyVoucherIssued(order.id, ctx.notifyClientId);
     return this.HUBBLE_OUTCOME.DELIVERED;
   }
 
@@ -4677,6 +4917,7 @@ export class RewardsService {
     order: HubbleLoadedOrder,
     body: HubbleOrderResult,
     actorId?: string,
+    via?: string,
   ): Promise<string | undefined> {
     // Ops already took this order over (manual override / release) or a code is already on it:
     // Hubble reporting PROCESSING now must NOT re-stamp provider='Hubble' over the manual state —
@@ -4705,7 +4946,7 @@ export class RewardsService {
         fromStatus: RedemptionStatus.CONFIRMED,
         toStatus: RedemptionStatus.PROCESSING,
         changedById: actorId ?? null,
-        notes: 'Hubble voucher processing',
+        notes: via ? `Hubble voucher processing (${via})` : 'Hubble voucher processing',
         data: {
           fulfilmentChannel: GiftFulfilmentChannel.DIGITAL_VOUCHER,
           supplierOrderRef: body.id ?? body.orderId ?? null,

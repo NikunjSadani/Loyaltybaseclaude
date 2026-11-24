@@ -1372,4 +1372,88 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       expect(meta().hubbleNeedsReconcile).toBe(false);
     });
   });
+  // ── Automatic re-check (source SWEEP, owner 2026-11-24) ─────────────────────────────────────────
+  describe('source SWEEP (automatic re-check)', () => {
+    const SUCCESS_BODY = { status: 'SUCCESS', id: 'hub-o1', referenceId: 'o1', vouchers: [{ cardNumber: 'CARD-O1' }] };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ro = mockPrisma.redemptionOrder as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cl = mockPrisma.client as any;
+    beforeEach(() => {
+      // notifyVoucherIssued (shared) self-loads the order + the client label.
+      ro.findUnique = jest.fn(async () => snapshot());
+      cl.findUnique = jest.fn(async () => ({ branding: null, internalName: 'Bajaj' }));
+      // The prod incident shape: place timed out, recover found Hubble PROCESSING → PROCESSING, unflagged.
+      row = stuckRow({
+        status: 'PROCESSING',
+        voucherProvider: 'Hubble',
+        fulfilmentChannel: 'DIGITAL_VOUCHER',
+        metadata: { sellingValuePaise: 50000, hubblePlaceAttemptAt: ago(30 * 60_000).toISOString(), hubblePlaceResponded: false, hubbleStatus: 'PROCESSING', hubbleOrderId: '01M85ZNA' },
+      });
+    });
+    afterEach(() => {
+      delete ro.findUnique;
+      delete cl.findUnique;
+    });
+
+    it('Hubble SUCCESS → DELIVERED with the code, history says "auto re-check", member gets the VOUCHER_ISSUED notification once', async () => {
+      o1Lookup.mockResolvedValue(SUCCESS_BODY);
+      const outcome = await service.reconcileHubbleOrder('o1', { source: 'SWEEP' });
+      expect(outcome).toBe('DELIVERED');
+      expect(row).toMatchObject({ status: 'DELIVERED', voucherCode: 'CARD-O1', voucherProvider: 'Hubble' });
+      expect(mockHubble.placeOrder).not.toHaveBeenCalled();
+      const notes = mockPrisma.redemptionStatusHistory.create.mock.calls.map((c) => (c[0] as { data: { notes?: string } }).data.notes);
+      expect(notes).toContain('Hubble voucher issued (auto re-check)');
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+      expect(mockNotifications.notifyUserWithChannels.mock.calls[0][0]).toMatchObject({ eventKey: 'VOUCHER_ISSUED', userId: 'owner-user' });
+    });
+
+    it('a stale flag (HUBBLE_PROCESSING_STALE) is cleared by a later SUCCESS the usual way', async () => {
+      row.metadata = { ...(row.metadata as Row), hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_STALE' };
+      o1Lookup.mockResolvedValue(SUCCESS_BODY);
+      await service.reconcileHubbleOrder('o1', { source: 'SWEEP' });
+      expect(row.status).toBe('DELIVERED');
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: false, hubbleResolvedPreviousReason: 'HUBBLE_PROCESSING_STALE' });
+    });
+
+    it('the webhook path now notifies too (same code): SUCCESS via webhook → one VOUCHER_ISSUED', async () => {
+      o1Lookup.mockResolvedValue(SUCCESS_BODY);
+      await service.reconcileHubbleOrder('o1', { webhookStatus: 'SUCCESS' });
+      expect(mockNotifications.notifyUserWithChannels).toHaveBeenCalledTimes(1);
+      expect(mockNotifications.notifyUserWithChannels.mock.calls[0][0].eventKey).toBe('VOUCHER_ISSUED');
+    });
+
+    it('Hubble still PROCESSING → unchanged, no notification, no refund', async () => {
+      o1Lookup.mockResolvedValue({ status: 'PROCESSING', id: 'hub-o1', referenceId: 'o1' });
+      const outcome = await service.reconcileHubbleOrder('o1', { source: 'SWEEP' });
+      expect(outcome).toBe('PROCESSING');
+      expect(row.status).toBe('PROCESSING');
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled();
+    });
+
+    it('Hubble says NO ORDER → the sweep NEVER refunds (left for ops), even for an old order', async () => {
+      row = stuckRow(); // old, CONFIRMED, INDETERMINATE — the ops retry WOULD refund this one
+      o1Lookup.mockResolvedValue(null);
+      const outcome = await service.reconcileHubbleOrder('o1', { source: 'SWEEP' });
+      expect(outcome).toBe('PENDING_RECONCILE');
+      expect(row.status).toBe('CONFIRMED');
+      expect(mockWallet.reverse).not.toHaveBeenCalled();
+    });
+
+    it('a Hubble lookup error → PENDING_RECONCILE (kept for the next sweep), nothing written', async () => {
+      o1Lookup.mockRejectedValue(new Error('Hubble did not respond within 15s'));
+      const outcome = await service.reconcileHubbleOrder('o1', { source: 'SWEEP' });
+      expect(outcome).toBe('PENDING_RECONCILE');
+      expect(row.status).toBe('PROCESSING');
+    });
+
+    it('Hubble FAILED → refunded through the usual path', async () => {
+      o1Lookup.mockResolvedValue({ status: 'FAILED', id: 'hub-o1', referenceId: 'o1', failureReason: 'out of stock' });
+      const outcome = await service.reconcileHubbleOrder('o1', { source: 'SWEEP' });
+      expect(outcome).toBe('FAILED_REFUNDED');
+      expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
+    });
+  });
 });
+

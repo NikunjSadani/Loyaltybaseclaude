@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { RewardsController } from './rewards.controller';
 import { AdminRewardsController } from './admin-rewards.controller';
 import { RewardsService } from './rewards.service';
+import { HubbleOrderSweep } from './hubble-order-sweep';
 import { PrismaModule } from '../prisma/prisma.module';
 import { WalletModule } from '../wallet/wallet.module';
 import { HubbleModule } from '../hubble/hubble.module';
@@ -15,7 +16,8 @@ import { HubbleWebhookController } from '../hubble/hubble-webhook.controller';
 @Module({
   imports: [PrismaModule, WalletModule, HubbleModule],
   controllers: [RewardsController, AdminRewardsController, HubbleWebhookController],
-  providers: [RewardsService],
+  // HubbleOrderSweep: the automatic re-check of Hubble-handed orders (@Interval, like voucher dispersal).
+  providers: [RewardsService, HubbleOrderSweep],
   // Exported so the Gift Catalogue dispatch console can reuse the guarded order
   // lifecycle (transition/update/list) instead of re-implementing fulfilment logic.
   exports: [RewardsService],
