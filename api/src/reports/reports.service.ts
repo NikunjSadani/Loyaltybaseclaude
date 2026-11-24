@@ -20,7 +20,7 @@ import { isLocationRequired } from '../common/location-gate.helper';
 import { buildLocationReport, pageOfLocationReport, resolveLocationParams } from './location/location-compliance-report';
 import { RedemptionReportQueryDto } from './dto/redemption-report.dto';
 import { redemptionOrderCount, redemptionScreenSummary, type RedemptionScreenSummary } from './redemptions/redemption-report.summary';
-import { cachedUserAreaResolver, loadUserAreaResolver, type AreaPrisma, type UserAreaResolver } from './area/user-area';
+import { loadUserAreaResolver, type AreaPrisma, type UserAreaResolver } from './area/user-area';
 import { tenantInstallWhere } from '../push/pwa-adoption.service';
 import {
   installedUsersIdHeaders,
@@ -339,9 +339,9 @@ export class ReportsService {
         set.add(i.platform);
         platformsByUser.set(i.userId, set);
       }
-      area = await cachedUserAreaResolver(clientId, () =>
-        loadUserAreaResolver(this.prisma as unknown as AreaPrisma, clientId),
-      );
+      // Fresh read (not the 60 s usage-page cache): the level IDs must match the App Adoption installed-users
+      // Excel, which also reads fresh — right after a hierarchy upload the two files must never disagree.
+      area = await loadUserAreaResolver(this.prisma as unknown as AreaPrisma, clientId);
     }
     const monthLabels = months.map((m) => m.label);
     const idHeaders = area

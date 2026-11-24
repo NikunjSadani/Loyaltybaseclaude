@@ -406,13 +406,15 @@ describe('ReportsService', () => {
         expect(byId.get('uX')!.levelIds).toEqual(['X9', 'Not set', 'Not set', 'Not set', 'Not set']);
       });
 
-      it('hierarchy is read once per tenant (4 reads, not per row) and cached across requests', async () => {
+      it('hierarchy is read once per REQUEST (4 tenant-wide reads, not per row) and fresh each time — matches the installed-users Excel', async () => {
         seedBajaj();
         await jsonOf();
         await jsonOf();
-        expect(mockPrisma.salesUser.findMany).toHaveBeenCalledTimes(1);
-        expect(mockPrisma.salesHierarchyLevel.findMany).toHaveBeenCalledTimes(1);
-        expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledTimes(1);
+        // Fresh per request (no 60 s cache): right after a hierarchy upload this report and the App Adoption
+        // installed-users Excel (which also reads fresh) must never disagree. Still one read per table per request.
+        expect(mockPrisma.salesUser.findMany).toHaveBeenCalledTimes(2);
+        expect(mockPrisma.salesHierarchyLevel.findMany).toHaveBeenCalledTimes(2);
+        expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledTimes(2);
         expect(mockPrisma.salesHierarchyLevel.findMany.mock.calls[0][0].where).toEqual({ clientId: 'bajaj-co' });
       });
 

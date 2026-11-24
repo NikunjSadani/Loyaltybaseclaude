@@ -253,12 +253,9 @@ export default function SessionReportPage() {
                           // Several covering reps join " | " — cap the width, full value on hover.
                           const v = row.levelIds?.[ci] ?? ''
                           return (
-                            <td
-                              key={h}
-                              className="px-2 py-1.5 whitespace-nowrap font-mono text-gray-600 max-w-[140px] truncate"
-                              title={v || undefined}
-                            >
-                              {v}
+                            <td key={h} className="px-2 py-1.5 whitespace-nowrap font-mono text-gray-600">
+                              {/* max-width on a <td> is ignored by auto table layout — cap a wrapper div instead. */}
+                              <div className="max-w-[140px] truncate" title={v || undefined}>{v}</div>
                             </td>
                           )
                         })}

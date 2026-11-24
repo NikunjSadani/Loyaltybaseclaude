@@ -77,7 +77,7 @@ describe('Session Report page — App Installed + level IDs', () => {
     const retail = screen.getByText('Ravi Retail').closest('tr')!
     const retailCells = within(retail).getAllByRole('cell')
     expect(retailCells.slice(3, 9).map(c => c.textContent)).toEqual(['No', 'I1 | I2', 'S1 | S2', 'A1 | A1', 'M1 | M1', 'Z1 | Z1'])
-    expect(retailCells[4].getAttribute('title')).toBe('I1 | I2')
+    expect(retailCells[4].querySelector('div')?.getAttribute('title')).toBe('I1 | I2')
 
     const admin = screen.getByText('Adi Admin').closest('tr')!
     expect(within(admin).getAllByRole('cell').slice(3, 9).map(c => c.textContent)).toEqual(['No', '', '', '', '', ''])
