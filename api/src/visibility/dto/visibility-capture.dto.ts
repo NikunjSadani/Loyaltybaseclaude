@@ -23,6 +23,7 @@ export const VISIBILITY_REJECT_REASON_CODES = [
   'POSM_NOT_VISIBLE',
   'GEO_MISMATCH',
   'DUPLICATE_PHOTO',
+  'INCORRECT_POSM', // owner 2026-11-24 — the wrong POSM material is installed / photographed
   'OTHER',
 ] as const;
 export type VisibilityRejectReasonCode = (typeof VISIBILITY_REJECT_REASON_CODES)[number];
