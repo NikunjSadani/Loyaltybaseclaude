@@ -27,11 +27,12 @@
  *    re-banked by a later download) and is flagged. PAID then reversed (PayoutReversalAllocation APPLIED_RECEIVABLE)
  *    stays paid + a receivable (receivablePaise as stored — legacy/backfilled rows carry the amount). face = amountPaise.
  *  TDS_194C — TdsRecoveryEntry section SEC_194C (the 194C TDS Gifsy deposits — gross-up, and no-PAN 194C paid in
- *    full — recovered from this tenant). Owner decision 2026-11-24 (replaces the D3 allocation): charged IN FULL as what
- *    Gifsy actually pays, WITH ITS BANK RUN, one frozen line per recovery row — rules in tdsItems() below. 194R / DEDUCT
- *    TDS excluded.
+ *    full — recovered from this tenant). Owner decisions 2026-11-24: charged IN FULL as what Gifsy actually pays, WITH
+ *    ITS BANK RUN (the run id stored on the row; an interim match for older rows) — rules in tdsItems() below. 194R /
+ *    DEDUCT TDS excluded.
  */
 import { computeFrozenValuePaise } from '../rewards/gift-value.helper';
+import { fyLabelForPeriod } from '../tds/tds.helpers';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { FundFlag, FundManualEntry, FundRateChange, FundRateRow, FundReceivable, FundSpendItem } from './fund-statement.engine';
 
@@ -245,8 +246,9 @@ export function creditItem(
     for (const al of e.reversalAllocations) {
       if (al.state === 'APPLIED_RECEIVABLE') {
         fromAllocations = true;
-        // receivablePaise is NOT NULL (default 0) and backfilled legacy rows carry receivablePaise = amountPaise, so it is
-        // used as-is: a genuine ₹0 (e.g. the whole payout was withheld as TDS) must never fall back to the gross.
+        // receivablePaise is the recorded amount to recover (NOT NULL, default 0): the engine writes the net cash the
+        // retailer received; backfilled legacy allocations were written with receivablePaise = amountPaise. Used as-is —
+        // a genuine ₹0 (the whole payout was withheld as TDS) must never fall back to the gross.
         receivable += al.receivablePaise;
       }
     }
@@ -283,26 +285,27 @@ export interface TdsRecoveryRow {
   panNumber: string;
   fyLabel: string;
   tenantSharePaise: bigint;
-  /** This tenant's base behind the row (no-PAN rows: this run's base). */
-  tenantBasePaise: bigint;
-  /** The PAN's / outlet's cumulative base for the year at this event. */
-  panBasePaise: bigint;
+  /** The bank run (CreditPayoutDownload.id) whose transaction wrote the row — NULL for rows before 2026-11-24. */
+  downloadId: string | null;
   createdAt: Date;
 }
 
-/** A client bank run (CreditPayoutDownload). */
+/** One of THIS client's bank runs (CreditPayoutDownload). */
 export interface TdsRun {
   id: string;
   downloadCode: string;
   downloadedAt: Date;
 }
 
-/** A 194C payout entry with the bank run it was last sent in. */
+/** One of this client's 194C payout entries. */
 export interface Tds194cEntry {
   id: string;
   outletId: string;
+  period: string;
+  status: string;
   amountPaise: bigint;
   payeePan: string | null;
+  /** The run the entry was LAST sent in (cleared by a reversal, replaced by a re-bank). */
   downloadId: string | null;
   /** The entry's own spend line (status + dates). */
   item: FundSpendItem;
@@ -310,76 +313,103 @@ export interface Tds194cEntry {
 
 const NO_PAN = '__NO_PAN__';
 const maskPan = (p: string) => (p.startsWith(NO_PAN) ? `no PAN (outlet ${p.split(':').slice(1).join(':') || '?'})` : `PAN …${p.slice(-4)}`);
-/** A recovery row is written in the SAME transaction as its bank run, right after the run row → within this window. */
+/** Older rows (no stored run id): the row is written in the SAME transaction as its run, right after it. */
 export const TDS_RUN_MATCH_WINDOW_MS = 10 * 60_000;
 
 /**
- * 194C TDS lines — owner decision 2026-11-24 (replaces the D3 allocation): charged as WHAT GIFSY ACTUALLY PAYS, WITH ITS
- * BANK RUN. One line per TdsRecoveryEntry (frozen: a line depends only on its own row and its own run, so later
- * payouts never change an earlier line):
- *  - amount = the row's tenantSharePaise, in FULL; dated with its bank run (the run's downloadedAt; the row's own
- *    createdAt when the run can't be identified). The opening cut-off applies to that date.
- *  - the run = the client's latest CreditPayoutDownload made ≤ 10 min before the row (written in the same transaction);
- *    its payouts for this TDS = the run's 194C entries of the same PAN (payeePan snapshot) / no-PAN outlet.
- *  - status follows those payouts: all paid → PAID (latest paidAt); all reversed before payment → RETURNED (latest
- *    return date) — the only case a return is shown; anything else → COMMITTED. Run or payouts not identifiable →
- *    PAID on the recorded day, flag TDS_RUN_UNMATCHED (status not tracked). A FAILED payout re-banked in a later run, or
- *    one reversed by the legacy path (which clears downloadId), leaves its original run → that run may become
- *    unmatched or lose the return; lines are never re-split.
- *  - "includes TDS for earlier payouts this year" (flag TDS_INCLUDES_EARLIER + note): the row's base is larger than
- *    this run's payouts (no-PAN rows: panBasePaise > tenantBasePaise; PAN rows: tenantBasePaise > the run's matched
- *    amount) — the yearly limit was crossed / a catch-up.
- *  - a negative row (true-up) → a credit line dated when recorded (PAID), never matched to a run.
+ * 194C TDS lines — owner decisions 2026-11-24: charged as WHAT GIFSY ACTUALLY PAYS, WITH ITS BANK RUN, one line per
+ * TdsRecoveryEntry, in FULL. Pure.
+ *
+ * Which run:
+ *  1. the run id STORED on the row (`downloadId`, written by the bank-file download since 2026-11-24) — exact; such a
+ *     line never moves (its date is the run's date even if a payout is later re-banked or reversed);
+ *  2. older rows (NULL): among THIS client's runs made ≤ 10 min before the row, the LATEST one that has payouts for
+ *     that PAN / no-PAN outlet (interim heuristic). Such a line can still change if one of those payouts is later
+ *     re-banked (it then leaves the run) — said on the line.
+ *  A row whose run is not one of this client's runs (a shared PAN: the TDS was recovered while ANOTHER client's run was
+ *  made) → dated when recorded, note "Recovered with a payout run outside this client's statement".
+ *
+ * Status: the payouts still in that run all paid → paid; otherwise committed. Never "returned": both reversal paths
+ * clear the payout's run link, and gross-up TDS already deposited is not given back (a later run's true-up nets it).
+ * When the run has none of its payouts left and this client has reversed 194C payouts for that PAN / outlet this FY →
+ * note "Payouts reversed — TDS stays deposited" (paid). When none are left for another reason → stored id: "payouts
+ * re-banked in a later run" (paid); older row: flag "bank run not identified" (paid, on the day recorded).
+ *
+ * "Includes TDS for earlier payouts this year — yearly limit crossed": the recovery bases are year-to-date, so the
+ * applicable rate cannot be derived reliably here; the note goes ONLY on the FIRST positive row per PAN / outlet per FY,
+ * and only when this client paid that PAN / outlet 194C payouts earlier in that FY (in an earlier run).
+ * A negative row (true-up) → a credit line dated when recorded.
  */
 export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly TdsRun[], entries: readonly Tds194cEntry[]): FundSpendItem[] {
   const out: FundSpendItem[] = [];
+  const runById = new Map(runs.map((r) => [r.id, r]));
   const sortedRuns = [...runs].sort((a, b) => a.downloadedAt.getTime() - b.downloadedAt.getTime());
+  const keyOf = (raw: string) => {
+    const t = raw.trim();
+    return t.startsWith(NO_PAN) ? t : t.toUpperCase();
+  };
+  const forKey = (pan: string) => {
+    const outlet = pan.startsWith(NO_PAN) ? pan.slice(NO_PAN.length + 1) : null;
+    return (e: Tds194cEntry) =>
+      outlet != null ? e.outletId === outlet && (!e.payeePan || e.payeePan.startsWith(NO_PAN)) : (e.payeePan ?? '').trim().toUpperCase() === pan;
+  };
+  // The first positive row per (PAN/outlet, FY) — the only candidate for the "includes earlier payouts" note.
+  const firstPositive = new Map<string, string>();
+  for (const r of [...recoveries].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : 1))) {
+    if (r.tenantSharePaise <= 0n) continue;
+    const k = `${keyOf(r.panNumber)}|${r.fyLabel}`;
+    if (!firstPositive.has(k)) firstPositive.set(k, r.id);
+  }
+
   for (const r of recoveries) {
     if (r.tenantSharePaise === 0n) continue;
-    const raw = r.panNumber.trim();
-    const pan = raw.startsWith(NO_PAN) ? raw : raw.toUpperCase();
-    const noPanOutlet = pan.startsWith(NO_PAN) ? pan.slice(NO_PAN.length + 1) : null;
-    const base = {
-      type: 'TDS_194C' as const,
-      source: { kind: 'tdsRecoveryEntry' as const, id: r.id },
-      facePaise: r.tenantSharePaise,
-    };
+    const pan = keyOf(r.panNumber);
+    const matchesKey = forKey(pan);
+    const base = { type: 'TDS_194C' as const, source: { kind: 'tdsRecoveryEntry' as const, id: r.id }, facePaise: r.tenantSharePaise, key: `tds:${r.id}` };
+    const who = `${maskPan(pan)}, FY ${r.fyLabel}`;
     if (r.tenantSharePaise < 0n) {
-      out.push({
-        ...base,
-        key: `tds:${r.id}`,
-        ref: `TDS 194C true-up · FY ${r.fyLabel}`,
-        description: `TDS 194C true-up (credit) — ${maskPan(pan)}, FY ${r.fyLabel}`,
-        status: 'PAID',
-        committedAt: r.createdAt,
-        paidAt: r.createdAt,
-      });
+      out.push({ ...base, ref: `TDS 194C true-up · FY ${r.fyLabel}`, description: `TDS 194C true-up (credit) — ${who}`, status: 'PAID', committedAt: r.createdAt, paidAt: r.createdAt });
       continue;
     }
+
+    // ── Which run ──
     let run: TdsRun | null = null;
-    for (const d of sortedRuns) {
-      const gap = r.createdAt.getTime() - d.downloadedAt.getTime();
-      if (gap >= 0 && gap <= TDS_RUN_MATCH_WINDOW_MS) run = d; // latest qualifying run wins
+    let stored = false;
+    let otherClientRun = false;
+    if (r.downloadId) {
+      stored = true;
+      run = runById.get(r.downloadId) ?? null;
+      otherClientRun = !run;
+    } else {
+      const inWindow = sortedRuns.filter((d) => {
+        const gap = r.createdAt.getTime() - d.downloadedAt.getTime();
+        return gap >= 0 && gap <= TDS_RUN_MATCH_WINDOW_MS;
+      });
+      const withPayouts = inWindow.filter((d) => entries.some((e) => e.downloadId === d.id && matchesKey(e)));
+      run = withPayouts.length ? withPayouts[withPayouts.length - 1] : inWindow.length ? inWindow[inWindow.length - 1] : null;
+      otherClientRun = inWindow.length === 0;
     }
-    const matched = run
-      ? entries.filter(
-          (e) =>
-            e.downloadId === run!.id &&
-            (noPanOutlet != null ? e.outletId === noPanOutlet && (!e.payeePan || e.payeePan.startsWith(NO_PAN)) : (e.payeePan ?? '').trim().toUpperCase() === pan),
-        )
-      : [];
-    const runBase = matched.reduce((x, e) => x + e.amountPaise, 0n);
-    const includesEarlier = noPanOutlet != null ? r.panBasePaise > r.tenantBasePaise : matched.length > 0 && r.tenantBasePaise > runBase;
+
     const flags: FundSpendItem['flags'] = [];
-    if (includesEarlier) flags.push('TDS_INCLUDES_EARLIER');
-    const note = includesEarlier ? ' — includes TDS for earlier payouts this year (yearly limit crossed)' : '';
-    if (!run || matched.length === 0) {
-      flags.push('TDS_RUN_UNMATCHED');
+    const notes: string[] = [];
+    const matched = run ? entries.filter((e) => e.downloadId === run!.id && matchesKey(e)) : [];
+    const sameYear = (e: Tds194cEntry) => fyLabelForPeriod(e.period) === r.fyLabel;
+    if (firstPositive.get(`${pan}|${r.fyLabel}`) === r.id && run) {
+      const earlier = entries.some(
+        (e) => matchesKey(e) && sameYear(e) && e.downloadId && e.downloadId !== run!.id && (runById.get(e.downloadId)?.downloadedAt.getTime() ?? Infinity) < run!.downloadedAt.getTime(),
+      );
+      if (earlier) {
+        flags.push('TDS_INCLUDES_EARLIER');
+        notes.push('includes TDS for earlier payouts this year (yearly limit crossed)');
+      }
+    }
+
+    if (otherClientRun) {
+      flags.push('TDS_OTHER_CLIENT_RUN');
       out.push({
         ...base,
-        key: `tds:${r.id}`,
         ref: `TDS 194C · FY ${r.fyLabel}`,
-        description: `TDS 194C borne by Gifsy — ${maskPan(pan)}, FY ${r.fyLabel} (bank run not identified)${note}`,
+        description: `TDS 194C borne by Gifsy — ${who} — Recovered with a payout run outside this client's statement`,
         status: 'PAID',
         committedAt: r.createdAt,
         paidAt: r.createdAt,
@@ -387,28 +417,43 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
       });
       continue;
     }
-    const statuses = matched.map((e) => e.item.status);
-    let status: FundSpendItem['status'] = 'COMMITTED';
-    let paidAt: Date | null = null;
-    let returnedAt: Date | null = null;
-    if (statuses.every((s) => s === 'PAID')) {
-      status = 'PAID';
-      paidAt = matched.reduce<Date | null>((m, e) => (e.item.paidAt && (!m || e.item.paidAt > m) ? e.item.paidAt : m), null);
-      if (!paidAt) flags.push('DATE_ESTIMATED');
-    } else if (statuses.every((s) => s === 'RETURNED')) {
-      status = 'RETURNED';
-      returnedAt = matched.reduce<Date | null>((m, e) => (e.item.returnedAt && (!m || e.item.returnedAt > m) ? e.item.returnedAt : m), null);
-      if (!returnedAt) flags.push('DATE_ESTIMATED');
+
+    if (matched.length === 0) {
+      const reversed = entries.some((e) => matchesKey(e) && sameYear(e) && e.status === 'REVERSED');
+      if (reversed) {
+        flags.push('TDS_PAYOUTS_REVERSED');
+        notes.push('Payouts reversed — TDS stays deposited');
+      } else if (stored) {
+        notes.push('payouts re-banked in a later run — the TDS stays with this run');
+      } else {
+        flags.push('TDS_RUN_UNMATCHED');
+        notes.push('bank run not identified');
+      }
+      const at = reversed || stored ? run!.downloadedAt : r.createdAt;
+      out.push({
+        ...base,
+        ref: stored || reversed ? `TDS 194C · ${run!.downloadCode}` : `TDS 194C · FY ${r.fyLabel}`,
+        description: `TDS 194C borne by Gifsy${stored || reversed ? ` with bank run ${run!.downloadCode}` : ''} — ${who} — ${notes.join('; ')}`,
+        status: 'PAID',
+        committedAt: at,
+        paidAt: at,
+        flags,
+      });
+      continue;
     }
+
+    const allPaid = matched.every((e) => e.item.status === 'PAID');
+    const paidAt = allPaid ? matched.reduce<Date | null>((m, e) => (e.item.paidAt && (!m || e.item.paidAt > m) ? e.item.paidAt : m), null) : null;
+    if (allPaid && !paidAt) flags.push('DATE_ESTIMATED');
     out.push({
       ...base,
-      key: `tds:${r.id}`,
-      ref: `TDS 194C · ${run.downloadCode}`,
-      description: `TDS 194C borne by Gifsy with bank run ${run.downloadCode} (${matched.length} payout${matched.length === 1 ? '' : 's'}) — ${maskPan(pan)}, FY ${r.fyLabel}${note}`,
-      status,
-      committedAt: run.downloadedAt,
+      ref: `TDS 194C · ${run!.downloadCode}`,
+      description:
+        `TDS 194C borne by Gifsy with bank run ${run!.downloadCode} (${matched.length} payout${matched.length === 1 ? '' : 's'}) — ${who}` +
+        (notes.length ? ` — ${notes.join('; ')}` : ''),
+      status: allPaid ? 'PAID' : 'COMMITTED',
+      committedAt: run!.downloadedAt,
       paidAt,
-      returnedAt,
       flags,
     });
   }
@@ -593,7 +638,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
   const recoveries = await allPages((p) =>
     db.tdsRecoveryEntry.findMany({
       where: { clientId, section: 'SEC_194C' },
-      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, tenantBasePaise: true, panBasePaise: true, createdAt: true },
+      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, downloadId: true, createdAt: true },
       orderBy: { id: 'asc' },
       ...p,
     }),
@@ -617,7 +662,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
     if (it) {
       items.push(it);
       if (e.tdsSection === 'SEC_194C') {
-        tds194c.push({ id: e.id, outletId: e.outletId, amountPaise: e.amountPaise, payeePan: e.payeePan, downloadId: e.downloadId, item: it });
+        tds194c.push({ id: e.id, outletId: e.outletId, period: e.period, status: e.status, amountPaise: e.amountPaise, payeePan: e.payeePan, downloadId: e.downloadId, item: it });
       }
     }
   }

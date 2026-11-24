@@ -52,7 +52,9 @@ export type FundFlag =
   | 'DATE_ESTIMATED' // the source has no event timestamp for the paid / return date (never updatedAt): a return is
   //                     placed on its commit day (nets to zero there); a paid date is left blank
   | 'TDS_INCLUDES_EARLIER' // a 194C TDS amount that includes TDS for earlier payouts this year (yearly limit crossed)
-  | 'TDS_RUN_UNMATCHED'; // the bank run a 194C TDS amount was recorded with could not be identified — status not tracked
+  | 'TDS_RUN_UNMATCHED' // an older TDS row whose bank run could not be identified — charged in full on the day recorded
+  | 'TDS_OTHER_CLIENT_RUN' // recovered with a payout run outside this client's statement (a PAN shared with another client)
+  | 'TDS_PAYOUTS_REVERSED'; // the run's payouts were reversed — the TDS stays deposited (not given back)
 
 export type FundSourceRef = {
   kind: 'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'tdsRecoveryEntry' | 'creditReversal';

@@ -3126,6 +3126,8 @@ export class CreditsService {
                 section: gi.section,
                 fyLabel: gi.fyLabel,
                 tdsInvoiceId: inv.invoiceId,
+                // The bank run that wrote this row (fund reconciliation dates the TDS line with it).
+                downloadId: rec.id,
                 panTdsTotalPaise: gi.bodyPaise,
                 tenantBasePaise: r.tenantBasePaise,
                 panBasePaise: gi.panBasePaise,
@@ -3147,6 +3149,7 @@ export class CreditsService {
               section: r.section,
               fyLabel: r.fyLabel,
               tdsInvoiceId: null,
+              downloadId: rec.id,
               panTdsTotalPaise: r.tenantSharePaise,
               tenantBasePaise: r.eventBasePaise,
               panBasePaise: r.cumulativeBasePaise,

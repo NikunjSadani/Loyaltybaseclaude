@@ -42,6 +42,9 @@ import {
   UpdateFundAlertsDto,
 } from './dto/fund.dto';
 
+/** The client low-balance step's own time budget (round 4 item 6) — the digest keeps its own. */
+export const FUND_ALERT_BUDGET_MS = 60_000;
+
 const n = (v: bigint | number | null | undefined): number => (v == null ? 0 : Number(v));
 const toPaise = (rupees: number): bigint => BigInt(Math.round(rupees * 100));
 
@@ -73,6 +76,7 @@ export type FundAlertStatus =
   | 'client-inactive'
   | 'disabled-in-environment'
   | 'test-recipient-not-internal'
+  | 'not-checked-time-budget'
   | 'email-not-configured'
   | 'failed';
 
@@ -744,7 +748,9 @@ export class FundService {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`fund-rate:${clientId}`}))`;
         let preview: { linesRepriced: number; deltaPaise: bigint; repricedFrom: Date | null; token: string } | null = null;
         if (backdated) {
-          preview = repricePreview(clientId, await loadFundInputs(tx as never, clientId), draft, now);
+          const cutoff = confirmToken ? tokenCutoff(confirmToken) : null;
+          if (!cutoff) throw new ConflictException('The confirmation is not valid — review the preview and confirm again.');
+          preview = repricePreview(clientId, await loadFundInputs(tx as never, clientId), draft, now, cutoff);
           if (confirmToken !== preview.token) {
             throw new ConflictException('The figures changed since the preview (new spend or another rate change). Review the new preview and confirm again.');
           }
@@ -925,6 +931,8 @@ export class FundService {
    */
   async runLowBalanceAlerts(
     nowMs: number,
+    budgetMs = FUND_ALERT_BUDGET_MS,
+    clock: () => number = () => Date.now(),
   ): Promise<{ results: Map<string, { figures: FundDigestFigures | null; alert?: FundAlertOutcome }>; error?: string }> {
     const results = new Map<string, { figures: FundDigestFigures | null; alert?: FundAlertOutcome }>();
     let rows: Array<{ clientId: string }>;
@@ -938,8 +946,21 @@ export class FundService {
       this.logger.error(`Fund low-balance alerts: could not read the settings: ${error}`);
       return { results, error };
     }
+    const deadline = clock() + budgetMs;
     for (const { clientId } of rows) {
       let r: { figures: FundDigestFigures | null; alert?: FundAlertOutcome };
+      if (clock() >= deadline) {
+        // Own time budget (round 4 item 6): the rest are recorded as not checked — never a silent skip.
+        this.logger.error(`Fund low-balance alert for ${clientId}: not checked — the step's time budget was used up`);
+        r = { figures: null, alert: { clientId, status: 'not-checked-time-budget' } };
+        results.set(clientId, r);
+        try {
+          await this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastStatus: r.alert!.status, lowAlertLastCheckedAt: new Date(nowMs) } });
+        } catch (e) {
+          this.logger.error(`Fund low-balance alert for ${clientId}: could not record the outcome: ${(e as Error)?.message ?? e}`);
+        }
+        continue;
+      }
       try {
         r = await this.digestAndAlert(clientId, nowMs);
       } catch (e) {
@@ -971,29 +992,39 @@ export function repricePreview(
   inputs: FundInputs,
   draft: RateDraft,
   now: Date,
+  /** Only lines committed BEFORE this instant count (the preview's own timestamp — carried inside the token). */
+  cutoff: Date = now,
 ): { linesRepriced: number; deltaPaise: bigint; repricedFrom: Date | null; token: string } {
   const before = statementOf(inputs);
   const newRow: FundRateRow = { ...draft, createdAt: now };
   const after = statementOf({ ...inputs, rates: [...inputs.rates, newRow] });
-  const charged = (s: FundStatement) => {
+  // Re-audit round 4 item 7: the preview + token cover only spend committed BEFORE the preview was made, so new spend
+  // arriving between the preview and the confirm (it is charged at the new rate anyway) never forces another 409.
+  // Returned items net to zero and are not "re-priced".
+  const charged = (st: FundStatement) => {
     const m = new Map<string, { charged: bigint; at: Date }>();
-    for (const l of s.lines) if (l.event === 'CHARGE') m.set(`${l.source.kind}:${l.source.id}:${l.ref}`, { charged: l.chargedPaise, at: l.date });
+    for (const l of st.lines) {
+      if (l.event !== 'CHARGE' || l.status === 'RETURNED' || l.date.getTime() >= cutoff.getTime()) continue;
+      m.set(`${l.source.kind}:${l.source.id}:${l.ref}`, { charged: l.chargedPaise, at: l.date });
+    }
     return m;
   };
-  const b = charged(before);
-  const a = charged(after);
+  const bMap = charged(before);
+  const aMap = charged(after);
   let lines = 0;
+  let deltaPaise = 0n;
   let from: Date | null = null;
-  for (const [k, v] of a) {
-    const old = b.get(k);
-    if (!old || old.charged !== v.charged) {
+  for (const [k, v] of aMap) {
+    const old = bMap.get(k);
+    const oldCharged = old?.charged ?? 0n;
+    if (oldCharged !== v.charged) {
       lines += 1;
+      deltaPaise += oldCharged - v.charged; // a higher charge takes more off the advance
       if (!from || v.at.getTime() < from.getTime()) from = v.at;
     }
   }
-  const deltaPaise = after.totals.balancePaise - before.totals.balancePaise;
   const fingerprint = inputs.rates.length + ':' + inputs.rates.reduce((m, r) => Math.max(m, r.createdAt.getTime()), 0);
-  const token = createHash('sha256')
+  const hash = createHash('sha256')
     .update(
       JSON.stringify({
         clientId,
@@ -1003,6 +1034,7 @@ export function repricePreview(
         rateBps: draft.rateBps ?? null,
         flatPaise: draft.flatPaise?.toString() ?? null,
         effectiveFrom: draft.effectiveFrom.toISOString(),
+        cutoff: cutoff.getTime(),
         lines,
         delta: deltaPaise.toString(),
         fingerprint,
@@ -1010,7 +1042,13 @@ export function repricePreview(
     )
     .digest('hex')
     .slice(0, 32);
-  return { linesRepriced: lines, deltaPaise, repricedFrom: from, token };
+  return { linesRepriced: lines, deltaPaise, repricedFrom: from, token: `${cutoff.getTime()}.${hash}` };
+}
+
+/** The preview timestamp carried inside a confirm token ("<ms>.<hash>"), or null for a malformed token. */
+export function tokenCutoff(token: string): Date | null {
+  const m = /^(\d{10,16})\.[0-9a-f]{32}$/.exec(token);
+  return m ? new Date(Number(m[1])) : null;
 }
 
 /** The voucher item's brand text for the operator (metadata brand / brandName; never used for pricing). */

@@ -2387,9 +2387,15 @@ model TdsRecoveryEntry {
   tenantBasePaise  BigInt // this tenant's contribution (pro-rata numerator)
   panBasePaise     BigInt // PAN aggregate base (denominator)
   tenantSharePaise BigInt // pro-rata recovery amount
+  /// The payout bank run (CreditPayoutDownload.id) whose transaction wrote this row — same name as
+  /// CreditPayoutEntry.downloadId. Set by every writer (both are inside the bank-file download transaction);
+  /// NULL for rows written before 2026-11-24 (no backfill). No FK on purpose (additive; a download row is never
+  /// deleted). Read by the fund statement to date the TDS line with its own run exactly.
+  downloadId       String?
   createdAt        DateTime   @default(now())
 
   @@index([clientId, fyLabel])
+  @@index([downloadId])
   @@index([panNumber, section, fyLabel])
   @@index([tdsInvoiceId])
   @@map("tds_recovery_entries")

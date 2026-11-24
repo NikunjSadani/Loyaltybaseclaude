@@ -160,7 +160,14 @@ export function FundOverview({ summary, internal }: { summary: FundSummary; inte
               {summary.byType.map((r) => (
                 <tr key={r.type}>
                   <td className="py-2 text-gray-800">{r.label || SPEND_TYPE_LABELS[r.type] || r.type}</td>
-                  <td className="py-2 text-right tabular-nums">{r.count.toLocaleString('en-IN')}</td>
+                  <td className="py-2 text-right tabular-nums">
+                    {r.count.toLocaleString('en-IN')}
+                    {(r.returnedCount ?? 0) > 0 && (
+                      <span className="block text-xs text-gray-500" data-testid="fund-type-returned-count">
+                        {(r.returnedCount ?? 0).toLocaleString('en-IN')} returned, not charged
+                      </span>
+                    )}
+                  </td>
                   <td className="py-2 text-right"><Money paise={r.facePaise} /></td>
                   <td className="py-2 text-right"><Money paise={r.discountPaise} /></td>
                   <td className="py-2 text-right"><Money paise={r.feePaise} /></td>

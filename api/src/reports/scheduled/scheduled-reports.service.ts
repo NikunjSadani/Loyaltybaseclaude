@@ -561,13 +561,15 @@ export class ScheduledReportsService {
       // Client fund: only clients with a fund set-up get the line (null = none). Clients checked by today's low-balance
       // step reuse its figures + outcome (one statement compute); the rest are computed here WITHOUT sending.
       const stepped = fundStep.results.get(c);
-      const fund = stepped
+      // A client the step could not compute (failed / not checked in time) still gets its figures here (no send) and
+      // keeps the step's outcome, so the skip is shown, never dropped.
+      const fund = stepped?.figures
         ? ({ ok: true as const, data: stepped })
         : await section('fund', c, () => this.fund.digestAndAlert(c, nowMs, { send: false }));
       if (!fund.ok) digest.fund = fund;
-      else if (!fund.data.figures && fund.data.alert?.status === 'failed') digest.fund = { ok: false, error: fund.data.alert.error ?? 'low-balance check failed' };
+      else if (!fund.data.figures && stepped?.alert?.status === 'failed') digest.fund = { ok: false, error: stepped.alert.error ?? 'low-balance check failed' };
       else if (fund.data.figures) {
-        const a = fund.data.alert;
+        const a = stepped?.alert ?? fund.data.alert;
         const f = fund.data.figures;
         digest.fund = {
           ok: true,

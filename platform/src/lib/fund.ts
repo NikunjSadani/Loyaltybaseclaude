@@ -19,7 +19,9 @@ export type FundFlag =
   | 'FACE_UNKNOWN'
   | 'DATE_ESTIMATED'
   | 'TDS_INCLUDES_EARLIER'
-  | 'TDS_RUN_UNMATCHED';
+  | 'TDS_RUN_UNMATCHED'
+  | 'TDS_OTHER_CLIENT_RUN'
+  | 'TDS_PAYOUTS_REVERSED';
 
 /** Plain words for the last daily low-balance check status (re-audit B2). */
 export function alertCheckLabel(status: string): string {
@@ -34,6 +36,7 @@ export function alertCheckLabel(status: string): string {
     case 'client-inactive': return 'Client not active — not e-mailed';
     case 'disabled-in-environment': return 'Alert e-mails are switched off on this server — not e-mailed';
     case 'test-recipient-not-internal': return 'Not sent — the test address is not internal';
+    case 'not-checked-time-budget': return 'Not checked today — the daily step ran out of time';
     case 'email-not-configured': return 'Not sent — e-mail is not set up on this server';
     case 'failed': return 'Not sent — the e-mail failed';
     default: return status;
@@ -76,7 +79,9 @@ export const FLAG_TEXT: Record<FundFlag, { chip: string; detail: string }> = {
   FACE_UNKNOWN: { chip: 'Face unknown', detail: 'No face value could be found (₹0 charged) — the source record needs checking.' },
   DATE_ESTIMATED: { chip: 'Date estimated', detail: 'The source record has no date for this event: a return is shown on the day it was committed, and a paid date is left blank.' },
   TDS_INCLUDES_EARLIER: { chip: 'Includes earlier TDS', detail: 'Includes TDS for earlier payouts this year — the yearly limit was crossed, so TDS on the earlier payouts became due with this bank run.' },
-  TDS_RUN_UNMATCHED: { chip: 'Bank run not identified', detail: 'The bank run this TDS was recorded with could not be identified — it is charged in full on the day it was recorded and its paid / returned status is not tracked.' },
+  TDS_RUN_UNMATCHED: { chip: 'Bank run not identified', detail: 'An older TDS entry whose bank run could not be identified — it is charged in full on the day it was recorded and shown as paid.' },
+  TDS_OTHER_CLIENT_RUN: { chip: 'Other client run', detail: "Recovered with a payout run outside this client's statement (the payee's PAN is shared with another client) — charged on the day it was recorded." },
+  TDS_PAYOUTS_REVERSED: { chip: 'Payouts reversed', detail: 'The payouts of this bank run were reversed — the TDS stays deposited with the government and is not given back; a later true-up nets it.' },
 };
 
 export function flagDetail(flag: string): string {
@@ -112,6 +117,8 @@ export interface FundByTypeRow {
   committedPaise: number;
   paidPaise: number;
   returnedPaise: number;
+  /** Items of this type that came back (not in count / face / fee — "N returned, not charged"). */
+  returnedCount?: number;
   netChargedPaise: number;
 }
 
