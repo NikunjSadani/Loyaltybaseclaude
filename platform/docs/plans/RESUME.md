@@ -327,8 +327,10 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
   **auto-disables** the webhook (email "paused"); re-enable at WhatsApp → Webhook → pencil → **Webhook Status** → Update.
   Proof it works: `gcloud logging read … httpRequest.requestUrl:"/v1/notifications/status"` shows 201s.
 - Hubble's **prod webhook is NOT registered** — Hubble has never POSTed `/v1/hubble/webhook` (14 days to 2026-11-24).
-  The automatic re-check (`HubbleOrderSweep` → `RewardsService.sweepHubbleOrders`, every ~2 min, kill switch
-  `HUBBLE_ORDER_SWEEP_ENABLED=false`) is the safety net; an order still open 1 h after hand-off is flagged
+  The automatic re-check (`RewardsService.sweepHubbleOrders`) is the safety net, driven by Cloud Scheduler
+  `hubble-sweep-prod` / `-staging` → `POST /v1/hubble/sweep` (secret `HUBBLE_SWEEP_SECRET[_STAGING]`, in the deploy
+  preflight — create it BEFORE deploying; create the job PAUSED, resume after the deploy). The `@Interval` tick (kill
+  switch `HUBBLE_ORDER_SWEEP_ENABLED=false`) is only an extra — prod CPU is throttled when idle; an order still open 1 h after hand-off is flagged
   `HUBBLE_PROCESSING_STALE`. It never refunds on "no order". Runbook §2a. Register the webhook with Hubble anyway.
 - Console "Advance" on a Hubble-handed order without a code: CONFIRMED→PROCESSING and PROCESSING→DISPATCHED are allowed
   (only →DELIVERED needs a code); DISPATCHED takes it out of the automatic re-check. Open question for the owner (2026-11-24).

@@ -29,8 +29,12 @@ refund a Hubble order by hand or in the database — the screens below are the o
 prod webhook is not registered with Hubble). Before this, an order Hubble left PROCESSING was never looked at again
 (prod BAJAJ-26-000050). The automatic re-check is now the safety net:
 
-- Every ~2 minutes each API instance runs `HubbleOrderSweep` (Nest `@Interval`, same mechanism as the voucher-dispersal
-  reconcile). Kill switch: env `HUBBLE_ORDER_SWEEP_ENABLED=false`.
+- **Driver = Cloud Scheduler** → `POST /v1/hubble/sweep` (one pass per call, inside the request). Prod `gifsy-api` runs
+  with CPU throttling (`run.googleapis.com/cpu-throttling=true`), so the in-process `HubbleOrderSweep` `@Interval`
+  (2 min, kill switch env `HUBBLE_ORDER_SWEEP_ENABLED=false`) does NOT fire reliably while idle; it stays only as a
+  harmless extra. Overlapping runs (scheduler + timer, several instances) are safe: the claim phase holds a Postgres
+  transaction-level advisory lock (a second run skips with `LOCKED`) and every order is claimed with a compare-and-set
+  on `hubbleLastSweepAt`, so one order is never checked twice at once.
 - It re-checks open orders handed to Hubble (CONFIRMED / PROCESSING, no code, a place attempt / Hubble provider / Hubble
   order id on record; not taken over manually) through the SAME `reconcileHubbleOrder` as the webhook and ops retry —
   it never places an order and **never refunds on "no order"** (that stays an ops decision via Retry).
@@ -42,6 +46,26 @@ prod webhook is not registered with Hubble). Before this, an order Hubble left P
 - Still not delivered **1 hour** after hand-off (and no other flag open) → flagged **Still processing at Hubble**
   (`HUBBLE_PROCESSING_STALE`): it appears in the console's needs-review list and the Daily Ops Digest "needs reconcile"
   count. Hubble delivering later clears it automatically.
+
+### 2b. Setting up the scheduler (owner infra, one-time per environment)
+
+Same pattern as `voucher-dispersal-drain-*` (VOUCHER-DISPERSAL.md):
+
+1. **Secret:** create Secret Manager secret `HUBBLE_SWEEP_SECRET` (prod) / `HUBBLE_SWEEP_SECRET_STAGING` (staging) with a
+   random value. The deploy workflows bind it to the API as env `HUBBLE_SWEEP_SECRET` (`--set-secrets`) and the
+   **preflight fails the deploy if it is missing** — create it BEFORE the deploy that carries this change. Until it is
+   set the endpoint answers 403 (fail-closed, no dev bypass).
+2. **Cloud Scheduler job**, created **PAUSED**:
+   - name `hubble-sweep-prod` / `hubble-sweep-staging`
+   - schedule `*/2 * * * *`, time zone `Asia/Kolkata`
+   - target HTTP `POST https://<api-host>/v1/hubble/sweep`, header `x-drain-secret: <the secret>`, empty body
+   - e.g. `gcloud scheduler jobs create http hubble-sweep-prod --location=<region> --schedule="*/2 * * * *"
+     --time-zone="Asia/Kolkata" --http-method=POST --uri="https://<api-host>/v1/hubble/sweep"
+     --headers="x-drain-secret=<secret>" --attempt-deadline=120s` then `gcloud scheduler jobs pause hubble-sweep-prod --location=<region>`
+     (or create from the console and pause it).
+3. **RESUME the job only after the deploy that carries `/v1/hubble/sweep` is serving** (before that it would 404 every
+   2 min). Check: `gcloud scheduler jobs resume hubble-sweep-prod --location=<region>`; the job's last run shows HTTP 200
+   with a JSON body `{ claimed, outcomes, flaggedStale, errors }` (`skipped: "LOCKED"` = another run held the lock — fine).
 
 ## 3. "Retry with Hubble" (ops)
 
