@@ -461,7 +461,7 @@ describe('fund sources — mapping the source records', () => {
   });
 
   describe('D3: 194C TDS dated with its payout', () => {
-    const payout = (id: string, o: Partial<Tds194cEntry> & { item?: Partial<FundSpendItem> } = {}): Tds194cEntry => ({
+    const payout = (id: string, o: Partial<Omit<Tds194cEntry, 'item'>> & { item?: Partial<FundSpendItem> } = {}): Tds194cEntry => ({
       id,
       outletId: 'OUT1',
       period: '2026-10',

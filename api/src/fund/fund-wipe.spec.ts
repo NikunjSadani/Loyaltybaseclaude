@@ -11,6 +11,8 @@ describe('wipe-tenant-data — fund tables', () => {
   it.each(['FundReceipt', 'FundLedger', 'FundSettings', 'FundRate'])('wipes %s by clientId', (model) => {
     expect(src).toContain(`model: '${model}'`);
     const delegate = model.charAt(0).toLowerCase() + model.slice(1);
-    expect(src).toMatch(new RegExp(`tx\.${delegate}\s*\.deleteMany\(\{ where: \{ clientId: In \} \}\)`));
+    const step = src.slice(src.indexOf(`model: '${model}'`));
+    const del = step.slice(step.indexOf('del:'), step.indexOf('.then('));
+    expect(del.replace(/\s+/g, ' ')).toContain(`tx.${delegate} .deleteMany({ where: { clientId: In } })`);
   });
 });
