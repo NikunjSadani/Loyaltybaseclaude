@@ -280,7 +280,11 @@ export interface FundSettings {
 
 /** A console rate save: saved, or (back-dated) a preview that needs an explicit confirm (owner D1). */
 export type FundRateSaveResult =
-  | { saved: true; id: string; scheduled: boolean; effectiveFrom: string; linesRepriced?: number; deltaPaise?: number }
+  | {
+      saved: true; id: string; scheduled: boolean; effectiveFrom: string; linesRepriced?: number; deltaPaise?: number;
+      /** Back-dated confirm: what the preview showed, and whether the stored figures include spend made after it. */
+      previewLinesRepriced?: number; previewDeltaPaise?: number; includesSpendAfterPreview?: boolean;
+    }
   | {
       saved: false;
       requiresConfirmation: true;

@@ -44,6 +44,8 @@ import {
 
 /** The client low-balance step's own time budget (round 4 item 6) — the digest keeps its own. */
 export const FUND_ALERT_BUDGET_MS = 60_000;
+/** A back-dated rate preview must be confirmed within 30 minutes (round 6). */
+export const CONFIRM_TOKEN_TTL_MS = 30 * 60_000;
 
 const n = (v: bigint | number | null | undefined): number => (v == null ? 0 : Number(v));
 const toPaise = (rupees: number): bigint => BigInt(Math.round(rupees * 100));
@@ -747,9 +749,13 @@ export class FundService {
       async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`fund-rate:${clientId}`}))`;
         let preview: { linesRepriced: number; deltaPaise: bigint; repricedFrom: Date | null; token: string } | null = null;
+        let previewFigures: { linesRepriced: number; deltaPaise: bigint } | null = null;
         if (backdated) {
           const cutoff = confirmToken ? tokenCutoff(confirmToken) : null;
           if (!cutoff) throw new ConflictException('The confirmation is not valid — review the preview and confirm again.');
+          if (now.getTime() - cutoff.getTime() > CONFIRM_TOKEN_TTL_MS) {
+            throw new ConflictException('The preview expired (older than 30 minutes) — preview again.');
+          }
           const txInputs = await loadFundInputs(tx as never, clientId);
           const verify = repricePreview(clientId, txInputs, draft, now, cutoff);
           if (!timingSafeEqualStr(confirmToken!, verify.token)) {
@@ -758,6 +764,7 @@ export class FundService {
           // Round 5 N6: the figures STORED (statement line + audit) cover everything committed up to the confirm —
           // incl. spend between the preview and now — recomputed inside this transaction.
           preview = repricePreview(clientId, txInputs, draft, now, now);
+          previewFigures = { linesRepriced: verify.linesRepriced, deltaPaise: verify.deltaPaise };
         }
         // B5: the audit row names the rate in force before this one (future-dated rows too).
         const sameKind = await tx.fundRate.findMany({
@@ -805,7 +812,7 @@ export class FundService {
             },
           },
         });
-        return { created, preview };
+        return { created, preview, previewFigures };
       },
       // The recompute reads the client's spend inside the transaction — give it room (tens of thousands of rows).
       { maxWait: 10_000, timeout: 120_000 },
@@ -816,6 +823,15 @@ export class FundService {
       scheduled: !backdated,
       effectiveFrom: result.created.effectiveFrom.toISOString(),
       ...(result.preview ? { linesRepriced: result.preview.linesRepriced, deltaPaise: n(result.preview.deltaPaise) } : {}),
+      // What the operator confirmed — the UI says plainly when the stored figures differ (spend made after the preview).
+      ...(result.previewFigures
+        ? {
+            previewLinesRepriced: result.previewFigures.linesRepriced,
+            previewDeltaPaise: n(result.previewFigures.deltaPaise),
+            includesSpendAfterPreview:
+              result.previewFigures.linesRepriced !== result.preview!.linesRepriced || result.previewFigures.deltaPaise !== result.preview!.deltaPaise,
+          }
+        : {}),
     };
   }
 
@@ -838,7 +854,7 @@ export class FundService {
   async digestAndAlert(
     clientId: string,
     nowMs: number,
-    opts: { send?: boolean; deadlineMs?: number; clock?: () => number } = {},
+    opts: { send?: boolean; deadlineMs?: number; clock?: () => number; onClaimed?: () => void } = {},
   ): Promise<{ figures: FundDigestFigures | null; alert?: FundAlertOutcome }> {
     const [settings, entryCount, rateCount] = await Promise.all([
       this.settingsRow(clientId),
@@ -893,6 +909,12 @@ export class FundService {
       data: { lowAlertLastSentOn: today },
     });
     if (claim.count === 0) return { figures, alert: { clientId, status: 'already-sent-today', recipients: to.length } };
+    opts.onClaimed?.();
+    // From here the send is awaited to the end and its outcome recorded HERE too (round 6), whatever the step budget.
+    const record = (status: FundAlertStatus) =>
+      this.prisma.fundSettings
+        .update({ where: { clientId }, data: { lowAlertLastStatus: status, lowAlertLastCheckedAt: new Date(nowMs) } })
+        .catch((e) => this.logger.error(`Fund low-balance alert for ${clientId}: could not record the outcome: ${(e as Error)?.message ?? e}`));
     const release = (error: string) =>
       this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastSentOn: settings!.lowAlertLastSentOn, lowAlertLastError: error } });
     const mail = buildLowBalanceEmail({
@@ -910,6 +932,7 @@ export class FundService {
         const error = `the mail relay rejected ${res.rejected.join(', ')}`;
         await release(error); // B6: a forced re-run retries
         this.logger.error(`Fund low-balance alert for ${clientId}: ${error}`);
+        await record('failed');
         return { figures, alert: { clientId, status: 'failed', error, recipients: sendTo.length } };
       }
       await this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastError: null, lowAlertLastRecipients: sendTo.length } });
@@ -921,11 +944,13 @@ export class FundService {
           metadata: { clientId, date: today, mode: target.mode, recipients: sendTo, balancePaise: stmt.totals.balancePaise.toString(), thresholdPaise: threshold.toString() },
         },
       });
+      await record(target.mode === 'live' ? 'sent' : 'sent-to-test-address');
       return { figures, alert: { clientId, status: target.mode === 'live' ? 'sent' : 'sent-to-test-address', recipients: sendTo.length } };
     } catch (e) {
       const error = ((e as Error)?.message ?? String(e)).slice(0, 300);
       await release(error);
       this.logger.error(`Fund low-balance alert for ${clientId} failed: ${error}`);
+      await record('failed');
       return { figures, alert: { clientId, status: 'failed', error, recipients: sendTo.length } };
     }
   }
@@ -973,13 +998,25 @@ export class FundService {
         // Round 5 N5: race the client's computation against what is left of the budget. A timed-out client is
         // "not checked — time budget"; its computation cannot send afterwards (digestAndAlert re-checks the deadline
         // right before claiming the day's e-mail).
+        // Round 6: once the day's e-mail is CLAIMED the timeout can no longer win — the send is awaited and recorded
+        // (digestAndAlert also writes the outcome itself right after the send).
         const remaining = Math.max(0, deadline - clock());
         let timer: NodeJS.Timeout | undefined;
-        const timeout = new Promise<'timeout'>((resolve) => {
-          timer = setTimeout(() => resolve('timeout'), remaining);
-        });
-        const raced = await Promise.race([this.digestAndAlert(clientId, nowMs, { deadlineMs: deadline, clock }), timeout]);
-        if (timer) clearTimeout(timer);
+        let claimed = false;
+        let raced: { figures: FundDigestFigures | null; alert?: FundAlertOutcome } | 'timeout';
+        try {
+          const timeout = new Promise<'timeout'>((resolve) => {
+            timer = setTimeout(() => {
+              if (!claimed) resolve('timeout');
+            }, remaining);
+          });
+          raced = await Promise.race([
+            this.digestAndAlert(clientId, nowMs, { deadlineMs: deadline, clock, onClaimed: () => (claimed = true) }),
+            timeout,
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
         if (raced === 'timeout') {
           this.logger.error(`Fund low-balance alert for ${clientId}: not checked — the step's time budget ran out during its check`);
           r = { figures: null, alert: { clientId, status: 'not-checked-time-budget' } };
@@ -1053,6 +1090,7 @@ export function repricePreview(
   if (!secret) throw new Error('JWT_SECRET is not set — cannot sign the rate-change confirmation.');
   const hash = createHmac('sha256', secret)
     .update(
+      'fund-rate-confirm:v1\n' +
       JSON.stringify({
         clientId,
         kind: draft.kind,

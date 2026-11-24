@@ -297,6 +297,8 @@ export interface TdsRun {
   downloadedAt: Date;
   /** The payout period ("YYYY-MM") the run paid. */
   period: string;
+  /** The single credit field the run paid (a SEPARATE run), or null for a combined run. */
+  fieldId?: string | null;
 }
 
 /** One of this client's 194C payout entries. */
@@ -304,6 +306,7 @@ export interface Tds194cEntry {
   id: string;
   outletId: string;
   period: string;
+  fieldId?: string;
   status: string;
   amountPaise: bigint;
   payeePan: string | null;
@@ -324,10 +327,22 @@ const keyOfPan = (raw: string) => {
   return t.startsWith(NO_PAN) ? t : t.toUpperCase();
 };
 /** The recovery key a 194C payout entry belongs to (its payee PAN snapshot, else its no-PAN outlet). */
-const keyOfEntry = (e: Tds194cEntry): string => {
+export const keyOfEntry = (e: Pick<Tds194cEntry, 'payeePan' | 'outletId'>): string => {
   const pan = (e.payeePan ?? '').trim();
   return pan && !pan.startsWith(NO_PAN) ? pan.toUpperCase() : `${NO_PAN}:${e.outletId}`;
 };
+
+/** Payout entries grouped by their recovery key in ONE pass (N7). */
+export function groupEntriesByKey(entries: readonly Tds194cEntry[]): Map<string, Tds194cEntry[]> {
+  const byKey = new Map<string, Tds194cEntry[]>();
+  for (const e of entries) {
+    const k = keyOfEntry(e);
+    const list = byKey.get(k);
+    if (list) list.push(e);
+    else byKey.set(k, [e]);
+  }
+  return byKey;
+}
 
 /**
  * 194C TDS lines — owner decisions 2026-11-24: charged as WHAT GIFSY ACTUALLY PAYS, WITH ITS BANK RUN, one line per
@@ -358,13 +373,7 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
   const runById = new Map(runs.map((r) => [r.id, r]));
   const sortedRuns = [...runs].sort((a, b) => a.downloadedAt.getTime() - b.downloadedAt.getTime());
   // Single pass: entries by recovery key (N7).
-  const byKey = new Map<string, Tds194cEntry[]>();
-  for (const e of entries) {
-    const k = keyOfEntry(e);
-    const list = byKey.get(k);
-    if (list) list.push(e);
-    else byKey.set(k, [e]);
-  }
+  const byKey = groupEntriesByKey(entries);
   const firstPositive = new Map<string, string>();
   for (const r of [...recoveries].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : 1))) {
     if (r.tenantSharePaise <= 0n) continue;
@@ -383,7 +392,14 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
       continue;
     }
     const inRun = (d: TdsRun) => mine.filter((e) => e.downloadId === d.id);
-    const reversedOf = (d: TdsRun) => mine.filter((e) => e.status === 'REVERSED' && e.period === d.period);
+    // A reversal clears the payout's run link, so a reversed payout is tied to a run by period AND field: the run's
+    // single field (a SEPARATE run) must be the entry's field. If more than one of this client's runs could own a
+    // reversed payout (same period, compatible field) it is ambiguous → never used for the "reversed" note (round 6).
+    const owners = (e: Tds194cEntry) => runs.filter((d) => d.period === e.period && (d.fieldId == null || d.fieldId === e.fieldId));
+    const reversedOf = (d: TdsRun) => {
+      const cands = mine.filter((e) => e.status === 'REVERSED' && e.period === d.period && (d.fieldId == null || d.fieldId === e.fieldId));
+      return cands.every((e) => owners(e).length === 1) ? cands : [];
+    };
 
     // ── Which run ──
     let run: TdsRun | null = null;
@@ -416,9 +432,12 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
     const notes: string[] = [];
     if (firstPositive.get(`${pan}|${r.fyLabel}`) === r.id) {
       const sameYear = (e: Tds194cEntry) => fyLabelForPeriod(e.period) === r.fyLabel;
+      // Reversed payouts never count as "earlier payouts". The committed-before-the-row fallback is ONLY for a row
+      // recorded with another client's run; this client's unmatched rows get no note (round 6).
+      const counted = (e: Tds194cEntry) => sameYear(e) && e.status !== 'REVERSED';
       const earlier = run
-        ? mine.some((e) => sameYear(e) && e.downloadId && e.downloadId !== run!.id && (runById.get(e.downloadId)?.downloadedAt.getTime() ?? Infinity) < run!.downloadedAt.getTime())
-        : mine.some((e) => sameYear(e) && e.status !== 'PENDING' && e.item.committedAt.getTime() < r.createdAt.getTime());
+        ? mine.some((e) => counted(e) && e.downloadId && e.downloadId !== run!.id && (runById.get(e.downloadId)?.downloadedAt.getTime() ?? Infinity) < run!.downloadedAt.getTime())
+        : kind === 'other-client' && mine.some((e) => counted(e) && e.status !== 'PENDING' && e.item.committedAt.getTime() < r.createdAt.getTime());
       if (earlier) {
         flags.push('TDS_INCLUDES_EARLIER');
         notes.push('includes TDS for earlier payouts this year (yearly limit crossed)');
@@ -674,12 +693,12 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
     if (it) {
       items.push(it);
       if (e.tdsSection === 'SEC_194C') {
-        tds194c.push({ id: e.id, outletId: e.outletId, period: e.period, status: e.status, amountPaise: e.amountPaise, payeePan: e.payeePan, downloadId: e.downloadId, item: it });
+        tds194c.push({ id: e.id, outletId: e.outletId, period: e.period, fieldId: e.fieldId, status: e.status, amountPaise: e.amountPaise, payeePan: e.payeePan, downloadId: e.downloadId, item: it });
       }
     }
   }
   const runs = recoveries.length
-    ? await db.creditPayoutDownload.findMany({ where: { clientId }, select: { id: true, downloadCode: true, downloadedAt: true, period: true } })
+    ? await db.creditPayoutDownload.findMany({ where: { clientId }, select: { id: true, downloadCode: true, downloadedAt: true, period: true, fieldId: true } })
     : [];
   items.push(...tdsItems(recoveries, runs, tds194c));
 

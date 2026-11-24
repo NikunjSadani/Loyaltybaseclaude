@@ -97,6 +97,25 @@ describe('FundConsoleSection', () => {
     expect(await screen.findByTestId('fund-console-saved')).toHaveTextContent('7 lines re-priced, balance -₹450.00');
   });
 
+  it('FC2b (round 6): when spend arrived after the preview, the saved message says so plainly', async () => {
+    let n = 0;
+    stub((u, init) => {
+      if (u.endsWith('/fund/rates/fee') && init?.method === 'POST') {
+        n += 1;
+        return n === 1 ? { body: { success: true, data: PREVIEW } }
+          : { body: { success: true, data: { saved: true, id: 'f2', scheduled: false, effectiveFrom: '2026-11-01T00:00:00.000Z', linesRepriced: 8, deltaPaise: -48_000, previewLinesRepriced: 7, previewDeltaPaise: -45_000, includesSpendAfterPreview: true } } };
+      }
+      return undefined;
+    });
+    render(<FundConsoleSection slug="bajaj" />);
+    fireEvent.change(await screen.findByLabelText('Percent (%)'), { target: { value: '4' } });
+    fireEvent.change(screen.getByLabelText('Effective from'), { target: { value: '2026-11-01' } });
+    fireEvent.click(screen.getByTestId('fund-console-fee-save'));
+    const preview = await screen.findByTestId('fund-rate-preview');
+    fireEvent.click(within(preview).getByTestId('fund-rate-confirm'));
+    expect(await screen.findByTestId('fund-console-saved')).toHaveTextContent('Saved — 8 lines / -₹480.00 re-priced (includes spend made after the preview).');
+  });
+
   it('FC3: a 409 on confirm shows the message and fetches a fresh preview (no token)', async () => {
     let n = 0;
     const fn = stub((u, init) => {
