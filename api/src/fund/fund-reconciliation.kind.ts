@@ -37,7 +37,8 @@ const FLAG_WORDS: Record<string, string> = {
   NO_FEE_RATE: 'No agency fee set — no fee charged',
   HUBBLE_NEEDS_RECONCILE: 'Voucher provider has not confirmed the outcome yet — counted as committed',
   DATE_ESTIMATED: 'The source record has no date for this step — a return is shown on its commit day; a paid date is left blank',
-  TDS_UNALLOCATED: 'TDS could not be matched to a payout — shown on the day it was recorded',
+  TDS_INCLUDES_EARLIER: 'Includes TDS for earlier payouts this year — yearly limit crossed',
+  TDS_RUN_UNMATCHED: 'The bank run of this TDS could not be identified — charged in full on the day recorded; status not tracked',
   FAILED_AWAITING_REBANK: 'Failed at the bank — awaiting re-bank (still committed)',
   FACE_RECOMPUTED: 'Face value re-derived from the order (its value was cleared by the refund)',
   FACE_UNKNOWN: 'Face value unknown — ₹0 charged; check the order',
@@ -177,7 +178,7 @@ async function run(ctx: ExportRunContext, p: FundReconciliationParams, out: Xlsx
   await A('Returned', 'Spend that came back: a voucher failed / cancelled / returned with a refund, a cash payout failed, or a payout reversed before payment. A return line credits the same amount the charge took, so a returned item nets to zero.');
   await A('Vouchers', 'Face value minus the client\'s discount % for that voucher item, at the rate in force on the order date. An item with no rate is charged at face value and flagged.');
   await A('Cash redemptions / target payouts / visibility payouts', 'Face value plus the agency fee (% of the payout or a flat ₹ per payout line), at the fee in force on the commit date. No fee set → no fee, flagged.');
-  await A('TDS 194C', 'The 194C TDS Gifsy deposits on top of a payout (gross-up, or a no-PAN payout paid in full), recovered from this client. It is dated with its payout: the year\'s TDS for a PAN (or a no-PAN outlet) is shared across that PAN\'s payouts by amount, and follows each payout\'s status. TDS that cannot be matched to a payout is shown on the day it was recorded and flagged.');
+  await A('TDS 194C', 'What Gifsy actually pays as 194C TDS on top of payouts (gross-up, or a no-PAN payout paid in full), recovered from this client — in full, dated with the bank run it was recorded with, one line per TDS amount (never re-split later). When the yearly limit is crossed the line notes that it includes TDS for earlier payouts this year. A negative true-up is a credit on the day it was recorded. TDS recorded before the opening date is excluded.');
   await A('Not on this statement', 'Points credits (money leaves only when points are redeemed), physical gifts, Voucher Dispersal campaigns, GST held back on visibility payouts, 194R TDS (paid by the client) and DEDUCT-method TDS (part of the gross award). No GST is charged on the portal.');
   await A('To recover', 'A payout already paid and later reversed. The money is with the outlet; once Gifsy recovers it, an adjustment credits the advance.');
   await A('Opening balance', 'The balance at the START of its date. Spend committed before that date is inside the opening figure and is ignored.');

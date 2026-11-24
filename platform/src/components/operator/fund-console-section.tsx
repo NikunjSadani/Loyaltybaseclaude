@@ -18,6 +18,7 @@ import { formatInrPaise } from '@/lib/money-format';
 import {
   bpsToPercentLabel, feeLabelOf, fundConsoleApi, parseRupees, todayIstKey,
   type FundRateRow, type FundRateSaveResult, type FundSettings, type FundVoucherItem,
+  alertCheckLabel,
 } from '@/lib/fund';
 
 const INPUT_CLS =
@@ -367,6 +368,7 @@ function AlertsBlock({ slug, settings, onChanged }: { slug: string; settings: Fu
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const env = settings.alertEnvironment;
+  const lastCheck = settings.lastCheck;
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
@@ -396,7 +398,14 @@ function AlertsBlock({ slug, settings, onChanged }: { slug: string; settings: Fu
           className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-2 text-xs font-semibold text-amber-200">
           {env === 'test'
             ? 'TEST ENVIRONMENT — low-balance e-mails go to ONE test address only, never to the recipients below.'
-            : 'LOW-BALANCE E-MAILS ARE OFF in this environment — nothing is sent to anyone.'}
+            : env === 'invalid-test'
+              ? 'FUND_ALERTS_TEST_RECIPIENT is not an internal address — low-balance e-mails are REFUSED here; nothing is sent.'
+              : 'LOW-BALANCE E-MAILS ARE OFF in this environment — nothing is sent to anyone.'}
+        </p>
+      )}
+      {lastCheck && (
+        <p data-testid="fund-console-last-check" className="text-xs text-white/70">
+          Last daily check{lastCheck.at ? ` (${formatISTDate(lastCheck.at)})` : ''}: <strong>{alertCheckLabel(lastCheck.status)}</strong>
         </p>
       )}
       <p className="text-[11px] text-white/40">

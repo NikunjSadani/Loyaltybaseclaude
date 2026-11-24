@@ -26,7 +26,7 @@ Each client **prepays** an advance. Spend comes off it:
 | Cash redemptions (UPI / bank) | Face value **plus** the agency fee |
 | Target / credit payouts | Gross award **plus** the agency fee |
 | Visibility payouts | Gross award **plus** the agency fee |
-| TDS 194C (gross-up) | The TDS Gifsy pays on top of the payout |
+| TDS 194C (gross-up) | What Gifsy actually pays as 194C TDS, in full, with its bank run (one line per TDS amount — never re-split later). When the yearly limit is crossed the line says it includes TDS for earlier payouts this year. A negative true-up is a credit line on the day it was recorded. |
 
 Not on this ledger: points credits (money leaves only when points are redeemed), physical gifts, voucher dispersal campaigns, GST held back on visibility payouts, 194R TDS (the client pays it) and DEDUCT-method TDS.
 
@@ -34,7 +34,7 @@ Not on this ledger: points credits (money leaves only when points are redeemed),
 
 Who can do what:
 
-- **Settings** (agency fee, voucher item discounts, low-balance alert) are managed in the **Gifsy console**: **Clients** → the client → **Fund** section. Gifsy admins, and Gifsy staff with the "manage fund" permission and access to that client.
+- **Settings** (agency fee, voucher item discounts, low-balance alert) are managed in the **Gifsy console**: **Clients** → the client → **Fund** section. Gifsy admins, and Gifsy staff with the "manage fund" permission and access to that client. Gifsy staff (who do not use the console client pages) open the same section while working in the client: **Fund Reconciliation → Rates & alerts → Change the fund settings** (`/admin/fund/settings`).
 - **Money entries** (opening balance, advances, adjustments) are recorded on **Fund Reconciliation** while working inside the client — same people.
 - Gifsy staff with "payouts: read" can open Fund Reconciliation read-only.
 - The **client admin** sees everything read-only. The **Rates & alerts** tab there says "Managed by Gifsy in the console".
@@ -104,7 +104,8 @@ Small orange chips are **flags**. Under the filters, "What the flags mean" expla
 | Face recomputed | The order's value was worked out again from the copy saved when it was ordered (a refund had cleared the stored value) | Nothing — for information |
 | Face unknown | No face value could be found (₹0 charged) | Check the source record |
 | Date estimated | The source has no date for this event: a return is shown on the day it was committed, and a paid date is blank | Nothing — for information; the amount is right |
-| TDS not matched | This TDS could not be matched to a payout — shown on the day it was recorded | Check the TDS entry against the payouts |
+| Includes earlier TDS | The TDS for earlier payouts this year became due with this bank run (yearly limit crossed) | Nothing — information |
+| Bank run not identified | The bank run this TDS was recorded with could not be identified — charged in full on the day recorded, status not tracked | Check the TDS entry against the payout downloads |
 
 The Overview also warns about **returns of spend committed before the opening date** (not credited automatically — record an Adjustment if the client should get it back) and **entries dated before the opening date** (excluded).
 
@@ -128,7 +129,7 @@ When the balance is below the client's threshold:
 - an e-mail goes to the alert recipients **Monday to Saturday** while the balance stays low, **once an opening balance is recorded** (and not while the client is inactive). The banner shows when the last e-mail went and to how many recipients — and, in bold, if the last e-mail **failed** (the client admin sees a short "could not be delivered" note, never the mail-server error);
 - the internal **Daily Ops Digest** has one line per client with the balance, committed amount and **LOW** when under the threshold.
 
-**Environments:** the console's Fund section says loudly when e-mails are not live. **TEST** (staging) = the e-mail goes to one test address only, never to the client's recipients. **OFF** = nothing is sent at all. Only production sends to the real recipients.
+**Environments:** the console's Fund section says loudly when e-mails are not live. **TEST** (staging) = the e-mail goes to one test address only, never to the client's recipients. **OFF** = nothing is sent at all. Only production sends to the real recipients. The test address must be an internal (gifsy) address, or nothing is sent and the console says so. The client's own view also says plainly when alert e-mails are switched off. Every daily check is recorded ("Last daily check: …") in the console and on the client's Rates & alerts tab — e.g. "Waiting for the opening balance", "Balance above the threshold", "E-mail sent" — so nothing is skipped silently. The client e-mails run as their own step of the daily run, even on a day the internal digest is not sent.
 
 Spend is still never blocked.
 `,

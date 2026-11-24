@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS "fund_settings" (
   "lowAlertLastSentOn"       TEXT,
   "lowAlertLastError"        TEXT,
   "lowAlertLastRecipients"   INTEGER,
+  "lowAlertLastStatus"       TEXT,
+  "lowAlertLastCheckedAt"    TIMESTAMP(3),
   "updatedById"              TEXT,
   "createdAt"                TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   "updatedAt"                TIMESTAMP(3) NOT NULL,

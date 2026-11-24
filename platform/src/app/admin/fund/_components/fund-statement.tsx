@@ -116,8 +116,7 @@ export function FundStatementTab({ isGifsy, refreshKey }: { isGifsy: boolean; re
         <Field id="st-event" label="Event">
           <select id="st-event" value={draft.event} onChange={set('event')} className={inputCls}>
             <option value="">All events</option>
-            {/* RATE_CHANGE is informational and not a filter the API accepts (FundStatementQueryDto.event). */}
-            {(Object.keys(EVENT_LABELS) as FundEvent[]).filter((ev) => ev !== 'RATE_CHANGE').map((ev) => <option key={ev} value={ev}>{EVENT_LABELS[ev]}</option>)}
+            {(Object.keys(EVENT_LABELS) as FundEvent[]).map((ev) => <option key={ev} value={ev}>{EVENT_LABELS[ev]}</option>)}
           </select>
         </Field>
         <Field id="st-q" label="Search"><input id="st-q" type="search" value={draft.q} onChange={set('q')} placeholder="Reference, outlet, UTR…" className={inputCls} /></Field>

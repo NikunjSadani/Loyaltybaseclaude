@@ -315,7 +315,7 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
       push(`Fund balance LOW: ${rupees(f.balancePaise)} (threshold ${rupees(f.thresholdPaise ?? 0n)}) — nothing is blocked`, 1);
     }
     const a = f.alert;
-    if (a && (a.status === 'failed' || a.status === 'email-not-configured')) {
+    if (a && (a.status === 'failed' || a.status === 'email-not-configured' || a.status === 'test-recipient-not-internal')) {
       push(`Fund low-balance e-mail to the client NOT sent: ${a.error ?? a.status}`, 1);
     } else if (f.isLow && a?.status === 'no-recipients') {
       push('Fund low-balance e-mail not sent: no alert recipients configured', 1);
@@ -641,6 +641,8 @@ export function fundAlertNote(f: FundSection): string {
       return 'No opening balance yet — low-balance e-mails start once it is recorded.';
     case 'client-inactive':
       return 'Client is not active — no low-balance e-mail.';
+    case 'test-recipient-not-internal':
+      return `Low-balance e-mail NOT sent: ${a.error ?? 'the test address is not internal'}.`;
     case 'disabled-in-environment':
       return 'Client e-mails are switched off on this server — no e-mail.';
     case 'already-sent-today':

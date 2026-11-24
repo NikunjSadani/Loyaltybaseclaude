@@ -25,19 +25,14 @@
  *    advance). committed = createdAt (created when the batch is CONFIRMED); paid = PAID (paidAt, utr — incl. the
  *    TDS-WITHHELD fully-withheld settlement); returned = REVERSED (before payment). FAILED stays committed (it is
  *    re-banked by a later download) and is flagged. PAID then reversed (PayoutReversalAllocation APPLIED_RECEIVABLE)
- *    stays paid + a receivable (receivablePaise, else amountPaise for a legacy row). face = amountPaise (gross).
+ *    stays paid + a receivable (receivablePaise as stored — legacy/backfilled rows carry the amount). face = amountPaise.
  *  TDS_194C — TdsRecoveryEntry section SEC_194C (the 194C TDS Gifsy deposits — gross-up, and no-PAN 194C paid in
- *    full — recovered from this tenant pro-rata). Owner D3 (2026-11-23): dated WITH ITS PAYOUT. A recovery row is
- *    keyed by (PAN or no-PAN outlet, FY) and is a cumulative delta, not per payout, so for each key the NET recovery
- *    (Σ tenantSharePaise — true-ups included) is allocated pro rata by amount over the client's 194C payout entries
- *    of that key and FY that went to the bank (status ≠ PENDING; PAN = the entry's payeePan snapshot, no-PAN = the
- *    outlet), largest remainder in paise. Each piece is a TDS line with its payout's commit date and status (paid /
- *    committed / returned when the payout was reversed before payment). A key with no matching entry keeps its
- *    recovery rows as lines on the day they were recorded, flagged TDS_UNALLOCATED. 194R / DEDUCT TDS excluded.
+ *    full — recovered from this tenant). Owner decision 2026-11-24 (replaces the D3 allocation): charged IN FULL as what
+ *    Gifsy actually pays, WITH ITS BANK RUN, one frozen line per recovery row — rules in tdsItems() below. 194R / DEDUCT
+ *    TDS excluded.
  */
 import { computeFrozenValuePaise } from '../rewards/gift-value.helper';
 import type { PrismaService } from '../prisma/prisma.service';
-import { fyLabelForPeriod } from '../tds/tds.helpers';
 import type { FundFlag, FundManualEntry, FundRateChange, FundRateRow, FundReceivable, FundSpendItem } from './fund-statement.engine';
 
 const PAGE = 2000;
@@ -45,7 +40,7 @@ const REFUNDED: ReadonlySet<string> = new Set(['FAILED', 'CANCELLED', 'RETURNED'
 
 type Db = Pick<
   PrismaService,
-  'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'creditField' | 'creditReversal' | 'tdsRecoveryEntry' | 'fundReceipt' | 'fundRate'
+  'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'creditField' | 'creditReversal' | 'creditPayoutDownload' | 'tdsRecoveryEntry' | 'fundReceipt' | 'fundRate'
 >;
 
 /** Keyset pages ordered by id (id is unique + NOT NULL). */
@@ -250,7 +245,9 @@ export function creditItem(
     for (const al of e.reversalAllocations) {
       if (al.state === 'APPLIED_RECEIVABLE') {
         fromAllocations = true;
-        receivable += al.receivablePaise > 0n ? al.receivablePaise : al.amountPaise;
+        // receivablePaise is NOT NULL (default 0) and backfilled legacy rows carry receivablePaise = amountPaise, so it is
+        // used as-is: a genuine ₹0 (e.g. the whole payout was withheld as TDS) must never fall back to the gross.
+        receivable += al.receivablePaise;
       }
     }
     if (!fromAllocations && legacy && legacy.receivablePaise > 0n) receivable += legacy.receivablePaise;
@@ -286,101 +283,133 @@ export interface TdsRecoveryRow {
   panNumber: string;
   fyLabel: string;
   tenantSharePaise: bigint;
+  /** This tenant's base behind the row (no-PAN rows: this run's base). */
+  tenantBasePaise: bigint;
+  /** The PAN's / outlet's cumulative base for the year at this event. */
+  panBasePaise: bigint;
   createdAt: Date;
 }
 
-/** A 194C payout entry that can carry a share of its PAN / outlet's recovered TDS. */
+/** A client bank run (CreditPayoutDownload). */
+export interface TdsRun {
+  id: string;
+  downloadCode: string;
+  downloadedAt: Date;
+}
+
+/** A 194C payout entry with the bank run it was last sent in. */
 export interface Tds194cEntry {
   id: string;
   outletId: string;
-  period: string;
   amountPaise: bigint;
-  status: string;
   payeePan: string | null;
-  /** The entry's own spend line (for its commit date + status). */
+  downloadId: string | null;
+  /** The entry's own spend line (status + dates). */
   item: FundSpendItem;
 }
 
 const NO_PAN = '__NO_PAN__';
 const maskPan = (p: string) => (p.startsWith(NO_PAN) ? `no PAN (outlet ${p.split(':').slice(1).join(':') || '?'})` : `PAN …${p.slice(-4)}`);
-
-/** Largest-remainder split of `total` (may be negative) by non-negative weights. Σ result === total. */
-export function splitPaise(total: bigint, weights: bigint[]): bigint[] {
-  const w = weights.reduce((x, y) => x + y, 0n);
-  if (w <= 0n) return weights.map(() => 0n);
-  const neg = total < 0n;
-  const t = neg ? -total : total;
-  const base = weights.map((x) => (t * x) / w);
-  let left = t - base.reduce((x, y) => x + y, 0n);
-  const order = weights
-    .map((x, i) => ({ i, rem: (t * x) % w }))
-    .sort((p1, p2) => (p2.rem > p1.rem ? 1 : p2.rem < p1.rem ? -1 : p1.i - p2.i));
-  for (const o of order) {
-    if (left <= 0n) break;
-    base[o.i] += 1n;
-    left -= 1n;
-  }
-  return neg ? base.map((x) => -x) : base;
-}
+/** A recovery row is written in the SAME transaction as its bank run, right after the run row → within this window. */
+export const TDS_RUN_MATCH_WINDOW_MS = 10 * 60_000;
 
 /**
- * 194C TDS lines dated with their payouts (owner D3). See the header for the rule. Pure.
+ * 194C TDS lines — owner decision 2026-11-24 (replaces the D3 allocation): charged as WHAT GIFSY ACTUALLY PAYS, WITH ITS
+ * BANK RUN. One line per TdsRecoveryEntry (frozen: a line depends only on its own row and its own run, so later
+ * payouts never change an earlier line):
+ *  - amount = the row's tenantSharePaise, in FULL; dated with its bank run (the run's downloadedAt; the row's own
+ *    createdAt when the run can't be identified). The opening cut-off applies to that date.
+ *  - the run = the client's latest CreditPayoutDownload made ≤ 10 min before the row (written in the same transaction);
+ *    its payouts for this TDS = the run's 194C entries of the same PAN (payeePan snapshot) / no-PAN outlet.
+ *  - status follows those payouts: all paid → PAID (latest paidAt); all reversed before payment → RETURNED (latest
+ *    return date) — the only case a return is shown; anything else → COMMITTED. Run or payouts not identifiable →
+ *    PAID on the recorded day, flag TDS_RUN_UNMATCHED (status not tracked). A FAILED payout re-banked in a later run, or
+ *    one reversed by the legacy path (which clears downloadId), leaves its original run → that run may become
+ *    unmatched or lose the return; lines are never re-split.
+ *  - "includes TDS for earlier payouts this year" (flag TDS_INCLUDES_EARLIER + note): the row's base is larger than
+ *    this run's payouts (no-PAN rows: panBasePaise > tenantBasePaise; PAN rows: tenantBasePaise > the run's matched
+ *    amount) — the yearly limit was crossed / a catch-up.
+ *  - a negative row (true-up) → a credit line dated when recorded (PAID), never matched to a run.
  */
-export function tdsItems(recoveries: readonly TdsRecoveryRow[], entries: readonly Tds194cEntry[]): FundSpendItem[] {
-  const byKey = new Map<string, TdsRecoveryRow[]>();
-  for (const r of recoveries) {
-    const pan = r.panNumber.trim();
-    const k = `${pan.startsWith(NO_PAN) ? pan : pan.toUpperCase()}|${r.fyLabel}`;
-    const list = byKey.get(k) ?? [];
-    list.push(r);
-    byKey.set(k, list);
-  }
+export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly TdsRun[], entries: readonly Tds194cEntry[]): FundSpendItem[] {
   const out: FundSpendItem[] = [];
-  for (const [k, rows] of byKey) {
-    const [pan, fy] = k.split('|');
-    const total = rows.reduce((x, r) => x + r.tenantSharePaise, 0n);
-    if (total === 0n) continue;
+  const sortedRuns = [...runs].sort((a, b) => a.downloadedAt.getTime() - b.downloadedAt.getTime());
+  for (const r of recoveries) {
+    if (r.tenantSharePaise === 0n) continue;
+    const raw = r.panNumber.trim();
+    const pan = raw.startsWith(NO_PAN) ? raw : raw.toUpperCase();
     const noPanOutlet = pan.startsWith(NO_PAN) ? pan.slice(NO_PAN.length + 1) : null;
-    const cands = entries.filter((e) => {
-      if (e.status === 'PENDING' || fyLabelForPeriod(e.period) !== fy) return false;
-      if (noPanOutlet != null) return e.outletId === noPanOutlet && (!e.payeePan || e.payeePan.startsWith(NO_PAN));
-      return (e.payeePan ?? '').trim().toUpperCase() === pan;
-    });
-    const weights = cands.map((e) => (e.amountPaise > 0n ? e.amountPaise : 0n));
-    if (cands.length === 0 || weights.every((x) => x === 0n)) {
-      for (const r of rows) {
-        if (r.tenantSharePaise === 0n) continue;
-        out.push({
-          key: `tds:${r.id}`,
-          type: 'TDS_194C',
-          ref: `TDS 194C · ${r.fyLabel}`,
-          description: `${r.tenantSharePaise < 0n ? 'TDS 194C true-up (credit)' : 'TDS 194C borne by Gifsy'} — ${maskPan(pan)} (no matching payout found — shown on the day it was recorded)`,
-          source: { kind: 'tdsRecoveryEntry', id: r.id },
-          facePaise: r.tenantSharePaise,
-          status: 'PAID',
-          committedAt: r.createdAt,
-          paidAt: r.createdAt,
-          flags: ['TDS_UNALLOCATED'],
-        });
-      }
+    const base = {
+      type: 'TDS_194C' as const,
+      source: { kind: 'tdsRecoveryEntry' as const, id: r.id },
+      facePaise: r.tenantSharePaise,
+    };
+    if (r.tenantSharePaise < 0n) {
+      out.push({
+        ...base,
+        key: `tds:${r.id}`,
+        ref: `TDS 194C true-up · FY ${r.fyLabel}`,
+        description: `TDS 194C true-up (credit) — ${maskPan(pan)}, FY ${r.fyLabel}`,
+        status: 'PAID',
+        committedAt: r.createdAt,
+        paidAt: r.createdAt,
+      });
       continue;
     }
-    const parts = splitPaise(total, weights);
-    cands.forEach((e, i) => {
-      if (parts[i] === 0n) return;
+    let run: TdsRun | null = null;
+    for (const d of sortedRuns) {
+      const gap = r.createdAt.getTime() - d.downloadedAt.getTime();
+      if (gap >= 0 && gap <= TDS_RUN_MATCH_WINDOW_MS) run = d; // latest qualifying run wins
+    }
+    const matched = run
+      ? entries.filter(
+          (e) =>
+            e.downloadId === run!.id &&
+            (noPanOutlet != null ? e.outletId === noPanOutlet && (!e.payeePan || e.payeePan.startsWith(NO_PAN)) : (e.payeePan ?? '').trim().toUpperCase() === pan),
+        )
+      : [];
+    const runBase = matched.reduce((x, e) => x + e.amountPaise, 0n);
+    const includesEarlier = noPanOutlet != null ? r.panBasePaise > r.tenantBasePaise : matched.length > 0 && r.tenantBasePaise > runBase;
+    const flags: FundSpendItem['flags'] = [];
+    if (includesEarlier) flags.push('TDS_INCLUDES_EARLIER');
+    const note = includesEarlier ? ' — includes TDS for earlier payouts this year (yearly limit crossed)' : '';
+    if (!run || matched.length === 0) {
+      flags.push('TDS_RUN_UNMATCHED');
       out.push({
-        key: `tds:${k}:${e.id}`,
-        type: 'TDS_194C',
-        ref: `TDS 194C · ${e.item.ref}`,
-        description: `TDS 194C borne by Gifsy on ${e.item.description} — ${maskPan(pan)}, FY ${fy}`,
-        source: { kind: 'creditPayoutEntry', id: e.id },
-        facePaise: parts[i],
-        status: e.item.status,
-        committedAt: e.item.committedAt,
-        paidAt: e.item.paidAt ?? null,
-        returnedAt: e.item.returnedAt ?? null,
-        flags: (e.item.flags ?? []).filter((f) => f === 'DATE_ESTIMATED'),
+        ...base,
+        key: `tds:${r.id}`,
+        ref: `TDS 194C · FY ${r.fyLabel}`,
+        description: `TDS 194C borne by Gifsy — ${maskPan(pan)}, FY ${r.fyLabel} (bank run not identified)${note}`,
+        status: 'PAID',
+        committedAt: r.createdAt,
+        paidAt: r.createdAt,
+        flags,
       });
+      continue;
+    }
+    const statuses = matched.map((e) => e.item.status);
+    let status: FundSpendItem['status'] = 'COMMITTED';
+    let paidAt: Date | null = null;
+    let returnedAt: Date | null = null;
+    if (statuses.every((s) => s === 'PAID')) {
+      status = 'PAID';
+      paidAt = matched.reduce<Date | null>((m, e) => (e.item.paidAt && (!m || e.item.paidAt > m) ? e.item.paidAt : m), null);
+      if (!paidAt) flags.push('DATE_ESTIMATED');
+    } else if (statuses.every((s) => s === 'RETURNED')) {
+      status = 'RETURNED';
+      returnedAt = matched.reduce<Date | null>((m, e) => (e.item.returnedAt && (!m || e.item.returnedAt > m) ? e.item.returnedAt : m), null);
+      if (!returnedAt) flags.push('DATE_ESTIMATED');
+    }
+    out.push({
+      ...base,
+      key: `tds:${r.id}`,
+      ref: `TDS 194C · ${run.downloadCode}`,
+      description: `TDS 194C borne by Gifsy with bank run ${run.downloadCode} (${matched.length} payout${matched.length === 1 ? '' : 's'}) — ${maskPan(pan)}, FY ${r.fyLabel}${note}`,
+      status,
+      committedAt: run.downloadedAt,
+      paidAt,
+      returnedAt,
+      flags,
     });
   }
   return out;
@@ -525,6 +554,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
         tdsDeductedPaise: true,
         tdsSection: true,
         payeePan: true,
+        downloadId: true,
         reversalAllocations: { select: { state: true, amountPaise: true, receivablePaise: true, creditReversal: { select: { approvedAt: true } } } },
       },
       orderBy: { id: 'asc' },
@@ -563,7 +593,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
   const recoveries = await allPages((p) =>
     db.tdsRecoveryEntry.findMany({
       where: { clientId, section: 'SEC_194C' },
-      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, createdAt: true },
+      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, tenantBasePaise: true, panBasePaise: true, createdAt: true },
       orderBy: { id: 'asc' },
       ...p,
     }),
@@ -587,11 +617,14 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
     if (it) {
       items.push(it);
       if (e.tdsSection === 'SEC_194C') {
-        tds194c.push({ id: e.id, outletId: e.outletId, period: e.period, amountPaise: e.amountPaise, status: e.status, payeePan: e.payeePan, item: it });
+        tds194c.push({ id: e.id, outletId: e.outletId, amountPaise: e.amountPaise, payeePan: e.payeePan, downloadId: e.downloadId, item: it });
       }
     }
   }
-  items.push(...tdsItems(recoveries, tds194c));
+  const runs = recoveries.length
+    ? await db.creditPayoutDownload.findMany({ where: { clientId }, select: { id: true, downloadCode: true, downloadedAt: true } })
+    : [];
+  items.push(...tdsItems(recoveries, runs, tds194c));
 
   return {
     items,

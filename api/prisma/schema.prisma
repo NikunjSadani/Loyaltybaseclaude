@@ -2201,6 +2201,10 @@ model FundSettings {
   lowAlertLastError        String?
   /// How many recipients the last low-balance e-mail was sent to (at send time).
   lowAlertLastRecipients   Int?
+  /// The outcome of the last daily low-balance check (sent / not-low / no-opening / switched off / failed …) and when —
+  /// shown in the console and the client view so a skip is never silent.
+  lowAlertLastStatus       String?
+  lowAlertLastCheckedAt    DateTime?
   updatedById              String?
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt

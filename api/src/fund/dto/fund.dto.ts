@@ -24,7 +24,7 @@ export class FundStatementQueryDto {
   @IsOptional() @Matches(DATE_RE, { message: `to ${DATE_MSG}` }) to?: string;
   @IsOptional() @IsIn(['VOUCHER', 'CASH_REDEMPTION', 'CREDIT_PAYOUT', 'VISIBILITY_PAYOUT', 'TDS_194C']) type?: string;
   @IsOptional() @IsIn(['COMMITTED', 'PAID', 'RETURNED']) status?: string;
-  @IsOptional() @IsIn(['OPENING', 'RECEIPT', 'ADJUSTMENT', 'CHARGE', 'RETURN']) event?: string;
+  @IsOptional() @IsIn(['OPENING', 'RECEIPT', 'ADJUSTMENT', 'CHARGE', 'RETURN', 'RATE_CHANGE']) event?: string;
   @IsOptional() @IsString() @MaxLength(100) q?: string;
   @IsOptional() @IsIn(['asc', 'desc']) order?: 'asc' | 'desc';
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) page?: number;

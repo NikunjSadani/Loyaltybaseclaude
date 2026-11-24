@@ -7,8 +7,8 @@
  *
  * Accounting model (bank-statement style):
  *  - every spend item is ONE debit at its commit date of `charged` (vouchers: face − the client's discount for that
- *    VOUCHER ITEM (owner D4); cash / credit / visibility payouts: face + agency fee; 194C TDS: the TDS Gifsy bears,
- *    dated with its payout (owner D3), which may be a negative true-up);
+ *    VOUCHER ITEM (owner D4); cash / credit / visibility payouts: face + agency fee; 194C TDS: what Gifsy actually
+ *    pays, in full, with its bank run (owner 2026-11-24) — a negative true-up is a credit);
  *  - a RETURNED item adds ONE credit of the same `charged` at its return date (net effect 0);
  *  - receipts / adjustments are credits (an adjustment may be negative); the opening balance is the first line.
  *  Balance = opening + receipts + adjustments − Σ charged of items not returned (= committed + paid).
@@ -51,7 +51,8 @@ export type FundFlag =
   | 'FACE_UNKNOWN' // no face value could be derived (₹0 charged) — check the source record
   | 'DATE_ESTIMATED' // the source has no event timestamp for the paid / return date (never updatedAt): a return is
   //                     placed on its commit day (nets to zero there); a paid date is left blank
-  | 'TDS_UNALLOCATED'; // a 194C TDS amount that could not be tied to a payout — shown on the day it was recorded
+  | 'TDS_INCLUDES_EARLIER' // a 194C TDS amount that includes TDS for earlier payouts this year (yearly limit crossed)
+  | 'TDS_RUN_UNMATCHED'; // the bank run a 194C TDS amount was recorded with could not be identified — status not tracked
 
 export type FundSourceRef = {
   kind: 'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'tdsRecoveryEntry' | 'creditReversal';
@@ -167,8 +168,9 @@ export interface FundTypeTotals {
   committedPaise: bigint;
   /** Σ charged of PAID items. */
   paidPaise: bigint;
-  /** Σ charged of RETURNED items (already credited back — informational). */
+  /** Σ charged of RETURNED items (already credited back — informational; not in count / face / discount / fee). */
   returnedPaise: bigint;
+  returnedCount: number;
   /** committed + paid (what this type has taken off the advance). */
   netChargedPaise: bigint;
 }
@@ -376,7 +378,7 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
   const byType = new Map<FundSpendType, FundTypeTotals>(
     FUND_SPEND_TYPES.map((t) => [
       t,
-      { type: t, count: 0, facePaise: 0n, discountPaise: 0n, feePaise: 0n, committedPaise: 0n, paidPaise: 0n, returnedPaise: 0n, netChargedPaise: 0n },
+      { type: t, count: 0, facePaise: 0n, discountPaise: 0n, feePaise: 0n, committedPaise: 0n, paidPaise: 0n, returnedPaise: 0n, returnedCount: 0, netChargedPaise: 0n },
     ]),
   );
   const receivables: FundStatement['receivables'] = { items: [], totalPaise: 0n };
@@ -403,10 +405,16 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
     }
 
     const t = byType.get(item.type)!;
-    t.count += 1;
-    t.facePaise += item.facePaise;
-    t.discountPaise += c.discountPaise;
-    t.feePaise += c.feePaise;
+    // A6: count / face / discount / fee cover what is still charged (committed + paid) — exactly like the totals and
+    // the cards; returned items are reported separately (returnedCount / returnedPaise).
+    if (item.status === 'RETURNED') {
+      t.returnedCount += 1;
+    } else {
+      t.count += 1;
+      t.facePaise += item.facePaise;
+      t.discountPaise += c.discountPaise;
+      t.feePaise += c.feePaise;
+    }
     if (item.status === 'COMMITTED') {
       t.committedPaise += c.chargedPaise;
       totals.committedPaise += c.chargedPaise;
@@ -461,6 +469,9 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
     receivables.totalPaise += r.amountPaise;
   }
   for (const rc of input.rateChanges ?? []) {
+    // A3: a change saved before the opening date is inside the opening figure (no line — keeps date order); a change
+    // that re-priced nothing gets no line.
+    if (rc.at.getTime() < cutoff || rc.linesRepriced === 0) continue;
     pending.push({
       sortKey: 'rate:' + rc.id,
       date: rc.at,
@@ -496,9 +507,8 @@ export function buildFundStatement(input: BuildStatementInput): FundStatement {
     if (e) return e;
     return a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0;
   });
-  // The opening line always leads (it is the balance at the start of its day).
-  const oi = pending.findIndex((p) => p.event === 'OPENING');
-  if (oi > 0) pending.unshift(...pending.splice(oi, 1));
+  // The opening line sorts by its as-of date (start of day) and EVENT_ORDER puts it first on that day; everything else
+  // on the statement is on/after it (earlier spend, entries and rate changes are cut off above), so date order holds.
 
   let bal = 0n;
   const lines: FundLine[] = pending.map((p, i) => {

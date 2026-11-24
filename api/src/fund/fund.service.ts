@@ -16,7 +16,7 @@ import type { Permission } from '../common/rbac/permissions';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { isGifsyOperator, platformWide } from '../common/tenant-scope';
 import { formatDateIST, istDateKey } from '../common/ist-date';
-import { REPORTS_CLIENT_ID } from '../common/report-recipients';
+import { allowedRecipientDomains, REPORTS_CLIENT_ID, splitRecipientsByDomain } from '../common/report-recipients';
 import {
   FUND_SPEND_TYPE_LABEL,
   FundLine,
@@ -72,6 +72,7 @@ export type FundAlertStatus =
   | 'no-opening'
   | 'client-inactive'
   | 'disabled-in-environment'
+  | 'test-recipient-not-internal'
   | 'email-not-configured'
   | 'failed';
 
@@ -88,12 +89,17 @@ export interface FundAlertOutcome {
  *   FUND_ALERTS_LIVE=true            → the client's configured recipients (set on PRODUCTION only);
  *   else FUND_ALERTS_TEST_RECIPIENT  → ONE test address (subject says who it would have gone to) — staging;
  *   else                             → nothing is sent (outcome "disabled-in-environment", shown in the digest).
+ * The test address must be on an INTERNAL domain (REPORTS_RECIPIENT_DOMAINS, default gifsy.in — re-audit B4): any other
+ * value is refused loudly (mode "invalid-test", outcome "test-recipient-not-internal"), never used.
  */
-export function fundAlertTarget(env: NodeJS.ProcessEnv = process.env): { mode: 'live' } | { mode: 'test'; to: string } | { mode: 'off' } {
+export function fundAlertTarget(
+  env: NodeJS.ProcessEnv = process.env,
+): { mode: 'live' } | { mode: 'test'; to: string } | { mode: 'off' } | { mode: 'invalid-test'; value: string } {
   if ((env.FUND_ALERTS_LIVE ?? '').trim().toLowerCase() === 'true') return { mode: 'live' };
   const t = (env.FUND_ALERTS_TEST_RECIPIENT ?? '').trim().toLowerCase();
-  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)) return { mode: 'test', to: t };
-  return { mode: 'off' };
+  if (!t) return { mode: 'off' };
+  const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t) && splitRecipientsByDomain([t], allowedRecipientDomains(env.REPORTS_RECIPIENT_DOMAINS)).allowed.length === 1;
+  return ok ? { mode: 'test', to: t } : { mode: 'invalid-test', value: t };
 }
 
 type RateDraft = Omit<FundRateRow, 'createdAt'> & { rewardLabel?: string | null; note: string | null };
@@ -198,6 +204,8 @@ export class FundService {
       lowAlertLastSentOn: string | null;
       lowAlertLastError: string | null;
       lowAlertLastRecipients?: number | null;
+      lowAlertLastStatus?: string | null;
+      lowAlertLastCheckedAt?: Date | null;
     } | null,
     o: { canManage: boolean; internal: boolean; clientActive: boolean },
   ) {
@@ -211,7 +219,7 @@ export class FundService {
       hasOpening: !!stmt.openingDate,
       canManage: o.canManage,
       /** Settings are managed in the Gifsy console (owner D6); a Gifsy operator gets the link. */
-      settingsConsoleHref: o.internal ? `/gifsy/clients/${encodeURIComponent(clientId)}#fund` : null,
+      settingsConsoleHref: o.internal ? `/admin/fund/settings` : null,
       totals: {
         openingPaise: n(t.openingPaise),
         receiptsPaise: n(t.receiptsPaise),
@@ -237,6 +245,7 @@ export class FundService {
         committedPaise: n(b.committedPaise),
         paidPaise: n(b.paidPaise),
         returnedPaise: n(b.returnedPaise),
+        returnedCount: b.returnedCount,
         netChargedPaise: n(b.netChargedPaise),
       })),
       receivables: {
@@ -275,6 +284,10 @@ export class FundService {
         // A client admin never sees a raw mail-server error (C11).
         lastAlertError: err == null ? null : o.internal ? err : CLIENT_ALERT_ERROR_TEXT,
         recipients: recipientsOf(settings?.alertRecipients).length,
+        /** Re-audit B4: said plainly to everyone — on this server alert e-mails do not reach the client. */
+        emailsSwitchedOff: fundAlertTarget().mode !== 'live',
+        /** Re-audit B2: the last daily check (never a silent skip). */
+        lastCheck: settings?.lowAlertLastStatus ? { status: settings.lowAlertLastStatus, at: settings.lowAlertLastCheckedAt ? settings.lowAlertLastCheckedAt.toISOString() : null } : null,
       },
     };
   }
@@ -426,13 +439,15 @@ export class FundService {
       clientId,
       canManage,
       managedInConsole: true,
-      consoleHref: internal ? `/gifsy/clients/${encodeURIComponent(clientId)}#fund` : null,
+      consoleHref: internal ? `/admin/fund/settings` : null,
       thresholdPaise: settings?.lowBalanceThresholdPaise == null ? null : n(settings.lowBalanceThresholdPaise),
       alertRecipients: recipientsOf(settings?.alertRecipients),
       lastAlertSentOn: settings?.lowAlertLastSentOn ?? null,
       lastAlertRecipients: settings?.lowAlertLastRecipients ?? null,
       lastAlertError: err == null ? null : internal ? err : CLIENT_ALERT_ERROR_TEXT,
       alertEnvironment: internal ? fundAlertTarget().mode : null,
+      emailsSwitchedOff: fundAlertTarget().mode !== 'live',
+      lastCheck: settings?.lowAlertLastStatus ? { status: settings.lowAlertLastStatus, at: settings.lowAlertLastCheckedAt ? settings.lowAlertLastCheckedAt.toISOString() : null } : null,
       currentFee: cur
         ? { feeType: cur.feeType, rateBps: cur.rateBps, flatPaise: cur.flatPaise == null ? null : n(cur.flatPaise), effectiveFrom: cur.effectiveFrom.toISOString() }
         : null,
@@ -705,82 +720,92 @@ export class FundService {
   private async saveRate(user: JwtPayload, clientId: string, draft: RateDraft, confirmToken?: string) {
     const now = new Date();
     const backdated = draft.effectiveFrom.getTime() <= now.getTime();
-    let preview: { linesRepriced: number; deltaPaise: bigint; repricedFrom: Date | null; token: string } | null = null;
-    let previous: FundRateRow | null = null;
-    if (backdated) {
-      const inputs = await loadFundInputs(this.prisma, clientId);
-      preview = repricePreview(clientId, inputs, draft, now);
-      previous = rateInForce(
-        inputs.rates.filter((r) => r.kind === draft.kind && (draft.kind === 'AGENCY_FEE' || r.rewardId === draft.rewardId)),
-        draft.effectiveFrom,
-      );
-      if (!confirmToken) {
-        return {
-          saved: false,
-          requiresConfirmation: true,
-          preview: {
-            linesRepriced: preview.linesRepriced,
-            deltaPaise: n(preview.deltaPaise),
-            effectiveFrom: draft.effectiveFrom.toISOString(),
-            from: (preview.repricedFrom ?? draft.effectiveFrom).toISOString(),
-            to: now.toISOString(),
-          },
-          confirmToken: preview.token,
-        };
-      }
-      if (confirmToken !== preview.token) {
-        throw new ConflictException('The figures changed since the preview (new spend or another rate change). Review the new preview and confirm again.');
-      }
+    // 1) Back-dated, no token yet → the preview only (nothing written).
+    if (backdated && !confirmToken) {
+      const preview = repricePreview(clientId, await loadFundInputs(this.prisma, clientId), draft, now);
+      return {
+        saved: false,
+        requiresConfirmation: true,
+        preview: {
+          linesRepriced: preview.linesRepriced,
+          deltaPaise: n(preview.deltaPaise),
+          effectiveFrom: draft.effectiveFrom.toISOString(),
+          from: (preview.repricedFrom ?? draft.effectiveFrom).toISOString(),
+          to: now.toISOString(),
+        },
+        confirmToken: preview.token,
+      };
     }
-    const row = await this.prisma.$transaction(async (tx) => {
-      const created = await tx.fundRate.create({
-        data: {
-          clientId,
-          kind: draft.kind,
-          feeType: draft.feeType ?? null,
-          rewardId: draft.rewardId ?? null,
-          rewardLabel: draft.rewardLabel ?? null,
-          rateBps: draft.rateBps ?? null,
-          flatPaise: draft.flatPaise ?? null,
-          effectiveFrom: draft.effectiveFrom,
-          note: draft.note,
-          repricedLines: preview ? preview.linesRepriced : null,
-          repriceDeltaPaise: preview ? preview.deltaPaise : null,
-          repricedFrom: preview ? preview.repricedFrom : null,
-          createdById: user.sub,
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          action: 'CREATE',
-          entityType: 'FUND_RATE',
-          entityId: created.id,
-          actorId: user.sub,
-          oldValues: previous
-            ? { feeType: previous.feeType ?? null, rateBps: previous.rateBps ?? null, flatPaise: previous.flatPaise?.toString() ?? null, effectiveFrom: previous.effectiveFrom.toISOString() }
-            : undefined,
-          newValues: {
+    // 2) The save — ATOMIC (re-audit A2/B3): a per-client advisory lock, then the preview is RECOMPUTED and the token
+    //    verified INSIDE the transaction. A double-click / two concurrent confirms serialise on the lock; the second
+    //    sees the first row in the rates fingerprint → token mismatch → 409, never a double save.
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`fund-rate:${clientId}`}))`;
+        let preview: { linesRepriced: number; deltaPaise: bigint; repricedFrom: Date | null; token: string } | null = null;
+        if (backdated) {
+          preview = repricePreview(clientId, await loadFundInputs(tx as never, clientId), draft, now);
+          if (confirmToken !== preview.token) {
+            throw new ConflictException('The figures changed since the preview (new spend or another rate change). Review the new preview and confirm again.');
+          }
+        }
+        // B5: the audit row names the rate in force before this one (future-dated rows too).
+        const sameKind = await tx.fundRate.findMany({
+          where: { clientId, kind: draft.kind, ...(draft.kind === 'VOUCHER_DISCOUNT' ? { rewardId: draft.rewardId ?? null } : {}) },
+          select: { feeType: true, rateBps: true, flatPaise: true, effectiveFrom: true, createdAt: true, kind: true, rewardId: true },
+        });
+        const previous = rateInForce(sameKind as FundRateRow[], draft.effectiveFrom);
+        const created = await tx.fundRate.create({
+          data: {
             clientId,
-            kind: created.kind,
-            rewardId: created.rewardId,
-            feeType: created.feeType,
-            rateBps: created.rateBps,
-            flatPaise: created.flatPaise?.toString() ?? null,
-            effectiveFrom: created.effectiveFrom.toISOString(),
-            note: created.note,
-            backdated,
-            ...(preview ? { linesRepriced: preview.linesRepriced, balanceDeltaPaise: preview.deltaPaise.toString() } : {}),
+            kind: draft.kind,
+            feeType: draft.feeType ?? null,
+            rewardId: draft.rewardId ?? null,
+            rewardLabel: draft.rewardLabel ?? null,
+            rateBps: draft.rateBps ?? null,
+            flatPaise: draft.flatPaise ?? null,
+            effectiveFrom: draft.effectiveFrom,
+            note: draft.note,
+            repricedLines: preview ? preview.linesRepriced : null,
+            repriceDeltaPaise: preview ? preview.deltaPaise : null,
+            repricedFrom: preview ? preview.repricedFrom : null,
+            createdById: user.sub,
           },
-        },
-      });
-      return created;
-    });
+        });
+        await tx.auditLog.create({
+          data: {
+            action: 'CREATE',
+            entityType: 'FUND_RATE',
+            entityId: created.id,
+            actorId: user.sub,
+            oldValues: previous
+              ? { feeType: previous.feeType ?? null, rateBps: previous.rateBps ?? null, flatPaise: previous.flatPaise?.toString() ?? null, effectiveFrom: previous.effectiveFrom.toISOString() }
+              : { previousRate: null },
+            newValues: {
+              clientId,
+              kind: created.kind,
+              rewardId: created.rewardId,
+              feeType: created.feeType,
+              rateBps: created.rateBps,
+              flatPaise: created.flatPaise?.toString() ?? null,
+              effectiveFrom: created.effectiveFrom.toISOString(),
+              note: created.note,
+              backdated,
+              ...(preview ? { linesRepriced: preview.linesRepriced, balanceDeltaPaise: preview.deltaPaise.toString() } : {}),
+            },
+          },
+        });
+        return { created, preview };
+      },
+      // The recompute reads the client's spend inside the transaction — give it room (tens of thousands of rows).
+      { maxWait: 10_000, timeout: 120_000 },
+    );
     return {
       saved: true,
-      id: row.id,
+      id: result.created.id,
       scheduled: !backdated,
-      effectiveFrom: row.effectiveFrom.toISOString(),
-      ...(preview ? { linesRepriced: preview.linesRepriced, deltaPaise: n(preview.deltaPaise) } : {}),
+      effectiveFrom: result.created.effectiveFrom.toISOString(),
+      ...(result.preview ? { linesRepriced: result.preview.linesRepriced, deltaPaise: n(result.preview.deltaPaise) } : {}),
     };
   }
 
@@ -800,7 +825,11 @@ export class FundService {
    * At most one e-mail per client per IST day (compare-and-set claim; released on failure or relay rejection — B6, so
    * a forced re-run retries). Never throws for an e-mail problem; never blocks anything.
    */
-  async digestAndAlert(clientId: string, nowMs: number): Promise<{ figures: FundDigestFigures | null; alert?: FundAlertOutcome }> {
+  async digestAndAlert(
+    clientId: string,
+    nowMs: number,
+    opts: { send?: boolean } = {},
+  ): Promise<{ figures: FundDigestFigures | null; alert?: FundAlertOutcome }> {
     const [settings, entryCount, rateCount] = await Promise.all([
       this.settingsRow(clientId),
       this.prisma.fundReceipt.count({ where: { clientId } }),
@@ -822,6 +851,7 @@ export class FundService {
       lastAlertSentOn: settings?.lowAlertLastSentOn ?? null,
       lastAlertError: settings?.lowAlertLastError ?? null,
     };
+    if (opts.send === false) return { figures };
     if (threshold == null) return { figures, alert: { clientId, status: 'no-threshold' } };
     if (!stmt.openingDate) return { figures, alert: { clientId, status: 'no-opening' } };
     const client = await this.clientActive(clientId);
@@ -832,6 +862,11 @@ export class FundService {
     if (settings!.lowAlertLastSentOn === today) return { figures, alert: { clientId, status: 'already-sent-today', recipients: settings!.lowAlertLastRecipients ?? to.length } };
     const target = fundAlertTarget();
     if (target.mode === 'off') return { figures, alert: { clientId, status: 'disabled-in-environment' } };
+    if (target.mode === 'invalid-test') {
+      const error = `FUND_ALERTS_TEST_RECIPIENT "${target.value}" is not on an internal domain (${allowedRecipientDomains().join(', ')}) — refused, nothing sent.`;
+      this.logger.error(`Fund low-balance alert for ${clientId}: ${error}`);
+      return { figures, alert: { clientId, status: 'test-recipient-not-internal', error } };
+    }
     if (!this.msg91.isEmailConfigured()) {
       const error = 'E-mail is not configured on this server (MSG91_SMTP_PASS) — the low-balance e-mail was NOT sent.';
       await this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastError: error } });
@@ -879,6 +914,50 @@ export class FundService {
       this.logger.error(`Fund low-balance alert for ${clientId} failed: ${error}`);
       return { figures, alert: { clientId, status: 'failed', error, recipients: sendTo.length } };
     }
+  }
+
+  /**
+   * The client low-balance e-mails as their OWN step of the daily run (re-audit B2) — independent of the internal
+   * digest's early exits (no digest recipients, list unreadable, digest already sent today). Every client with a
+   * threshold is checked once; the outcome (sent / not-low / no-opening / switched off / failed …) is stored on its
+   * settings row (lowAlertLastStatus / lowAlertLastCheckedAt — shown in the console and the client view) and returned
+   * for the digest, so a skip is never silent. Never throws.
+   */
+  async runLowBalanceAlerts(
+    nowMs: number,
+  ): Promise<{ results: Map<string, { figures: FundDigestFigures | null; alert?: FundAlertOutcome }>; error?: string }> {
+    const results = new Map<string, { figures: FundDigestFigures | null; alert?: FundAlertOutcome }>();
+    let rows: Array<{ clientId: string }>;
+    try {
+      rows = await this.prisma.fundSettings.findMany({
+        where: { lowBalanceThresholdPaise: { not: null }, clientId: { not: REPORTS_CLIENT_ID } },
+        select: { clientId: true },
+      });
+    } catch (e) {
+      const error = ((e as Error)?.message ?? String(e)).slice(0, 300);
+      this.logger.error(`Fund low-balance alerts: could not read the settings: ${error}`);
+      return { results, error };
+    }
+    for (const { clientId } of rows) {
+      let r: { figures: FundDigestFigures | null; alert?: FundAlertOutcome };
+      try {
+        r = await this.digestAndAlert(clientId, nowMs);
+      } catch (e) {
+        const error = ((e as Error)?.message ?? String(e)).slice(0, 300);
+        this.logger.error(`Fund low-balance alert for ${clientId} failed: ${error}`);
+        r = { figures: null, alert: { clientId, status: 'failed', error } };
+      }
+      results.set(clientId, r);
+      try {
+        await this.prisma.fundSettings.update({
+          where: { clientId },
+          data: { lowAlertLastStatus: r.alert?.status ?? null, lowAlertLastCheckedAt: new Date(nowMs) },
+        });
+      } catch (e) {
+        this.logger.error(`Fund low-balance alert for ${clientId}: could not record the outcome: ${(e as Error)?.message ?? e}`);
+      }
+    }
+    return { results };
   }
 }
 

@@ -1,7 +1,13 @@
 import { internalSecretConfigured } from '../../common/internal-call';
 import { heldDigestFigures } from '../../wallet/held-opening-balances/held-balance-facts';
 import { TdsService } from '../../tds/tds.service';
-import { FundService } from '../../fund/fund.service';
+import { FundService, type FundAlertOutcome, type FundDigestFigures } from '../../fund/fund.service';
+
+/** The client low-balance step's results, handed to the digest (re-audit B2). */
+export interface FundAlertStep {
+  results: Map<string, { figures: FundDigestFigures | null; alert?: FundAlertOutcome }>;
+  error?: string;
+}
 import { financialYear } from '../../tds/tds.helpers';
 import { randomUUID } from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
@@ -183,14 +189,24 @@ export class ScheduledReportsService {
     opts: { force?: boolean } = {},
   ): Promise<{ dateLabel: string; reports: ReportOutcome[] }> {
     const dateLabel = formatDateIST(new Date(nowMs));
-    const outcome = await this.runDigest(nowMs, dateLabel, opts.force === true);
+    // Client low-balance e-mails — their OWN step, BEFORE and independent of the internal digest (re-audit B2): the
+    // digest's early exits (no digest recipients, unreadable list, already sent today, lease held) never stop a client
+    // alert. Each outcome is stored on the client's fund settings and reported in the digest. Never throws.
+    let fundStep: FundAlertStep = { results: new Map() };
+    try {
+      fundStep = await this.fund.runLowBalanceAlerts(nowMs);
+    } catch (e) {
+      fundStep = { results: new Map(), error: short(e) };
+      this.logger.error(`Fund low-balance alerts failed: ${fundStep.error}`);
+    }
+    const outcome = await this.runDigest(nowMs, dateLabel, opts.force === true, fundStep);
     const msg = `Daily operations digest (${dateLabel}${opts.force ? ', force' : ''}): ${outcome.status}${outcome.error ? ` — ${outcome.error}` : ''}`;
     if (outcome.status === 'sent' || outcome.status === 'skipped') this.logger.log(msg);
     else this.logger.error(msg);
     return { dateLabel, reports: [outcome] };
   }
 
-  private async runDigest(nowMs: number, dateLabel: string, force: boolean): Promise<ReportOutcome> {
+  private async runDigest(nowMs: number, dateLabel: string, force: boolean, fundStep: FundAlertStep = { results: new Map() }): Promise<ReportOutcome> {
     const key: ReportKey = 'dailyDigest';
     const deadlineMs = this.clock() + RUN_BUDGET_MS;
 
@@ -248,7 +264,7 @@ export class ScheduledReportsService {
 
     // 4. Collect (within the budget) → build → send → record.
     try {
-      const input = await this.collect(nowMs, dateLabel, plan.window, deadlineMs);
+      const input = await this.collect(nowMs, dateLabel, plan.window, deadlineMs, fundStep);
       if (stateReadError) {
         input.sharedFailures = [{ key: 'shared/run-history', label: 'run history' }, ...(input.sharedFailures ?? [])];
         input.runNotices = [
@@ -472,8 +488,17 @@ export class ScheduledReportsService {
   // ── Collect ─────────────────────────────────────────────────────────────────────────────────
 
   /** Assemble the builder input for `window`. Public for the runner spec (exercises section isolation). */
-  async collect(nowMs: number, dateLabel: string, window: DigestWindow, deadlineMs = Infinity): Promise<DigestInput> {
+  async collect(
+    nowMs: number,
+    dateLabel: string,
+    window: DigestWindow,
+    deadlineMs = Infinity,
+    fundStep: FundAlertStep = { results: new Map() },
+  ): Promise<DigestInput> {
     const runNotices: string[] = [];
+    if (fundStep.error) {
+      runNotices.push(`The client low-balance e-mail step could not run (${fundStep.error}) — no client was checked today.`);
+    }
     const sharedFailures: Array<{ key: string; label: string }> = [];
     const section = <T,>(label: string, clientId: string, load: () => Promise<T>) => this.section(label, clientId, load, deadlineMs);
     const defaultTargets: KycSlaTargets = { fieldHrs: KYC_FIELD_SLA_DEFAULT, gifsyHrs: KYC_GIFSY_SLA_DEFAULT };
@@ -533,11 +558,14 @@ export class ScheduledReportsService {
       const held = await section('heldBalances', c, () => heldDigestFigures(this.prisma, c, window));
       if (!held.ok) digest.heldBalances = held;
       else if (held.data) digest.heldBalances = { ok: true, data: held.data };
-      // Client fund: only clients with a fund set-up get the line (null = none). The once-a-day low-balance e-mail to
-      // the client is sent from HERE — inside this run's lease + time budget, from the same single statement compute
-      // (A7 / B5); a skipped section sends nothing.
-      const fund = await section('fund', c, () => this.fund.digestAndAlert(c, nowMs));
+      // Client fund: only clients with a fund set-up get the line (null = none). Clients checked by today's low-balance
+      // step reuse its figures + outcome (one statement compute); the rest are computed here WITHOUT sending.
+      const stepped = fundStep.results.get(c);
+      const fund = stepped
+        ? ({ ok: true as const, data: stepped })
+        : await section('fund', c, () => this.fund.digestAndAlert(c, nowMs, { send: false }));
       if (!fund.ok) digest.fund = fund;
+      else if (!fund.data.figures && fund.data.alert?.status === 'failed') digest.fund = { ok: false, error: fund.data.alert.error ?? 'low-balance check failed' };
       else if (fund.data.figures) {
         const a = fund.data.alert;
         const f = fund.data.figures;

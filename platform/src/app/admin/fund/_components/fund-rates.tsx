@@ -6,7 +6,7 @@ import { Info } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { formatISTDate } from '@/lib/ist-date';
 import { formatInrPaise } from '@/lib/money-format';
-import { bpsToPercentLabel, feeLabelOf, fundApi, type FundRateRow, type FundSettings } from '@/lib/fund';
+import { bpsToPercentLabel, feeLabelOf, fundApi, type FundRateRow, type FundSettings, alertCheckLabel } from '@/lib/fund';
 import { EmptyBlock, ErrorBlock, LoadingBlock, Money } from './fund-ui';
 
 const feeLabel = (f: Parameters<typeof feeLabelOf>[0]) => feeLabelOf(f, formatInrPaise);
@@ -54,9 +54,19 @@ export function FundRatesTab({ refreshKey, internal }: { refreshKey: number; int
         <Info className="h-4 w-4 flex-shrink-0" aria-hidden />
         <span><strong>Managed by Gifsy in the console.</strong> This view is read-only.</span>
         {settings.consoleHref && (
-          <Link href={settings.consoleHref} className="font-medium underline">Change them in the Gifsy console →</Link>
+          <Link href={settings.consoleHref} className="font-medium underline">Change the fund settings →</Link>
         )}
       </p>
+      {settings.emailsSwitchedOff && (
+        <p data-testid="fund-emails-off" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          Low-balance alert e-mails are switched off on this server — no alert e-mail reaches your team from here.
+        </p>
+      )}
+      {settings.lastCheck && (
+        <p data-testid="fund-last-check" className="text-sm text-gray-600">
+          Last daily check{settings.lastCheck.at ? ` (${formatISTDate(settings.lastCheck.at)})` : ''}: <strong>{alertCheckLabel(settings.lastCheck.status)}</strong>
+        </p>
+      )}
 
       <Card>
         <CardHeader><CardTitle className="text-base">Agency fee on payouts</CardTitle></CardHeader>

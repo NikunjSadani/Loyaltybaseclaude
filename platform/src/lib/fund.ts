@@ -18,7 +18,27 @@ export type FundFlag =
   | 'FACE_RECOMPUTED'
   | 'FACE_UNKNOWN'
   | 'DATE_ESTIMATED'
-  | 'TDS_UNALLOCATED';
+  | 'TDS_INCLUDES_EARLIER'
+  | 'TDS_RUN_UNMATCHED';
+
+/** Plain words for the last daily low-balance check status (re-audit B2). */
+export function alertCheckLabel(status: string): string {
+  switch (status) {
+    case 'sent': return 'E-mail sent';
+    case 'sent-to-test-address': return 'Sent to the test address only (this server does not e-mail clients)';
+    case 'already-sent-today': return 'Already e-mailed today';
+    case 'not-low': return 'Balance above the threshold — no e-mail needed';
+    case 'no-threshold': return 'No threshold set';
+    case 'no-recipients': return 'No recipients set — not e-mailed';
+    case 'no-opening': return 'Waiting for the opening balance — e-mails start once it is recorded';
+    case 'client-inactive': return 'Client not active — not e-mailed';
+    case 'disabled-in-environment': return 'Alert e-mails are switched off on this server — not e-mailed';
+    case 'test-recipient-not-internal': return 'Not sent — the test address is not internal';
+    case 'email-not-configured': return 'Not sent — e-mail is not set up on this server';
+    case 'failed': return 'Not sent — the e-mail failed';
+    default: return status;
+  }
+}
 
 export const SPEND_TYPE_LABELS: Record<FundSpendType, string> = {
   VOUCHER: 'Vouchers',
@@ -55,7 +75,8 @@ export const FLAG_TEXT: Record<FundFlag, { chip: string; detail: string }> = {
   FACE_RECOMPUTED: { chip: 'Face recomputed', detail: "The order's value was worked out again from the copy saved when it was ordered (the stored value had been cleared by a refund)." },
   FACE_UNKNOWN: { chip: 'Face unknown', detail: 'No face value could be found (₹0 charged) — the source record needs checking.' },
   DATE_ESTIMATED: { chip: 'Date estimated', detail: 'The source record has no date for this event: a return is shown on the day it was committed, and a paid date is left blank.' },
-  TDS_UNALLOCATED: { chip: 'TDS not matched', detail: 'This TDS could not be matched to a payout — it is shown on the day it was recorded.' },
+  TDS_INCLUDES_EARLIER: { chip: 'Includes earlier TDS', detail: 'Includes TDS for earlier payouts this year — the yearly limit was crossed, so TDS on the earlier payouts became due with this bank run.' },
+  TDS_RUN_UNMATCHED: { chip: 'Bank run not identified', detail: 'The bank run this TDS was recorded with could not be identified — it is charged in full on the day it was recorded and its paid / returned status is not tracked.' },
 };
 
 export function flagDetail(flag: string): string {
@@ -126,6 +147,10 @@ export interface FundSummary {
     /** Already a client-safe sentence for a client admin (the raw error for Gifsy). */
     lastAlertError: string | null;
     recipients: number;
+    /** On this server low-balance e-mails do not reach the client (test address or switched off). */
+    emailsSwitchedOff?: boolean;
+    /** The last daily low-balance check (status + when) — a skip is never silent. */
+    lastCheck?: { status: string; at: string | null } | null;
   };
 }
 
@@ -234,7 +259,11 @@ export interface FundSettings {
   lastAlertRecipients: number | null;
   lastAlertError: string | null;
   /** Where low-balance e-mails go in this environment — Gifsy only (null for a client admin). */
-  alertEnvironment: 'live' | 'test' | 'off' | null;
+  alertEnvironment: 'live' | 'test' | 'off' | 'invalid-test' | null;
+  /** On this server low-balance e-mails do not reach the client (test address or switched off) — shown to everyone. */
+  emailsSwitchedOff?: boolean;
+  /** The last daily low-balance check (status + when). */
+  lastCheck?: { status: string; at: string | null } | null;
   currentFee: FundFeeView | null;
   scheduledFee: FundFeeView | null;
   feeRates: FundRateRow[];
