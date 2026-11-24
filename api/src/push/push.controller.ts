@@ -12,6 +12,7 @@ import type { Response } from 'express';
 import { timingSafeEqual } from 'crypto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Public, Roles } from '../common/decorators/roles.decorator';
+import { RequirePermission } from '../common/decorators/require-permission.decorator';
 import { PushSubscriptionService } from './push-subscription.service';
 import { PushSenderService } from './push-sender.service';
 import { PushDeliveryWorker } from './push-delivery.worker';
@@ -62,6 +63,8 @@ export class PushController {
    */
   @Get('adoption')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER')
+  // Gifsy staff roles (e.g. Project Manager) reach App Adoption through 'Reporting & Analytics → view' (owner 2026-11-24).
+  @RequirePermission('reports:read')
   getAdoption(@CurrentUser() user: JwtPayload): Promise<AdoptionReport> {
     return this.adoption.adoption(user.clientId);
   }
@@ -76,6 +79,8 @@ export class PushController {
    */
   @Get('adoption/installed-users')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER')
+  // Gifsy staff roles (e.g. Project Manager) reach App Adoption through 'Reporting & Analytics → view' (owner 2026-11-24).
+  @RequirePermission('reports:read')
   installedUsers(
     @CurrentUser() user: JwtPayload,
     @Query() q: InstalledUsersQueryDto,

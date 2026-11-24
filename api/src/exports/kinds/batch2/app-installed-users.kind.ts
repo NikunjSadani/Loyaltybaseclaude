@@ -406,7 +406,7 @@ export const APP_INSTALLED_USERS_KIND: ExportKindDef<InstalledUsersParams> = {
   kind: 'app-installed-users',
   label: 'App installed users',
   // Same as GET /v1/push/adoption: @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'), no @RequirePermission.
-  access: { roles: ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'] },
+  access: { roles: ['GIFSY_ADMIN', 'CLIENT_ADMIN', 'MIS_USER'], permission: 'reports:read' },
   parseParams(raw: unknown, user: JwtPayload) {
     const q = parseQueryDto(InstalledUsersQueryDto, raw);
     if (q.since && !istDayStart(q.since)) {
