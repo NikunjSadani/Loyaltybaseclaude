@@ -329,9 +329,11 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
 - Hubble's **prod webhook is NOT registered** — Hubble has never POSTed `/v1/hubble/webhook` (14 days to 2026-11-24).
   The automatic re-check (`RewardsService.sweepHubbleOrders`) is the safety net, driven by Cloud Scheduler
   `hubble-sweep-prod` / `-staging` → `POST /v1/hubble/sweep` (secret `HUBBLE_SWEEP_SECRET[_STAGING]`, in the deploy
-  preflight — create it BEFORE deploying; create the job PAUSED, resume after the deploy). The `@Interval` tick (kill
-  switch `HUBBLE_ORDER_SWEEP_ENABLED=false`) is only an extra — prod CPU is throttled when idle; an order still open 1 h after hand-off is flagged
-  `HUBBLE_PROCESSING_STALE`. It never refunds on "no order". Runbook §2a. Register the webhook with Hubble anyway.
+  preflight — create it BEFORE deploying; create the job PAUSED, resume after the deploy). The in-process `@Interval`
+  tick is OFF in both deploys (`HUBBLE_ORDER_SWEEP_ENABLED=false` — prod CPU is throttled when idle). An order still open
+  1 h after hand-off is flagged `HUBBLE_STILL_OPEN_STALE` (also once for anything past the 7-day window); an unflagged
+  "no order" gets `HUBBLE_INDETERMINATE` (refundable only by ops Retry). It never refunds on "no order". Runbook §2a.
+  Register the webhook with Hubble anyway.
 - No manual FORWARD move (→PROCESSING / DISPATCHED / DELIVERED) on a Hubble-handed order without a code (owner
   2026-11-24): `transitionOrder` refuses it (console, dispatch controller, bulk upload row error) and the console hides
   "Advance". Exits: Retry with Hubble / Fulfil manually; reconcile + auto re-check are exempt.

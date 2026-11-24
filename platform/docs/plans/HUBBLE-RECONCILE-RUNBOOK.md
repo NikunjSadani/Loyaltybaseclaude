@@ -31,21 +31,33 @@ prod webhook is not registered with Hubble). Before this, an order Hubble left P
 
 - **Driver = Cloud Scheduler** → `POST /v1/hubble/sweep` (one pass per call, inside the request). Prod `gifsy-api` runs
   with CPU throttling (`run.googleapis.com/cpu-throttling=true`), so the in-process `HubbleOrderSweep` `@Interval`
-  (2 min, kill switch env `HUBBLE_ORDER_SWEEP_ENABLED=false`) does NOT fire reliably while idle; it stays only as a
-  harmless extra. Overlapping runs (scheduler + timer, several instances) are safe: the claim phase holds a Postgres
+  (2 min) does NOT fire reliably while idle — the deploys set `HUBBLE_ORDER_SWEEP_ENABLED=false`, so the Scheduler
+  job is the only trigger (the timer could be switched back on as a harmless extra). Overlapping runs (scheduler + timer, several instances) are safe: the claim phase holds a Postgres
   transaction-level advisory lock (a second run skips with `LOCKED`) and every order is claimed with a compare-and-set
   on `hubbleLastSweepAt`, so one order is never checked twice at once.
 - It re-checks open orders handed to Hubble (CONFIRMED / PROCESSING, no code, a place attempt / Hubble provider / Hubble
   order id on record; not taken over manually) through the SAME `reconcileHubbleOrder` as the webhook and ops retry —
-  it never places an order and **never refunds on "no order"** (that stays an ops decision via Retry).
+  it never places an order and **never refunds on "no order"** (that stays an ops decision via Retry). Hubble's own
+  FAILED answer is refunded through the usual path and the member gets the usual refund message.
+- "No order" on an unflagged order (e.g. the server died in the middle of the place call) → flagged **Hubble state
+  unknown** (`HUBBLE_INDETERMINATE`) so ops Retry can refund it under the usual 2 h + same-account + canary rules (the
+  2 h count from the flag); if Hubble had acknowledged the order before → `HUBBLE_PROCESSING_NOT_FOUND`.
+- Order no longer eligible for Hubble (tenant flag off / product gone) → **Hubble can't be checked — fulfil manually or
+  refund** (`HUBBLE_NOT_ELIGIBLE_NOW`).
+- Orders ops **fulfilled manually** after handing them to Hubble are still asked about for 7 days (check only — never
+  delivered or refunded): if Hubble reports SUCCESS too → the double-issuance flag (`HUBBLE_SUCCESS_MANUAL_CODE_PRESENT`).
+- Each Scheduler call has a ~90 s budget; work left over is picked up by the next call (`budget` in the response).
 - Not before 2 min after hand-off; every run for the first hour, then every 15 min, until 7 days. At most 25 orders per
   run, least-recently-checked first. One instance at a time (Postgres advisory lock + per-order claim). Metadata:
   `hubbleLastSweepAt`, `hubbleSweepCount`, `hubbleLastSweepOutcome`.
 - Delivered through the re-check → the member gets the same VOUCHER_ISSUED bell + WhatsApp as the confirm path (the
-  webhook / ops-retry path now sends it too — it did not before).
+  webhook / ops-retry path now sends it too — it did not before). Only the call that actually delivers sends it, and a
+  once-only marker per code (`voucherIssuedNotifiedFp`, a hash) stops a duplicate when two paths race.
 - Still not delivered **1 hour** after hand-off (and no other flag open) → flagged **Still processing at Hubble**
-  (`HUBBLE_PROCESSING_STALE`): it appears in the console's needs-review list and the Daily Ops Digest "needs reconcile"
-  count. Hubble delivering later clears it automatically.
+  (`HUBBLE_STILL_OPEN_STALE`): it appears in the console's needs-review list and the Daily Ops Digest "needs reconcile"
+  count. Hubble delivering later clears it automatically. An open Hubble order older than the 7-day window gets the same
+  flag once (no Hubble call), so nothing waits silently.
+- Re-raising a reason that is already open changes nothing (no timestamp churn).
 
 ### 2b. Setting up the scheduler (owner infra, one-time per environment)
 
@@ -102,7 +114,7 @@ older orders without a fingerprint count only for the same tenant. If none verif
 | Hubble succeeded without a code (`HUBBLE_SUCCESS_NO_CODE`) | success but no voucher code in the reply | Retry; if still no code, get it from Hubble's portal → **Fulfil manually** |
 | Unknown Hubble status (`HUBBLE_UNKNOWN_STATUS:*`) | a status we don't recognise | check Hubble's portal; Retry or Fulfil manually |
 | Order changed while Hubble was processing (`HUBBLE_PROCESSING_CLAIM_LOST`) | a race with another change | Retry |
-| Still processing at Hubble (`HUBBLE_PROCESSING_STALE`) | the automatic re-check has asked Hubble for an hour+ and it is still not delivered (still processing, no order yet, or Hubble not answering) | check the order in Hubble's portal; **Retry with Hubble** (an aged "no order" can be refunded there), or **Fulfil manually**; escalate to Hubble if it stays processing |
+| Still processing at Hubble (`HUBBLE_STILL_OPEN_STALE`) | the automatic re-check has asked Hubble for an hour+ and it is still not delivered (still processing, no order yet, or Hubble not answering) | check the order in Hubble's portal; **Retry with Hubble** (an aged "no order" can be refunded there), or **Fulfil manually**; escalate to Hubble if it stays processing |
 | Hubble sent a webhook but has no order for this reference (`HUBBLE_WEBHOOK_BUT_NOT_FOUND`) | contradiction — the webhook path never refunds | check Hubble's portal; Retry |
 | Hubble not configured / Amount not issuable on Hubble (`HUBBLE_NOT_CONFIGURED`, `HUBBLE_INVALID_AMOUNT`) | no Hubble order was ever placed | refund via the normal status change, or **Fulfil manually** (Retry is hidden) |
 | Hubble issued a voucher on top of a manual code / Hubble failed but a code is on the order / Hubble processing after a manual takeover (`HUBBLE_SUCCESS_MANUAL_CODE_PRESENT`, `HUBBLE_FAILED_VOUCHER_PRESENT`, `HUBBLE_PROCESSING_AFTER_MANUAL`) | **possible double issuance** — sticky: a later delivery does not clear it | check both vouchers in Hubble's portal; cancel one with the vendor if needed; then **Acknowledge** with a note |
