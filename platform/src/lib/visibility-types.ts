@@ -194,6 +194,11 @@ export interface VisibilityConfig {
   programs?: string[];
   /** APPLIES-TO: narrow to these Outlet.programCategory (Sub-Program) values; empty/absent = every sub-program. */
   subPrograms?: string[];
+  /**
+   * Sales photo view (tenant-scoped): SalesHierarchyLevel.code values whose users see this month's capture photos of
+   * their team's outlets in the sales app. Empty / absent = OFF.
+   */
+  salesPhotoViewLevels?: string[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -573,6 +578,41 @@ export interface SalesEligibleResponse {
    *  leaf rep with no downline, so the FE hides the filter. */
   members: SalesEligibleMember[];
   outlets: SalesEligibleOutlet[];
+  /** Present (true) only when this tenant lets the caller's level view capture photos (salesPhotoViewLevels). */
+  photoView?: true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sales photo view (tenant-scoped: visibilityConfig.salesPhotoViewLevels)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One photo's review state in plain sales words: Approved / Needs re-take / Waiting. */
+export type SalesPhotoStatus = 'approved' | 'needs_retake' | 'pending';
+
+/** One photo of a capture's CURRENT version, as a sales manager sees it (never GPS coordinates). */
+export interface SalesCapturePhoto {
+  fieldId: string;
+  /** Form field label — also the image alt text. */
+  label: string;
+  mediaKey: string;
+  /** Backend auth-gated stream path (`/v1/visibility/captures/media?key=…`) — rewrite with rewriteMediaViewPath. */
+  viewPath: string;
+  status: SalesPhotoStatus;
+  reason: string | null;
+  capturedAt: string | null;
+  /** Fence-required photos only. */
+  fenceStatus?: PhotoFenceStatus;
+}
+
+/** A capture's current-version photos + who submitted it and when (sales photo view). */
+export interface SalesCapturePhotos {
+  captureId: string;
+  windowKey: string;
+  version: number;
+  status: VisibilityCaptureStatus | string;
+  capturedBy: string | null;
+  capturedAt: string | null;
+  photos: SalesCapturePhoto[];
 }
 
 /** One window row of the outlet-view "Visibility — this period" card (D13). */
@@ -588,6 +628,8 @@ export interface OutletStatusWindow {
   /** Per-CAMERA-field review state of this window's capture (present for CHANGES_REQUESTED). */
   photoReviews?: VisibilityPhotoReviews | null;
   state: CaptureUiState;
+  /** Sales photo view: this window's capture photos (present only when the feature is on for the caller). */
+  photos?: SalesCapturePhotos | null;
 }
 
 /** GET /outlet/:outletId/status response (D13). */
@@ -606,6 +648,8 @@ export interface OutletStatusResponse {
   notApplicable?: boolean;
   canCapture: boolean;
   windows: OutletStatusWindow[];
+  /** Present (true) only when this tenant lets the caller's level view capture photos. */
+  photoView?: true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

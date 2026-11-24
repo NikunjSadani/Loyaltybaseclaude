@@ -103,6 +103,28 @@ describe('VISCFG — VisibilityConfigEditor', () => {
     expect(block.allowedSalesLevels).toEqual(expect.arrayContaining(['XSR', 'ASM']));
   });
 
+  it('VISCFG7: sales photo view levels hydrate, toggle and save; none ticked saves [] (OFF)', async () => {
+    getConfig.mockResolvedValue({
+      success: true,
+      data: { outletScope: ['SSS'], frequencyPerMonth: 1, allowedSalesLevels: ['SO'], geoFence: { enabled: false, radiusMeters: 50 },
+        salesPhotoViewLevels: ['SO'] },
+    });
+    render(<VisibilityConfigEditor />);
+    const so = await screen.findByLabelText('View photos: SO');
+    expect((so as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByLabelText('View photos: ASM'));
+    fireEvent.click(screen.getByLabelText('View photos: XSR'));
+    fireEvent.click(screen.getByRole('button', { name: /save configuration/i }));
+    await waitFor(() => expect(setConfig).toHaveBeenCalledTimes(1));
+    expect(setConfig.mock.calls[0][0].salesPhotoViewLevels).toEqual(['SO', 'ASM', 'XSR']);
+    // Untick all → [] (OFF).
+    setConfig.mockClear();
+    for (const c of ['SO', 'ASM', 'XSR']) fireEvent.click(screen.getByLabelText(`View photos: ${c}`));
+    fireEvent.click(screen.getByRole('button', { name: /save configuration/i }));
+    await waitFor(() => expect(setConfig).toHaveBeenCalledTimes(1));
+    expect(setConfig.mock.calls[0][0].salesPhotoViewLevels).toEqual([]);
+  });
+
   it('VISCFG3: describeWindows renders the D6 window preview', () => {
     expect(describeWindows(1)).toBe('[1–end]');
     expect(describeWindows(2)).toBe('[1–15] [16–end]');

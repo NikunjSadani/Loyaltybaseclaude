@@ -11,6 +11,8 @@
  *   - geoFence           : { enabled, radiusMeters } capture geo-fence policy.
  *   - programs / subPrograms (APPLIES-TO, optional): narrow the in-scope outlet types further by
  *     Outlet.programName / programCategory; empty = every program / sub-program (D12).
+ *   - salesPhotoViewLevels (optional, tenant-scoped): which levels see their team's photos in the
+ *     sales app; none ticked = OFF.
  *
  * The WHOLE block is saved via `visibilityApi.setConfig` (REPLACE-WHOLE PUT /config).
  * Cloned-and-adapted from the Scheme admin UX; it does NOT import the scheme feature.
@@ -18,7 +20,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  Save, AlertCircle, CheckCircle, Loader2, MapPin, Layers, CalendarClock, Users,
+  Save, AlertCircle, CheckCircle, Loader2, MapPin, Layers, CalendarClock, Users, Camera,
 } from 'lucide-react';
 import { visibilityApi } from '@/lib/visibility';
 import { formCapturesLocation, type VisibilityConfig } from '@/lib/visibility-types';
@@ -86,6 +88,7 @@ export function VisibilityConfigEditor() {
         },
         programs: strList(d?.programs),
         subPrograms: strList(d?.subPrograms),
+        salesPhotoViewLevels: strList(d?.salesPhotoViewLevels),
       });
     } else {
       setLoadError(res.error);
@@ -115,6 +118,13 @@ export function VisibilityConfigEditor() {
         ? c.allowedSalesLevels.filter((x) => x !== code)
         : [...c.allowedSalesLevels, code],
     }));
+
+  const photoLevels = config.salesPhotoViewLevels ?? [];
+  const togglePhotoLevel = (code: string) =>
+    setConfig((c) => {
+      const cur = c.salesPhotoViewLevels ?? [];
+      return { ...c, salesPhotoViewLevels: cur.includes(code) ? cur.filter((x) => x !== code) : [...cur, code] };
+    });
 
   const scopeOpts = useScopeOptions(!loading && !loadError);
   const programs = config.programs ?? [];
@@ -147,6 +157,8 @@ export function VisibilityConfigEditor() {
       geoFence: { enabled: config.geoFence.enabled, radiusMeters: radius },
       programs,
       subPrograms,
+      // Sales photo view: an empty list = OFF (the backend then stores no key at all).
+      salesPhotoViewLevels: photoLevels,
     });
     setSaving(false);
     if (res.success) setMsg({ kind: 'ok', text: 'Visibility configuration saved.' });
@@ -260,6 +272,33 @@ export function VisibilityConfigEditor() {
                 className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${on ? 'border-[var(--brand-primary)] bg-green-50' : 'border-gray-200 hover:border-gray-300'}`}>
                 <input type="checkbox" checked={on} onChange={() => toggleLevel(code)}
                   aria-label={code} className="w-3.5 h-3.5 accent-[var(--brand-primary)]" />
+                <span className="text-xs font-semibold text-gray-700">{code}</span>
+                <span className="text-[10px] text-gray-400 truncate">{ROLE_LABELS[code]}</span>
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Sales photo view (tenant-scoped; none ticked = OFF) */}
+      <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3" data-testid="visibility-photo-view-levels">
+        <div className="flex items-center gap-2">
+          <Camera className="w-4 h-4 text-[var(--brand-primary)]" />
+          <p className="text-sm font-semibold text-gray-800">Who sees team photos in the sales app</p>
+        </div>
+        <p className="text-xs text-gray-500">
+          Sales users at these levels can see this month&apos;s visibility photos — with Approved / Needs re-take /
+          Waiting — for outlets in their own team. Leave all unticked to keep photos visible only to Gifsy and the
+          client admin.
+        </p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+          {SALES_LEVELS.map((code) => {
+            const on = photoLevels.includes(code);
+            return (
+              <label key={code}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${on ? 'border-[var(--brand-primary)] bg-green-50' : 'border-gray-200 hover:border-gray-300'}`}>
+                <input type="checkbox" checked={on} onChange={() => togglePhotoLevel(code)}
+                  aria-label={`View photos: ${code}`} className="w-3.5 h-3.5 accent-[var(--brand-primary)]" />
                 <span className="text-xs font-semibold text-gray-700">{code}</span>
                 <span className="text-[10px] text-gray-400 truncate">{ROLE_LABELS[code]}</span>
               </label>

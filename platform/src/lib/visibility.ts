@@ -31,6 +31,7 @@ import { downloadOrQueue } from '@/lib/exports/download';
 import type {
   OutletStatusResponse,
   Pagination,
+  SalesCapturePhotos,
   SalesEligibleResponse,
   SubmitCaptureResult,
   VisibilityCapture,
@@ -89,6 +90,8 @@ export interface SetVisibilityConfigInput {
   /** APPLIES-TO (optional): program / sub-program narrowing; empty = all. An ABSENT key is carried over by the backend. */
   programs?: string[];
   subPrograms?: string[];
+  /** Sales photo view (optional): levels that see team photos in the sales app; empty = OFF; ABSENT = carried over. */
+  salesPhotoViewLevels?: string[];
 }
 
 /** PUT /form — replace the versioned capture form. */
@@ -249,6 +252,10 @@ export const visibilityApi = {
   /** One outlet: all windows of the current month, each with its capture status (D13). */
   getOutletStatus(outletId: string) {
     return api.get<OutletStatusResponse>(`${BASE}/outlet/${outletId}/status`);
+  },
+  /** One capture's CURRENT photos (sales photo view — only when the tenant lets the caller's level see photos). */
+  getSalesCapturePhotos(captureId: string) {
+    return api.get<SalesCapturePhotos>(`${BASE}/sales/captures/${encodeURIComponent(captureId)}/photos`);
   },
   /** Submit a capture (window-key + geo-fence computed server-side). */
   submitCapture(input: SubmitCaptureInput) {

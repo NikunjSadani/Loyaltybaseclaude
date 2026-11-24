@@ -22,6 +22,7 @@ import { useGifsySettings } from '@/lib/gifsy-settings';
 import { visibilityApi } from '@/lib/visibility';
 import { isChangesRequested, CAPTURE_UI_STATE_LABELS } from '@/lib/visibility-types';
 import type { CaptureUiState, OutletStatusWindow } from '@/lib/visibility-types';
+import { SalesPhotoThumbStrip, SalesPhotoLightbox, capturedByLine } from '@/components/visibility/SalesPhotoViewer';
 import { hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags } from '@/lib/rekyc-fields';
 import { SignaturePad, SignatureClearButton, type SignaturePadHandle } from '@/components/signature-pad';
 import { SoDeclarationView } from '@/components/so-declaration-view';
@@ -965,6 +966,8 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
   const [inScope, setInScope] = useState(false);
   const [notInScopeReason, setNotInScopeReason] = useState<string | null>(null);
   const [canCapture, setCanCapture] = useState(false);
+  // Sales photo view (tenant-scoped): the window whose photo is open full-screen, and which photo.
+  const [viewer, setViewer] = useState<{ windowKey: string; index: number } | null>(null);
 
   useEffect(() => {
     if (!enabled || !outletId) { setWindows(null); return; }
@@ -1024,7 +1027,7 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
       <CardContent className="pt-0 pb-3 space-y-2">
         {windows.map((w) => {
           const cfg = VIS_STATE_LABEL[effState(w)];
-          return (
+          const row = (
             <div key={w.windowKey} className="flex items-center gap-2">
               <span className="text-xs text-gray-600 flex-1">{visWindowLabel(w)}</span>
               <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${cfg.cls}`}>
@@ -1032,7 +1035,34 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
               </span>
             </div>
           );
+          // Sales photo view — only when the backend sent this window's photos (tenant + level allow it);
+          // otherwise exactly the row of before.
+          if (!w.photos) return row;
+          const photos = w.photos;
+          return (
+            <div key={w.windowKey} className="space-y-1.5">
+              {row}
+              <SalesPhotoThumbStrip
+                data={photos}
+                testId={`visibility-photos-${w.windowKey}`}
+                onOpen={(index) => setViewer({ windowKey: w.windowKey, index })}
+              />
+            </div>
+          );
         })}
+        {viewer && (() => {
+          const data = windows.find((x) => x.windowKey === viewer.windowKey)?.photos;
+          if (!data || data.photos.length === 0) return null;
+          return (
+            <SalesPhotoLightbox
+              photos={data.photos}
+              index={viewer.index}
+              onIndexChange={(index) => setViewer({ windowKey: viewer.windowKey, index })}
+              onClose={() => setViewer(null)}
+              capturedLine={capturedByLine(data)}
+            />
+          );
+        })()}
         {needsCapture && (
           <Link href={`/sales/visibility?outletId=${encodeURIComponent(outletId)}`} className="block pt-1">
             <Button variant="primary" className="w-full justify-center gap-2 py-2.5 text-sm" data-testid="visibility-capture-cta">
