@@ -1587,7 +1587,9 @@ const HUBBLE_REASON_LABEL: Record<string, string> = {
   HUBBLE_ISSUED_AFTER_REFUND: 'Hubble may have issued a voucher for refunded points — check the order in Hubble’s portal',
   HUBBLE_WEBHOOK_BUT_NOT_FOUND: 'Hubble sent a webhook but has no order for this reference — check the order in Hubble’s portal',
   // Set by the automatic re-check when an order is still not delivered an hour after it reached Hubble.
-  HUBBLE_PROCESSING_STALE: 'Still processing at Hubble',
+  HUBBLE_STILL_OPEN_STALE: 'Still processing at Hubble',
+  // The auto re-check found the order no longer eligible for Hubble (tenant flag off / product gone).
+  HUBBLE_NOT_ELIGIBLE_NOW: 'Hubble can’t be checked — fulfil manually or refund',
 };
 
 /** "just now" / "4 min ago" / "3 h ago" / "2 d ago" — for the "last checked" hint. */
@@ -1636,10 +1638,15 @@ function blankDraft(toStatus: string, notes = ''): TransitionDraft {
   return { toStatus, voucherCode: '', voucherPin: '', voucherProvider: '', trackingNumber: '', trackingUrl: '', notes };
 }
 
+/** The auto re-check stops 7 days after hand-off (backend HUBBLE_SWEEP_MAX_AGE_MS). */
+const HUBBLE_RECHECK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 function OrderRow({
-  order, onTransitioned, canManage, canCancelVoucher,
+  order, onTransitioned, canManage, canCancelVoucher, loadedAtMs = Date.now(),
 }: {
   order: OrderItem;
+  /** When the list was last loaded — "last checked" is relative to it (refreshes with every list refresh). */
+  loadedAtMs?: number;
   onTransitioned: (updated: OrderPatch | null) => void;
   /** Gifsy operator → Advance controls; a tenant admin's list is VIEW-ONLY (no action column). */
   canManage: boolean;
@@ -1695,6 +1702,12 @@ function OrderRow({
   // Handed to Hubble and still open, with NO flag yet (e.g. waiting on Hubble's PROCESSING): ops may ask
   // Hubble again at any time — the automatic re-check does the same every few minutes.
   const hubbleWaiting = !needsReconcile && order.hubbleHanded === true && !voucherIssued;
+  // With Hubble and no code (flagged or not): nobody but a Gifsy admin can move it (backend block).
+  const hubbleHeld = !voucherIssued && (order.hubbleHanded === true || isHubble);
+  // Past the auto re-check window (7 days after hand-off): say so instead of "last checked".
+  const hubbleOverWindow =
+    hubbleWaiting && !!order.hubbleWaitingSince &&
+    loadedAtMs - Date.parse(order.hubbleWaitingSince) > HUBBLE_RECHECK_WINDOW_MS;
   const canRetryHubble =
     (needsReconcile && !postRefundFlag && !HUBBLE_NEVER_PLACED_REASONS.has(order.hubbleReconcileReason ?? '')) ||
     hubbleWaiting;
@@ -1918,8 +1931,13 @@ function OrderRow({
             </span>
           )}
           {hubbleWaiting && order.hubbleWaitingSince && (
-            <span className="block mt-0.5 text-[10px] text-gray-400" data-testid="hubble-waiting">
-              Waiting for Hubble since {formatISTDateTime(order.hubbleWaitingSince)} · last checked {relativeAgo(order.hubbleLastCheckedAt)}
+            <span
+              className={`block mt-0.5 text-[10px] ${hubbleOverWindow ? 'text-amber-700' : 'text-gray-400'}`}
+              data-testid="hubble-waiting"
+            >
+              {hubbleOverWindow
+                ? <>Waiting for Hubble since {formatISTDateTime(order.hubbleWaitingSince)} — over 7 days — needs ops action</>
+                : <>Waiting for Hubble since {formatISTDateTime(order.hubbleWaitingSince)} · last checked {relativeAgo(order.hubbleLastCheckedAt, loadedAtMs)}</>}
             </span>
           )}
           {needsReconcile && order.hubbleNoOrderUnverifiedWhy && (
@@ -1944,6 +1962,10 @@ function OrderRow({
                 >
                   {open ? 'Close' : 'Advance'}
                 </button>
+              ) : !canCancelVoucher && hubbleHeld ? (
+                <span className="text-[10px] text-gray-500" data-testid="hubble-held-note">
+                  With Hubble — a Gifsy admin can retry or fulfil
+                </span>
               ) : (
                 <span className="text-[10px] text-gray-300">—</span>
               )}
@@ -1964,6 +1986,12 @@ function OrderRow({
                     className="text-[10px] font-semibold text-[var(--brand-primary)] hover:underline disabled:opacity-50"
                   >
                     {retryBusy ? 'Retrying…' : 'Retry with Hubble'}
+                  </button>
+                  <button
+                    onClick={() => { setManualOpen((o) => !o); setManualErr(''); }}
+                    className="text-[10px] font-semibold text-amber-700 hover:underline"
+                  >
+                    Fulfil manually…
                   </button>
                   {retryMsg && <span className="text-[10px] text-gray-500" role="status">{retryMsg}</span>}
                 </>
@@ -2047,7 +2075,7 @@ function OrderRow({
           </td>
         </tr>
       )}
-      {canManage && canCancelVoucher && needsReconcile && !postRefundFlag && manualOpen && (
+      {canManage && canCancelVoucher && (hubbleWaiting || (needsReconcile && !postRefundFlag)) && manualOpen && (
         <tr>
           <td colSpan={canManage ? 9 : 8} className="px-4 py-4 bg-amber-50/50">
             <div className="space-y-2 max-w-2xl">
@@ -2408,6 +2436,9 @@ function FulfilmentQueue({
   // Search: the raw input, and the debounced/trimmed term actually sent to the server.
   const [searchInput, setSearchInput] = useState('');
   const [query, setQuery] = useState('');
+  // When the list was last (re)loaded — drives the relative "last checked" on Hubble rows.
+  const [loadedAtMs, setLoadedAtMs] = useState(() => Date.now());
+  const searchRef = useRef<HTMLInputElement>(null);
   // Server-side total for the current status filter (never derived from the loaded rows).
   const [total, setTotal] = useState<number | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -2455,6 +2486,7 @@ function FulfilmentQueue({
       const data = await apiJson<OrdersPage>(ordersUrl(status, limit, null, queryRef.current));
       if (gen !== genRef.current) return;
       setOrders(data.orders ?? []);
+      setLoadedAtMs(Date.now());
       setTotal(data.pagination?.total ?? null);
       setNextCursor(data.nextCursor ?? null);
     } catch (e) {
@@ -2690,7 +2722,8 @@ function FulfilmentQueue({
         {/* Say exactly what the download contains — it follows the list's filter + search. */}
         <p className="text-xs text-gray-500" data-testid="fulfilment-export-scope">
           The sheet includes {statusFilter === 'all' ? 'all orders awaiting fulfilment' : `all ${statusFilter} orders`}
-          {query ? <> matching &ldquo;{query}&rdquo;</> : null} — not just the rows loaded below.
+          {query ? <> matching &ldquo;{query}&rdquo;</> : null} — not just the rows loaded below. Vouchers still with
+          Hubble (no code yet) are left out: Hubble delivers them, or use Retry / Fulfil manually here.
         </p>
 
         {downloadErr && (
@@ -2751,6 +2784,12 @@ function FulfilmentQueue({
           <div className="flex items-center gap-2">
             <Package className="h-4 w-4 text-[var(--brand-primary)]" />
             <h2 className="text-sm font-bold text-gray-900">Redemption orders</h2>
+            {/* Polite announcement of the search result (screen readers); empty when not searching. */}
+            <span className="sr-only" role="status" aria-live="polite" data-testid="orders-search-status">
+              {query && !loading && !error && shownTotal != null
+                ? `${shownTotal} ${shownTotal === 1 ? 'order matches' : 'orders match'} '${query}'`
+                : ''}
+            </span>
             <span className="text-xs text-gray-400" data-testid="orders-count" aria-live="polite">
               {shownTotal == null
                 ? ''
@@ -2773,6 +2812,7 @@ function FulfilmentQueue({
               <label htmlFor="orders-search" className="sr-only">Search orders</label>
               <input
                 id="orders-search"
+                ref={searchRef}
                 type="search"
                 value={searchInput}
                 maxLength={ORDER_SEARCH_MAX_LEN}
@@ -2783,7 +2823,8 @@ function FulfilmentQueue({
               {searchInput && (
                 <button
                   type="button"
-                  onClick={() => { setSearchInput(''); setQuery(''); }}
+                  onClick={() => { setSearchInput(''); setQuery(''); searchRef.current?.focus(); }}
+                  aria-label="Clear search"
                   className="absolute right-1.5 top-1/2 -translate-y-1/2 px-1.5 py-0.5 text-[11px] font-semibold text-gray-500 hover:text-gray-800"
                 >
                   Clear
@@ -2840,7 +2881,7 @@ function FulfilmentQueue({
               <thead>
                 <tr className="border-b border-gray-100 text-left text-xs text-gray-400">
                   <th className="px-4 py-3 font-medium">Order</th>
-                  <th className="px-4 py-3 font-medium">Redeemed on</th>
+                  <th className="px-4 py-3 font-medium">Redeemed on (IST)</th>
                   <th className="px-4 py-3 font-medium">Reward</th>
                   <th className="px-4 py-3 font-medium">Partner · Outlet ID</th>
                   <th className="px-4 py-3 font-medium">Phone</th>
@@ -2860,6 +2901,7 @@ function FulfilmentQueue({
                     onTransitioned={applyOrderUpdate}
                     canManage={canManage}
                     canCancelVoucher={canCancelVoucher}
+                    loadedAtMs={loadedAtMs}
                   />
                 ))}
               </tbody>

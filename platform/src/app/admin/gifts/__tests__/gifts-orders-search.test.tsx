@@ -103,16 +103,21 @@ describe('GIFS — orders search + Redeemed on', () => {
     await openFulfilment();
     fireEvent.change(screen.getByLabelText('Search orders'), { target: { value: 'xyz' } });
     expect(await screen.findByText("No orders match 'xyz'", {}, { timeout: 1500 })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    // Polite announcement of the result count.
+    expect(screen.getByTestId('orders-search-status')).toHaveTextContent("0 orders match 'xyz'");
+    await userEvent.click(screen.getByRole('button', { name: 'Clear search' }));
     expect(await screen.findByText('RDM-1')).toBeInTheDocument();
     expect((screen.getByLabelText('Search orders') as HTMLInputElement).value).toBe('');
+    // Focus goes back to the search box; the announcement is cleared.
+    expect(screen.getByLabelText('Search orders')).toHaveFocus();
+    expect(screen.getByTestId('orders-search-status')).toHaveTextContent('');
     expect(new URL(orderUrls(fn).at(-1)!, 'http://x').searchParams.get('q')).toBeNull();
   });
 
   it('GIFS5: "Redeemed on" shows the order createdAt in IST (date + time)', async () => {
     installFetch();
     await openFulfilment();
-    expect(screen.getByRole('columnheader', { name: 'Redeemed on' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Redeemed on (IST)' })).toBeInTheDocument();
     const row = screen.getByText('RDM-1').closest('tr') as HTMLElement;
     // 10:12 UTC → 3:42 pm IST
     expect(within(row).getByTestId('order-redeemed-on').textContent).toMatch(/24 Nov 2026.*0?3:42\s*pm/i);
@@ -127,7 +132,9 @@ describe('GIFS — orders search + Redeemed on', () => {
     await openFulfilment();
     fireEvent.change(screen.getByLabelText('Search orders'), { target: { value: 'amazon' } });
     await waitFor(() =>
-      expect(screen.getByTestId('fulfilment-export-scope')).toHaveTextContent('all orders awaiting fulfilment matching “amazon”'),
+      expect(screen.getByTestId('fulfilment-export-scope')).toHaveTextContent(
+        /all orders awaiting fulfilment matching “amazon” — not just the rows loaded below\. Vouchers still with Hubble \(no code yet\) are left out/,
+      ),
       { timeout: 1500 },
     );
     await userEvent.click(screen.getByRole('button', { name: /download fulfilment sheet/i }));

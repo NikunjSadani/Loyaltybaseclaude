@@ -31,7 +31,7 @@ const ORDERS = [
     hubbleHanded: true, hubbleWaitingSince: '2026-11-24T05:15:00.000Z', hubbleLastCheckedAt: new Date(Date.now() - 4 * 60_000).toISOString() },
   // Flagged stale.
   { ...base, id: 's', orderNumber: 'STALE', status: 'PROCESSING', voucherProvider: 'Hubble',
-    hubbleHanded: true, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_STALE' },
+    hubbleHanded: true, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_STILL_OPEN_STALE' },
   // Never handed to Hubble (manual / Deoleo-like).
   { ...base, id: 'm', orderNumber: 'MANUAL', status: 'CONFIRMED', voucherProvider: null, hubbleHanded: false },
   // Delivered Hubble order.
@@ -75,8 +75,34 @@ describe('GIFHR — Retry with Hubble visibility', () => {
     expect(within(row('WAITING')).queryByRole('button', { name: 'Advance' })).not.toBeInTheDocument();
     expect(within(row('STALE')).queryByRole('button', { name: 'Advance' })).not.toBeInTheDocument();
     expect(within(row('MANUAL')).getByRole('button', { name: 'Advance' })).toBeInTheDocument();
-    // No manual fulfil on an unflagged order (unchanged rule).
-    expect(within(row('WAITING')).queryByRole('button', { name: /fulfil manually/i })).not.toBeInTheDocument();
+    // Audit I: "Fulfil manually…" is offered on the UNFLAGGED waiting order too (the block message names it).
+    await userEvent.click(within(row('WAITING')).getByRole('button', { name: /fulfil manually/i }));
+    expect(await screen.findByText(/Fulfil this Hubble order manually/)).toBeInTheDocument();
+  });
+
+  it('audit J: HUBBLE_NOT_ELIGIBLE_NOW reads "Hubble can’t be checked — fulfil manually or refund"', async () => {
+    ORDERS.push({ ...base, id: 'n', orderNumber: 'NOTELIG', status: 'CONFIRMED', voucherProvider: null,
+      hubbleHanded: true, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_ELIGIBLE_NOW' } as never);
+    try {
+      installFetch();
+      await open();
+      expect(within(row('NOTELIG')).getByText(/Hubble can’t be checked — fulfil manually or refund/)).toBeInTheDocument();
+    } finally {
+      ORDERS.pop();
+    }
+  });
+
+  it('audit K: past the 7-day window the waiting line says it needs ops action', async () => {
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
+    ORDERS.push({ ...base, id: 'o', orderNumber: 'OLDWAIT', status: 'PROCESSING', voucherProvider: 'Hubble',
+      hubbleHanded: true, hubbleWaitingSince: old, hubbleLastCheckedAt: null } as never);
+    try {
+      installFetch();
+      await open();
+      expect(within(row('OLDWAIT')).getByTestId('hubble-waiting')).toHaveTextContent(/over 7 days — needs ops action/);
+    } finally {
+      ORDERS.pop();
+    }
   });
 
   it('the unflagged waiting order shows "Waiting for Hubble since <IST> · last checked <relative>"', async () => {
@@ -96,5 +122,10 @@ describe('GIFHR — Retry with Hubble visibility', () => {
     await open();
     expect(retryIn('WAITING')).not.toBeInTheDocument();
     expect(retryIn('STALE')).not.toBeInTheDocument();
+    if (role === 'GIFSY_STAFF') {
+      // Audit I: an operator who can't act sees WHY instead of a bare dash.
+      expect(within(row('WAITING')).getByTestId('hubble-held-note')).toHaveTextContent('With Hubble — a Gifsy admin can retry or fulfil');
+      expect(within(row('MANUAL')).queryByTestId('hubble-held-note')).not.toBeInTheDocument();
+    }
   });
 });
