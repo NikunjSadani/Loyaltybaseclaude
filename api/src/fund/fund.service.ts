@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { Msg91Service } from '../notifications/msg91.service';
 import { GifsyRoleService } from '../common/rbac/gifsy-role.service';
@@ -750,10 +750,14 @@ export class FundService {
         if (backdated) {
           const cutoff = confirmToken ? tokenCutoff(confirmToken) : null;
           if (!cutoff) throw new ConflictException('The confirmation is not valid — review the preview and confirm again.');
-          preview = repricePreview(clientId, await loadFundInputs(tx as never, clientId), draft, now, cutoff);
-          if (confirmToken !== preview.token) {
+          const txInputs = await loadFundInputs(tx as never, clientId);
+          const verify = repricePreview(clientId, txInputs, draft, now, cutoff);
+          if (!timingSafeEqualStr(confirmToken!, verify.token)) {
             throw new ConflictException('The figures changed since the preview (new spend or another rate change). Review the new preview and confirm again.');
           }
+          // Round 5 N6: the figures STORED (statement line + audit) cover everything committed up to the confirm —
+          // incl. spend between the preview and now — recomputed inside this transaction.
+          preview = repricePreview(clientId, txInputs, draft, now, now);
         }
         // B5: the audit row names the rate in force before this one (future-dated rows too).
         const sameKind = await tx.fundRate.findMany({
@@ -834,7 +838,7 @@ export class FundService {
   async digestAndAlert(
     clientId: string,
     nowMs: number,
-    opts: { send?: boolean } = {},
+    opts: { send?: boolean; deadlineMs?: number; clock?: () => number } = {},
   ): Promise<{ figures: FundDigestFigures | null; alert?: FundAlertOutcome }> {
     const [settings, entryCount, rateCount] = await Promise.all([
       this.settingsRow(clientId),
@@ -878,6 +882,10 @@ export class FundService {
       await this.prisma.fundSettings.update({ where: { clientId }, data: { lowAlertLastError: error } });
       this.logger.error(`Fund low-balance alert for ${clientId}: ${error}`);
       return { figures, alert: { clientId, status: 'email-not-configured', error } };
+    }
+    // Past the alert step's budget (the step already recorded "not checked") → never send late.
+    if (opts.deadlineMs != null && (opts.clock ?? Date.now)() >= opts.deadlineMs) {
+      return { figures, alert: { clientId, status: 'not-checked-time-budget' } };
     }
     // Claim today's send (compare-and-set) so two concurrent runs can never both e-mail.
     const claim = await this.prisma.fundSettings.updateMany({
@@ -962,7 +970,22 @@ export class FundService {
         continue;
       }
       try {
-        r = await this.digestAndAlert(clientId, nowMs);
+        // Round 5 N5: race the client's computation against what is left of the budget. A timed-out client is
+        // "not checked — time budget"; its computation cannot send afterwards (digestAndAlert re-checks the deadline
+        // right before claiming the day's e-mail).
+        const remaining = Math.max(0, deadline - clock());
+        let timer: NodeJS.Timeout | undefined;
+        const timeout = new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), remaining);
+        });
+        const raced = await Promise.race([this.digestAndAlert(clientId, nowMs, { deadlineMs: deadline, clock }), timeout]);
+        if (timer) clearTimeout(timer);
+        if (raced === 'timeout') {
+          this.logger.error(`Fund low-balance alert for ${clientId}: not checked — the step's time budget ran out during its check`);
+          r = { figures: null, alert: { clientId, status: 'not-checked-time-budget' } };
+        } else {
+          r = raced;
+        }
       } catch (e) {
         const error = ((e as Error)?.message ?? String(e)).slice(0, 300);
         this.logger.error(`Fund low-balance alert for ${clientId} failed: ${error}`);
@@ -1024,7 +1047,11 @@ export function repricePreview(
     }
   }
   const fingerprint = inputs.rates.length + ':' + inputs.rates.reduce((m, r) => Math.max(m, r.createdAt.getTime()), 0);
-  const hash = createHash('sha256')
+  // Round 5 N6: an HMAC keyed with the API's existing JWT_SECRET (the app refuses to boot without it — jwt.strategy),
+  // so a token can only come from this server's own preview; no new secret / env var.
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new Error('JWT_SECRET is not set — cannot sign the rate-change confirmation.');
+  const hash = createHmac('sha256', secret)
     .update(
       JSON.stringify({
         clientId,
@@ -1043,6 +1070,12 @@ export function repricePreview(
     .digest('hex')
     .slice(0, 32);
   return { linesRepriced: lines, deltaPaise, repricedFrom: from, token: `${cutoff.getTime()}.${hash}` };
+}
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
 }
 
 /** The preview timestamp carried inside a confirm token ("<ms>.<hash>"), or null for a malformed token. */

@@ -137,19 +137,22 @@ are refused (excluded + listed if any exist).
     (no backfill). A stored id is used EXACTLY and the line is frozen on that run (its date never moves, even if a payout
     is later re-banked or reversed).
   - **Older rows (NULL id), interim:** among THIS client's runs made ≤ 10 min before the row, the latest one that has
-    payouts for that PAN / no-PAN outlet. Such a line can still change if one of those payouts is later re-banked.
-  - **Another client's run** (a PAN shared across clients — the pro-rata rows for every client are written by the run of
-    the client that crossed): the line is dated when recorded with the note "Recovered with a payout run outside this
-    client's statement".
+    payouts for that PAN / no-PAN outlet; else one whose period has REVERSED payouts for that PAN / outlet (the reversal
+    cleared their run link); else none → "bank run not identified", dated when recorded and never labelled with a run.
+    Such a line can still change if one of its payouts is later re-banked.
+  - **Another client's run** (stored id that is not one of this client's runs — a PAN shared across clients: the
+    pro-rata rows for every client are written by the run of the client that crossed): dated when recorded, note
+    "Recovered with a payout run outside this client's statement".
   - **Status:** the run's payouts all paid → paid; otherwise committed. **Never "returned"** — both reversal paths clear
-    the payout's run link, and gross-up TDS already deposited is not given back (a later run's true-up nets it). If the
-    run's payouts were reversed → "Payouts reversed — TDS stays deposited" (paid). Older row with nothing matching →
-    "bank run not identified" (paid, on the recorded day).
+    the payout's run link. "Payouts reversed — TDS stays deposited" only when THIS run's own payouts were reversed
+    (reversed entries of that PAN / outlet for the run's period). TDS on a reversed payout stays deposited. It is absorbed
+    only if the same PAN/outlet gets more 194C payouts later in the same financial year; otherwise it is not recovered.
   - **"Includes TDS for earlier payouts this year — yearly limit crossed":** the recovery bases are year-to-date, so the
     rate is not derived; the note goes ONLY on the first positive row per PAN / outlet per FY, and only when this client
-    paid that PAN / outlet 194C payouts in an earlier run that FY.
+    paid that PAN / outlet 194C payouts earlier that FY (in an earlier run; for a row recorded with another client's run,
+    payouts committed before the row was recorded). Payout entries are grouped by PAN / outlet once (one pass).
   - A negative row (true-up) is a credit line dated when recorded. Rows dated before the opening date are excluded.
-  - Deoleo: no 194C gross-up / no-PAN recovery rows today; the only change it sees is the new (empty) column.
+  - Deoleo: its existing screens, bank files and amounts are unchanged; the only change it sees is the new column (filled on future 194C runs).
 - **Back-dated rates** (owner D1): a rate whose effective date is on/before the moment it is saved (today included)
   re-prices lines already committed. The first save returns a preview (lines re-priced, balance change, period) and a
   confirm token; only a second call with that token saves (server-enforced; a stale token → 409 + new preview). Audited
@@ -197,7 +200,7 @@ early exits), every check's outcome is stored (`lowAlertLastStatus` / `lowAlertL
 console, the client view and the digest; `FUND_ALERTS_TEST_RECIPIENT` must be internal (else refused loudly); the client
 view says plainly when alert e-mails are switched off; every rate audit row names the previous rate; Gifsy staff (who
 never see the console client pages) edit a client's fund settings at `/admin/fund/settings` while working in the client
-(same API: permission + tenant grant). The e-mail switch lives in the deploy workflows (prod `FUND_ALERTS_LIVE=false` until the owner flips it; staging `FUND_ALERTS_TEST_RECIPIENT=ops@gifsy.in`) — RESUME §6. A back-dated confirm token covers only spend committed before the preview (ongoing spend never forces another 409).
+(same API: permission + tenant grant). The e-mail switch lives in the deploy workflows (prod `FUND_ALERTS_LIVE=false` until the owner flips it; staging `FUND_ALERTS_TEST_RECIPIENT=ops@gifsy.in`) — RESUME §6. A back-dated confirm token is an HMAC keyed with the API's existing `JWT_SECRET` (no new secret) and covers only spend committed before the preview (ongoing spend never forces another 409); the figures STORED on the confirmed rate are recomputed inside the transaction up to the confirm. Each client in the alert step is raced against what is left of the 60 s budget; a client that runs out is recorded "not checked — time budget" and can no longer send.
 
 **Other build choices:** only `redemptionMode = GIFT_CARD` counts as a voucher; TDS lines carry their payout's status;
 low-balance recipients may be any domain (Gifsy-configured, client addresses).

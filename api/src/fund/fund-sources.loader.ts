@@ -295,6 +295,8 @@ export interface TdsRun {
   id: string;
   downloadCode: string;
   downloadedAt: Date;
+  /** The payout period ("YYYY-MM") the run paid. */
+  period: string;
 }
 
 /** One of this client's 194C payout entries. */
@@ -316,141 +318,151 @@ const maskPan = (p: string) => (p.startsWith(NO_PAN) ? `no PAN (outlet ${p.split
 /** Older rows (no stored run id): the row is written in the SAME transaction as its run, right after it. */
 export const TDS_RUN_MATCH_WINDOW_MS = 10 * 60_000;
 
+/** The recovery key of a PAN / no-PAN outlet as the TDS engine writes it. */
+const keyOfPan = (raw: string) => {
+  const t = raw.trim();
+  return t.startsWith(NO_PAN) ? t : t.toUpperCase();
+};
+/** The recovery key a 194C payout entry belongs to (its payee PAN snapshot, else its no-PAN outlet). */
+const keyOfEntry = (e: Tds194cEntry): string => {
+  const pan = (e.payeePan ?? '').trim();
+  return pan && !pan.startsWith(NO_PAN) ? pan.toUpperCase() : `${NO_PAN}:${e.outletId}`;
+};
+
 /**
  * 194C TDS lines — owner decisions 2026-11-24: charged as WHAT GIFSY ACTUALLY PAYS, WITH ITS BANK RUN, one line per
- * TdsRecoveryEntry, in FULL. Pure.
+ * TdsRecoveryEntry, in FULL. Pure; entries are grouped by PAN / outlet ONCE (no per-row scan of every entry).
  *
  * Which run:
- *  1. the run id STORED on the row (`downloadId`, written by the bank-file download since 2026-11-24) — exact; such a
- *     line never moves (its date is the run's date even if a payout is later re-banked or reversed);
- *  2. older rows (NULL): among THIS client's runs made ≤ 10 min before the row, the LATEST one that has payouts for
- *     that PAN / no-PAN outlet (interim heuristic). Such a line can still change if one of those payouts is later
- *     re-banked (it then leaves the run) — said on the line.
- *  A row whose run is not one of this client's runs (a shared PAN: the TDS was recovered while ANOTHER client's run was
- *  made) → dated when recorded, note "Recovered with a payout run outside this client's statement".
+ *  1. STORED run id (`downloadId`, written by the bank-file download since 2026-11-24) — exact; the line never moves.
+ *     If that id is not one of THIS client's runs (a PAN shared across clients — the pro-rata rows for every client are
+ *     written by the run of the client that crossed) → dated when recorded, note "Recovered with a payout run outside
+ *     this client's statement" (TDS_OTHER_CLIENT_RUN).
+ *  2. Older rows (NULL id), interim: among THIS client's runs made ≤ 10 min before the row, the LATEST one that has
+ *     payouts for that PAN / outlet; else one whose period has REVERSED payouts for that PAN / outlet (the reversal
+ *     cleared their run link); else none → TDS_RUN_UNMATCHED, dated when recorded, never labelled with a run. Such a
+ *     line can still change if one of its payouts is later re-banked.
  *
- * Status: the payouts still in that run all paid → paid; otherwise committed. Never "returned": both reversal paths
- * clear the payout's run link, and gross-up TDS already deposited is not given back (a later run's true-up nets it).
- * When the run has none of its payouts left and this client has reversed 194C payouts for that PAN / outlet this FY →
- * note "Payouts reversed — TDS stays deposited" (paid). When none are left for another reason → stored id: "payouts
- * re-banked in a later run" (paid); older row: flag "bank run not identified" (paid, on the day recorded).
+ * Status: the run's payouts all paid → paid; otherwise committed. Never "returned". "Payouts reversed — TDS stays
+ * deposited" only when this run's OWN payouts were reversed (reversed entries of that PAN / outlet for the run's
+ * period). TDS on a reversed payout stays deposited; it is absorbed only if the same PAN / outlet gets more 194C payouts
+ * later in the same financial year, otherwise it is not recovered (the TDS engine never writes a negative true-up for it).
  *
- * "Includes TDS for earlier payouts this year — yearly limit crossed": the recovery bases are year-to-date, so the
- * applicable rate cannot be derived reliably here; the note goes ONLY on the FIRST positive row per PAN / outlet per FY,
- * and only when this client paid that PAN / outlet 194C payouts earlier in that FY (in an earlier run).
+ * "Includes TDS for earlier payouts this year — yearly limit crossed": only on the FIRST positive row per PAN / outlet
+ * per FY, and only when THIS client paid that PAN / outlet 194C payouts earlier that FY (before the run; for a row
+ * recorded with another client's run, committed before the row was recorded).
  * A negative row (true-up) → a credit line dated when recorded.
  */
 export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly TdsRun[], entries: readonly Tds194cEntry[]): FundSpendItem[] {
   const out: FundSpendItem[] = [];
   const runById = new Map(runs.map((r) => [r.id, r]));
   const sortedRuns = [...runs].sort((a, b) => a.downloadedAt.getTime() - b.downloadedAt.getTime());
-  const keyOf = (raw: string) => {
-    const t = raw.trim();
-    return t.startsWith(NO_PAN) ? t : t.toUpperCase();
-  };
-  const forKey = (pan: string) => {
-    const outlet = pan.startsWith(NO_PAN) ? pan.slice(NO_PAN.length + 1) : null;
-    return (e: Tds194cEntry) =>
-      outlet != null ? e.outletId === outlet && (!e.payeePan || e.payeePan.startsWith(NO_PAN)) : (e.payeePan ?? '').trim().toUpperCase() === pan;
-  };
-  // The first positive row per (PAN/outlet, FY) — the only candidate for the "includes earlier payouts" note.
+  // Single pass: entries by recovery key (N7).
+  const byKey = new Map<string, Tds194cEntry[]>();
+  for (const e of entries) {
+    const k = keyOfEntry(e);
+    const list = byKey.get(k);
+    if (list) list.push(e);
+    else byKey.set(k, [e]);
+  }
   const firstPositive = new Map<string, string>();
   for (const r of [...recoveries].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : 1))) {
     if (r.tenantSharePaise <= 0n) continue;
-    const k = `${keyOf(r.panNumber)}|${r.fyLabel}`;
+    const k = `${keyOfPan(r.panNumber)}|${r.fyLabel}`;
     if (!firstPositive.has(k)) firstPositive.set(k, r.id);
   }
 
   for (const r of recoveries) {
     if (r.tenantSharePaise === 0n) continue;
-    const pan = keyOf(r.panNumber);
-    const matchesKey = forKey(pan);
+    const pan = keyOfPan(r.panNumber);
+    const mine = byKey.get(pan) ?? [];
     const base = { type: 'TDS_194C' as const, source: { kind: 'tdsRecoveryEntry' as const, id: r.id }, facePaise: r.tenantSharePaise, key: `tds:${r.id}` };
     const who = `${maskPan(pan)}, FY ${r.fyLabel}`;
     if (r.tenantSharePaise < 0n) {
       out.push({ ...base, ref: `TDS 194C true-up · FY ${r.fyLabel}`, description: `TDS 194C true-up (credit) — ${who}`, status: 'PAID', committedAt: r.createdAt, paidAt: r.createdAt });
       continue;
     }
+    const inRun = (d: TdsRun) => mine.filter((e) => e.downloadId === d.id);
+    const reversedOf = (d: TdsRun) => mine.filter((e) => e.status === 'REVERSED' && e.period === d.period);
 
     // ── Which run ──
     let run: TdsRun | null = null;
-    let stored = false;
-    let otherClientRun = false;
+    let kind: 'matched' | 'reversed' | 'rebanked' | 'other-client' | 'unmatched';
     if (r.downloadId) {
-      stored = true;
       run = runById.get(r.downloadId) ?? null;
-      otherClientRun = !run;
+      if (!run) kind = 'other-client';
+      else if (inRun(run).length) kind = 'matched';
+      else if (reversedOf(run).length) kind = 'reversed';
+      else kind = 'rebanked';
     } else {
       const inWindow = sortedRuns.filter((d) => {
         const gap = r.createdAt.getTime() - d.downloadedAt.getTime();
         return gap >= 0 && gap <= TDS_RUN_MATCH_WINDOW_MS;
       });
-      const withPayouts = inWindow.filter((d) => entries.some((e) => e.downloadId === d.id && matchesKey(e)));
-      run = withPayouts.length ? withPayouts[withPayouts.length - 1] : inWindow.length ? inWindow[inWindow.length - 1] : null;
-      otherClientRun = inWindow.length === 0;
+      const withPayouts = inWindow.filter((d) => inRun(d).length > 0);
+      const withReversed = inWindow.filter((d) => reversedOf(d).length > 0);
+      if (withPayouts.length) {
+        run = withPayouts[withPayouts.length - 1];
+        kind = 'matched';
+      } else if (withReversed.length) {
+        run = withReversed[withReversed.length - 1];
+        kind = 'reversed';
+      } else {
+        kind = 'unmatched'; // never labelled or dated with an unrelated run
+      }
     }
 
     const flags: FundSpendItem['flags'] = [];
     const notes: string[] = [];
-    const matched = run ? entries.filter((e) => e.downloadId === run!.id && matchesKey(e)) : [];
-    const sameYear = (e: Tds194cEntry) => fyLabelForPeriod(e.period) === r.fyLabel;
-    if (firstPositive.get(`${pan}|${r.fyLabel}`) === r.id && run) {
-      const earlier = entries.some(
-        (e) => matchesKey(e) && sameYear(e) && e.downloadId && e.downloadId !== run!.id && (runById.get(e.downloadId)?.downloadedAt.getTime() ?? Infinity) < run!.downloadedAt.getTime(),
-      );
+    if (firstPositive.get(`${pan}|${r.fyLabel}`) === r.id) {
+      const sameYear = (e: Tds194cEntry) => fyLabelForPeriod(e.period) === r.fyLabel;
+      const earlier = run
+        ? mine.some((e) => sameYear(e) && e.downloadId && e.downloadId !== run!.id && (runById.get(e.downloadId)?.downloadedAt.getTime() ?? Infinity) < run!.downloadedAt.getTime())
+        : mine.some((e) => sameYear(e) && e.status !== 'PENDING' && e.item.committedAt.getTime() < r.createdAt.getTime());
       if (earlier) {
         flags.push('TDS_INCLUDES_EARLIER');
         notes.push('includes TDS for earlier payouts this year (yearly limit crossed)');
       }
     }
+    const tail = () => (notes.length ? ` — ${notes.join('; ')}` : '');
 
-    if (otherClientRun) {
-      flags.push('TDS_OTHER_CLIENT_RUN');
-      out.push({
-        ...base,
-        ref: `TDS 194C · FY ${r.fyLabel}`,
-        description: `TDS 194C borne by Gifsy — ${who} — Recovered with a payout run outside this client's statement`,
-        status: 'PAID',
-        committedAt: r.createdAt,
-        paidAt: r.createdAt,
-        flags,
-      });
-      continue;
-    }
-
-    if (matched.length === 0) {
-      const reversed = entries.some((e) => matchesKey(e) && sameYear(e) && e.status === 'REVERSED');
-      if (reversed) {
-        flags.push('TDS_PAYOUTS_REVERSED');
-        notes.push('Payouts reversed — TDS stays deposited');
-      } else if (stored) {
-        notes.push('payouts re-banked in a later run — the TDS stays with this run');
+    if (kind === 'other-client' || kind === 'unmatched') {
+      if (kind === 'other-client') {
+        flags.push('TDS_OTHER_CLIENT_RUN');
+        notes.push("Recovered with a payout run outside this client's statement");
       } else {
         flags.push('TDS_RUN_UNMATCHED');
         notes.push('bank run not identified');
       }
-      const at = reversed || stored ? run!.downloadedAt : r.createdAt;
+      out.push({ ...base, ref: `TDS 194C · FY ${r.fyLabel}`, description: `TDS 194C borne by Gifsy — ${who}${tail()}`, status: 'PAID', committedAt: r.createdAt, paidAt: r.createdAt, flags });
+      continue;
+    }
+    if (kind === 'reversed' || kind === 'rebanked') {
+      if (kind === 'reversed') {
+        flags.push('TDS_PAYOUTS_REVERSED');
+        notes.push('Payouts reversed — TDS stays deposited');
+      } else {
+        notes.push('payouts re-banked in a later run — the TDS stays with this run');
+      }
       out.push({
         ...base,
-        ref: stored || reversed ? `TDS 194C · ${run!.downloadCode}` : `TDS 194C · FY ${r.fyLabel}`,
-        description: `TDS 194C borne by Gifsy${stored || reversed ? ` with bank run ${run!.downloadCode}` : ''} — ${who} — ${notes.join('; ')}`,
+        ref: `TDS 194C · ${run!.downloadCode}`,
+        description: `TDS 194C borne by Gifsy with bank run ${run!.downloadCode} — ${who}${tail()}`,
         status: 'PAID',
-        committedAt: at,
-        paidAt: at,
+        committedAt: run!.downloadedAt,
+        paidAt: run!.downloadedAt,
         flags,
       });
       continue;
     }
-
+    const matched = inRun(run!);
     const allPaid = matched.every((e) => e.item.status === 'PAID');
     const paidAt = allPaid ? matched.reduce<Date | null>((m, e) => (e.item.paidAt && (!m || e.item.paidAt > m) ? e.item.paidAt : m), null) : null;
     if (allPaid && !paidAt) flags.push('DATE_ESTIMATED');
     out.push({
       ...base,
       ref: `TDS 194C · ${run!.downloadCode}`,
-      description:
-        `TDS 194C borne by Gifsy with bank run ${run!.downloadCode} (${matched.length} payout${matched.length === 1 ? '' : 's'}) — ${who}` +
-        (notes.length ? ` — ${notes.join('; ')}` : ''),
+      description: `TDS 194C borne by Gifsy with bank run ${run!.downloadCode} (${matched.length} payout${matched.length === 1 ? '' : 's'}) — ${who}${tail()}`,
       status: allPaid ? 'PAID' : 'COMMITTED',
       committedAt: run!.downloadedAt,
       paidAt,
@@ -667,7 +679,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
     }
   }
   const runs = recoveries.length
-    ? await db.creditPayoutDownload.findMany({ where: { clientId }, select: { id: true, downloadCode: true, downloadedAt: true } })
+    ? await db.creditPayoutDownload.findMany({ where: { clientId }, select: { id: true, downloadCode: true, downloadedAt: true, period: true } })
     : [];
   items.push(...tdsItems(recoveries, runs, tds194c));
 
