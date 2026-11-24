@@ -1419,12 +1419,12 @@ describe('Hubble "no order for reference" → fail + refund (ops retry only)', (
       expect(mockNotifications.notifyUserWithChannels.mock.calls[0][0]).toMatchObject({ eventKey: 'VOUCHER_ISSUED', userId: 'owner-user' });
     });
 
-    it('a stale flag (HUBBLE_PROCESSING_STALE) is cleared by a later SUCCESS the usual way', async () => {
-      row.metadata = { ...(row.metadata as Row), hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_PROCESSING_STALE' };
+    it('a stale flag (HUBBLE_STILL_OPEN_STALE) is cleared by a later SUCCESS the usual way', async () => {
+      row.metadata = { ...(row.metadata as Row), hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_STILL_OPEN_STALE' };
       o1Lookup.mockResolvedValue(SUCCESS_BODY);
       await service.reconcileHubbleOrder('o1', { source: 'SWEEP' });
       expect(row.status).toBe('DELIVERED');
-      expect(meta()).toMatchObject({ hubbleNeedsReconcile: false, hubbleResolvedPreviousReason: 'HUBBLE_PROCESSING_STALE' });
+      expect(meta()).toMatchObject({ hubbleNeedsReconcile: false, hubbleResolvedPreviousReason: 'HUBBLE_STILL_OPEN_STALE' });
     });
 
     it('the webhook path now notifies too (same code): SUCCESS via webhook → one VOUCHER_ISSUED', async () => {
