@@ -145,12 +145,12 @@ are refused (excluded + listed if any exist).
     "Recovered with a payout run outside this client's statement".
   - **Status:** the run's payouts all paid → paid; otherwise committed. **Never "returned"** — both reversal paths clear
     the payout's run link. "Payouts reversed — TDS stays deposited" only when THIS run's own payouts were reversed
-    (reversed entries of that PAN / outlet for the run's period). TDS on a reversed payout stays deposited. It is absorbed
+    (reversed entries of that PAN / outlet for the run's period AND, for a single-field run, the same field; if more than one of the client's runs could own the reversed payout the note is not used). TDS on a reversed payout stays deposited. It is absorbed
     only if the same PAN/outlet gets more 194C payouts later in the same financial year; otherwise it is not recovered.
   - **"Includes TDS for earlier payouts this year — yearly limit crossed":** the recovery bases are year-to-date, so the
     rate is not derived; the note goes ONLY on the first positive row per PAN / outlet per FY, and only when this client
     paid that PAN / outlet 194C payouts earlier that FY (in an earlier run; for a row recorded with another client's run,
-    payouts committed before the row was recorded). Payout entries are grouped by PAN / outlet once (one pass).
+    payouts committed before the row was recorded; never for this client's unmatched rows; reversed payouts never count). Payout entries are grouped by PAN / outlet once (one pass).
   - A negative row (true-up) is a credit line dated when recorded. Rows dated before the opening date are excluded.
   - Deoleo: its existing screens, bank files and amounts are unchanged; the only change it sees is the new column (filled on future 194C runs).
 - **Back-dated rates** (owner D1): a rate whose effective date is on/before the moment it is saved (today included)
@@ -200,7 +200,7 @@ early exits), every check's outcome is stored (`lowAlertLastStatus` / `lowAlertL
 console, the client view and the digest; `FUND_ALERTS_TEST_RECIPIENT` must be internal (else refused loudly); the client
 view says plainly when alert e-mails are switched off; every rate audit row names the previous rate; Gifsy staff (who
 never see the console client pages) edit a client's fund settings at `/admin/fund/settings` while working in the client
-(same API: permission + tenant grant). The e-mail switch lives in the deploy workflows (prod `FUND_ALERTS_LIVE=false` until the owner flips it; staging `FUND_ALERTS_TEST_RECIPIENT=ops@gifsy.in`) — RESUME §6. A back-dated confirm token is an HMAC keyed with the API's existing `JWT_SECRET` (no new secret) and covers only spend committed before the preview (ongoing spend never forces another 409); the figures STORED on the confirmed rate are recomputed inside the transaction up to the confirm. Each client in the alert step is raced against what is left of the 60 s budget; a client that runs out is recorded "not checked — time budget" and can no longer send.
+(same API: permission + tenant grant). The e-mail switch lives in the deploy workflows (prod `FUND_ALERTS_LIVE=false` until the owner flips it; staging `FUND_ALERTS_TEST_RECIPIENT=ops@gifsy.in`) — RESUME §6. A back-dated confirm token is an HMAC (input prefixed `fund-rate-confirm:v1`) keyed with the API's existing `JWT_SECRET` (no new secret), valid for 30 minutes (then "preview expired — preview again") and covers only spend committed before the preview (ongoing spend never forces another 409); the figures STORED on the confirmed rate are recomputed inside the transaction up to the confirm. Each client in the alert step is raced against what is left of the 60 s budget; a client that runs out BEFORE its e-mail is claimed is recorded "not checked — time budget" and can no longer send; once claimed, the send is awaited and its outcome recorded. When the stored re-priced figures differ from the preview, the console says "Saved — N lines / ₹X re-priced (includes spend made after the preview)".
 
 **Other build choices:** only `redemptionMode = GIFT_CARD` counts as a voucher; TDS lines carry their payout's status;
 low-balance recipients may be any domain (Gifsy-configured, client addresses).
