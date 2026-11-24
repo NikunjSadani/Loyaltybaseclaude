@@ -17,6 +17,7 @@ jest.mock('../../fund/fund-sources.loader', () => ({ loadFundInputs: jest.fn() }
 const mockLoadFund = loadFundInputs as jest.MockedFunction<typeof loadFundInputs>;
 import { TdsService } from '../../tds/tds.service';
 import { JwtPayload } from '../../common/decorators/current-user.decorator';
+import { GifsyRoleService } from '../../common/rbac/gifsy-role.service';
 
 const mockPrisma = {
   wallet: { aggregate: jest.fn() },
@@ -27,6 +28,7 @@ const mockPrisma = {
 const mockTenant = { resolveClient: jest.fn() };
 const mockTenantSettings = { getConversionRate: jest.fn() };
 const mockTds = { report194R: jest.fn(), summary194C: jest.fn() };
+const mockRoles = { getPermissions: jest.fn() };
 
 const admin: JwtPayload = {
   sub: 'admin1', role: 'GIFSY_ADMIN', clientId: 'deoleo', phone: '', name: '',
@@ -81,6 +83,8 @@ function primeDefaults() {
       { key: 'a', type: 'CASH_REDEMPTION', ref: 'a', description: 'a', source: { kind: 'payoutTransaction', id: 'a' }, facePaise: 10_000_00n, status: 'PAID', committedAt: at, paidAt: at },
       { key: 'b', type: 'CASH_REDEMPTION', ref: 'b', description: 'b', source: { kind: 'payoutTransaction', id: 'b' }, facePaise: 5_000_00n, status: 'COMMITTED', committedAt: at },
     ],
+    extraReceivables: [],
+    rateChanges: [],
     entryRows: [],
     rateRows: [],
   } as never);
@@ -100,6 +104,7 @@ describe('FinanceDashboardService', () => {
         { provide: TenantService, useValue: mockTenant },
         { provide: TenantSettingsService, useValue: mockTenantSettings },
         { provide: TdsService, useValue: mockTds },
+        { provide: GifsyRoleService, useValue: mockRoles },
       ],
     }).compile();
     service = module.get(FinanceDashboardService);
@@ -210,6 +215,7 @@ describe('FinanceDashboardService', () => {
       lowBalance: true, // below the ₹2,00,000 threshold
       thresholdRupees: 200_000,
       hasSettings: true,
+      noClientContext: false,
     });
     expect(mockLoadFund).toHaveBeenCalledWith(mockPrisma, 'deoleo');
     expect(mockPrisma.fundSettings.findUnique).toHaveBeenCalledWith({ where: { clientId: 'deoleo' } });
@@ -222,7 +228,7 @@ describe('FinanceDashboardService', () => {
 
   it('fund block for an un-assumed Gifsy owner (no client context) is all zero — never another tenant’s numbers', async () => {
     const out = await service.finance(admin);
-    expect(out.fund).toMatchObject({ balanceRupees: 0, receivedRupees: 0, hasSettings: false, lowBalance: false });
+    expect(out.fund).toMatchObject({ balanceRupees: 0, receivedRupees: 0, hasSettings: false, lowBalance: false, noClientContext: true });
     expect(mockLoadFund).not.toHaveBeenCalled();
   });
 
@@ -255,5 +261,23 @@ describe('FinanceDashboardService', () => {
     for (const call of mockPrisma.pointsLedger.aggregate.mock.calls) {
       expect(call[0].where.wallet).toEqual({ partner: { clientId: 'deoleo' } });
     }
+  });
+
+  it('B1: MIS_USER never gets the fund block (null — the card is hidden) and nothing is loaded', async () => {
+    const out = await service.finance({ sub: 'm', role: 'MIS_USER', clientId: 'deoleo', phone: '', name: '' });
+    expect(out.fund).toBeNull();
+    expect(mockLoadFund).not.toHaveBeenCalled();
+  });
+
+  it('B1: GIFSY_STAFF gets the fund block only when its role holds payouts:read', async () => {
+    const staff: JwtPayload = { sub: 's', role: 'GIFSY_STAFF', clientId: 'deoleo', phone: '', name: '', assumed: true, gifsyRoleId: 'r1' };
+    mockRoles.getPermissions.mockResolvedValueOnce(new Set(['reports:read']));
+    expect((await service.finance(staff)).fund).toBeNull();
+  });
+
+  it('B1: GIFSY_STAFF holding payouts:read gets the fund block', async () => {
+    const staff: JwtPayload = { sub: 's', role: 'GIFSY_STAFF', clientId: 'deoleo', phone: '', name: '', assumed: true, gifsyRoleId: 'r1' };
+    mockRoles.getPermissions.mockResolvedValueOnce(new Set(['payouts:read']));
+    expect((await service.finance(staff)).fund).toMatchObject({ balanceRupees: 133_500 });
   });
 });

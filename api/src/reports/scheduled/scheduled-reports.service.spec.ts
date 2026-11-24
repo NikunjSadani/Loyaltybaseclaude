@@ -161,8 +161,7 @@ const tenantSettingsMock = {
 };
 /** Fund reconciliation: no client has a fund set-up in these fixtures (null = no line); no low-balance e-mails. */
 const fundMock = {
-  digestFigures: jest.fn(async () => null),
-  runLowBalanceAlerts: jest.fn(async () => new Map()),
+  digestAndAlert: jest.fn(async () => ({ figures: null })),
 };
 const tdsMock = {
   report194R: jest.fn().mockResolvedValue({ rows: [], summary: { totalExcessDeductedPaise: 0n, excessRetailerCount: 0 } }),

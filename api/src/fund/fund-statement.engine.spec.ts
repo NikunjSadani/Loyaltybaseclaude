@@ -8,8 +8,7 @@ import {
   type FundRateRow,
   type FundSpendItem,
 } from './fund-statement.engine';
-import { cashItem, creditItem, tdsItem, voucherItem, type CreditEntryRow, type VoucherOrderRow } from './fund-sources.loader';
-import { voucherBrandOf } from './fund-brand';
+import { cashItem, creditItem, splitPaise, tdsItems, voucherItem, type CreditEntryRow, type Tds194cEntry, type VoucherOrderRow } from './fund-sources.loader';
 
 // Dates are computed relative to a fixed anchor inside the test (never a hard-coded "future" date — the engine is
 // pure and has no clock, so any anchor works).
@@ -22,9 +21,9 @@ const feeRate = (o: Partial<FundRateRow> & { effectiveFrom: Date }): FundRateRow
   createdAt: o.effectiveFrom,
   ...o,
 });
-const discRate = (brandKey: string, rateBps: number, effectiveFrom: Date, createdAt = effectiveFrom): FundRateRow => ({
+const discRate = (rewardId: string, rateBps: number, effectiveFrom: Date, createdAt = effectiveFrom): FundRateRow => ({
   kind: 'VOUCHER_DISCOUNT',
-  brandKey,
+  rewardId,
   rateBps,
   effectiveFrom,
   createdAt,
@@ -69,27 +68,27 @@ describe('fund engine — rates', () => {
 });
 
 describe('fund engine — charge per spend type', () => {
-  const amazon = 'brand:amazon';
-  it('voucher: face − brand discount at the rate in force on the COMMIT date', () => {
+  const amazon = 'rw-amazon';
+  it('voucher: face − the item discount at the rate in force on the COMMIT date', () => {
     const rates = [discRate(amazon, 300, day(0)), discRate(amazon, 200, day(30))];
-    const before = chargeFor(item({ key: 'v1', type: 'VOUCHER', facePaise: 100_000n, committedAt: day(29), brandKey: amazon }), rates);
+    const before = chargeFor(item({ key: 'v1', type: 'VOUCHER', facePaise: 100_000n, committedAt: day(29), rewardId: amazon }), rates);
     expect(before).toMatchObject({ discountPaise: 3_000n, feePaise: 0n, chargedPaise: 97_000n, rateLabel: '3%', flags: [] });
-    const after = chargeFor(item({ key: 'v2', type: 'VOUCHER', facePaise: 100_000n, committedAt: day(30), brandKey: amazon }), rates);
+    const after = chargeFor(item({ key: 'v2', type: 'VOUCHER', facePaise: 100_000n, committedAt: day(30), rewardId: amazon }), rates);
     expect(after).toMatchObject({ discountPaise: 2_000n, chargedPaise: 98_000n, rateLabel: '2%' });
   });
 
-  it('voucher with no rate for its brand → face value + NO_BRAND_RATE (another brand\'s rate never applies)', () => {
+  it('voucher with no rate for its item → face value + NO_ITEM_RATE (another item\'s rate never applies)', () => {
     const rates = [discRate(amazon, 300, day(0))];
-    const c = chargeFor(item({ key: 'v', type: 'VOUCHER', facePaise: 50_000n, committedAt: day(5), brandKey: 'brand:flipkart' }), rates);
-    expect(c).toMatchObject({ discountPaise: 0n, chargedPaise: 50_000n, flags: ['NO_BRAND_RATE'] });
-    const noKey = chargeFor(item({ key: 'v', type: 'VOUCHER', facePaise: 50_000n, committedAt: day(5), brandKey: null }), [discRate('', 300, day(0))]);
-    expect(noKey.flags).toEqual(['NO_BRAND_RATE']);
+    const c = chargeFor(item({ key: 'v', type: 'VOUCHER', facePaise: 50_000n, committedAt: day(5), rewardId: 'rw-flipkart' }), rates);
+    expect(c).toMatchObject({ discountPaise: 0n, chargedPaise: 50_000n, flags: ['NO_ITEM_RATE'] });
+    const noKey = chargeFor(item({ key: 'v', type: 'VOUCHER', facePaise: 50_000n, committedAt: day(5), rewardId: null }), [discRate('', 300, day(0))]);
+    expect(noKey.flags).toEqual(['NO_ITEM_RATE']);
   });
 
   it('voucher discount committed BEFORE the first rate → face value + flagged', () => {
-    const c = chargeFor(item({ key: 'v', type: 'VOUCHER', facePaise: 10_000n, committedAt: day(1), brandKey: amazon }), [discRate(amazon, 300, day(2))]);
+    const c = chargeFor(item({ key: 'v', type: 'VOUCHER', facePaise: 10_000n, committedAt: day(1), rewardId: amazon }), [discRate(amazon, 300, day(2))]);
     expect(c.chargedPaise).toBe(10_000n);
-    expect(c.flags).toEqual(['NO_BRAND_RATE']);
+    expect(c.flags).toEqual(['NO_ITEM_RATE']);
   });
 
   it.each(['CASH_REDEMPTION', 'CREDIT_PAYOUT', 'VISIBILITY_PAYOUT'] as const)('%s: face + % agency fee', (type) => {
@@ -128,7 +127,7 @@ describe('fund engine — charge per spend type', () => {
 });
 
 describe('fund engine — statement', () => {
-  const rates: FundRateRow[] = [feeRate({ effectiveFrom: day(0), rateBps: 1000 }), discRate('brand:amazon', 300, day(0))];
+  const rates: FundRateRow[] = [feeRate({ effectiveFrom: day(0), rateBps: 1000 }), discRate('rw-amazon', 300, day(0))];
 
   it('balance = opening + receipts + adjustments − committed − paid; returned nets to zero; running balance', () => {
     const stmt = buildFundStatement({
@@ -139,7 +138,7 @@ describe('fund engine — statement', () => {
         entry({ id: 'a1', kind: 'ADJUSTMENT', amountPaise: -10_000n, date: day(6), note: 'bank charges' }),
       ],
       items: [
-        item({ key: 'v-paid', type: 'VOUCHER', facePaise: 100_000n, committedAt: day(1), brandKey: 'brand:amazon', status: 'PAID', paidAt: day(1) }),
+        item({ key: 'v-paid', type: 'VOUCHER', facePaise: 100_000n, committedAt: day(1), rewardId: 'rw-amazon', status: 'PAID', paidAt: day(1) }),
         item({ key: 'c-committed', type: 'CASH_REDEMPTION', facePaise: 50_000n, committedAt: day(3) }),
         item({ key: 'cp-returned', type: 'CREDIT_PAYOUT', facePaise: 200_000n, committedAt: day(4), status: 'RETURNED', returnedAt: day(5) }),
       ],
@@ -180,7 +179,7 @@ describe('fund engine — statement', () => {
       entries: [entry({ id: 'o', kind: 'OPENING_BALANCE', amountPaise: 100_000n, date: day(10) })],
       items: [
         item({ key: 'old-paid', type: 'CASH_REDEMPTION', facePaise: 9_999n, committedAt: day(9), status: 'PAID', paidAt: day(11) }),
-        item({ key: 'old-returned', type: 'VOUCHER', facePaise: 5_000n, committedAt: day(9), status: 'RETURNED', returnedAt: day(12), brandKey: 'brand:amazon' }),
+        item({ key: 'old-returned', type: 'VOUCHER', facePaise: 5_000n, committedAt: day(9), status: 'RETURNED', returnedAt: day(12), rewardId: 'rw-amazon' }),
         item({ key: 'old-returned-early', type: 'VOUCHER', facePaise: 1_000n, committedAt: day(8), status: 'RETURNED', returnedAt: day(9) }),
         item({ key: 'on-cutoff', type: 'CASH_REDEMPTION', facePaise: 10_000n, committedAt: day(10) }),
       ],
@@ -223,18 +222,18 @@ describe('fund engine — statement', () => {
     expect(stmt.lines[1].balancePaise).toBe(3_900n);
   });
 
-  it('flags: missing brand rate is counted per brand; receivables collected (not credited)', () => {
+  it('flags: missing item rate is counted per item; receivables collected (not credited)', () => {
     const stmt = buildFundStatement({
       rates: [],
       entries: [],
       items: [
-        item({ key: 'v1', type: 'VOUCHER', facePaise: 1_000n, committedAt: day(1), brandKey: 'brand:x', brandLabel: 'X' }),
-        item({ key: 'v2', type: 'VOUCHER', facePaise: 1_000n, committedAt: day(2), brandKey: 'brand:x', brandLabel: 'X' }),
+        item({ key: 'v1', type: 'VOUCHER', facePaise: 1_000n, committedAt: day(1), rewardId: 'rw-x', itemLabel: 'X' }),
+        item({ key: 'v2', type: 'VOUCHER', facePaise: 1_000n, committedAt: day(2), rewardId: 'rw-x', itemLabel: 'X' }),
         item({ key: 'p', type: 'CREDIT_PAYOUT', facePaise: 5_000n, committedAt: day(1), status: 'PAID', paidAt: day(2), receivablePaise: 4_900n }),
       ],
     });
-    expect(stmt.flagCounts).toEqual({ NO_BRAND_RATE: 2, NO_FEE_RATE: 1 });
-    expect(stmt.brandsWithoutRate).toEqual([{ brandKey: 'brand:x', brandLabel: 'X', count: 2 }]);
+    expect(stmt.flagCounts).toEqual({ NO_ITEM_RATE: 2, NO_FEE_RATE: 1 });
+    expect(stmt.itemsWithoutRate).toEqual([{ rewardId: 'rw-x', itemLabel: 'X', count: 2 }]);
     expect(stmt.receivables.totalPaise).toBe(4_900n);
     expect(stmt.totals.balancePaise).toBe(-7_000n); // the receivable is NOT credited
   });
@@ -255,7 +254,7 @@ describe('fund engine — statement', () => {
       items: [
         item({ key: 'a', type: 'CASH_REDEMPTION', facePaise: 10_000n, committedAt: day(2) }),
         item({ key: 'b', type: 'CASH_REDEMPTION', facePaise: 20_000n, committedAt: day(4), status: 'RETURNED', returnedAt: day(8) }),
-        item({ key: 'c', type: 'VOUCHER', facePaise: 30_000n, committedAt: day(6), brandKey: 'brand:amazon' }),
+        item({ key: 'c', type: 'VOUCHER', facePaise: 30_000n, committedAt: day(6), rewardId: 'rw-amazon' }),
       ],
     });
     const p = periodSummary(stmt, day(3), day(7));
@@ -290,7 +289,7 @@ describe('fund sources — mapping the source records', () => {
     cancelledAt: null,
     updatedAt: day(9),
     rewardId: 'rw1',
-    reward: { id: 'rw1', name: 'Amazon Pay ₹500', metadata: { hubbleProductId: 'P1' } },
+    reward: { id: 'rw1', name: 'Amazon Pay ₹500' },
     statusHistory: hist(['CONFIRMED', day(1)]),
     ...o,
   });
@@ -299,9 +298,9 @@ describe('fund sources — mapping the source records', () => {
     expect(voucherItem(order({ status: 'CANCELLED', statusHistory: hist(['CANCELLED', day(1)]) }))).toBeNull();
   });
 
-  it('voucher committed at the CONFIRMED history row; DELIVERED → paid at deliveredAt; brand from the Hubble product', () => {
+  it('voucher committed at the CONFIRMED history row; DELIVERED → paid at deliveredAt; priced by its catalogue ITEM (owner D4)', () => {
     const it1 = voucherItem(order({ status: 'DELIVERED', deliveredAt: day(2), statusHistory: hist(['DELIVERED', day(2)], ['CONFIRMED', day(1)]) }))!;
-    expect(it1).toMatchObject({ status: 'PAID', committedAt: day(1), paidAt: day(2), facePaise: 50_000n, brandKey: 'hubble:P1', type: 'VOUCHER' });
+    expect(it1).toMatchObject({ status: 'PAID', committedAt: day(1), paidAt: day(2), facePaise: 50_000n, rewardId: 'rw1', itemLabel: 'Amazon Pay ₹500', type: 'VOUCHER' });
   });
 
   it('voucher refunded (valuePaise zeroed) → RETURNED at the refund row, face re-derived + flagged', () => {
@@ -327,10 +326,16 @@ describe('fund sources — mapping the source records', () => {
     expect(it1.flags).toContain('HUBBLE_NEEDS_RECONCILE');
   });
 
-  it('brand key: metadata brand > Hubble product > the item itself', () => {
-    expect(voucherBrandOf({ id: 'i', name: 'Amazon ₹500', metadata: { brand: ' Amazon ', hubbleProductId: 'P' } })).toEqual({ brandKey: 'brand:amazon', brandLabel: 'Amazon' });
-    expect(voucherBrandOf({ id: 'i', name: 'Amazon ₹500', metadata: { hubbleProductId: 'P' } })).toEqual({ brandKey: 'hubble:P', brandLabel: 'Amazon ₹500' });
-    expect(voucherBrandOf({ id: 'i', name: 'Manual card', metadata: null })).toEqual({ brandKey: 'item:i', brandLabel: 'Manual card' });
+  it('A6: return / paid dates come only from event rows — never updatedAt; no event → flagged DATE_ESTIMATED', () => {
+    const noEvent = voucherItem(order({ status: 'CANCELLED', statusHistory: hist(['CONFIRMED', day(1)]), cancelledAt: null, updatedAt: day(20) }))!;
+    expect(noEvent.status).toBe('RETURNED');
+    expect(noEvent.returnedAt).toBeNull(); // the engine nets it on its commit day
+    expect(noEvent.flags).toContain('DATE_ESTIMATED');
+    const viaCancelledAt = voucherItem(order({ status: 'CANCELLED', statusHistory: hist(['CONFIRMED', day(1)]), cancelledAt: day(3), updatedAt: day(20) }))!;
+    expect(viaCancelledAt.returnedAt).toEqual(day(3));
+    const deliveredNoDate = voucherItem(order({ status: 'DELIVERED', deliveredAt: null, statusHistory: hist(['CONFIRMED', day(1)]), updatedAt: day(20) }))!;
+    expect(deliveredNoDate.paidAt).toBeNull();
+    expect(deliveredNoDate.flags).toContain('DATE_ESTIMATED');
   });
 
   const txn = (o: Partial<Parameters<typeof cashItem>[0]>) => ({
@@ -357,6 +362,14 @@ describe('fund sources — mapping the source records', () => {
       returnedAt: day(4),
       facePaise: 30_000n,
     });
+    // A6: SUCCESS without completedAt → paid date blank + flagged (never updatedAt).
+    const noDate = cashItem(txn({ status: 'SUCCESS', completedAt: null }), undefined);
+    expect(noDate.paidAt).toBeNull();
+    expect(noDate.flags).toContain('DATE_ESTIMATED');
+    // FAILED with no order row and no reversedAt → flagged, not moved to updatedAt.
+    const failedNoDate = cashItem(txn({ status: 'FAILED' }), { orderNumber: 'X', status: 'CONFIRMED', statusHistory: [] });
+    expect(failedNoDate.returnedAt).toBeNull();
+    expect(failedNoDate.flags).toContain('DATE_ESTIMATED');
     // Order refunded while the payout never succeeded → returned.
     expect(cashItem(txn({ status: 'HOLD' }), { orderNumber: 'X', status: 'CANCELLED', statusHistory: hist(['CANCELLED', day(2)]) }).status).toBe('RETURNED');
   });
@@ -384,7 +397,7 @@ describe('fund sources — mapping the source records', () => {
     expect(creditItem(entryRow({}), vis)).toMatchObject({ type: 'CREDIT_PAYOUT', status: 'COMMITTED', committedAt: day(1) });
     expect(creditItem(entryRow({ fieldId: 'f-vis' }), vis)!.type).toBe('VISIBILITY_PAYOUT');
     expect(creditItem(entryRow({ status: 'PAID', paidAt: day(3), utr: 'U9' }), vis)).toMatchObject({ status: 'PAID', paidAt: day(3), utr: 'U9' });
-    expect(creditItem(entryRow({ status: 'REVERSED', reversalAllocations: [{ state: 'APPLIED_CANCELLED', amountPaise: 100_000n, receivablePaise: 0n, updatedAt: day(4) }] }), vis)).toMatchObject({
+    expect(creditItem(entryRow({ status: 'REVERSED', reversalAllocations: [{ state: 'APPLIED_CANCELLED', amountPaise: 100_000n, receivablePaise: 0n, creditReversal: { approvedAt: day(4) } }] }), vis)).toMatchObject({
       status: 'RETURNED',
       returnedAt: day(4),
     });
@@ -394,11 +407,11 @@ describe('fund sources — mapping the source records', () => {
   });
 
   it('credit payout PAID then reversed → stays paid + receivable (net received; legacy row → gross)', () => {
-    const a = creditItem(entryRow({ status: 'PAID', paidAt: day(2), reversalAllocations: [{ state: 'APPLIED_RECEIVABLE', amountPaise: 100_000n, receivablePaise: 98_000n, updatedAt: day(5) }] }), vis)!;
+    const a = creditItem(entryRow({ status: 'PAID', paidAt: day(2), reversalAllocations: [{ state: 'APPLIED_RECEIVABLE', amountPaise: 100_000n, receivablePaise: 98_000n, creditReversal: { approvedAt: day(5) } }] }), vis)!;
     expect(a).toMatchObject({ status: 'PAID', receivablePaise: 98_000n });
-    const legacy = creditItem(entryRow({ status: 'PAID', paidAt: day(2), reversalAllocations: [{ state: 'APPLIED_RECEIVABLE', amountPaise: 100_000n, receivablePaise: 0n, updatedAt: day(5) }] }), vis)!;
+    const legacy = creditItem(entryRow({ status: 'PAID', paidAt: day(2), reversalAllocations: [{ state: 'APPLIED_RECEIVABLE', amountPaise: 100_000n, receivablePaise: 0n, creditReversal: { approvedAt: day(5) } }] }), vis)!;
     expect(legacy.receivablePaise).toBe(100_000n);
-    const released = creditItem(entryRow({ status: 'PAID', paidAt: day(2), reversalAllocations: [{ state: 'RELEASED', amountPaise: 100_000n, receivablePaise: 0n, updatedAt: day(5) }] }), vis)!;
+    const released = creditItem(entryRow({ status: 'PAID', paidAt: day(2), reversalAllocations: [{ state: 'RELEASED', amountPaise: 100_000n, receivablePaise: 0n, creditReversal: { approvedAt: day(5) } }] }), vis)!;
     expect(released.receivablePaise).toBe(0n);
   });
 
@@ -406,12 +419,117 @@ describe('fund sources — mapping the source records', () => {
     expect(creditItem(entryRow({ batch: { batchCode: 'IMP', sourceKind: 'VENDOR_IMPORT' } }), vis)).toBeNull();
   });
 
-  it('194C TDS recovery → a paid TDS line (PAN masked); negative true-up described as a credit', () => {
-    const t = tdsItem({ id: 'r1', panNumber: 'ABCDE1234F', fyLabel: '2026-27', tenantSharePaise: 2_041n, createdAt: day(2) });
-    expect(t).toMatchObject({ type: 'TDS_194C', facePaise: 2_041n, status: 'PAID', committedAt: day(2) });
-    expect(t.description).toContain('…234F');
-    expect(t.description).not.toContain('ABCDE');
-    expect(tdsItem({ id: 'r2', panNumber: '__NO_PAN__:OUT7', fyLabel: 'x', tenantSharePaise: -100n, createdAt: day(2) }).description).toContain('true-up');
+  it('A1: a paid entry reversed afterwards (incl. a fully TDS-withheld one flipped PAID → REVERSED) stays PAID — never "returned"', () => {
+    // ₹1,000 payout + 2% agency fee, fully withheld as TDS (settled TDS-WITHHELD, paidAt set), then reversed.
+    const e = creditItem(entryRow({ amountPaise: 100_000n, status: 'REVERSED', paidAt: day(2), utr: 'TDS-WITHHELD-PD-1', reversalAllocations: [{ state: 'APPLIED_CANCELLED', amountPaise: 100_000n, receivablePaise: 0n, creditReversal: { approvedAt: day(5) } }] }), vis)!;
+    expect(e).toMatchObject({ status: 'PAID', paidAt: day(2), receivablePaise: 0n, returnedAt: null });
+    const stmt = buildFundStatement({ rates: [feeRate({ effectiveFrom: day(0), rateBps: 200 })], entries: [], items: [e] });
+    expect(stmt.totals).toMatchObject({ paidPaise: 102_000n, returnedPaise: 0n, balancePaise: -102_000n });
+    expect(stmt.lines.map((l) => l.event)).toEqual(['CHARGE']);
+    // Never paid (PENDING/FAILED → REVERSED): returned at the reversal's approval.
+    const unpaid = creditItem(entryRow({ status: 'REVERSED', paidAt: null, reversalAllocations: [{ state: 'APPLIED_CANCELLED', amountPaise: 100_000n, receivablePaise: 0n, creditReversal: { approvedAt: day(4) } }] }), vis)!;
+    expect(unpaid).toMatchObject({ status: 'RETURNED', returnedAt: day(4) });
+  });
+
+  it('A2: legacy payout reversal (no allocation) → the consumed PAID entry is a receivable of its net amount', () => {
+    const paid = creditItem(entryRow({ status: 'PAID', paidAt: day(2) }), vis, { approvedAt: day(6), receivablePaise: 95_000n })!;
+    expect(paid).toMatchObject({ status: 'PAID', receivablePaise: 95_000n });
+    // An allocation, when present, wins over the legacy figure (never both).
+    const both = creditItem(entryRow({ status: 'PAID', paidAt: day(2), reversalAllocations: [{ state: 'APPLIED_RECEIVABLE', amountPaise: 100_000n, receivablePaise: 90_000n, creditReversal: { approvedAt: day(5) } }] }), vis, { approvedAt: day(6), receivablePaise: 95_000n })!;
+    expect(both.receivablePaise).toBe(90_000n);
+    // Legacy PENDING → REVERSED: returned at the legacy reversal's approvedAt.
+    const unpaid = creditItem(entryRow({ status: 'REVERSED' }), vis, { approvedAt: day(6), receivablePaise: 0n })!;
+    expect(unpaid).toMatchObject({ status: 'RETURNED', returnedAt: day(6) });
+    // No event anywhere → flagged.
+    expect(creditItem(entryRow({ status: 'REVERSED' }), vis)!.flags).toContain('DATE_ESTIMATED');
+    // Orphan legacy receivables (no entries recorded) are listed + totalled, never credited.
+    const stmt = buildFundStatement({
+      rates: [],
+      entries: [],
+      items: [],
+      extraReceivables: [{ ref: 'Reversal r1', description: 'x', type: 'CREDIT_PAYOUT', source: { kind: 'creditReversal', id: 'r1' }, paidAt: null, amountPaise: 12_300n }],
+    });
+    expect(stmt.receivables.totalPaise).toBe(12_300n);
+    expect(stmt.totals.balancePaise).toBe(0n);
+  });
+
+  it('splitPaise: largest remainder, exact total, negatives mirrored', () => {
+    expect(splitPaise(100n, [1n, 1n, 1n])).toEqual([34n, 33n, 33n]);
+    expect(splitPaise(-100n, [1n, 1n, 1n])).toEqual([-34n, -33n, -33n]);
+    expect(splitPaise(1_000n, [700n, 300n])).toEqual([700n, 300n]);
+    expect(splitPaise(5n, [0n, 0n])).toEqual([0n, 0n]);
+  });
+
+  describe('D3: 194C TDS dated with its payout', () => {
+    const payout = (id: string, o: Partial<Tds194cEntry> & { item?: Partial<FundSpendItem> } = {}): Tds194cEntry => ({
+      id,
+      outletId: 'OUT1',
+      period: '2026-10',
+      amountPaise: 100_000n,
+      status: 'PAID',
+      payeePan: 'ABCDE1234F',
+      ...o,
+      item: item({ key: 'cpe:' + id, type: 'VISIBILITY_PAYOUT', facePaise: o.amountPaise ?? 100_000n, committedAt: day(10), status: 'PAID', paidAt: day(12), ...(o.item ?? {}) }),
+    });
+    const rec = (id: string, pan: string, share: bigint, at = day(15)) => ({ id, panNumber: pan, fyLabel: '2026-27', tenantSharePaise: share, createdAt: at });
+
+    it('the PAN-year net recovery (true-ups included) is shared by amount over that PAN\'s payouts, on each payout\'s commit date and status', () => {
+      const lines = tdsItems(
+        [rec('r1', 'abcde1234f', 3_000n), rec('r2', 'ABCDE1234F', -100n)],
+        [
+          payout('p1', { amountPaise: 200_000n, item: { committedAt: day(10) } }),
+          payout('p2', { amountPaise: 100_000n, item: { committedAt: day(11), status: 'COMMITTED', paidAt: null } }),
+          payout('p3', { status: 'PENDING' }), // never in a bank file → not in the base
+          payout('p4', { payeePan: 'OTHER9999Z' }),
+        ],
+      );
+      expect(lines.map((l) => [l.source.id, l.facePaise, l.committedAt, l.status])).toEqual([
+        ['p1', 1_933n, day(10), 'PAID'],
+        ['p2', 967n, day(11), 'COMMITTED'],
+      ]);
+      expect(lines.reduce((x, l) => x + l.facePaise, 0n)).toBe(2_900n);
+      expect(lines[0].description).toContain('…234F');
+      expect(lines[0].description).not.toContain('ABCDE');
+    });
+
+    it('a payout reversed before payment takes its TDS share back with it (returned); before the opening date → excluded', () => {
+      const [l] = tdsItems([rec('r1', 'ABCDE1234F', 2_000n)], [payout('p1', { status: 'REVERSED', item: { status: 'RETURNED', paidAt: null, returnedAt: day(13) } })]);
+      expect(l).toMatchObject({ status: 'RETURNED', returnedAt: day(13), facePaise: 2_000n });
+      const stmt = buildFundStatement({
+        rates: [],
+        entries: [entry({ id: 'o', kind: 'OPENING_BALANCE', amountPaise: 0n, date: day(11) })],
+        items: tdsItems([rec('r1', 'ABCDE1234F', 2_000n)], [payout('p1')]), // payout committed day 10 < opening day 11
+      });
+      expect(stmt.totals.tdsTotalPaise).toBe(0n);
+    });
+
+    it('no-PAN 194C recovery is matched to the outlet\'s payouts', () => {
+      const lines = tdsItems([rec('r1', '__NO_PAN__:OUT7', 500n)], [payout('p1', { outletId: 'OUT7', payeePan: null }), payout('p2', { outletId: 'OUT8', payeePan: null })]);
+      expect(lines.map((l) => [l.source.id, l.facePaise])).toEqual([['p1', 500n]]);
+    });
+
+    it('no matching payout → kept on the day it was recorded and flagged TDS_UNALLOCATED (never guessed silently)', () => {
+      const lines = tdsItems([rec('r1', 'ZZZZZ0000Z', 700n, day(20)), rec('r2', 'ZZZZZ0000Z', -100n, day(25))], []);
+      expect(lines.map((l) => [l.source.kind, l.facePaise, l.committedAt, l.flags])).toEqual([
+        ['tdsRecoveryEntry', 700n, day(20), ['TDS_UNALLOCATED']],
+        ['tdsRecoveryEntry', -100n, day(25), ['TDS_UNALLOCATED']],
+      ]);
+      expect(lines[1].description).toContain('true-up');
+    });
+  });
+
+  it('D1: a confirmed back-dated rate change shows as an informational line (amount 0, balance unchanged)', () => {
+    const stmt = buildFundStatement({
+      rates: [],
+      entries: [entry({ id: 'r', kind: 'RECEIPT', amountPaise: 1_000n, date: day(1) })],
+      items: [],
+      rateChanges: [{ id: 'rate1', at: day(3), effectiveFrom: day(0), label: 'Agency fee change', linesRepriced: 4, deltaPaise: -2_500n }],
+    });
+    const info = stmt.lines.find((l) => l.event === 'RATE_CHANGE')!;
+    expect(info.amountPaise).toBe(0n);
+    expect(info.balancePaise).toBe(1_000n);
+    expect(info.description).toMatch(/^Rate change on .*: 4 lines re-priced from .*, balance changed by −₹25\.00$/);
+    expect(stmt.totals.balancePaise).toBe(1_000n);
   });
 });
 

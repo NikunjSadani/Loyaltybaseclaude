@@ -1,16 +1,18 @@
 import 'reflect-metadata';
-import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
 import { istDateKey } from '../common/ist-date';
-import { FundController } from './fund.controller';
-import { FundService } from './fund.service';
+import { FundConsoleController, FundController } from './fund.controller';
+import { CLIENT_ALERT_ERROR_TEXT, FundService, fundAlertTarget } from './fund.service';
 import { istDayStart } from './fund-day';
 
 const gifsyAssumed: JwtPayload = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'bajaj', phone: '', name: 'Ops', assumed: true };
 const gifsyHome: JwtPayload = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'Ops' };
-const staffAssumed: JwtPayload = { sub: 's1', role: 'GIFSY_STAFF', clientId: 'bajaj', phone: '', name: 'Staff', assumed: true };
+const staffAssumed: JwtPayload = { sub: 's1', role: 'GIFSY_STAFF', clientId: 'bajaj', phone: '', name: 'Staff', assumed: true, gifsyRoleId: 'role-1' };
+const staffHome: JwtPayload = { sub: 's1', role: 'GIFSY_STAFF', clientId: 'gifsy', phone: '', name: 'Staff', gifsyRoleId: 'role-1' };
 const clientAdmin: JwtPayload = { sub: 'c1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '', name: 'Client' };
 
 /** Dates relative to "now" (never a hard-coded future date). */
@@ -26,11 +28,12 @@ function makePrisma() {
     payoutTransaction: { findMany: m().mockResolvedValue([]) },
     creditPayoutEntry: { findMany: m().mockResolvedValue([]) },
     creditField: { findMany: m().mockResolvedValue([]) },
+    creditReversal: { findMany: m().mockResolvedValue([]) },
     tdsRecoveryEntry: { findMany: m().mockResolvedValue([]) },
-    rewardCatalog: { findMany: m().mockResolvedValue([]) },
+    rewardCatalog: { findMany: m().mockResolvedValue([]), findFirst: m().mockResolvedValue(null) },
     auditLog: { create: m().mockResolvedValue({}) },
     user: { findMany: m().mockResolvedValue([]) },
-    client: { findUnique: m().mockResolvedValue({ internalName: 'Bajaj', branding: { displayName: 'Bajaj Consumer' } }) },
+    client: { findUnique: m().mockResolvedValue({ id: 'bajaj', status: 'ACTIVE', internalName: 'Bajaj', branding: { displayName: 'Bajaj Consumer' } }) },
     $executeRaw: m().mockResolvedValue(1),
     $transaction: jest.fn(),
   };
@@ -38,11 +41,18 @@ function makePrisma() {
   return prisma;
 }
 
-function makeService(prisma = makePrisma(), mail = { sendEmail: jest.fn().mockResolvedValue({ skipped: false, accepted: ['a@x.com'], rejected: [] }), isEmailConfigured: jest.fn().mockReturnValue(true) }) {
-  return { svc: new FundService(prisma as never, mail as never), prisma, mail };
+function makeService(opts: { staffPerms?: string[]; grant?: boolean } = {}) {
+  const prisma = makePrisma();
+  const mail = {
+    sendEmail: jest.fn().mockResolvedValue({ skipped: false, accepted: ['a@x.com'], rejected: [] }),
+    isEmailConfigured: jest.fn().mockReturnValue(true),
+  };
+  const roles = { getPermissions: jest.fn().mockResolvedValue(new Set(opts.staffPerms ?? [])) };
+  const grants = { hasGrantUncached: jest.fn().mockResolvedValue(opts.grant ?? true) };
+  return { svc: new FundService(prisma as never, mail as never, roles as never, grants as never), prisma, mail, roles, grants };
 }
 
-/** Every `where` passed to a tenant-data read in the loader. */
+/** The clientId every tenant-data read was pinned to. */
 function whereClientIds(prisma: ReturnType<typeof makePrisma>): unknown[] {
   const calls = [
     ...prisma.fundReceipt.findMany.mock.calls,
@@ -51,6 +61,7 @@ function whereClientIds(prisma: ReturnType<typeof makePrisma>): unknown[] {
     ...prisma.payoutTransaction.findMany.mock.calls,
     ...prisma.creditPayoutEntry.findMany.mock.calls,
     ...prisma.creditField.findMany.mock.calls,
+    ...prisma.creditReversal.findMany.mock.calls,
     ...prisma.tdsRecoveryEntry.findMany.mock.calls,
   ];
   return calls.map(([arg]) => {
@@ -72,16 +83,25 @@ describe('FundService — tenant scope + roles', () => {
     const s = await svc.summary(clientAdmin);
     expect(s.clientId).toBe('deoleo');
     expect(s.canManage).toBe(false);
+    expect(s.settingsConsoleHref).toBeNull();
     const ids = whereClientIds(prisma);
-    expect(ids.length).toBeGreaterThanOrEqual(7);
+    expect(ids.length).toBeGreaterThanOrEqual(8);
     expect(new Set(ids)).toEqual(new Set(['deoleo']));
   });
 
-  it('an assumed Gifsy operator reads the ASSUMED tenant and can manage', async () => {
+  it('an assumed Gifsy owner reads the ASSUMED tenant, can manage, and gets the console link', async () => {
     const { svc, prisma } = makeService();
     const s = await svc.summary(gifsyAssumed);
     expect(s.canManage).toBe(true);
+    expect(s.settingsConsoleHref).toBe('/gifsy/clients/bajaj#fund');
     expect(new Set(whereClientIds(prisma))).toEqual(new Set(['bajaj']));
+  });
+
+  it('B4: GIFSY_STAFF canManage follows its role\'s payouts:manage_fund — not merely "is Gifsy"', async () => {
+    expect(await makeService({ staffPerms: ['payouts:read'] }).svc.canManage(staffAssumed)).toBe(false);
+    expect(await makeService({ staffPerms: ['payouts:read', 'payouts:manage_fund'] }).svc.canManage(staffAssumed)).toBe(true);
+    const { svc } = makeService({ staffPerms: ['payouts:read'] });
+    await expect(svc.recordReceipt(staffAssumed, { amountRupees: 1, receivedOn: daysFromToday(0), referenceNumber: 'U' })).rejects.toBeInstanceOf(ForbiddenException);
   });
 
   it('CLIENT_ADMIN writes are refused in the service too (defence in depth) — nothing is written', async () => {
@@ -89,29 +109,59 @@ describe('FundService — tenant scope + roles', () => {
     await expect(svc.recordReceipt(clientAdmin, { amountRupees: 10, receivedOn: daysFromToday(0), referenceNumber: 'U1' })).rejects.toBeInstanceOf(ForbiddenException);
     await expect(svc.recordAdjustment(clientAdmin, { amountRupees: 10, date: daysFromToday(0), reason: 'x' })).rejects.toBeInstanceOf(ForbiddenException);
     await expect(svc.recordOpening(clientAdmin, { amountRupees: 10, asOfDate: daysFromToday(0) })).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(svc.updateAlerts(clientAdmin, { thresholdRupees: 1, alertRecipients: ['a@b.com'] })).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(svc.setAgencyFee(clientAdmin, { feeType: 'PERCENT', percent: 5, effectiveFrom: daysFromToday(0) })).rejects.toBeInstanceOf(ForbiddenException);
-    await expect(svc.setBrandDiscount(clientAdmin, { brandKey: 'brand:amazon', brandLabel: 'Amazon', percent: 3, effectiveFrom: daysFromToday(0) })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(svc.updateAlerts(clientAdmin, 'deoleo', { thresholdRupees: 1, alertRecipients: ['a@b.com'] })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(svc.setAgencyFee(clientAdmin, 'deoleo', { feeType: 'PERCENT', percent: 5, effectiveFrom: daysFromToday(3) })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(svc.setItemDiscount(clientAdmin, 'deoleo', { rewardId: 'rw', percent: 3, effectiveFrom: daysFromToday(3) })).rejects.toBeInstanceOf(ForbiddenException);
     expect(prisma.fundReceipt.create).not.toHaveBeenCalled();
     expect(prisma.fundRate.create).not.toHaveBeenCalled();
     expect(prisma.fundSettings.upsert).not.toHaveBeenCalled();
   });
 
-  it('controller: reads = GIFSY_ADMIN + CLIENT_ADMIN (payouts:read); writes = GIFSY_ADMIN only (payouts:manage_fund)', () => {
+  it('controllers: tenant reads = GIFSY_ADMIN + CLIENT_ADMIN; tenant writes + console = Gifsy only with the right permission', () => {
     const p = FundController.prototype as unknown as Record<string, object>;
     for (const r of ['summary', 'statement', 'entries', 'settings', 'export']) {
       expect(Reflect.getMetadata(ROLES_KEY, p[r])).toEqual(['GIFSY_ADMIN', 'CLIENT_ADMIN']);
       expect(Reflect.getMetadata(PERMISSION_KEY, p[r])).toBe('payouts:read');
     }
-    for (const w of ['recordReceipt', 'recordAdjustment', 'recordOpening', 'updateAlerts', 'setAgencyFee', 'setBrandDiscount']) {
+    for (const w of ['recordReceipt', 'recordAdjustment', 'recordOpening']) {
       expect(Reflect.getMetadata(ROLES_KEY, p[w])).toEqual(['GIFSY_ADMIN']);
       expect(Reflect.getMetadata(PERMISSION_KEY, p[w])).toBe('payouts:manage_fund');
+    }
+    // D6: no settings writes on the tenant controller any more.
+    for (const gone of ['updateAlerts', 'setAgencyFee', 'setBrandDiscount', 'setItemDiscount']) expect(p[gone]).toBeUndefined();
+    const c = FundConsoleController.prototype as unknown as Record<string, object>;
+    expect(Reflect.getMetadata(ROLES_KEY, c.get)).toEqual(['GIFSY_ADMIN']);
+    expect(Reflect.getMetadata(PERMISSION_KEY, c.get)).toBe('payouts:read');
+    for (const w of ['updateAlerts', 'setAgencyFee', 'setItemDiscount']) {
+      expect(Reflect.getMetadata(ROLES_KEY, c[w])).toEqual(['GIFSY_ADMIN']);
+      expect(Reflect.getMetadata(PERMISSION_KEY, c[w])).toBe('payouts:manage_fund');
     }
   });
 });
 
+describe('FundService — console target (owner D6)', () => {
+  it('GIFSY_ADMIN may target any existing client; unknown / the gifsy operator row → 404', async () => {
+    const { svc, prisma } = makeService();
+    await expect(svc.consoleClient(gifsyHome, 'bajaj', true)).resolves.toBe('bajaj');
+    prisma.client.findUnique.mockResolvedValueOnce(null);
+    await expect(svc.consoleClient(gifsyHome, 'nope', false)).rejects.toBeInstanceOf(NotFoundException);
+    prisma.client.findUnique.mockResolvedValueOnce({ id: 'gifsy' });
+    await expect(svc.consoleClient(gifsyHome, 'gifsy', false)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('GIFSY_STAFF needs the permission AND a tenant grant for that client', async () => {
+    await expect(makeService({ staffPerms: ['payouts:read'], grant: true }).svc.consoleClient(staffHome, 'bajaj', false)).resolves.toBe('bajaj');
+    await expect(makeService({ staffPerms: ['payouts:read'], grant: true }).svc.consoleClient(staffHome, 'bajaj', true)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(makeService({ staffPerms: ['payouts:read', 'payouts:manage_fund'], grant: false }).svc.consoleClient(staffHome, 'bajaj', true)).rejects.toThrow(/do not have access/);
+  });
+
+  it('a client admin can never use the console', async () => {
+    await expect(makeService().svc.consoleSettings(clientAdmin, 'deoleo')).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
 describe('FundService — receipts / adjustments / opening balance', () => {
-  it('records a receipt: rupees → paise ONCE (the old ×100 bug), start of the IST day, audited, inside one transaction', async () => {
+  it('records a receipt: rupees → paise ONCE, start of the IST day, audited, inside one transaction', async () => {
     const { svc, prisma } = makeService();
     prisma.fundReceipt.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'r1', ...data }));
     const day = daysFromToday(-1);
@@ -120,23 +170,30 @@ describe('FundService — receipts / adjustments / opening balance', () => {
     const data = prisma.fundReceipt.create.mock.calls[0][0].data;
     expect(data).toMatchObject({ clientId: 'bajaj', entryType: 'RECEIPT', amountPaise: 150_050n, referenceNumber: 'UTR123', createdByUserId: 'g1' });
     expect(data.receivedAt).toEqual(istDayStart(day));
-    expect(prisma.$executeRaw).toHaveBeenCalled(); // per-client advisory lock
+    expect(prisma.$executeRaw).toHaveBeenCalled();
     expect(prisma.auditLog.create.mock.calls[0][0].data).toMatchObject({ entityType: 'FUND_RECEIPT', actorId: 'g1' });
   });
 
-  it('a GIFSY_STAFF assumed into the tenant may record (route permission decides upstream)', async () => {
+  it('B7: the duplicate-UTR check is trimmed + case-insensitive', async () => {
     const { svc, prisma } = makeService();
-    prisma.fundReceipt.create.mockResolvedValue({ id: 'r1', receiptNumber: 'FR-1' });
-    await expect(svc.recordReceipt(staffAssumed, { amountRupees: 1, receivedOn: daysFromToday(0), referenceNumber: 'U' })).resolves.toBeTruthy();
-  });
-
-  it('refuses a future receipt date, a duplicate UTR and a receipt dated before the opening balance', async () => {
-    const { svc, prisma } = makeService();
-    await expect(svc.recordReceipt(gifsyAssumed, { amountRupees: 1, receivedOn: daysFromToday(2), referenceNumber: 'U' })).rejects.toBeInstanceOf(BadRequestException);
     prisma.fundReceipt.findFirst.mockImplementation(async ({ where }: { where: { entryType: string } }) =>
       where.entryType === 'RECEIPT' ? { receiptNumber: 'FR-OLD' } : null,
     );
-    await expect(svc.recordReceipt(gifsyAssumed, { amountRupees: 1, receivedOn: daysFromToday(0), referenceNumber: 'U' })).rejects.toBeInstanceOf(ConflictException);
+    await expect(svc.recordReceipt(gifsyAssumed, { amountRupees: 1, receivedOn: daysFromToday(0), referenceNumber: '  utr123 ' })).rejects.toBeInstanceOf(ConflictException);
+    const dupCall = prisma.fundReceipt.findFirst.mock.calls.find(([a]) => (a as { where: { entryType: string } }).where.entryType === 'RECEIPT')!;
+    expect((dupCall[0] as { where: { referenceNumber: unknown } }).where.referenceNumber).toEqual({ equals: 'utr123', mode: 'insensitive' });
+  });
+
+  it('B9: a receipt-number clash (P2002) is a clear 409 and nothing is saved', async () => {
+    const { svc, prisma } = makeService();
+    prisma.fundReceipt.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x' }));
+    await expect(svc.recordReceipt(gifsyAssumed, { amountRupees: 1, receivedOn: daysFromToday(0), referenceNumber: 'U' })).rejects.toThrow(/same number — nothing was saved/);
+    await expect(svc.recordAdjustment(gifsyAssumed, { amountRupees: 1, date: daysFromToday(0), reason: 'r' })).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('refuses a future receipt date and a receipt dated before the opening balance', async () => {
+    const { svc, prisma } = makeService();
+    await expect(svc.recordReceipt(gifsyAssumed, { amountRupees: 1, receivedOn: daysFromToday(2), referenceNumber: 'U' })).rejects.toBeInstanceOf(BadRequestException);
     prisma.fundReceipt.findFirst.mockImplementation(async ({ where }: { where: { entryType: string } }) =>
       where.entryType === 'OPENING_BALANCE' ? { receivedAt: istDayStart(daysFromToday(-1)), receiptNumber: 'FO-1' } : null,
     );
@@ -149,14 +206,14 @@ describe('FundService — receipts / adjustments / opening balance', () => {
     await expect(svc.recordAdjustment(gifsyAssumed, { amountRupees: 5, date: daysFromToday(0), reason: '   ' })).rejects.toBeInstanceOf(BadRequestException);
     await expect(svc.recordAdjustment(gifsyAssumed, { amountRupees: 0, date: daysFromToday(0), reason: 'x' })).rejects.toBeInstanceOf(BadRequestException);
     prisma.fundReceipt.create.mockResolvedValue({ id: 'a1', receiptNumber: 'FA-1' });
-    await svc.recordAdjustment(gifsyAssumed, { amountRupees: -250.25, date: daysFromToday(0), reason: 'Hubble credit note reversal' });
-    expect(prisma.fundReceipt.create.mock.calls[0][0].data).toMatchObject({ entryType: 'ADJUSTMENT', amountPaise: -25_025n, reason: 'Hubble credit note reversal' });
+    await svc.recordAdjustment(gifsyAssumed, { amountRupees: -250.25, date: daysFromToday(0), reason: 'credit note' });
+    expect(prisma.fundReceipt.create.mock.calls[0][0].data).toMatchObject({ entryType: 'ADJUSTMENT', amountPaise: -25_025n, reason: 'credit note' });
   });
 
-  it('opening balance: only one per client (409) and never after existing entries', async () => {
+  it('opening balance: once only (D2 — 409 says it cannot be changed) and never after existing entries', async () => {
     const { svc, prisma } = makeService();
     prisma.fundReceipt.findFirst.mockResolvedValueOnce({ receiptNumber: 'FO-1' });
-    await expect(svc.recordOpening(gifsyAssumed, { amountRupees: 100, asOfDate: daysFromToday(0) })).rejects.toBeInstanceOf(ConflictException);
+    await expect(svc.recordOpening(gifsyAssumed, { amountRupees: 100, asOfDate: daysFromToday(0) })).rejects.toThrow(/cannot be changed/);
     prisma.fundReceipt.count.mockResolvedValueOnce(2);
     await expect(svc.recordOpening(gifsyAssumed, { amountRupees: 100, asOfDate: daysFromToday(0) })).rejects.toThrow(/dated before/);
     prisma.fundReceipt.create.mockResolvedValue({ id: 'o1', receiptNumber: 'FO-1' });
@@ -165,108 +222,202 @@ describe('FundService — receipts / adjustments / opening balance', () => {
   });
 });
 
-describe('FundService — settings + rates', () => {
-  it('threshold needs at least one recipient; recipients are normalised; audited', async () => {
+describe('FundService — console settings + rates (D1, D4, D6)', () => {
+  it('alerts: threshold needs a recipient; recipients normalised; audited; targets the console slug', async () => {
     const { svc, prisma } = makeService();
-    await expect(svc.updateAlerts(gifsyAssumed, { thresholdRupees: 5000, alertRecipients: [] })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(svc.updateAlerts(gifsyHome, 'bajaj', { thresholdRupees: 5000, alertRecipients: [] })).rejects.toBeInstanceOf(BadRequestException);
     prisma.fundSettings.upsert.mockResolvedValue({ lowBalanceThresholdPaise: 500_000n });
-    const r = await svc.updateAlerts(gifsyAssumed, { thresholdRupees: 5000, alertRecipients: ['A@X.com', 'a@x.com ', 'b@y.com'] });
+    const r = await svc.updateAlerts(gifsyHome, 'bajaj', { thresholdRupees: 5000, alertRecipients: ['A@X.com', 'a@x.com ', 'b@y.com'] });
     expect(r.alertRecipients).toEqual(['a@x.com', 'b@y.com']);
     expect(prisma.fundSettings.upsert.mock.calls[0][0].create).toMatchObject({ clientId: 'bajaj', lowBalanceThresholdPaise: 500_000n });
     expect(prisma.auditLog.create.mock.calls[0][0].data.entityType).toBe('FUND_SETTINGS');
   });
 
-  it('agency fee: % stored as basis points; flat as paise; mismatched fields refused', async () => {
+  it('a FUTURE-dated fee saves at once (scheduled), stored in bps / paise; mismatched fields refused', async () => {
     const { svc, prisma } = makeService();
     prisma.fundRate.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'f', ...data }));
-    await svc.setAgencyFee(gifsyAssumed, { feeType: 'PERCENT', percent: 2.5, effectiveFrom: daysFromToday(3) });
-    expect(prisma.fundRate.create.mock.calls[0][0].data).toMatchObject({ kind: 'AGENCY_FEE', feeType: 'PERCENT', rateBps: 250, flatPaise: null, clientId: 'bajaj' });
-    await svc.setAgencyFee(gifsyAssumed, { feeType: 'FLAT', flatRupees: 15, effectiveFrom: daysFromToday(0) });
+    const res = await svc.setAgencyFee(gifsyHome, 'bajaj', { feeType: 'PERCENT', percent: 2.5, effectiveFrom: daysFromToday(3) });
+    expect(res).toMatchObject({ saved: true, scheduled: true });
+    expect(prisma.fundRate.create.mock.calls[0][0].data).toMatchObject({ kind: 'AGENCY_FEE', feeType: 'PERCENT', rateBps: 250, flatPaise: null, clientId: 'bajaj', repricedLines: null });
+    await svc.setAgencyFee(gifsyHome, 'bajaj', { feeType: 'FLAT', flatRupees: 15, effectiveFrom: daysFromToday(2) });
     expect(prisma.fundRate.create.mock.calls[1][0].data).toMatchObject({ feeType: 'FLAT', flatPaise: 1_500n, rateBps: null });
-    await expect(svc.setAgencyFee(gifsyAssumed, { feeType: 'PERCENT', effectiveFrom: daysFromToday(0) })).rejects.toBeInstanceOf(BadRequestException);
-    await expect(svc.setAgencyFee(gifsyAssumed, { feeType: 'FLAT', percent: 3, flatRupees: 1, effectiveFrom: daysFromToday(0) })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(svc.setAgencyFee(gifsyHome, 'bajaj', { feeType: 'PERCENT', effectiveFrom: daysFromToday(1) })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(svc.setAgencyFee(gifsyHome, 'bajaj', { feeType: 'FLAT', percent: 3, flatRupees: 1, effectiveFrom: daysFromToday(1) })).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('brand discount: only a known brand-key shape; stored per brand in bps', async () => {
+  it('D1: a BACK-DATED fee returns a preview (lines re-priced + balance change) and saves only with the matching token', async () => {
     const { svc, prisma } = makeService();
-    prisma.fundRate.create.mockResolvedValue({ id: 'd', kind: 'VOUCHER_DISCOUNT', effectiveFrom: new Date(), createdAt: new Date() });
-    await expect(svc.setBrandDiscount(gifsyAssumed, { brandKey: 'amazon', brandLabel: 'Amazon', percent: 3, effectiveFrom: daysFromToday(0) })).rejects.toBeInstanceOf(BadRequestException);
-    await svc.setBrandDiscount(gifsyAssumed, { brandKey: 'hubble:P1', brandLabel: 'Amazon Pay', percent: 3, effectiveFrom: daysFromToday(0) });
-    expect(prisma.fundRate.create.mock.calls[0][0].data).toMatchObject({ kind: 'VOUCHER_DISCOUNT', brandKey: 'hubble:P1', rateBps: 300 });
+    const committed = new Date(Date.now() - 2 * 86_400_000);
+    prisma.payoutTransaction.findMany.mockResolvedValue([
+      { id: 't1', amountPaise: 100_000n, status: 'SUCCESS', payoutMode: 'UPI', createdAt: committed, completedAt: committed, reversedAt: null, updatedAt: committed, providerRefId: 'U', redemptionOrderId: null, batch: null },
+    ]);
+    prisma.fundRate.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'f', ...data }));
+    const body = { feeType: 'PERCENT' as const, percent: 2, effectiveFrom: daysFromToday(-5) };
+    const preview = await svc.setAgencyFee(gifsyHome, 'bajaj', body);
+    expect(preview).toMatchObject({ saved: false, requiresConfirmation: true, preview: { linesRepriced: 1, deltaPaise: -2_000 } });
+    expect(prisma.fundRate.create).not.toHaveBeenCalled();
+    // Wrong / stale token → 409, nothing saved.
+    await expect(svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: 'bogus' })).rejects.toBeInstanceOf(ConflictException);
+    expect(prisma.fundRate.create).not.toHaveBeenCalled();
+    const token = (preview as { confirmToken: string }).confirmToken;
+    const saved = await svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: token });
+    expect(saved).toMatchObject({ saved: true, scheduled: false, linesRepriced: 1, deltaPaise: -2_000 });
+    expect(prisma.fundRate.create.mock.calls[0][0].data).toMatchObject({ repricedLines: 1, repriceDeltaPaise: -2_000n, repricedFrom: committed });
+    const audit = prisma.auditLog.create.mock.calls[0][0].data;
+    expect(audit.newValues).toMatchObject({ backdated: true, linesRepriced: 1, balanceDeltaPaise: '-2000' });
   });
 
-  it('settings lists the catalogue voucher brands (grouped by brand key) with the rate in force', async () => {
+  it('D1: same-day effective counts as back-dated (re-prices lines committed earlier today)', async () => {
+    const { svc } = makeService();
+    const res = await svc.setAgencyFee(gifsyHome, 'bajaj', { feeType: 'FLAT', flatRupees: 5, effectiveFrom: daysFromToday(0) });
+    expect(res).toMatchObject({ requiresConfirmation: true });
+  });
+
+  it('D4: discount per voucher ITEM of THIS client (another client\'s item refused)', async () => {
+    const { svc, prisma } = makeService();
+    await expect(svc.setItemDiscount(gifsyHome, 'bajaj', { rewardId: 'rw-other', percent: 3, effectiveFrom: daysFromToday(2) })).rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.rewardCatalog.findFirst.mock.calls[0][0].where).toMatchObject({ id: 'rw-other', clientId: 'bajaj', redemptionMode: 'GIFT_CARD' });
+    prisma.rewardCatalog.findFirst.mockResolvedValue({ id: 'rw1', name: 'Amazon ₹500' });
+    prisma.fundRate.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'd', ...data }));
+    await svc.setItemDiscount(gifsyHome, 'bajaj', { rewardId: 'rw1', percent: 3, effectiveFrom: daysFromToday(2) });
+    expect(prisma.fundRate.create.mock.calls[0][0].data).toMatchObject({ kind: 'VOUCHER_DISCOUNT', rewardId: 'rw1', rewardLabel: 'Amazon ₹500', rateBps: 300 });
+  });
+
+  it('settings view lists the voucher items with current + scheduled rates; a client admin gets a client-safe alert error', async () => {
     const { svc, prisma } = makeService();
     prisma.rewardCatalog.findMany.mockResolvedValue([
-      { id: 'i1', name: 'Amazon ₹500', metadata: { hubbleProductId: 'P1' }, deletedAt: null },
-      { id: 'i2', name: 'Amazon ₹1000', metadata: { hubbleProductId: 'P1' }, deletedAt: null },
-      { id: 'i3', name: 'Old card', metadata: null, deletedAt: new Date() },
+      { id: 'i1', name: 'Amazon ₹500', code: 'AMZ500', metadata: { brand: 'Amazon' }, deletedAt: null, status: 'ACTIVE' },
+      { id: 'i3', name: 'Old card', code: 'OLD', metadata: null, deletedAt: new Date(), status: 'INACTIVE' },
     ]);
+    const past = new Date(Date.now() - 86_400_000);
+    const future = new Date(Date.now() + 3 * 86_400_000);
     prisma.fundRate.findMany.mockResolvedValue([
-      { id: 'd1', kind: 'VOUCHER_DISCOUNT', brandKey: 'hubble:P1', brandLabel: 'Amazon', rateBps: 300, effectiveFrom: new Date(Date.now() - 86_400_000), createdAt: new Date(), createdById: null, note: null, feeType: null, flatPaise: null },
+      { id: 'd2', kind: 'VOUCHER_DISCOUNT', rewardId: 'i1', rewardLabel: 'Amazon ₹500', rateBps: 400, effectiveFrom: future, createdAt: new Date(), createdById: null, note: null, feeType: null, flatPaise: null, repricedLines: null, repriceDeltaPaise: null, repricedFrom: null },
+      { id: 'd1', kind: 'VOUCHER_DISCOUNT', rewardId: 'i1', rewardLabel: 'Amazon ₹500', rateBps: 300, effectiveFrom: past, createdAt: past, createdById: null, note: null, feeType: null, flatPaise: null, repricedLines: null, repriceDeltaPaise: null, repricedFrom: null },
     ]);
-    const s = await svc.settings(clientAdmin);
-    expect(s.canManage).toBe(false);
-    const amazon = s.brands.find((b) => b.brandKey === 'hubble:P1')!;
-    expect(amazon.items).toEqual(['Amazon ₹500', 'Amazon ₹1000']);
-    expect(amazon.currentRateBps).toBe(300);
-    expect(s.brands.find((b) => b.brandKey === 'item:i3')!.items).toEqual(['Old card (deleted)']);
+    prisma.fundSettings.findUnique.mockResolvedValue({ lowBalanceThresholdPaise: 100n, alertRecipients: ['a@b.com'], lowAlertLastSentOn: null, lowAlertLastError: 'SMTP 550 mailbox unavailable', lowAlertLastRecipients: 1 });
+    const s = await svc.tenantSettings(clientAdmin);
+    expect(s.managedInConsole).toBe(true);
+    expect(s.consoleHref).toBeNull();
+    expect(s.lastAlertError).toBe(CLIENT_ALERT_ERROR_TEXT);
+    expect(s.items[0]).toMatchObject({ rewardId: 'i1', brandText: 'Amazon', currentRateBps: 300, scheduledRateBps: 400 });
+    expect(s.items[1]).toMatchObject({ deleted: true, active: false, currentRateBps: null });
     expect(prisma.rewardCatalog.findMany.mock.calls[0][0].where.clientId).toBe('deoleo');
+    const g = await svc.consoleSettings(gifsyHome, 'bajaj');
+    expect(g.lastAlertError).toBe('SMTP 550 mailbox unavailable');
+    expect(g.consoleHref).toBe('/gifsy/clients/bajaj#fund');
   });
 });
 
-describe('FundService — daily low-balance e-mail', () => {
+describe('FundService — digest line + daily low-balance e-mail (A7 / B5 / B6)', () => {
   const today = () => istDateKey(new Date());
-  const lowSettings = (o: Record<string, unknown> = {}) => ({ clientId: 'bajaj', lowBalanceThresholdPaise: 1_000n, alertRecipients: ['ops@bajaj.test'], lowAlertLastSentOn: null, ...o });
+  const ENV = { ...process.env };
+  afterEach(() => {
+    process.env = { ...ENV };
+  });
+  /** A set-up client whose balance (₹0 opening) is below a ₹10 threshold. */
+  function lowClient(o: { settings?: Record<string, unknown>; opening?: boolean } = {}) {
+    const ctx = makeService();
+    ctx.prisma.fundSettings.findUnique.mockResolvedValue({
+      clientId: 'bajaj',
+      lowBalanceThresholdPaise: 1_000n,
+      alertRecipients: ['ops@bajaj.test'],
+      lowAlertLastSentOn: null,
+      lowAlertLastError: null,
+      lowAlertLastRecipients: null,
+      ...(o.settings ?? {}),
+    });
+    ctx.prisma.fundReceipt.count.mockResolvedValue(1);
+    if (o.opening !== false) {
+      ctx.prisma.fundReceipt.findMany.mockResolvedValue([
+        { id: 'o', entryType: 'OPENING_BALANCE', receiptNumber: 'FO-1', amountPaise: 0n, receivedAt: new Date(Date.now() - 10 * 86_400_000), paymentMode: 'OPENING_BALANCE', referenceNumber: null, bankName: null, notes: null, reason: null, createdByUserId: null, createdAt: new Date() },
+      ]);
+    }
+    ctx.prisma.fundSettings.updateMany.mockResolvedValue({ count: 1 });
+    return ctx;
+  }
 
-  it('low + not yet sent today → claims today and sends ONE e-mail; balance never blocks anything', async () => {
-    const { svc, prisma, mail } = makeService();
-    prisma.fundSettings.findMany.mockResolvedValue([lowSettings()]);
-    prisma.fundSettings.updateMany.mockResolvedValue({ count: 1 });
-    const out = await svc.runLowBalanceAlerts(Date.now());
-    expect(out.get('bajaj')).toMatchObject({ status: 'sent', recipients: 1 });
+  it('fund-alert target is fail-safe: off unless FUND_ALERTS_LIVE=true; a valid test address otherwise', () => {
+    expect(fundAlertTarget({})).toEqual({ mode: 'off' });
+    expect(fundAlertTarget({ FUND_ALERTS_TEST_RECIPIENT: 'qa@gifsy.in' })).toEqual({ mode: 'test', to: 'qa@gifsy.in' });
+    expect(fundAlertTarget({ FUND_ALERTS_TEST_RECIPIENT: 'junk' })).toEqual({ mode: 'off' });
+    expect(fundAlertTarget({ FUND_ALERTS_LIVE: 'true', FUND_ALERTS_TEST_RECIPIENT: 'qa@gifsy.in' })).toEqual({ mode: 'live' });
+  });
+
+  it('no fund set-up → no line, no statement compute', async () => {
+    const { svc, prisma } = makeService();
+    expect(await svc.digestAndAlert('bajaj', Date.now())).toEqual({ figures: null });
+    expect(prisma.redemptionOrder.findMany).not.toHaveBeenCalled();
+  });
+
+  it('LIVE: low + not yet sent today → ONE e-mail to the client recipients, from ONE statement compute; count recorded', async () => {
+    process.env.FUND_ALERTS_LIVE = 'true';
+    const { svc, prisma, mail } = lowClient();
+    const r = await svc.digestAndAlert('bajaj', Date.now());
+    expect(r.figures).toMatchObject({ isLow: true, hasOpening: true });
+    expect(r.alert).toMatchObject({ status: 'sent', recipients: 1 });
     expect(mail.sendEmail).toHaveBeenCalledTimes(1);
     expect(mail.sendEmail.mock.calls[0][0].to).toEqual(['ops@bajaj.test']);
     expect(mail.sendEmail.mock.calls[0][0].subject).toContain('Bajaj Consumer');
+    expect(prisma.redemptionOrder.findMany).toHaveBeenCalledTimes(1); // single compute
     expect(prisma.fundSettings.updateMany.mock.calls[0][0].data).toEqual({ lowAlertLastSentOn: today() });
+    expect(prisma.fundSettings.update).toHaveBeenCalledWith({ where: { clientId: 'bajaj' }, data: { lowAlertLastError: null, lowAlertLastRecipients: 1 } });
   });
 
-  it('already sent today → no e-mail; a lost claim race → no e-mail', async () => {
-    const { svc, prisma, mail } = makeService();
-    prisma.fundSettings.findMany.mockResolvedValue([lowSettings({ lowAlertLastSentOn: today() })]);
-    expect((await svc.runLowBalanceAlerts(Date.now())).get('bajaj')!.status).toBe('already-sent-today');
-    prisma.fundSettings.findMany.mockResolvedValue([lowSettings()]);
-    prisma.fundSettings.updateMany.mockResolvedValue({ count: 0 });
-    expect((await svc.runLowBalanceAlerts(Date.now())).get('bajaj')!.status).toBe('already-sent-today');
-    expect(mail.sendEmail).not.toHaveBeenCalled();
+  it('B5 staging: only the TEST address gets it (subject names the real recipients); unset → nothing sent', async () => {
+    process.env.FUND_ALERTS_TEST_RECIPIENT = 'qa@gifsy.in';
+    delete process.env.FUND_ALERTS_LIVE;
+    const a = lowClient();
+    expect((await a.svc.digestAndAlert('bajaj', Date.now())).alert!.status).toBe('sent-to-test-address');
+    expect(a.mail.sendEmail.mock.calls[0][0].to).toEqual(['qa@gifsy.in']);
+    expect(a.mail.sendEmail.mock.calls[0][0].subject).toContain('[TEST — would go to 1 recipient(s): ops@bajaj.test]');
+    delete process.env.FUND_ALERTS_TEST_RECIPIENT;
+    const b = lowClient();
+    expect((await b.svc.digestAndAlert('bajaj', Date.now())).alert!.status).toBe('disabled-in-environment');
+    expect(b.mail.sendEmail).not.toHaveBeenCalled();
   });
 
-  it('balance at/above the threshold → not-low, no e-mail', async () => {
-    const { svc, prisma, mail } = makeService();
-    prisma.fundSettings.findMany.mockResolvedValue([lowSettings({ lowBalanceThresholdPaise: 0n })]);
-    expect((await svc.runLowBalanceAlerts(Date.now())).get('bajaj')!.status).toBe('not-low');
-    expect(mail.sendEmail).not.toHaveBeenCalled();
+  it('A7: no opening balance → no e-mail ("no-opening"); a non-ACTIVE client → none ("client-inactive")', async () => {
+    process.env.FUND_ALERTS_LIVE = 'true';
+    const a = lowClient({ opening: false });
+    expect((await a.svc.digestAndAlert('bajaj', Date.now())).alert!.status).toBe('no-opening');
+    const b = lowClient();
+    b.prisma.client.findUnique.mockResolvedValue({ status: 'INACTIVE', internalName: 'Bajaj', branding: {} });
+    expect((await b.svc.digestAndAlert('bajaj', Date.now())).alert!.status).toBe('client-inactive');
+    expect(a.mail.sendEmail).not.toHaveBeenCalled();
+    expect(b.mail.sendEmail).not.toHaveBeenCalled();
   });
 
-  it('a send failure is stored loudly and today\'s claim released (a re-run can retry)', async () => {
-    const { svc, prisma, mail } = makeService();
-    prisma.fundSettings.findMany.mockResolvedValue([lowSettings({ lowAlertLastSentOn: '2000-01-01' })]);
-    prisma.fundSettings.updateMany.mockResolvedValue({ count: 1 });
-    mail.sendEmail.mockRejectedValue(new Error('SMTP down'));
-    const out = await svc.runLowBalanceAlerts(Date.now());
-    expect(out.get('bajaj')).toMatchObject({ status: 'failed' });
-    expect(out.get('bajaj')!.error).toContain('SMTP down');
-    expect(prisma.fundSettings.update).toHaveBeenCalledWith({
-      where: { clientId: 'bajaj' },
-      data: { lowAlertLastSentOn: '2000-01-01', lowAlertLastError: expect.stringContaining('SMTP down') },
-    });
+  it('already sent today, or a lost claim race → no e-mail', async () => {
+    process.env.FUND_ALERTS_LIVE = 'true';
+    const a = lowClient({ settings: { lowAlertLastSentOn: today() } });
+    expect((await a.svc.digestAndAlert('bajaj', Date.now())).alert!.status).toBe('already-sent-today');
+    const b = lowClient();
+    b.prisma.fundSettings.updateMany.mockResolvedValue({ count: 0 });
+    expect((await b.svc.digestAndAlert('bajaj', Date.now())).alert!.status).toBe('already-sent-today');
+    expect(a.mail.sendEmail).not.toHaveBeenCalled();
+    expect(b.mail.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('B6: a relay rejection or a send failure releases today\'s claim (a forced re-run retries) and is stored', async () => {
+    process.env.FUND_ALERTS_LIVE = 'true';
+    const a = lowClient({ settings: { lowAlertLastSentOn: '2000-01-01' } });
+    a.mail.sendEmail.mockResolvedValue({ skipped: false, accepted: [], rejected: ['ops@bajaj.test'] });
+    const ra = await a.svc.digestAndAlert('bajaj', Date.now());
+    expect(ra.alert).toMatchObject({ status: 'failed' });
+    expect(a.prisma.fundSettings.update).toHaveBeenCalledWith({ where: { clientId: 'bajaj' }, data: { lowAlertLastSentOn: '2000-01-01', lowAlertLastError: expect.stringContaining('rejected ops@bajaj.test') } });
+    const b = lowClient();
+    b.mail.sendEmail.mockRejectedValue(new Error('SMTP down'));
+    const rb = await b.svc.digestAndAlert('bajaj', Date.now());
+    expect(rb.alert!.error).toContain('SMTP down');
+    expect(b.prisma.fundSettings.update).toHaveBeenCalledWith({ where: { clientId: 'bajaj' }, data: { lowAlertLastSentOn: null, lowAlertLastError: expect.stringContaining('SMTP down') } });
   });
 
   it('e-mail not configured → not sent, error recorded (never reported as delivered)', async () => {
-    const { svc, prisma, mail } = makeService();
+    process.env.FUND_ALERTS_LIVE = 'true';
+    const { svc, mail } = lowClient();
     mail.isEmailConfigured.mockReturnValue(false);
-    prisma.fundSettings.findMany.mockResolvedValue([lowSettings()]);
-    expect((await svc.runLowBalanceAlerts(Date.now())).get('bajaj')!.status).toBe('email-not-configured');
+    expect((await svc.digestAndAlert('bajaj', Date.now())).alert!.status).toBe('email-not-configured');
     expect(mail.sendEmail).not.toHaveBeenCalled();
   });
 });

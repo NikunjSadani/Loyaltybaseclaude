@@ -42,7 +42,7 @@ function prisma() {
     },
     fundRate: {
       findMany: jest.fn().mockResolvedValue([
-        { id: 'f', kind: 'AGENCY_FEE', brandKey: null, brandLabel: null, feeType: 'PERCENT', rateBps: 500, flatPaise: null, effectiveFrom: day(0), note: null, createdById: 'g', createdAt: day(0) },
+        { id: 'f', kind: 'AGENCY_FEE', rewardId: null, rewardLabel: null, feeType: 'PERCENT', rateBps: 500, flatPaise: null, effectiveFrom: day(0), note: null, repricedLines: 3, repriceDeltaPaise: -150n, repricedFrom: day(0), createdById: 'g', createdAt: day(0) },
       ]),
     },
     redemptionOrder: { findMany: jest.fn().mockResolvedValue([]) },
@@ -53,6 +53,7 @@ function prisma() {
     },
     creditPayoutEntry: { findMany: jest.fn().mockResolvedValue([]) },
     creditField: { findMany: jest.fn().mockResolvedValue([]) },
+    creditReversal: { findMany: jest.fn().mockResolvedValue([]) },
     tdsRecoveryEntry: { findMany: jest.fn().mockResolvedValue([]) },
     fundSettings: { findUnique: jest.fn().mockResolvedValue({ lowBalanceThresholdPaise: 2_000_000n }) },
   };
@@ -86,13 +87,19 @@ describe('export kind fund-reconciliation', () => {
     const head = stmt[0] as string[];
     const bal = head.indexOf('Balance (₹)');
     // opening 10,000 → charge 1,050 (₹1,000 + 5%) → receipt 5,000 ... chronological; last balance = 13,950.
-    expect(stmt.slice(1).map((r) => r[bal])).toEqual([10_000, 15_000, 13_950]);
+    // + the D1 information line for the recorded back-dated fee (amount 0, balance unchanged).
+    expect(stmt.slice(1).map((r) => r[bal])).toEqual([10_000, 10_000, 15_000, 13_950]);
+    const entry = head.indexOf('Entry');
+    expect(stmt[2][entry]).toBe('Rate change (information)');
     const summary = sheets.get('Summary')!;
     const balanceRow = summary.find((r) => r[1] === 'Balance (= available)')!;
     expect(balanceRow[3]).toBe(13_950);
     expect(summary.find((r) => r[1] === 'Low-balance threshold')![4]).toMatch(/LOW/);
     expect(sheets.get('Receipts')!.length).toBe(3);
     expect(sheets.get('Rates')!.slice(1)[0]).toContain('5%');
+    const about = sheets.get('About')!.map((r) => String(r[1])).join(' ');
+    expect(about).not.toMatch(/never rewritten/);
+    expect(about).not.toMatch(/Hubble/);
     for (const m of [db.fundReceipt.findMany, db.fundRate.findMany, db.creditPayoutEntry.findMany, db.tdsRecoveryEntry.findMany]) {
       expect(m.mock.calls[0][0].where.clientId).toBe('deoleo');
     }
