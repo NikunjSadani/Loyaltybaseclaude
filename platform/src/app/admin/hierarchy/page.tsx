@@ -66,7 +66,8 @@ function StatusBadge({ status }: { status: HierarchyEmployee['status'] }) {
         ? <UserCheck className="h-2.5 w-2.5" />
         : <UserX className="h-2.5 w-2.5" />
       }
-      {status}
+      {/* One word everywhere for a PLACEHOLDER position: "Vacant". */}
+      {status === 'ACTIVE' ? 'Active' : status === 'PLACEHOLDER' ? 'Vacant' : status}
     </span>
   );
 }
@@ -293,11 +294,16 @@ export default function HierarchyPage() {
   const [editError, setEditError] = useState<string | null>(null);
 
   // ── Load from API ──────────────────────────────────────────────────────────
-  const loadEmployees = useCallback(() => {
-    fetch('/api/admin/hierarchy-config')
+  // Resolves true when the list was (re)loaded, false when it could not be — callers that just
+  // saved a change must say so instead of showing a stale list as if it were current.
+  const loadEmployees = useCallback((): Promise<boolean> => {
+    return fetch('/api/admin/hierarchy-config')
       .then((r) => r.json())
-      .then((j) => { if (j.success) setEmployees(j.data.employees ?? []); })
-      .catch(() => {});
+      .then((j) => {
+        if (j?.success) { setEmployees(j.data.employees ?? []); return true; }
+        return false;
+      })
+      .catch(() => false);
   }, []);
 
   useEffect(() => { loadEmployees(); }, [loadEmployees]);
@@ -588,7 +594,7 @@ export default function HierarchyPage() {
       <div className="grid grid-cols-3 gap-3">
         <StatCard label="Total Positions"  value={totalCount}       testId="stat-total" />
         <StatCard label="Active"           value={activeCount}      testId="stat-active" />
-        <StatCard label="Placeholders"     value={placeholderCount} testId="stat-placeholder" accent />
+        <StatCard label="Vacant positions" value={placeholderCount} testId="stat-placeholder" accent />
       </div>
 
       {/* Success banner */}
@@ -918,7 +924,15 @@ export default function HierarchyPage() {
           roles={[]}
           employeeOptions={employeeOptions}
           onClose={() => setEditUser(null)}
-          onSaved={(warning) => { if (!warning) setSuccessMsg('Employee updated.'); loadEmployees(); }}
+          onSaved={(r) => {
+            // A save that committed with a problem shows as a WARNING (the dialog stays open with
+            // "Retry sign-out"); otherwise a specific success message.
+            if (r?.warning) showEditError(r.warning);
+            else setSuccessMsg(r?.message ?? 'Employee updated.');
+            void loadEmployees().then((ok) => {
+              if (!ok) showEditError('Saved, but the list could not be refreshed — reload the page to see the change.');
+            });
+          }}
         />
       )}
 
