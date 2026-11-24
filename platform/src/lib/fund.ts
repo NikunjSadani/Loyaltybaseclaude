@@ -274,7 +274,7 @@ export function todayIstKey(now: Date = new Date()): string {
  */
 export function parseRupees(input: string): number | null {
   // C10: accept a leading "+" and the Unicode minus "−" (U+2212) that some keyboards / copied text produce.
-  const s = input.replace(/[,\s₹]/g, '').replace(/\u2212/g, '-').replace(/^\+/, '');
+  const s = input.replace(/[,\s₹]/g, '').replace(/\u2212/g, '-').replace(/^\+(?=\d)/, '');
   if (!/^-?\d+(\.\d{1,2})?$/.test(s)) return null;
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
