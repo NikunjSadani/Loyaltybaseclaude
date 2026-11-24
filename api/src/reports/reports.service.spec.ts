@@ -11,6 +11,8 @@ import { TenantService } from '../tenant/tenant.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { ReportFormat } from './dto/reports.dto';
 import { deriveKycStage } from '../common/kyc-rekyc.helper';
+import * as XLSX from 'xlsx';
+import { clearUserAreaCache } from './area/user-area';
 
 const mockPrisma = {
   visibilityCapture: { findMany: jest.fn() },
@@ -24,6 +26,11 @@ const mockPrisma = {
   // kycStatus reads clients.features.gifsyRejectFastTrack (Bajaj "Routing" column). Default: no flag → OFF.
   client: { findUnique: jest.fn() },
   kycStatusHistory: { findMany: jest.fn() },
+  // Session Report: App Installed (pwa_install) + level-ID columns (user-area resolver's 4 tenant-wide reads).
+  pwaInstall: { findMany: jest.fn() },
+  salesHierarchyLevel: { findMany: jest.fn() },
+  salesUser: { findMany: jest.fn() },
+  salesUserAssignment: { findMany: jest.fn() },
 };
 
 // visibilityStatus is master-gated; default ON so the existing scoping tests run.
@@ -42,6 +49,11 @@ describe('ReportsService', () => {
     // kycStatus always runs a tenant-scoped outlet.findMany for the outlet columns;
     // default to no outlets so tests that don't care about enrichment still work.
     mockPrisma.outlet.findMany.mockResolvedValue([]);
+    mockPrisma.pwaInstall.findMany.mockResolvedValue([]);
+    mockPrisma.salesHierarchyLevel.findMany.mockResolvedValue([]);
+    mockPrisma.salesUser.findMany.mockResolvedValue([]);
+    mockPrisma.salesUserAssignment.findMany.mockResolvedValue([]);
+    clearUserAreaCache();
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         ReportsService,
@@ -258,6 +270,191 @@ describe('ReportsService', () => {
         expect(res.filename).toBe('session-report.xlsx');
         expect(Buffer.isBuffer(res.buffer)).toBe(true);
       }
+    });
+
+    // ── App Installed + level-ID columns (owner 2026-11-24, platform-wide) ──────────────────────────────────────
+    describe('App Installed + level-ID columns', () => {
+      const bajajAdmin: JwtPayload = { sub: 'a1', role: 'CLIENT_ADMIN', clientId: 'bajaj-co', phone: '', name: '' };
+      const lvl = (code: string, level: number, name: string | null = code) => ({ code, name, level });
+      const su = (id: string, userId: string, code: string, reportingToId: string | null, employeeCode: string) => ({
+        id,
+        userId,
+        reportingToId,
+        isActive: true,
+        deletedAt: null,
+        employeeCode,
+        zone: null,
+        hierarchyLevel: { code },
+        user: { name: id, status: 'ACTIVE' },
+      });
+      const user = (id: string, role: string) => ({ id, name: id, phone: '9000000000', role, lastLoginAt: null });
+      const outlet = (id: string, ownerUserId: string) => ({
+        id,
+        partnerId: `p-${id}`,
+        parentId: null,
+        isPrimary: true,
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+        zone: null,
+        state: null,
+        city: null,
+        partner: { userId: ownerUserId },
+        parent: null,
+      });
+
+      /** Bajaj-shaped tenant: ISR → SO → ASM → SM → ZH; a 2nd ISR/SO line under the same ASM. */
+      const seedBajaj = () => {
+        mockPrisma.salesHierarchyLevel.findMany.mockResolvedValue([
+          lvl('ZH', 5),
+          lvl('ISR', 1),
+          lvl('ASM', 3),
+          lvl('SO', 2),
+          lvl('SM', 4),
+        ]);
+        mockPrisma.salesUser.findMany.mockResolvedValue([
+          su('zh1', 'uZh', 'ZH', null, 'Z1'),
+          su('sm1', 'uSm', 'SM', 'zh1', 'M1'),
+          su('asm1', 'uAsm', 'ASM', 'sm1', 'A1'),
+          su('so1', 'uSo', 'SO', 'asm1', 'S1'),
+          su('isr1', 'uIsr', 'ISR', 'so1', 'I1'),
+          su('so2', 'uSo2', 'SO', 'asm1', 'S2'),
+          su('isr2', 'uIsr2', 'ISR', 'so2', 'I2'),
+        ]);
+        mockPrisma.outlet.findMany.mockResolvedValue([outlet('o1', 'uR1'), outlet('o2', 'uR2')]);
+        mockPrisma.salesUserAssignment.findMany.mockResolvedValue([
+          { salesUserId: 'isr1', outletId: 'o1', partnerId: null },
+          { salesUserId: 'isr1', outletId: 'o2', partnerId: null },
+          { salesUserId: 'isr2', outletId: 'o2', partnerId: null },
+        ]);
+        mockPrisma.user.findMany.mockResolvedValue([
+          user('uIsr', 'SALES_ISR'),
+          user('uSo', 'SALES_SO'),
+          user('uAsm', 'SALES_ASM'),
+          user('uSm', 'SALES_STATE_HEAD'),
+          user('uZh', 'SALES_HO'),
+          user('uR1', 'SSS'),
+          user('uR2', 'WHOLESALER'),
+          user('uAdmin', 'CLIENT_ADMIN'),
+        ]);
+        mockPrisma.userActivityDay.findMany.mockResolvedValue([]);
+        mockPrisma.pwaInstall.findMany.mockResolvedValue([
+          { userId: 'uIsr', platform: 'IOS' },
+          { userId: 'uIsr', platform: 'ANDROID' },
+          { userId: 'uR1', platform: 'ANDROID' },
+        ]);
+      };
+
+      type Row = { userId: string; appInstalled: boolean; appPlatforms: string[]; levelIds: string[] };
+      const jsonOf = async (u: JwtPayload = bajajAdmin) => {
+        const res = await service.sessionReport(u, {});
+        if (res.kind !== 'json') throw new Error('expected json');
+        const data = res.data as { idHeaders: string[]; rows: Row[] };
+        return { ...data, byId: new Map(data.rows.map((r) => [r.userId, r])) };
+      };
+
+      it('App Installed: Yes with platforms (Android before iOS) from ONE tenant-wide pwa_install read; No otherwise', async () => {
+        seedBajaj();
+        const { byId } = await jsonOf();
+        expect(byId.get('uIsr')).toMatchObject({ appInstalled: true, appPlatforms: ['Android', 'iOS'] });
+        expect(byId.get('uR1')).toMatchObject({ appInstalled: true, appPlatforms: ['Android'] });
+        expect(byId.get('uSo')).toMatchObject({ appInstalled: false, appPlatforms: [] });
+        expect(mockPrisma.pwaInstall.findMany).toHaveBeenCalledTimes(1);
+        // Same population as the App Adoption page (tenantInstallWhere): tenant-stamped AND the user's own tenant, not deleted.
+        expect(mockPrisma.pwaInstall.findMany.mock.calls[0][0].where).toEqual({
+          clientId: 'bajaj-co',
+          user: { clientId: 'bajaj-co', deletedAt: null },
+        });
+      });
+
+      it('level-ID headers = the tenant level names ranked 1..5 + " ID" (Bajaj ISR/SO/ASM/SM/ZH)', async () => {
+        seedBajaj();
+        const { idHeaders } = await jsonOf();
+        expect(idHeaders).toEqual(['ISR ID', 'SO ID', 'ASM ID', 'SM ID', 'ZH ID']);
+      });
+
+      it('sales user at each level: own code at own level + codes above, blank below', async () => {
+        seedBajaj();
+        const { byId } = await jsonOf();
+        expect(byId.get('uIsr')!.levelIds).toEqual(['I1', 'S1', 'A1', 'M1', 'Z1']);
+        expect(byId.get('uSo')!.levelIds).toEqual(['', 'S1', 'A1', 'M1', 'Z1']);
+        expect(byId.get('uAsm')!.levelIds).toEqual(['', '', 'A1', 'M1', 'Z1']);
+        expect(byId.get('uSm')!.levelIds).toEqual(['', '', '', 'M1', 'Z1']);
+        expect(byId.get('uZh')!.levelIds).toEqual(['', '', '', '', 'Z1']);
+      });
+
+      it('retailer with one rep = that rep chain; with two reps = aligned chains joined " | "; admin blank', async () => {
+        seedBajaj();
+        const { byId } = await jsonOf();
+        expect(byId.get('uR1')!.levelIds).toEqual(['I1', 'S1', 'A1', 'M1', 'Z1']);
+        expect(byId.get('uR2')!.levelIds).toEqual(['I1 | I2', 'S1 | S2', 'A1 | A1', 'M1 | M1', 'Z1 | Z1']);
+        expect(byId.get('uAdmin')!.levelIds).toEqual(['', '', '', '', '']);
+        expect(byId.get('uAdmin')!.appInstalled).toBe(false);
+      });
+
+      it('Deoleo level names (XSR/SO/ASM/RSM/ZNM) drive the headers', async () => {
+        mockPrisma.salesHierarchyLevel.findMany.mockResolvedValue([
+          lvl('XSR', 1),
+          lvl('SO', 2),
+          lvl('ASM', 3),
+          lvl('RSM', 4),
+          lvl('ZNM', 5),
+        ]);
+        mockPrisma.user.findMany.mockResolvedValue([user('uX', 'SALES_ISR')]);
+        mockPrisma.salesUser.findMany.mockResolvedValue([su('x1', 'uX', 'XSR', null, 'X9')]);
+        mockPrisma.userActivityDay.findMany.mockResolvedValue([]);
+        const { idHeaders, byId } = await jsonOf(gifsy);
+        expect(idHeaders).toEqual(['XSR ID', 'SO ID', 'ASM ID', 'RSM ID', 'ZNM ID']);
+        expect(byId.get('uX')!.levelIds).toEqual(['X9', 'Not set', 'Not set', 'Not set', 'Not set']);
+      });
+
+      it('hierarchy is read once per tenant (4 reads, not per row) and cached across requests', async () => {
+        seedBajaj();
+        await jsonOf();
+        await jsonOf();
+        expect(mockPrisma.salesUser.findMany).toHaveBeenCalledTimes(1);
+        expect(mockPrisma.salesHierarchyLevel.findMany).toHaveBeenCalledTimes(1);
+        expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledTimes(1);
+        expect(mockPrisma.salesHierarchyLevel.findMany.mock.calls[0][0].where).toEqual({ clientId: 'bajaj-co' });
+      });
+
+      it('Excel: App Installed + 5 ID columns between Role and Last Login, cells match, plus an About sheet', async () => {
+        seedBajaj();
+        const res = await service.sessionReport(bajajAdmin, { format: ReportFormat.XLSX });
+        if (res.kind !== 'xlsx') throw new Error('expected xlsx');
+        const wb = XLSX.read(res.buffer, { type: 'buffer' });
+        expect(wb.SheetNames).toEqual(['Session Report', 'About']);
+        const aoa = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets['Session Report'], { header: 1, defval: '' });
+        const header = aoa[0] as string[];
+        expect(header.slice(0, 11)).toEqual([
+          'S.No', 'Name', 'Mobile', 'Role', 'App Installed',
+          'ISR ID', 'SO ID', 'ASM ID', 'SM ID', 'ZH ID', 'Last Login',
+        ]);
+        expect(header).toHaveLength(11 + 13);
+        const rowOf = (name: string) => aoa.find((r) => r[1] === name) as unknown[];
+        expect(rowOf('uIsr').slice(4, 10)).toEqual(['Yes — Android, iOS', 'I1', 'S1', 'A1', 'M1', 'Z1']);
+        expect(rowOf('uR2').slice(4, 10)).toEqual(['No', 'I1 | I2', 'S1 | S2', 'A1 | A1', 'M1 | M1', 'Z1 | Z1']);
+        expect(rowOf('uAdmin').slice(4, 10)).toEqual(['No', '', '', '', '', '']);
+        const about = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets['About'], { header: 1, defval: '' }) as string[][];
+        const labels = about.map((r) => r[0]);
+        expect(labels).toEqual(expect.arrayContaining([
+          'App Installed',
+          'ISR ID · SO ID · ASM ID · SM ID · ZH ID',
+          'Level IDs — sales users',
+          'Level IDs — retailers / wholesalers',
+          'Level IDs — admin / Gifsy / vendor',
+        ]));
+        const idWhat = about.find((r) => r[0] === 'ISR ID · SO ID · ASM ID · SM ID · ZH ID')![1];
+        expect(idWhat).toMatch(/^Level ID columns \(ISR ID · SO ID · ASM ID · SM ID · ZH ID\): employee codes only/);
+      });
+
+      it('a caller with no tenant: no install / hierarchy reads, columns empty', async () => {
+        mockPrisma.user.findMany.mockResolvedValue([user('u1', 'CLIENT_ADMIN')]);
+        mockPrisma.userActivityDay.findMany.mockResolvedValue([]);
+        const { idHeaders, rows } = await jsonOf({ ...gifsy, clientId: '' });
+        expect(idHeaders).toEqual([]);
+        expect(rows[0]).toMatchObject({ appInstalled: false, levelIds: [] });
+        expect(mockPrisma.pwaInstall.findMany).not.toHaveBeenCalled();
+        expect(mockPrisma.salesUser.findMany).not.toHaveBeenCalled();
+      });
     });
   });
 

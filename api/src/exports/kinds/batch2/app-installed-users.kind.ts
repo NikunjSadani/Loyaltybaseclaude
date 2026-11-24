@@ -112,10 +112,14 @@ export const INSTALLED_USERS_ID_COL = INSTALLED_USERS_HEADERS.indexOf('Employee 
 /**
  * The level-ID headers: "<tenant level name> ID". A header equal (case-insensitive) to a fixed column or to an earlier
  * level header gets the internal level code appended — e.g. a level named "Employee" → "Employee ID (SO)" (never two
- * "Employee ID" columns).
+ * "Employee ID" columns). `alsoReserved` = another file's own fixed headers (the Session Report passes its columns +
+ * month labels) so a level name can never collide there either.
  */
-export function installedUsersIdHeaders(idLevels: readonly HierarchyIdLevel[]): string[] {
-  const used = new Set<string>(INSTALLED_USERS_HEADERS.map((h) => h.toLowerCase()));
+export function installedUsersIdHeaders(
+  idLevels: readonly HierarchyIdLevel[],
+  alsoReserved: readonly string[] = [],
+): string[] {
+  const used = new Set<string>([...INSTALLED_USERS_HEADERS, ...alsoReserved].map((h) => h.toLowerCase()));
   return idLevels.map((l) => {
     const base = `${l.label} ID`;
     let out = base;
@@ -138,6 +142,19 @@ export function installedUsersWidths(idCount: number): number[] {
 }
 
 export const INSTALLED_USERS_ABOUT_SHEET = 'About';
+
+/**
+ * The About-sheet rows explaining the level-ID columns: [label, note] pairs — first the headers joined " · " with what
+ * the columns are, then one row per row type (sales users / retailers & wholesalers / admin). Shared with the Session
+ * Report Excel so both files explain the same columns in the same words.
+ */
+export function levelIdAboutRows(area: Pick<UserAreaResolver, 'idNotes'>, idHeaders: readonly string[]): [string, string][] {
+  const [idWhat, ...idRows] = area.idNotes;
+  const out: [string, string][] = [[idHeaders.length ? idHeaders.join(' · ') : 'Level ID columns', idWhat ?? '']];
+  const idLabels = ['Level IDs — sales users', 'Level IDs — retailers / wholesalers', 'Level IDs — admin / Gifsy / vendor'];
+  for (let i = 0; i < idRows.length; i++) out.push([idLabels[i] ?? 'Level IDs', idRows[i]]);
+  return out;
+}
 
 /** Users read per batch (keeps every `IN (...)` list small). */
 export const INSTALLED_USERS_CHUNK = 1000;
@@ -223,15 +240,22 @@ function roleLabel(clientId: string, u: UserRow, typeDisplay: Map<string, string
   return u.role === 'VENDOR' ? 'Vendor' : u.role;
 }
 
-function platformsLabel(platforms: Set<string>): string {
-  return [...platforms]
+/**
+ * Installed platforms as display labels in a fixed order (Android, iOS, Desktop, Other, then anything else A–Z).
+ * Shared with the Session Report's "App Installed" column so both files word platforms identically.
+ */
+export function platformLabels(platforms: Iterable<string>): string[] {
+  return [...new Set(platforms)]
     .sort((a, b) => {
       const ia = PLATFORM_ORDER.indexOf(a);
       const ib = PLATFORM_ORDER.indexOf(b);
       return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
     })
-    .map((p) => PLATFORM_LABEL[p] ?? p)
-    .join(', ');
+    .map((p) => PLATFORM_LABEL[p] ?? p);
+}
+
+function platformsLabel(platforms: Set<string>): string {
+  return platformLabels(platforms).join(', ');
 }
 
 /** Read everything and build every row in memory (no bytes written). */
@@ -388,11 +412,7 @@ async function run(ctx: ExportRunContext, p: InstalledUsersParams, out: XlsxStre
   await about.addRow(['Zone / State / City', geoNote]);
   await about.addRow(['Not set / Not in hierarchy', blankNote]);
   await about.addRow(['"N cities" / "N states"', area.notes[3] ?? '']);
-  const idHeaders = installedUsersIdHeaders(area.idLevels);
-  const [idWhat, ...idRows] = area.idNotes;
-  await about.addRow([idHeaders.length ? idHeaders.join(' · ') : 'Level ID columns', idWhat ?? '']);
-  const idLabels = ['Level IDs — sales users', 'Level IDs — retailers / wholesalers', 'Level IDs — admin / Gifsy / vendor'];
-  for (let i = 0; i < idRows.length; i++) await about.addRow([idLabels[i] ?? 'Level IDs', idRows[i]]);
+  for (const r of levelIdAboutRows(area, installedUsersIdHeaders(area.idLevels))) await about.addRow(r);
 
   // 6. Full State / City lists of the rows summarised above (only when there are any; not counted).
   if (fullAreas.length) {

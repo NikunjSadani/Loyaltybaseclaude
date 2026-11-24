@@ -20,6 +20,32 @@ import { isLocationRequired } from '../common/location-gate.helper';
 import { buildLocationReport, pageOfLocationReport, resolveLocationParams } from './location/location-compliance-report';
 import { RedemptionReportQueryDto } from './dto/redemption-report.dto';
 import { redemptionOrderCount, redemptionScreenSummary, type RedemptionScreenSummary } from './redemptions/redemption-report.summary';
+import { cachedUserAreaResolver, loadUserAreaResolver, type AreaPrisma, type UserAreaResolver } from './area/user-area';
+import { tenantInstallWhere } from '../push/pwa-adoption.service';
+import {
+  installedUsersIdHeaders,
+  levelIdAboutRows,
+  platformLabels,
+} from '../exports/kinds/batch2/app-installed-users.kind';
+
+/** Session Report fixed headers (Excel). The App Installed + level-ID columns sit between Role and Last Login. */
+export const SESSION_REPORT_LEAD_HEADERS = ['S.No', 'Name', 'Mobile', 'Role'] as const;
+export const SESSION_REPORT_APP_HEADER = 'App Installed';
+export const SESSION_REPORT_LAST_LOGIN_HEADER = 'Last Login';
+
+/** "Yes — Android, iOS" / "No" — the Session Report's App Installed cell (screen + Excel). */
+export function appInstalledCell(platforms: readonly string[]): string {
+  return platforms.length ? `Yes — ${platforms.join(', ')}` : 'No';
+}
+
+/** About-sheet note for the App Installed column. */
+export const SESSION_REPORT_APP_NOTE =
+  '"Yes — <platforms>" = the user has opened the app as an installed (home-screen) app on those platforms — the same ' +
+  'users counted as "Installed to home screen" on the App Adoption page. "No" = never opened as an installed app ' +
+  '(they may still use it in the browser).';
+export const SESSION_REPORT_ACTIVE_NOTE =
+  'Month columns: the number of days the user actually used the app in that month (not logins). Active-day tracking ' +
+  'began when the feature shipped, so months before that read 0 (no historical backfill).';
 
 /**
  * Reporting & Analytics — ported from platform/src/app/api/reports/*.
@@ -296,24 +322,60 @@ export class ReportsService {
       }
     }
 
-    // 5. Rows — activeDays omits months with no activity.
+    // 5. App installed (owner 2026-11-24, all tenants): ONE tenant-wide read of the pwa_install rows — the SAME
+    //    population as the App Adoption page's "Installed to home screen" (tenantInstallWhere) — never per row.
+    // 6. Level-ID columns (ISR ID · SO ID · … — the tenant's levels ranked 1..5): the installed-users Excel's resolver
+    //    (reports/area/user-area.ts), 4 tenant-wide reads, cached per tenant (shared with the Usage report).
+    const clientId = (user.clientId ?? '').trim();
+    const platformsByUser = new Map<string, Set<string>>();
+    let area: UserAreaResolver | null = null;
+    if (clientId && users.length > 0) {
+      const installs = await this.prisma.pwaInstall.findMany({
+        where: tenantInstallWhere(clientId),
+        select: { userId: true, platform: true },
+      });
+      for (const i of installs) {
+        const set = platformsByUser.get(i.userId) ?? new Set<string>();
+        set.add(i.platform);
+        platformsByUser.set(i.userId, set);
+      }
+      area = await cachedUserAreaResolver(clientId, () =>
+        loadUserAreaResolver(this.prisma as unknown as AreaPrisma, clientId),
+      );
+    }
+    const monthLabels = months.map((m) => m.label);
+    const idHeaders = area
+      ? installedUsersIdHeaders(area.idLevels, [
+          ...SESSION_REPORT_LEAD_HEADERS,
+          SESSION_REPORT_APP_HEADER,
+          SESSION_REPORT_LAST_LOGIN_HEADER,
+          ...monthLabels,
+        ])
+      : [];
+
+    // 7. Rows — activeDays omits months with no activity.
     const rows = users.map((u) => {
       const byMonth = counts.get(u.id);
       const activeDays: Record<string, number> = {};
       if (byMonth) {
         for (const [ym, n] of byMonth) activeDays[ym] = n;
       }
+      const appPlatforms = platformLabels(platformsByUser.get(u.id) ?? []);
       return {
         userId: u.id,
         name: u.name,
         phone: u.phone,
         role: u.role,
+        appInstalled: appPlatforms.length > 0,
+        appPlatforms,
+        // One cell per idHeaders entry ('' = blank: admin, or a level below the user — see the About sheet).
+        levelIds: area ? area.resolveIds({ id: u.id, role: u.role }) : [],
         lastLoginAt: u.lastLoginAt ? u.lastLoginAt.toISOString() : null,
         activeDays,
       };
     });
 
-    // 7. XLSX — one row per user; fixed lead columns then one column per month.
+    // 8. XLSX — one row per user: S.No · Name · Mobile · Role · App Installed · <level> ID × ≤5 · Last Login · months.
     if (q.format === ReportFormat.XLSX) {
       const sheetRows = rows.map((r, i) => {
         const out: Record<string, unknown> = {
@@ -321,21 +383,38 @@ export class ReportsService {
           Name: r.name,
           Mobile: r.phone,
           Role: r.role,
-          'Last Login': this.formatIstDateTime(r.lastLoginAt),
+          [SESSION_REPORT_APP_HEADER]: appInstalledCell(r.appPlatforms),
         };
+        idHeaders.forEach((h, c) => {
+          out[h] = r.levelIds[c] ?? '';
+        });
+        out[SESSION_REPORT_LAST_LOGIN_HEADER] = this.formatIstDateTime(r.lastLoginAt);
         for (const mo of months) {
           out[mo.label] = r.activeDays[mo.ym] ?? 0;
         }
         return out;
       });
-      return this.toXlsx([{ name: 'Session Report', rows: sheetRows }], 'session-report.xlsx');
+      // "About" — how to read the App Installed + level-ID columns (same level-ID wording as the installed-users Excel).
+      const aboutRows: [string, string][] = [
+        [SESSION_REPORT_APP_HEADER, SESSION_REPORT_APP_NOTE],
+        ...(area ? levelIdAboutRows(area, idHeaders) : []),
+        ['Month columns', SESSION_REPORT_ACTIVE_NOTE],
+      ];
+      return this.toXlsx(
+        [
+          { name: 'Session Report', rows: sheetRows },
+          { name: 'About', rows: aboutRows.map(([k, v]) => ({ 'About this report': k, Notes: v })) },
+        ],
+        'session-report.xlsx',
+      );
     }
 
-    // 6. JSON.
+    // 9. JSON.
     return this.toJson({
       generatedAt: new Date().toISOString(),
       timezone: 'Asia/Kolkata',
       months,
+      idHeaders,
       rows,
     });
   }
