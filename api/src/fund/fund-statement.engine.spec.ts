@@ -458,7 +458,7 @@ describe('fund sources — mapping the source records', () => {
   });
 
   describe('194C TDS — what Gifsy actually pays, with its bank run (owner 2026-11-24)', () => {
-    const run = (id: string, at: Date) => ({ id, downloadCode: `PD-${id}`, downloadedAt: at });
+    const run = (id: string, at: Date, period = '2026-10') => ({ id, downloadCode: `PD-${id}`, downloadedAt: at, period });
     const entryOf = (id: string, o: Partial<Omit<Tds194cEntry, 'item'>> & { item?: Partial<FundSpendItem> } = {}): Tds194cEntry => ({
       id,
       outletId: 'OUT1',
@@ -508,9 +508,11 @@ describe('fund sources — mapping the source records', () => {
       expect(l.flags).toContain('TDS_OTHER_CLIENT_RUN');
       expect(l.description).toContain("Recovered with a payout run outside this client's statement");
       expect(l.committedAt).toEqual(recAt);
-      // Older row (no id) and no run of THIS client in the window → the same note.
+      // N1: an OLDER row (no id) with no run of this client in the window is "bank run not identified" — the
+      // other-client note is only for a stored id that is not this client's run.
       const [old] = tdsItems([rec('r2', 'ABCDE1234F', 700n, recAt)], [run('d1', new Date(recAt.getTime() - 11 * 60_000))], [entryOf('p1')]);
-      expect(old.flags).toContain('TDS_OTHER_CLIENT_RUN');
+      expect(old.flags).toContain('TDS_RUN_UNMATCHED');
+      expect(old.flags).not.toContain('TDS_OTHER_CLIENT_RUN');
     });
 
     it('stored id: a re-banked payout does NOT move the line (frozen on its run)', () => {
@@ -560,6 +562,47 @@ describe('fund sources — mapping the source records', () => {
       // First row but no earlier payout this FY → no note.
       const [solo] = tdsItems([rec('r3', 'ABCDE1234F', 2_000n, recAt, 'd1')], [run('d1', runAt)], [entryOf('p1')]);
       expect(solo.flags ?? []).not.toContain('TDS_INCLUDES_EARLIER');
+    });
+
+    it('N4: "Payouts reversed" only for THIS run\'s own reversed payouts; never label / date an unrelated run', () => {
+      // Reversed payout of ANOTHER period → not this run's: stored id → re-banked note; NULL id → unmatched, no run label.
+      const other = [entryOf('p9', { downloadId: null, status: 'REVERSED', period: '2026-08', item: { status: 'RETURNED', paidAt: null } })];
+      const [st] = tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt, 'd1')], [run('d1', runAt)], other);
+      expect(st.flags ?? []).not.toContain('TDS_PAYOUTS_REVERSED');
+      expect(st.description).toContain('re-banked in a later run');
+      const [nl] = tdsItems([rec('r2', 'ABCDE1234F', 2_000n, recAt)], [run('d1', runAt)], other);
+      expect(nl.flags).toContain('TDS_RUN_UNMATCHED');
+      expect(nl.ref).toBe('TDS 194C · FY 2026-27');
+      expect(nl.description).not.toContain('PD-d1');
+      expect(nl.committedAt).toEqual(recAt);
+    });
+
+    it('N3: a first-of-year row recorded with ANOTHER client\'s run notes earlier payouts only from THIS client\'s payouts before it', () => {
+      const earlierPayout = entryOf('p0', { downloadId: 'd0', item: { committedAt: new Date(recAt.getTime() - 86_400_000) } });
+      const [withEarlier] = tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt, 'foreign')], [run('d0', at(1))], [earlierPayout]);
+      expect(withEarlier.flags).toEqual(expect.arrayContaining(['TDS_OTHER_CLIENT_RUN', 'TDS_INCLUDES_EARLIER']));
+      const later = entryOf('p5', { downloadId: 'd5', item: { committedAt: new Date(recAt.getTime() + 86_400_000) } });
+      const [noEarlier] = tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt, 'foreign')], [run('d5', at(23))], [later]);
+      expect(noEarlier.flags).not.toContain('TDS_INCLUDES_EARLIER');
+    });
+
+    it('N7: realistic volume — 2,000 recovery rows × 50,000 payout entries — grouped once, runs quickly', () => {
+      const runsN = Array.from({ length: 200 }, (_, i) => run('d' + i, new Date(at(0).getTime() + i * 3_600_000)));
+      const ents: Tds194cEntry[] = [];
+      for (let i = 0; i < 50_000; i++) {
+        const pan = 'PAN' + String(i % 2_000).padStart(5, '0') + 'X';
+        ents.push(entryOf('e' + i, { payeePan: pan, downloadId: 'd' + (i % 200) }));
+      }
+      const recs = Array.from({ length: 2_000 }, (_, i) =>
+        rec('r' + i, 'PAN' + String(i).padStart(5, '0') + 'X', 1_000n, new Date(runsN[i % 200].downloadedAt.getTime() + 1_000), 'd' + (i % 200)),
+      );
+      const t0 = Date.now();
+      const lines = tdsItems(recs, runsN, ents);
+      const ms = Date.now() - t0;
+      expect(lines).toHaveLength(2_000);
+      expect(lines.every((l) => !(l.flags ?? []).includes('TDS_RUN_UNMATCHED'))).toBe(true);
+      // A per-row scan of 50k entries would be 100M comparisons; the grouped pass is far below a second.
+      expect(ms).toBeLessThan(5_000);
     });
 
     it('a negative true-up → a credit line dated when recorded; TDS recorded before the opening date is excluded', () => {

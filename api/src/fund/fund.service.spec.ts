@@ -9,6 +9,9 @@ import { FundConsoleController, FundController } from './fund.controller';
 import { CLIENT_ALERT_ERROR_TEXT, FundService, fundAlertTarget } from './fund.service';
 import { istDayStart } from './fund-day';
 
+// The confirm token is an HMAC keyed with the API's JWT_SECRET (round 5 N6).
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-for-fund-specs';
+
 const gifsyAssumed: JwtPayload = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'bajaj', phone: '', name: 'Ops', assumed: true };
 const gifsyHome: JwtPayload = { sub: 'g1', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'Ops' };
 const staffAssumed: JwtPayload = { sub: 's1', role: 'GIFSY_STAFF', clientId: 'bajaj', phone: '', name: 'Staff', assumed: true, gifsyRoleId: 'role-1' };
@@ -301,10 +304,16 @@ describe('FundService — console settings + rates (D1, D4, D6)', () => {
     const body = { feeType: 'PERCENT' as const, percent: 2, effectiveFrom: daysFromToday(-5) };
     const pv = (await svc.setAgencyFee(gifsyHome, 'bajaj', body)) as { confirmToken: string; preview: { linesRepriced: number } };
     expect(pv.confirmToken).toMatch(/^\d{10,16}\.[0-9a-f]{32}$/);
+    // N6: the token is an HMAC — a forged one with the right shape is refused.
+    const [ms] = pv.confirmToken.split('.');
+    await expect(svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: `${ms}.${'0'.repeat(32)}` })).rejects.toBeInstanceOf(ConflictException);
     // New spend lands between the preview and the confirm.
     prisma.payoutTransaction.findMany.mockResolvedValue([txn('t1', committed), txn('t2', new Date(Date.now() + 1_000))]);
     const saved = await svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: pv.confirmToken });
-    expect(saved).toMatchObject({ saved: true, linesRepriced: 1, deltaPaise: -2_000 });
+    // The token still verifies (only pre-preview spend is in it) — and the figures STORED are recomputed at the confirm,
+    // so they include the new line committed in between (round 5 N6).
+    expect(saved).toMatchObject({ saved: true, linesRepriced: 2, deltaPaise: -4_000 });
+    expect(prisma.fundRate.create.mock.calls[0][0].data).toMatchObject({ repricedLines: 2, repriceDeltaPaise: -4_000n });
   });
 
   it('B5: the audit row of a FUTURE-dated rate names the rate in force before it', async () => {
@@ -517,6 +526,23 @@ describe('FundService — digest line + daily low-balance e-mail (A7 / B5 / B6)'
     expect(out.results.get('deoleo')!.alert!.status).toBe('not-checked-time-budget');
     const recorded = prisma.fundSettings.update.mock.calls.map(([a]) => (a as { data: { lowAlertLastStatus: string } }).data.lowAlertLastStatus);
     expect(recorded).toEqual(['not-low', 'not-checked-time-budget']);
+  });
+
+  it('round 5 N5: a client whose check outlasts the remaining budget is "not checked — time budget" (raced, never awaited forever)', async () => {
+    const { svc, prisma } = makeService();
+    prisma.fundSettings.findMany.mockResolvedValue([{ clientId: 'bajaj' }]);
+    jest.spyOn(svc, 'digestAndAlert').mockImplementation(() => new Promise(() => undefined)); // never settles
+    const out = await svc.runLowBalanceAlerts(Date.now(), 30);
+    expect(out.results.get('bajaj')!.alert!.status).toBe('not-checked-time-budget');
+    expect(prisma.fundSettings.update.mock.calls[0][0].data.lowAlertLastStatus).toBe('not-checked-time-budget');
+  });
+
+  it('round 5 N5: past the deadline, digestAndAlert never sends (a late computation cannot e-mail)', async () => {
+    process.env.FUND_ALERTS_LIVE = 'true';
+    const { svc, mail } = lowClient();
+    const r = await svc.digestAndAlert('bajaj', Date.now(), { deadlineMs: 0, clock: () => 1 });
+    expect(r.alert!.status).toBe('not-checked-time-budget');
+    expect(mail.sendEmail).not.toHaveBeenCalled();
   });
 
   it('B2: an unreadable settings table is reported (error), never thrown', async () => {
