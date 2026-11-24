@@ -35,7 +35,10 @@ export class HubbleSweepController {
       claimed: r.claimed,
       outcomes: r.outcomes,
       flaggedStale: r.flaggedStale,
+      flaggedOther: r.flaggedOther,
+      flaggedOutOfWindow: r.flaggedOutOfWindow,
       errors: r.errors,
+      ...(r.budget ? { budget: r.budget } : {}),
     };
   }
 }

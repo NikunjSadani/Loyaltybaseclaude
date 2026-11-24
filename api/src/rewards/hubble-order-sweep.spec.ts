@@ -80,7 +80,8 @@ describe('RewardsService.sweepHubbleOrders', () => {
   let locked: boolean;
   let claimCalls: string[];
   let orderNow: Record<string, { status: string; voucherCode: string | null; createdAt: Date; metadata: Record<string, unknown> }>;
-  const mockHubble = { isConfigured: jest.fn().mockReturnValue(true) };
+  let outOfWindow: Array<{ id: string; createdAt: Date; metadata: unknown }>;
+  const mockHubble = { isConfigured: jest.fn().mockReturnValue(true), getOrderByReference: jest.fn() };
   const auditCreate = jest.fn().mockResolvedValue({});
 
   const tx = {
@@ -98,6 +99,8 @@ describe('RewardsService.sweepHubbleOrders', () => {
   const mockPrisma = {
     $transaction: jest.fn(async (fn: (t: typeof tx) => unknown) => fn(tx)),
     $executeRaw: jest.fn().mockReturnValue(Promise.resolve(1)),
+    // Step 4 (out-of-window flagging) — one top-level read.
+    $queryRaw: jest.fn(async () => outOfWindow),
     redemptionOrder: {
       findFirst: jest.fn(async ({ where }: { where: { id: string } }) => {
         const o = orderNow[where.id];
@@ -113,6 +116,7 @@ describe('RewardsService.sweepHubbleOrders', () => {
     claimCalls = [];
     candidates = [];
     orderNow = {};
+    outOfWindow = [];
     mockHubble.isConfigured.mockReturnValue(true);
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -152,13 +156,19 @@ describe('RewardsService.sweepHubbleOrders', () => {
     expect(claimCalls).not.toContain('recent');
   });
 
-  it('the candidate query only reads open (CONFIRMED / PROCESSING), code-less, Hubble-handed, non-manual orders', async () => {
+  it('the candidate query: open code-less Hubble-handed orders + check-only manual overrides; index-friendly predicates', async () => {
     await service.sweepHubbleOrders(NOW);
     const sql = (tx.$queryRaw.mock.calls[1][0] as TemplateStringsArray).join('?');
-    expect(sql).toContain(`"status"::text IN ('CONFIRMED', 'PROCESSING')`);
-    expect(sql).toContain('"voucherCode" IS NULL');
+    // Audit H: enum compare (no ::text cast, so the status index is usable); btrim'd code / provider.
+    expect(sql).toContain(`"status" IN ('CONFIRMED', 'PROCESSING')`);
+    expect(sql).not.toContain('"status"::text');
+    expect(sql).toContain(`coalesce(btrim("voucherCode"), '') = ''`);
+    expect(sql).toContain(`lower(btrim(coalesce("voucherProvider", ''))) = 'hubble'`);
     expect(sql).toContain(`'hubblePlaceAttemptAt'`);
     expect(sql).toContain(`NOT IN ('MANUAL_OVERRIDE', 'RELEASED')`);
+    // Audit E: manual overrides after a Hubble hand-off are kept (check-only), until a double issue is seen.
+    expect(sql).toContain(`= 'MANUAL_OVERRIDE'`);
+    expect(sql).toContain(`'hubbleDoubleIssueSeen'`);
     expect(sql).toContain(`ORDER BY ("metadata"->>'hubbleLastSweepAt') ASC NULLS FIRST`);
   });
 
@@ -215,7 +225,7 @@ describe('RewardsService.sweepHubbleOrders', () => {
     expect(rec).not.toHaveBeenCalled();
   });
 
-  it('STALE: still open ≥ 1 h after hand-off and unflagged → flagged HUBBLE_PROCESSING_STALE + audited', async () => {
+  it('STALE: still open ≥ 1 h after hand-off and unflagged → flagged HUBBLE_STILL_OPEN_STALE + audited', async () => {
     candidates = [cand('old', 70 * MIN), cand('new', 30 * MIN), cand('flagged', 90 * MIN)];
     orderNow = {
       old: openOrder(70 * MIN),
@@ -229,8 +239,85 @@ describe('RewardsService.sweepHubbleOrders', () => {
     expect(res.flaggedStale).toBe(1);
     expect(flag).toHaveBeenCalledTimes(1);
     expect(flag).toHaveBeenCalledWith('old', HUBBLE_PROCESSING_STALE_REASON);
-    expect(auditCreate.mock.calls[0][0].data.metadata).toMatchObject({ event: 'HUBBLE_PROCESSING_STALE', orderNumber: 'ORD-old' });
+    expect(auditCreate.mock.calls[0][0].data.metadata).toMatchObject({ event: 'HUBBLE_STILL_OPEN_STALE', orderNumber: 'ORD-old' });
   });
+
+  it('D: the stale reason never reads as "Hubble holds an order" (HUBBLE_HAS_ORDER_REASON)', () => {
+    expect(HUBBLE_PROCESSING_STALE_REASON).toBe('HUBBLE_STILL_OPEN_STALE');
+    expect(/^HUBBLE_(SUCCESS|PROCESSING|UNKNOWN_STATUS)/.test(HUBBLE_PROCESSING_STALE_REASON)).toBe(false);
+  });
+
+  it('D: an order this very check resolved (terminal outcome) is never stale-flagged', async () => {
+    candidates = [cand('old', 70 * MIN)];
+    orderNow = { old: openOrder(70 * MIN) }; // even if a stale read still shows it open
+    jest.spyOn(service, 'reconcileHubbleOrder').mockResolvedValue('FAILED_REFUNDED');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const flag = jest.spyOn(service as any, 'markHubblePendingReconcile').mockResolvedValue(undefined);
+    await service.sweepHubbleOrders(NOW);
+    expect(flag).not.toHaveBeenCalled();
+  });
+
+  it('J: SKIPPED (no longer eligible: tenant flag off / product gone) flags HUBBLE_NOT_ELIGIBLE_NOW, not the stale reason', async () => {
+    candidates = [cand('x', 70 * MIN)];
+    orderNow = { x: openOrder(70 * MIN) };
+    jest.spyOn(service, 'reconcileHubbleOrder').mockResolvedValue('SKIPPED');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const flag = jest.spyOn(service as any, 'markHubblePendingReconcile').mockResolvedValue(undefined);
+    const res = await service.sweepHubbleOrders(NOW);
+    expect(flag).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('x', 'HUBBLE_NOT_ELIGIBLE_NOW');
+    expect(res.flaggedOther).toBe(1);
+  });
+
+  it('E: a manual override after a Hubble hand-off is CHECK-ONLY (never reconciled); Hubble SUCCESS raises the double-issue flag', async () => {
+    candidates = [{ ...cand('m', 30 * MIN, undefined, { hubbleStatus: 'MANUAL_OVERRIDE', hubbleOrderId: 'h1' }), checkOnly: true } as never];
+    orderNow = { m: { status: 'DELIVERED', voucherCode: 'MANUAL-1', createdAt: at(30 * MIN), metadata: { hubbleStatus: 'MANUAL_OVERRIDE' } } };
+    const rec = jest.spyOn(service, 'reconcileHubbleOrder');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const flag = jest.spyOn(service as any, 'markHubblePendingReconcile').mockResolvedValue(undefined);
+    mockHubble.getOrderByReference.mockResolvedValueOnce({ status: 'SUCCESS', id: 'h1' });
+    const res = await service.sweepHubbleOrders(NOW);
+    expect(rec).not.toHaveBeenCalled();
+    expect(flag).toHaveBeenCalledWith('m', 'HUBBLE_SUCCESS_MANUAL_CODE_PRESENT');
+    expect(res.outcomes).toEqual({ DOUBLE_ISSUE_FLAGGED: 1 });
+    // Hubble still processing → nothing flagged, nothing changed.
+    flag.mockClear();
+    candidates = [{ ...cand('m', 30 * MIN, undefined, { hubbleStatus: 'MANUAL_OVERRIDE' }), checkOnly: true } as never];
+    mockHubble.getOrderByReference.mockResolvedValueOnce({ status: 'PROCESSING' });
+    await service.sweepHubbleOrders(NOW);
+    expect(flag).not.toHaveBeenCalled();
+  });
+
+  it('K: an open Hubble order past the 7-day window is FLAGGED once (no Hubble call), not left waiting', async () => {
+    outOfWindow = [
+      { id: 'ancient', createdAt: at(9 * 24 * 60 * MIN), metadata: { hubblePlaceAttemptAt: iso(9 * 24 * 60 * MIN) } },
+      // created more than 7 d ago, but HANDED (place attempt) inside the window: not out of window yet
+      { id: 'late', createdAt: at(8 * 24 * 60 * MIN), metadata: { hubblePlaceAttemptAt: iso(6 * 24 * 60 * MIN) } },
+    ];
+    orderNow = { ancient: openOrder(9 * 24 * 60 * MIN), late: openOrder(6 * 24 * 60 * MIN) };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const flag = jest.spyOn(service as any, 'markHubblePendingReconcile').mockResolvedValue(undefined);
+    const res = await service.sweepHubbleOrders(NOW);
+    expect(flag).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('ancient', HUBBLE_PROCESSING_STALE_REASON);
+    expect(res.flaggedOutOfWindow).toBe(1);
+    expect(mockHubble.getOrderByReference).not.toHaveBeenCalled();
+    const sql = ((mockPrisma.$queryRaw.mock.calls as unknown as unknown[][])[0][0] as TemplateStringsArray).join('?');
+    expect(sql).toContain(`coalesce("metadata"->>'hubbleNeedsReconcile', '') <> 'true'`);
+  });
+
+  it('G: the per-pass time budget stops new work and reports what was left', async () => {
+    candidates = [cand('d0', 10 * MIN), cand('d1', 10 * MIN), cand('d2', 10 * MIN)];
+    const rec = jest.spyOn(service, 'reconcileHubbleOrder').mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      return 'PROCESSING';
+    });
+    const res = await service.sweepHubbleOrders(NOW, 20); // 20 ms budget: the first check already overruns it
+    expect(rec).toHaveBeenCalledTimes(1);
+    expect(res.budget).toEqual({ exhausted: true, unprocessed: 2 });
+    expect(mockPrisma.$queryRaw).not.toHaveBeenCalled(); // the out-of-window step is skipped too
+  });
+
 
   it('a stale candidate that got DELIVERED by this very check is NOT flagged', async () => {
     candidates = [cand('old', 70 * MIN)];

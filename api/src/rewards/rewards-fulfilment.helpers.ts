@@ -8,7 +8,7 @@
  * guarded `transitionOrder` (one call per row) so no status logic lives here.
  *
  * Layout (single header row, then one row per order):
- *   Order Number | Reward | Outlet ID | Phone | Redeemed on | Mode | Current Status |
+ *   Order Number | Reward | Outlet ID | Phone | Redeemed on (IST) | Mode | Current Status |
  *   Voucher Code | Voucher PIN | Voucher Provider | Tracking Number | Tracking URL | New Status
  *
  * The first seven columns are the locked context the ops user reads (Outlet ID + Phone added
@@ -31,7 +31,7 @@ export const FULFILMENT_COLS = [
   'Reward',
   'Outlet ID',
   'Phone',
-  'Redeemed on',
+  'Redeemed on (IST)',
   'Mode',
   'Current Status',
   'Voucher Code',
