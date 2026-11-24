@@ -292,6 +292,21 @@ describe('FundService — console settings + rates (D1, D4, D6)', () => {
     expect(prisma.$transaction.mock.calls.at(-1)![1]).toMatchObject({ timeout: 120_000 });
   });
 
+  it('round 4 item 7: spend committed AFTER the preview never invalidates the token (no endless 409s); it is not counted as re-priced', async () => {
+    const { svc, prisma } = makeService();
+    const committed = new Date(Date.now() - 2 * 86_400_000);
+    const txn = (id: string, at: Date) => ({ id, amountPaise: 100_000n, status: 'SUCCESS', payoutMode: 'UPI', createdAt: at, completedAt: at, reversedAt: null, updatedAt: at, providerRefId: 'U', redemptionOrderId: null, batch: null });
+    prisma.payoutTransaction.findMany.mockResolvedValue([txn('t1', committed)]);
+    prisma.fundRate.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'f', createdAt: new Date(), ...data }));
+    const body = { feeType: 'PERCENT' as const, percent: 2, effectiveFrom: daysFromToday(-5) };
+    const pv = (await svc.setAgencyFee(gifsyHome, 'bajaj', body)) as { confirmToken: string; preview: { linesRepriced: number } };
+    expect(pv.confirmToken).toMatch(/^\d{10,16}\.[0-9a-f]{32}$/);
+    // New spend lands between the preview and the confirm.
+    prisma.payoutTransaction.findMany.mockResolvedValue([txn('t1', committed), txn('t2', new Date(Date.now() + 1_000))]);
+    const saved = await svc.setAgencyFee(gifsyHome, 'bajaj', { ...body, confirmToken: pv.confirmToken });
+    expect(saved).toMatchObject({ saved: true, linesRepriced: 1, deltaPaise: -2_000 });
+  });
+
   it('B5: the audit row of a FUTURE-dated rate names the rate in force before it', async () => {
     const { svc, prisma } = makeService();
     const past = new Date(Date.now() - 30 * 86_400_000);
@@ -489,6 +504,19 @@ describe('FundService — digest line + daily low-balance e-mail (A7 / B5 / B6)'
     const recorded = prisma.fundSettings.update.mock.calls.map(([a]) => [(a as { where: { clientId: string } }).where.clientId, (a as { data: { lowAlertLastStatus: string } }).data.lowAlertLastStatus]);
     expect(recorded).toEqual([['bajaj', 'not-low'], ['deoleo', 'failed']]);
     expect(prisma.fundSettings.findMany.mock.calls[0][0].where).toMatchObject({ lowBalanceThresholdPaise: { not: null }, clientId: { not: 'gifsy' } });
+  });
+
+  it('round 4 item 6: the step has its own time budget — clients after it are recorded "not checked", never skipped silently', async () => {
+    const { svc, prisma } = makeService();
+    prisma.fundSettings.findMany.mockResolvedValue([{ clientId: 'bajaj' }, { clientId: 'deoleo' }]);
+    const spy = jest.spyOn(svc, 'digestAndAlert').mockResolvedValue({ figures: null, alert: { clientId: 'bajaj', status: 'not-low' } });
+    let t = 0;
+    const clock = () => (t += 40_000); // each tick 40 s: the first client fits the 60 s budget, the second does not
+    const out = await svc.runLowBalanceAlerts(Date.now(), 60_000, clock);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(out.results.get('deoleo')!.alert!.status).toBe('not-checked-time-budget');
+    const recorded = prisma.fundSettings.update.mock.calls.map(([a]) => (a as { data: { lowAlertLastStatus: string } }).data.lowAlertLastStatus);
+    expect(recorded).toEqual(['not-low', 'not-checked-time-budget']);
   });
 
   it('B2: an unreadable settings table is reported (error), never thrown', async () => {

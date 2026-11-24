@@ -462,26 +462,29 @@ describe('fund sources — mapping the source records', () => {
     const entryOf = (id: string, o: Partial<Omit<Tds194cEntry, 'item'>> & { item?: Partial<FundSpendItem> } = {}): Tds194cEntry => ({
       id,
       outletId: 'OUT1',
+      period: '2026-10',
+      status: 'PAID',
       amountPaise: 100_000n,
       payeePan: 'ABCDE1234F',
       downloadId: 'd1',
       ...o,
       item: item({ key: 'cpe:' + id, type: 'VISIBILITY_PAYOUT', facePaise: o.amountPaise ?? 100_000n, committedAt: day(10), status: 'PAID', paidAt: day(12), ...(o.item ?? {}) }),
     });
-    const rec = (id: string, pan: string, share: bigint, at: Date, bases: { tenant?: bigint; pan?: bigint } = {}) => ({
+    const rec = (id: string, pan: string, share: bigint, at: Date, downloadId: string | null = null) => ({
       id,
       panNumber: pan,
       fyLabel: '2026-27',
       tenantSharePaise: share,
-      tenantBasePaise: bases.tenant ?? 100_000n,
-      panBasePaise: bases.pan ?? 100_000n,
+      downloadId,
       createdAt: at,
     });
-    const runAt = new Date(day(11).getTime() + 3_600_000);
+    // Runs inside FY 2026-27 (day() is relative to 1 Jan 2026 → use a fixed in-FY anchor).
+    const at = (h: number) => new Date(Date.UTC(2026, 9, 20, h) - 330 * 60_000);
+    const runAt = at(10);
     const recAt = new Date(runAt.getTime() + 2_000); // written in the same transaction, just after the run row
 
-    it('charged in FULL, one line per recovery row, dated with its bank run; status follows that run\'s payouts', () => {
-      const lines = tdsItems([rec('r1', 'abcde1234f', 2_041n, recAt)], [run('d1', runAt)], [entryOf('p1'), entryOf('p2', { downloadId: 'd0' })]);
+    it('stored run id: exact — charged in FULL, dated with that run, status follows its payouts', () => {
+      const lines = tdsItems([rec('r1', 'abcde1234f', 2_041n, recAt, 'd1')], [run('d1', runAt)], [entryOf('p1'), entryOf('p2', { downloadId: 'd0' })]);
       expect(lines).toHaveLength(1);
       expect(lines[0]).toMatchObject({ facePaise: 2_041n, committedAt: runAt, status: 'PAID', paidAt: day(12), source: { kind: 'tdsRecoveryEntry', id: 'r1' } });
       expect(lines[0].description).toContain('bank run PD-d1 (1 payout)');
@@ -489,49 +492,74 @@ describe('fund sources — mapping the source records', () => {
       expect(lines[0].description).not.toContain('ABCDE');
     });
 
-    it('frozen: later payouts / runs never change an earlier line (no re-split)', () => {
-      const before = tdsItems([rec('r1', 'ABCDE1234F', 2_041n, recAt)], [run('d1', runAt)], [entryOf('p1')]);
-      const laterRun = new Date(day(20).getTime());
-      const after = tdsItems(
-        [rec('r1', 'ABCDE1234F', 2_041n, recAt), rec('r2', 'ABCDE1234F', 3_000n, new Date(laterRun.getTime() + 1_000))],
-        [run('d1', runAt), run('d2', laterRun)],
-        [entryOf('p1'), entryOf('p3', { downloadId: 'd2', amountPaise: 300_000n, item: { committedAt: day(19) } })],
-      );
-      expect(after[0]).toEqual(before[0]);
-      expect(after[1]).toMatchObject({ facePaise: 3_000n, committedAt: laterRun });
+    it('two close downloads each match their OWN run (stored ids)', () => {
+      const runs = [run('d1', runAt), run('d2', new Date(runAt.getTime() + 60_000))];
+      const ents = [entryOf('p1', { downloadId: 'd1' }), entryOf('p2', { downloadId: 'd2', item: { committedAt: day(11), status: 'COMMITTED', paidAt: null } })];
+      const lines = tdsItems([rec('r1', 'ABCDE1234F', 1_000n, recAt, 'd1'), rec('r2', 'ABCDE1234F', 1_500n, new Date(runAt.getTime() + 61_000), 'd2')], runs, ents);
+      expect(lines.map((l) => [l.source.id, l.committedAt, l.status])).toEqual([
+        ['r1', runs[0].downloadedAt, 'PAID'],
+        ['r2', runs[1].downloadedAt, 'COMMITTED'],
+      ]);
     });
 
-    it('yearly limit crossed → visible note + flag (PAN: base > this run; no-PAN: cumulative > this run)', () => {
-      const [pan] = tdsItems([rec('r1', 'ABCDE1234F', 6_000n, recAt, { tenant: 300_000n })], [run('d1', runAt)], [entryOf('p1')]);
-      expect(pan.flags).toContain('TDS_INCLUDES_EARLIER');
-      expect(pan.description).toContain('includes TDS for earlier payouts this year (yearly limit crossed)');
-      const [nopan] = tdsItems(
-        [rec('r2', '__NO_PAN__:OUT7', 6_000n, recAt, { tenant: 100_000n, pan: 300_000n })],
-        [run('d1', runAt)],
-        [entryOf('p7', { outletId: 'OUT7', payeePan: null })],
-      );
-      expect(nopan.flags).toContain('TDS_INCLUDES_EARLIER');
-      const [plain] = tdsItems([rec('r3', 'ABCDE1234F', 2_000n, recAt, { tenant: 100_000n })], [run('d1', runAt)], [entryOf('p1')]);
-      expect(plain.flags ?? []).not.toContain('TDS_INCLUDES_EARLIER');
+    it('a shared PAN: a row written by ANOTHER client\'s run is never matched to this client\'s run', () => {
+      // This client has a run at the same moment, but the row names the other client's download.
+      const [l] = tdsItems([rec('r1', 'ABCDE1234F', 700n, recAt, 'other-client-run')], [run('d1', runAt)], [entryOf('p1')]);
+      expect(l.flags).toContain('TDS_OTHER_CLIENT_RUN');
+      expect(l.description).toContain("Recovered with a payout run outside this client's statement");
+      expect(l.committedAt).toEqual(recAt);
+      // Older row (no id) and no run of THIS client in the window → the same note.
+      const [old] = tdsItems([rec('r2', 'ABCDE1234F', 700n, recAt)], [run('d1', new Date(recAt.getTime() - 11 * 60_000))], [entryOf('p1')]);
+      expect(old.flags).toContain('TDS_OTHER_CLIENT_RUN');
     });
 
-    it('a run whose payouts were ALL reversed before payment → the TDS line is returned; partly paid → committed', () => {
-      const [ret] = tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt)], [run('d1', runAt)], [entryOf('p1', { item: { status: 'RETURNED', paidAt: null, returnedAt: day(14) } })]);
-      expect(ret).toMatchObject({ status: 'RETURNED', returnedAt: day(14) });
-      const [mixed] = tdsItems(
-        [rec('r1', 'ABCDE1234F', 2_000n, recAt)],
-        [run('d1', runAt)],
-        [entryOf('p1'), entryOf('p2', { item: { status: 'COMMITTED', paidAt: null } })],
-      );
-      expect(mixed.status).toBe('COMMITTED');
+    it('stored id: a re-banked payout does NOT move the line (frozen on its run)', () => {
+      const before = tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt, 'd1')], [run('d1', runAt)], [entryOf('p1')]);
+      // p1 failed and was re-banked in d3 later: its downloadId now points at d3.
+      const later = new Date(runAt.getTime() + 5 * 86_400_000);
+      const after = tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt, 'd1')], [run('d1', runAt), run('d3', later)], [entryOf('p1', { downloadId: 'd3' })]);
+      expect(after[0].committedAt).toEqual(before[0].committedAt);
+      expect(after[0].facePaise).toBe(2_000n);
+      expect(after[0].description).toContain('re-banked in a later run');
     });
 
-    it('run not identifiable (no run within 10 min before, or no matching payout) → charged in full on the day recorded, flagged', () => {
-      const [far] = tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt)], [run('d1', new Date(recAt.getTime() - 11 * 60_000))], [entryOf('p1')]);
-      expect(far).toMatchObject({ facePaise: 2_000n, committedAt: recAt, status: 'PAID' });
-      expect(far.flags).toContain('TDS_RUN_UNMATCHED');
-      const [nomatch] = tdsItems([rec('r1', 'ZZZZZ0000Z', 2_000n, recAt)], [run('d1', runAt)], [entryOf('p1')]);
-      expect(nomatch.flags).toContain('TDS_RUN_UNMATCHED');
+    it('older rows (NULL id) use the interim match: the latest run in the window that HAS payouts for the PAN', () => {
+      const runs = [run('d1', runAt), run('d2', new Date(runAt.getTime() + 30_000))]; // d2 is later but has no PAN payout
+      const [l] = tdsItems([rec('r1', 'ABCDE1234F', 900n, new Date(runAt.getTime() + 40_000))], runs, [entryOf('p1', { downloadId: 'd1' }), entryOf('px', { downloadId: 'd2', payeePan: 'OTHER9999Z' })]);
+      expect(l.committedAt).toEqual(runAt);
+      expect(l.ref).toBe('TDS 194C · PD-d1');
+      // A run in the window but no payout for the PAN, nothing reversed → "bank run not identified", on the recorded day.
+      const [u] = tdsItems([rec('r2', 'ZZZZZ0000Z', 900n, recAt)], [run('d1', runAt)], [entryOf('p1')]);
+      expect(u.flags).toContain('TDS_RUN_UNMATCHED');
+      expect(u.committedAt).toEqual(recAt);
+    });
+
+    it('never "returned": the run\'s payouts reversed → paid, "Payouts reversed — TDS stays deposited"', () => {
+      // Reversal cleared the payout's run link (downloadId null) and its status is REVERSED.
+      const ents = [entryOf('p1', { downloadId: null, status: 'REVERSED', item: { status: 'RETURNED', paidAt: null, returnedAt: day(14) } })];
+      const [s1] = tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt, 'd1')], [run('d1', runAt)], ents);
+      expect(s1).toMatchObject({ status: 'PAID', committedAt: runAt });
+      expect(s1.flags).toContain('TDS_PAYOUTS_REVERSED');
+      expect(s1.description).toContain('Payouts reversed — TDS stays deposited');
+      const [s2] = tdsItems([rec('r2', 'ABCDE1234F', 2_000n, recAt)], [run('d1', runAt)], ents);
+      expect(s2.flags).toContain('TDS_PAYOUTS_REVERSED');
+      expect(s2.flags).not.toContain('TDS_RUN_UNMATCHED');
+    });
+
+    it('"includes TDS for earlier payouts" only on the FIRST positive row per PAN per FY, and only with earlier payouts this FY', () => {
+      const runs = [run('d0', at(2)), run('d1', runAt), run('d2', at(20))];
+      const ents = [entryOf('p0', { downloadId: 'd0' }), entryOf('p1', { downloadId: 'd1' }), entryOf('p2', { downloadId: 'd2' })];
+      const lines = tdsItems(
+        [rec('r1', 'ABCDE1234F', 6_000n, recAt, 'd1'), rec('r2', 'ABCDE1234F', 2_000n, new Date(at(20).getTime() + 1_000), 'd2')],
+        runs,
+        ents,
+      );
+      expect(lines[0].flags).toContain('TDS_INCLUDES_EARLIER');
+      expect(lines[0].description).toContain('includes TDS for earlier payouts this year (yearly limit crossed)');
+      expect(lines[1].flags ?? []).not.toContain('TDS_INCLUDES_EARLIER'); // a later run's own TDS — no note
+      // First row but no earlier payout this FY → no note.
+      const [solo] = tdsItems([rec('r3', 'ABCDE1234F', 2_000n, recAt, 'd1')], [run('d1', runAt)], [entryOf('p1')]);
+      expect(solo.flags ?? []).not.toContain('TDS_INCLUDES_EARLIER');
     });
 
     it('a negative true-up → a credit line dated when recorded; TDS recorded before the opening date is excluded', () => {
@@ -540,8 +568,8 @@ describe('fund sources — mapping the source records', () => {
       expect(credit.description).toContain('true-up (credit)');
       const stmt = buildFundStatement({
         rates: [],
-        entries: [entry({ id: 'o', kind: 'OPENING_BALANCE', amountPaise: 0n, date: day(12) })],
-        items: tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt)], [run('d1', runAt)], [entryOf('p1')]), // run on day 11
+        entries: [entry({ id: 'o', kind: 'OPENING_BALANCE', amountPaise: 0n, date: new Date(runAt.getTime() + 86_400_000) })],
+        items: tdsItems([rec('r1', 'ABCDE1234F', 2_000n, recAt, 'd1')], [run('d1', runAt)], [entryOf('p1')]),
       });
       expect(stmt.totals.tdsTotalPaise).toBe(0n);
     });

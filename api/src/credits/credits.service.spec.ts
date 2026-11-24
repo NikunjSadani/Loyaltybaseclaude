@@ -3445,6 +3445,8 @@ describe('CreditsService', () => {
       expect(recovery[0]).toMatchObject({
         clientId: 'deoleo', tenantSharePaise: 111100n, panTdsTotalPaise: 111100n,
         tenantBasePaise: 11000000n, panBasePaise: 11000000n, tdsInvoiceId: 'tds1', section: 'SEC_194C',
+        // Fund reconciliation (2026-11-24): the row stores the bank run that wrote it.
+        downloadId: 'd1',
       });
       // Retailer paid FULL (no deduction) — the bank total is the gross amount.
       expect(mockTx.tdsDeductionEntry.createMany).not.toHaveBeenCalled();
@@ -3532,6 +3534,8 @@ describe('CreditsService', () => {
       expect(byTenant['deoleo']).toBe(40400n);
       expect(byTenant['other']).toBe(70700n);
       expect(recovery.reduce((s, r) => s + r.tenantSharePaise, 0n)).toBe(111100n);
+      // Every pro-rata row (this client's AND the other client's) names the run that wrote it.
+      expect((recovery as Array<{ downloadId?: string }>).every((r) => r.downloadId === 'd1')).toBe(true);
       // panBase is the cross-tenant FY aggregate (₹1.1L), not just this event's base.
       expect(recovery[0].panBasePaise).toBe(11000000n);
     });
@@ -3801,6 +3805,9 @@ describe('CreditsService', () => {
         expect(mockTx.tdsRecoveryEntry.findMany.mock.calls[0][0].where.clientId).toBe('deoleo');
         const rec = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data[0];
         expect(rec).toMatchObject({ clientId: 'deoleo', panNumber: '__NO_PAN__:O1', section: 'SEC_194C', tenantSharePaise: 1000000n });
+        // Fund reconciliation (2026-11-24): the no-PAN writer stores the bank run too.
+        const run = (await mockTx.creditPayoutDownload.create.mock.results.at(-1)!.value) as { id: string };
+        expect(rec.downloadId).toBe(run.id);
       });
 
       it('(b) a download mixing 194R + 194C GROSS_UP entries for one PAN raises ONLY the 194C invoice (D7), as the anchor', async () => {

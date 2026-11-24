@@ -26,7 +26,7 @@ Each client **prepays** an advance. Spend comes off it:
 | Cash redemptions (UPI / bank) | Face value **plus** the agency fee |
 | Target / credit payouts | Gross award **plus** the agency fee |
 | Visibility payouts | Gross award **plus** the agency fee |
-| TDS 194C (gross-up) | What Gifsy actually pays as 194C TDS, in full, with its bank run (one line per TDS amount — never re-split later). When the yearly limit is crossed the line says it includes TDS for earlier payouts this year. A negative true-up is a credit line on the day it was recorded. |
+| TDS 194C (gross-up) | What Gifsy actually pays as 194C TDS, in full, with its bank run — one line per TDS amount. TDS recorded since 24 Nov 2026 stores its bank run, so its line never moves; an older line can move if one of its payouts is later re-banked. The first TDS line of the year for a PAN says when it includes TDS for earlier payouts (yearly limit crossed). TDS is never "returned": if the payouts are reversed it stays deposited. A negative true-up is a credit line on the day it was recorded. |
 
 Not on this ledger: points credits (money leaves only when points are redeemed), physical gifts, voucher dispersal campaigns, GST held back on visibility payouts, 194R TDS (the client pays it) and DEDUCT-method TDS.
 
@@ -105,7 +105,9 @@ Small orange chips are **flags**. Under the filters, "What the flags mean" expla
 | Face unknown | No face value could be found (₹0 charged) | Check the source record |
 | Date estimated | The source has no date for this event: a return is shown on the day it was committed, and a paid date is blank | Nothing — for information; the amount is right |
 | Includes earlier TDS | The TDS for earlier payouts this year became due with this bank run (yearly limit crossed) | Nothing — information |
-| Bank run not identified | The bank run this TDS was recorded with could not be identified — charged in full on the day recorded, status not tracked | Check the TDS entry against the payout downloads |
+| Bank run not identified | An older TDS entry whose bank run could not be identified — charged in full on the day recorded | Check the TDS entry against the payout downloads |
+| Other client run | Recovered with a payout run outside this client's statement (the PAN is shared with another client) | Nothing — information |
+| Payouts reversed | The payouts of that bank run were reversed — the TDS stays deposited and is not given back | Nothing — a later true-up nets it |
 
 The Overview also warns about **returns of spend committed before the opening date** (not credited automatically — record an Adjustment if the client should get it back) and **entries dated before the opening date** (excluded).
 
