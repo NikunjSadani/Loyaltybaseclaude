@@ -58,6 +58,7 @@ export const VISIBILITY_REASON_LABELS: Record<string, string> = {
   POSM_NOT_VISIBLE: 'POSM not visible',
   GEO_MISMATCH: 'Location mismatch',
   DUPLICATE_PHOTO: 'Duplicate photo',
+  INCORRECT_POSM: 'Incorrect POSM',
   OTHER: 'Other',
 };
 
