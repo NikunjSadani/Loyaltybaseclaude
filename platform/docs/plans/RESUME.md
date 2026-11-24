@@ -326,6 +326,12 @@ Detailed runbooks: [`runbooks/PROD-CUTOVER-RECORD.md`](runbooks/PROD-CUTOVER-REC
   number, incl. campaigns sent from the MSG91 panel, so volume is unrelated to portal sends. On repeated 4xx MSG91
   **auto-disables** the webhook (email "paused"); re-enable at WhatsApp → Webhook → pencil → **Webhook Status** → Update.
   Proof it works: `gcloud logging read … httpRequest.requestUrl:"/v1/notifications/status"` shows 201s.
+- Hubble's **prod webhook is NOT registered** — Hubble has never POSTed `/v1/hubble/webhook` (14 days to 2026-11-24).
+  The automatic re-check (`HubbleOrderSweep` → `RewardsService.sweepHubbleOrders`, every ~2 min, kill switch
+  `HUBBLE_ORDER_SWEEP_ENABLED=false`) is the safety net; an order still open 1 h after hand-off is flagged
+  `HUBBLE_PROCESSING_STALE`. It never refunds on "no order". Runbook §2a. Register the webhook with Hubble anyway.
+- Console "Advance" on a Hubble-handed order without a code: CONFIRMED→PROCESSING and PROCESSING→DISPATCHED are allowed
+  (only →DELIVERED needs a code); DISPATCHED takes it out of the automatic re-check. Open question for the owner (2026-11-24).
 - Hubble: a timeout is **not** a "no". Never refund a Hubble order by hand — use the runbook. Hubble only documents
   order statuses SUCCESS / PROCESSING / FAILED — CANCELLED / RETURNED are OUR redemption statuses, not Hubble's.
 - TDS 194R is keyed by the **payee PAN snapshot** (`payeePan`), not the outlet's current owner; every new payout path

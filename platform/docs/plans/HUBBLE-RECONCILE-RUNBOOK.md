@@ -18,12 +18,35 @@ refund a Hubble order by hand or in the database — the screens below are the o
 | Hubble's answer at confirm | What we do | What the retailer sees |
 |---|---|---|
 | Voucher issued | Order DELIVERED, code + PIN shown | the voucher |
-| Hubble still processing | Order stays open, webhook / retry finishes it | "processing" |
+| Hubble still processing | Order stays open; the **automatic re-check** (§2a) finishes it (a webhook or ops retry also can) | "processing" |
 | **Definitive rejection** (HTTP 400/422 with Hubble's own business error) **and** Hubble's lookup says "no such order" **and** the canary check passes (§4; at confirm max 2 tries / 20 s) | Order FAILED, points refunded at once | refund message with order number and date |
 | Hubble failed the order | Order FAILED, points refunded | refund message |
 | **Anything else** — timeout, network error, 5xx, 401/403/404/408/409/429, a rejection whose wording suggests a retry/duplicate/limit, an unverified "no order", an unexpected error | Order **CONFIRMED + flagged** (`HUBBLE_INDETERMINATE` or `HUBBLE_UNEXPECTED`). **No refund.** | "Redemption confirmed. Your voucher is taking longer than usual — we're checking with the voucher provider. It will appear in your orders once issued; our team will follow up if there's a problem." |
 
+## 2a. Automatic re-check (since 2026-11-24)
+
+⚠️ **Hubble has never POSTed our webhook in prod** (no `/v1/hubble/webhook` requests in 14 days as of 2026-11-24 — the
+prod webhook is not registered with Hubble). Before this, an order Hubble left PROCESSING was never looked at again
+(prod BAJAJ-26-000050). The automatic re-check is now the safety net:
+
+- Every ~2 minutes each API instance runs `HubbleOrderSweep` (Nest `@Interval`, same mechanism as the voucher-dispersal
+  reconcile). Kill switch: env `HUBBLE_ORDER_SWEEP_ENABLED=false`.
+- It re-checks open orders handed to Hubble (CONFIRMED / PROCESSING, no code, a place attempt / Hubble provider / Hubble
+  order id on record; not taken over manually) through the SAME `reconcileHubbleOrder` as the webhook and ops retry —
+  it never places an order and **never refunds on "no order"** (that stays an ops decision via Retry).
+- Not before 2 min after hand-off; every run for the first hour, then every 15 min, until 7 days. At most 25 orders per
+  run, least-recently-checked first. One instance at a time (Postgres advisory lock + per-order claim). Metadata:
+  `hubbleLastSweepAt`, `hubbleSweepCount`, `hubbleLastSweepOutcome`.
+- Delivered through the re-check → the member gets the same VOUCHER_ISSUED bell + WhatsApp as the confirm path (the
+  webhook / ops-retry path now sends it too — it did not before).
+- Still not delivered **1 hour** after hand-off (and no other flag open) → flagged **Still processing at Hubble**
+  (`HUBBLE_PROCESSING_STALE`): it appears in the console's needs-review list and the Daily Ops Digest "needs reconcile"
+  count. Hubble delivering later clears it automatically.
+
 ## 3. "Retry with Hubble" (ops)
+
+Shown (Gifsy admin) on **any open order handed to Hubble**, flagged or not. An unflagged one shows
+"Waiting for Hubble since <time> · last checked <time ago>".
 
 Asks Hubble for the order by our reference. It never places a new order. Outcomes shown on screen:
 
@@ -55,6 +78,7 @@ older orders without a fingerprint count only for the same tenant. If none verif
 | Hubble succeeded without a code (`HUBBLE_SUCCESS_NO_CODE`) | success but no voucher code in the reply | Retry; if still no code, get it from Hubble's portal → **Fulfil manually** |
 | Unknown Hubble status (`HUBBLE_UNKNOWN_STATUS:*`) | a status we don't recognise | check Hubble's portal; Retry or Fulfil manually |
 | Order changed while Hubble was processing (`HUBBLE_PROCESSING_CLAIM_LOST`) | a race with another change | Retry |
+| Still processing at Hubble (`HUBBLE_PROCESSING_STALE`) | the automatic re-check has asked Hubble for an hour+ and it is still not delivered (still processing, no order yet, or Hubble not answering) | check the order in Hubble's portal; **Retry with Hubble** (an aged "no order" can be refunded there), or **Fulfil manually**; escalate to Hubble if it stays processing |
 | Hubble sent a webhook but has no order for this reference (`HUBBLE_WEBHOOK_BUT_NOT_FOUND`) | contradiction — the webhook path never refunds | check Hubble's portal; Retry |
 | Hubble not configured / Amount not issuable on Hubble (`HUBBLE_NOT_CONFIGURED`, `HUBBLE_INVALID_AMOUNT`) | no Hubble order was ever placed | refund via the normal status change, or **Fulfil manually** (Retry is hidden) |
 | Hubble issued a voucher on top of a manual code / Hubble failed but a code is on the order / Hubble processing after a manual takeover (`HUBBLE_SUCCESS_MANUAL_CODE_PRESENT`, `HUBBLE_FAILED_VOUCHER_PRESENT`, `HUBBLE_PROCESSING_AFTER_MANUAL`) | **possible double issuance** — sticky: a later delivery does not clear it | check both vouchers in Hubble's portal; cancel one with the vendor if needed; then **Acknowledge** with a note |
