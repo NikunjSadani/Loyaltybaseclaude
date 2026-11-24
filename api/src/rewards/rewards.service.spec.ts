@@ -4173,6 +4173,60 @@ describe('RewardsService', () => {
     });
   });
 
+  // ─── Delivery address (shipping PII) — visibility matrix (2026-11-24) ─────────────────────────
+  describe('delivery address visibility (listOrders / getOrder)', () => {
+    const staff: JwtPayload = { sub: 'st1', role: 'GIFSY_STAFF', clientId: 'deoleo', assumed: true, gifsyRoleId: 'role-1', phone: '9990004444', name: '' };
+    const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '9990002222', name: '' };
+    const at = new Date('2026-10-01T10:00:00.000Z');
+    const DELIVERY = {
+      deliveryName: 'Ravi Kumar', deliveryPhone: '9822222222',
+      deliveryAddressLine1: '12 MG Road', deliveryAddressLine2: 'Near Clock Tower',
+      deliveryCity: 'Pune', deliveryState: 'Maharashtra', deliveryPincode: '411001',
+    };
+    const phy = { id: 'o1', partnerId: 'cp1', status: 'CONFIRMED', redemptionMode: 'PHYSICAL_GIFT', voucherCode: null, createdAt: at, updatedAt: at, ...DELIVERY };
+    const gc = { ...phy, id: 'o2', redemptionMode: 'GIFT_CARD' };
+    const leaks = (res: unknown) => /MG Road|Ravi Kumar|411001|9822222222/.test(JSON.stringify(res));
+    const listFor = async (u: JwtPayload) => {
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([phy, gc]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(2);
+      return service.listOrders(u, {});
+    };
+    afterEach(() => mockPrisma.redemptionOrder.findFirst.mockReset());
+
+    it('GIFSY_ADMIN and GIFSY_STAFF with rewards:manage_orders get the address on PHYSICAL_GIFT rows only', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read', 'rewards:manage_orders']));
+      for (const u of [gifsy, staff]) {
+        const res = await listFor(u);
+        expect(res.orders[0]).toMatchObject(DELIVERY);
+        expect(res.orders[1]).not.toHaveProperty('deliveryAddressLine1');
+        expect(res.orders[1]).not.toHaveProperty('deliveryName');
+      }
+      expect(mockPrisma.redemptionOrder.findMany.mock.calls[0][0].select.deliveryAddressLine1).toBe(true);
+    });
+
+    it('read-only GIFSY_STAFF, CLIENT_ADMIN, a SALES rep and the member list get the fields OMITTED', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read']));
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      const sales: JwtPayload = { sub: 's1', role: 'SALES_ASM', clientId: 'deoleo', phone: '9990005555', name: '' };
+      for (const u of [staff, clientAdmin, sales, partner]) {
+        const res = await listFor(u);
+        for (const o of res.orders) {
+          for (const k of Object.keys(DELIVERY)) expect(o).not.toHaveProperty(k);
+        }
+        expect(leaks(res)).toBe(false);
+      }
+    });
+
+    it('getOrder (operator branch): read-only staff get no delivery fields; GIFSY_ADMIN keeps them', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read']));
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({ ...phy, reward: null, partner: null });
+      const s = await service.getOrder(staff, 'o1');
+      expect(leaks(s)).toBe(false);
+      const g = await service.getOrder(gifsy, 'o1');
+      expect(g.order).toMatchObject(DELIVERY);
+    });
+  });
+
   // ─── Voucher PIN (card number + PIN gift cards) — visibility matrix ───────────────────────────
   describe('voucher PIN visibility (card + PIN gift cards)', () => {
     const staff: JwtPayload = { sub: 'st1', role: 'GIFSY_STAFF', clientId: 'deoleo', assumed: true, gifsyRoleId: 'role-1', phone: '9990004444', name: '' };
@@ -5347,7 +5401,7 @@ describe('RewardsService', () => {
         where: { deletedAt: null },
         orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
         take: 1,
-        select: { outletCode: true },
+        select: { outletCode: true, name: true, ownerName: true },
       });
       const XLSX = require('xlsx');
       const wb = XLSX.read(buf, { type: 'buffer' });
@@ -5357,6 +5411,86 @@ describe('RewardsService', () => {
       expect(aoa[1][h.indexOf('Phone')]).toBe('9811111111');
       expect(aoa[2][h.indexOf('Outlet ID')]).toBe('');
       expect(aoa[2][h.indexOf('Phone')]).toBe('9822222222');
+    });
+
+    describe('delivery address columns (2026-11-24)', () => {
+      const DELIVERY = {
+        deliveryName: 'Ravi Kumar', deliveryPhone: '09822222222',
+        deliveryAddressLine1: '12 MG Road', deliveryAddressLine2: 'Near Clock Tower',
+        deliveryCity: 'Pune', deliveryState: 'Maharashtra', deliveryPincode: '011001',
+      };
+      const sheetRows = () => [
+        {
+          orderNumber: 'PHY-1', redemptionMode: 'PHYSICAL_GIFT', status: 'CONFIRMED', reward: { name: 'Cooker' },
+          ...DELIVERY,
+          partner: {
+            phone: '9811111111', user: null, businessName: 'Biz One', ownerName: 'Partner Owner',
+            outlets: [{ outletCode: 'BJ-1', name: 'Outlet One', ownerName: 'Outlet Owner' }],
+          },
+        },
+        {
+          // Voucher row carrying stray delivery data → still blank delivery cells.
+          orderNumber: 'GC-1', redemptionMode: 'GIFT_CARD', status: 'CONFIRMED', reward: { name: 'Amazon' },
+          ...DELIVERY,
+          partner: { phone: null, user: null, businessName: 'Biz Two', ownerName: 'Owner Two', outlets: [] },
+        },
+      ];
+      const readSheet = (buf: Buffer) => {
+        const XLSX = require('xlsx');
+        const wb = XLSX.read(buf, { type: 'buffer', cellNF: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true }) as unknown[][];
+        return { XLSX, ws, aoa, h: aoa[0] as string[] };
+      };
+      const DELIVERY_COLS = ['Deliver to (name)', 'Delivery phone', 'Address line 1', 'Address line 2', 'City', 'State', 'PIN code'];
+
+      it('GIFSY_ADMIN: physical rows carry the full address (PIN + phone as TEXT); voucher rows stay blank; outlet/owner on all', async () => {
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue(sheetRows());
+        const { XLSX, ws, aoa, h } = readSheet(await service.getFulfilmentTemplate(assumedGifsy, {}));
+
+        expect(h.slice(0, 15)).toEqual([
+          'Order Number', 'Reward', 'Outlet ID', 'Phone', 'Redeemed on (IST)',
+          'Outlet name', 'Owner name', ...DELIVERY_COLS, 'Mode',
+        ]);
+        const phy = aoa[1];
+        expect(phy[h.indexOf('Outlet name')]).toBe('Outlet One');
+        expect(phy[h.indexOf('Owner name')]).toBe('Outlet Owner');
+        expect(DELIVERY_COLS.map((c) => phy[h.indexOf(c)])).toEqual([
+          'Ravi Kumar', '09822222222', '12 MG Road', 'Near Clock Tower', 'Pune', 'Maharashtra', '011001',
+        ]);
+        // TEXT cells — leading zeros survive.
+        for (const c of ['PIN code', 'Delivery phone']) {
+          const cell = ws[XLSX.utils.encode_cell({ r: 1, c: h.indexOf(c) })];
+          expect(cell.t).toBe('s');
+        }
+
+        const gc = aoa[2];
+        expect(gc[h.indexOf('Outlet name')]).toBe('Biz Two'); // no outlet → business name
+        expect(gc[h.indexOf('Owner name')]).toBe('Owner Two');
+        expect(DELIVERY_COLS.map((c) => gc[h.indexOf(c)])).toEqual(['', '', '', '', '', '', '']);
+      });
+
+      it('GIFSY_STAFF with rewards:manage_orders gets the address; read-only staff get blank delivery cells', async () => {
+        const staff: JwtPayload = { sub: 'st1', role: 'GIFSY_STAFF', clientId: 'deoleo', assumed: true, gifsyRoleId: 'role-1', phone: '9990004444', name: '' };
+        mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read', 'rewards:manage_orders']));
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue(sheetRows());
+        let s = readSheet(await service.getFulfilmentTemplate(staff, {}));
+        expect(s.aoa[1][s.h.indexOf('Address line 1')]).toBe('12 MG Road');
+
+        mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read']));
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue(sheetRows());
+        s = readSheet(await service.getFulfilmentTemplate(staff, {}));
+        expect(DELIVERY_COLS.map((c) => s.aoa[1][s.h.indexOf(c)])).toEqual(['', '', '', '', '', '', '']);
+        expect(JSON.stringify(s.aoa)).not.toContain('MG Road');
+      });
+
+      it('formula-leading address text is escaped', async () => {
+        const rows = sheetRows();
+        rows[0].deliveryAddressLine1 = '=HYPERLINK("http://x")';
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue(rows);
+        const { aoa, h } = readSheet(await service.getFulfilmentTemplate(assumedGifsy, {}));
+        expect(aoa[1][h.indexOf('Address line 1')]).toBe('\'=HYPERLINK("http://x")');
+      });
     });
 
     it('audit 6: leaves out orders handed to Hubble with no code (the upload would refuse them); owner scope = upload scope', async () => {

@@ -183,7 +183,8 @@ through "Retry with Hubble" (+500 points each); Hubble's real 404 "no order" bod
 
 | Work | Branch / worktree | State | Read |
 |---|---|---|---|
-| **Nothing else in flight** — every row that was here shipped (release/next2 → 2026-11-22, release/next3 → 2026-11-23, release/next4 → 2026-11-24; see §1). Worktrees removed 2026-11-24. | — | — | §1 |
+| **Delivery address for physical gifts** (PLATFORM-WIDE, owner-approved 2026-11-24): fulfilment Excel gains Outlet name, Owner name, Deliver to (name), Delivery phone, Address line 1/2, City, State, PIN code after "Redeemed on (IST)" (physical rows filled, voucher/cash blank; PIN + phones as TEXT; read-only — the header-based upload ignores them, old sheets still upload). Redemption Orders shows a "Deliver to" block + "Copy address" on PHYSICAL_GIFT rows. Address shown ONLY to GIFSY_ADMIN / GIFSY_STAFF with `rewards:manage_orders` (same rule as the full voucher code); omitted from the list/getOrder payload for everyone else (CLIENT_ADMIN, read-only staff, sales); partner My Orders unchanged. | `feat/fulfilment-delivery-address` (worktree `ship-addr`) | Built + targeted tests + build/tsc green; not pushed | `api/src/rewards/rewards-fulfilment.helpers.ts` header |
+| Other work — every earlier row shipped (release/next2 → 2026-11-22, release/next3 → 2026-11-23, release/next4 → 2026-11-24; see §1). | — | — | §1 |
 | **MSG91 webhook "Add Condition"** (receive only portal reports) | — | Owner deferred 2026-11-19. ⚠️ Can't simply filter on `crqid`: scheme sends and some untracked paths carry none (their reports would be lost). Needs a design. | this row |
 
 ## 4. What's next / waiting on the owner

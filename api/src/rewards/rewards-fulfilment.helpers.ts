@@ -8,14 +8,21 @@
  * guarded `transitionOrder` (one call per row) so no status logic lives here.
  *
  * Layout (single header row, then one row per order):
- *   Order Number | Reward | Outlet ID | Phone | Redeemed on (IST) | Mode | Current Status |
+ *   Order Number | Reward | Outlet ID | Phone | Redeemed on (IST) | Outlet name | Owner name |
+ *   Deliver to (name) | Delivery phone | Address line 1 | Address line 2 | City | State | PIN code |
+ *   Mode | Current Status |
  *   Voucher Code | Voucher PIN | Voucher Provider | Tracking Number | Tracking URL | New Status
  *
- * The first seven columns are the locked context the ops user reads (Outlet ID + Phone added
+ * The columns up to Current Status are the locked context the ops user reads (Outlet ID + Phone added
  * 2026-11-24 — ignored on upload, like the other context columns); the last six
  * are blank fill columns. `Order Number` is the row key. `Voucher PIN` is OPTIONAL (card number
  * + PIN gift cards only) and text-formatted so a leading-zero PIN survives Excel; the parser is
  * header-based, so a sheet downloaded before the column existed still uploads unchanged.
+ *
+ * Outlet name / Owner name + the seven DELIVERY columns (added 2026-11-24, between Redeemed on and
+ * Mode) are READ-ONLY info for shipping physical gifts — never read on upload. Delivery cells are
+ * filled for PHYSICAL_GIFT rows only (blank for voucher / cash rows) and only for a caller who may
+ * manage orders. Phone / Delivery phone / PIN code are TEXT cells (leading zeros survive).
  */
 
 import * as XLSX from 'xlsx';
@@ -32,6 +39,15 @@ export const FULFILMENT_COLS = [
   'Outlet ID',
   'Phone',
   'Redeemed on (IST)',
+  'Outlet name',
+  'Owner name',
+  'Deliver to (name)',
+  'Delivery phone',
+  'Address line 1',
+  'Address line 2',
+  'City',
+  'State',
+  'PIN code',
   'Mode',
   'Current Status',
   'Voucher Code',
@@ -44,6 +60,20 @@ export const FULFILMENT_COLS = [
 
 /** Fill columns that must be TEXT cells (a number cell has already lost leading zeros / digits). */
 export const TEXT_FILL_COLS = ['Voucher Code', 'Voucher PIN'] as const;
+
+/** Read-only context columns written as TEXT cells (leading zeros / long digits must survive). */
+export const TEXT_CONTEXT_COLS = ['Phone', 'Delivery phone', 'PIN code'] as const;
+
+/** Delivery address for a PHYSICAL_GIFT order (RedemptionOrder.delivery*). Read-only context. */
+export interface FulfilmentDelivery {
+  name?: string | null;
+  phone?: string | null;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  state?: string | null;
+  pincode?: string | null;
+}
 
 /** Row error for a Voucher Code / PIN cell Excel stored as a number. */
 export const VOUCHER_CELL_NUMBER_MESSAGE =
@@ -61,6 +91,15 @@ export interface FulfilmentTemplateRow {
   phone?: string;
   /** When the partner placed the redemption (RedemptionOrder.createdAt) — shown in IST. */
   redeemedAt?: Date | null;
+  /** The partner's primary outlet name (falls back to the business name). Read-only context. */
+  outletName?: string;
+  /** The outlet / partner owner name. Read-only context. */
+  ownerName?: string;
+  /**
+   * Delivery address — set ONLY for a PHYSICAL_GIFT order AND a caller who may manage orders;
+   * omitted → the delivery cells stay blank.
+   */
+  delivery?: FulfilmentDelivery | null;
   mode: string;
   currentStatus: string;
 }
@@ -77,6 +116,15 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
     o.outletCode ?? '',
     o.phone ?? '',
     o.redeemedAt ? istDateTimeCell(o.redeemedAt) : '',
+    o.outletName ?? '',
+    o.ownerName ?? '',
+    o.delivery?.name ?? '',
+    o.delivery?.phone ?? '',
+    o.delivery?.addressLine1 ?? '',
+    o.delivery?.addressLine2 ?? '',
+    o.delivery?.city ?? '',
+    o.delivery?.state ?? '',
+    o.delivery?.pincode ?? '',
     o.mode,
     o.currentStatus,
     '', // Voucher Code
@@ -90,7 +138,7 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
   const ws = aoaToSheetSafe([header, ...dataRows]);
   // Text-format the Voucher Code + PIN fill cells (Excel would otherwise turn "0123" into the
   // number 123, or a 16-digit card number into 6.001E+15 with its last digits zeroed).
-  for (const label of TEXT_FILL_COLS) {
+  for (const label of [...TEXT_FILL_COLS, ...TEXT_CONTEXT_COLS]) {
     const col = FULFILMENT_COLS.indexOf(label);
     for (let r = 1; r <= dataRows.length; r++) {
       const ref = XLSX.utils.encode_cell({ r, c: col });
@@ -104,6 +152,15 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
     { wch: 16 }, // Outlet ID
     { wch: 14 }, // Phone
     { wch: 18 }, // Redeemed on (IST)
+    { wch: 24 }, // Outlet name
+    { wch: 20 }, // Owner name
+    { wch: 20 }, // Deliver to (name)
+    { wch: 14 }, // Delivery phone
+    { wch: 32 }, // Address line 1
+    { wch: 24 }, // Address line 2
+    { wch: 16 }, // City
+    { wch: 16 }, // State
+    { wch: 10 }, // PIN code
     { wch: 14 }, // Mode
     { wch: 16 }, // Current Status
     { wch: 22 }, // Voucher Code

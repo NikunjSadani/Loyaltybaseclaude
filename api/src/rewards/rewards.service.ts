@@ -518,6 +518,49 @@ export function orderPartnerContact(p: OrderPartnerContactRow | null | undefined
   };
 }
 
+/** RedemptionOrder delivery columns — shipping PII (see DELIVERY_FIELDS_SELECT / canSeeFullVoucherCode). */
+type OrderDeliveryRow = {
+  deliveryName: string | null;
+  deliveryPhone: string | null;
+  deliveryAddressLine1: string | null;
+  deliveryAddressLine2: string | null;
+  deliveryCity: string | null;
+  deliveryState: string | null;
+  deliveryPincode: string | null;
+};
+
+/** Delivery columns to select for the operator order list (stripped unless the caller manages orders). */
+const DELIVERY_FIELDS_SELECT = {
+  deliveryName: true,
+  deliveryPhone: true,
+  deliveryAddressLine1: true,
+  deliveryAddressLine2: true,
+  deliveryCity: true,
+  deliveryState: true,
+  deliveryPincode: true,
+} satisfies Prisma.RedemptionOrderSelect;
+
+/** The fulfilment-sheet delivery cells for one order. */
+export function orderDeliveryFields(o: OrderDeliveryRow): {
+  name: string | null;
+  phone: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+} {
+  return {
+    name: o.deliveryName,
+    phone: o.deliveryPhone,
+    addressLine1: o.deliveryAddressLine1,
+    addressLine2: o.deliveryAddressLine2,
+    city: o.deliveryCity,
+    state: o.deliveryState,
+    pincode: o.deliveryPincode,
+  };
+}
+
 /**
  * The RedemptionOrder shape the Hubble auto-issuance helpers operate on (a structural
  * subset of the full row loaded by RewardsService.loadHubbleOrder — extra columns are
@@ -1154,6 +1197,8 @@ export class RewardsService {
           metadata: true,
           // Read ONLY to derive the operator-only `voucherFillable` below; never returned.
           pointsDeducted: true,
+          // Shipping PII — returned ONLY to an operator who manages orders, PHYSICAL_GIFT only.
+          ...DELIVERY_FIELDS_SELECT,
         },
         skip,
         // One extra row tells us whether another page exists (it is never returned).
@@ -1175,10 +1220,25 @@ export class RewardsService {
     const memberView = !this.isGifsy(user) && !tenantAdmin;
     // Card number + PIN: member (own) and fulfilling operator only. A SALES rep never — even on the
     // member branch (their login resolves to no partner today; this pins it regardless).
-    const hideCodes =
-      isSalesViewer(user.role) || (!memberView && !(await this.canSeeFullVoucherCode(user)));
-    const mapped = orders.map(({ metadata, pointsDeducted, partner, ...o }) => ({
+    const operatorManagesOrders = !memberView && (await this.canSeeFullVoucherCode(user));
+    const hideCodes = isSalesViewer(user.role) || (!memberView && !operatorManagesOrders);
+    // DELIVERY ADDRESS (shipping PII): the same rule as the full voucher code — GIFSY_ADMIN, or
+    // GIFSY_STAFF with rewards:manage_orders — and only on PHYSICAL_GIFT orders. Everyone else
+    // (CLIENT_ADMIN, read-only staff, sales, the member's own list) gets the fields OMITTED.
+    const showDelivery = operatorManagesOrders && !isSalesViewer(user.role);
+    const mapped = orders.map(({
+      metadata, pointsDeducted, partner,
+      deliveryName, deliveryPhone, deliveryAddressLine1, deliveryAddressLine2,
+      deliveryCity, deliveryState, deliveryPincode,
+      ...o
+    }) => ({
       ...o,
+      ...(showDelivery && o.redemptionMode === PayoutMode.PHYSICAL_GIFT
+        ? {
+            deliveryName, deliveryPhone, deliveryAddressLine1, deliveryAddressLine2,
+            deliveryCity, deliveryState, deliveryPincode,
+          }
+        : {}),
       // Member view: { id, businessName } only (unchanged). Operator/admin view: + the partner's
       // Outlet ID (primary outlet code) and registered phone for the Redemption orders console.
       partner: partner
@@ -1224,9 +1284,15 @@ export class RewardsService {
         },
       });
       if (!order) throw new NotFoundException('Order not found');
-      // Read-only staff get the "issued" indicator, never the code itself.
+      // Read-only staff get the "issued" indicator, never the code itself — and no delivery
+      // address (shipping PII follows the same manage-orders rule as the list + fulfilment sheet).
       if (!(await this.canSeeFullVoucherCode(user))) {
-        return { order: { ...order, ...hiddenVoucherFields(order.voucherCode) } };
+        const {
+          deliveryName: _n, deliveryPhone: _p, deliveryAddressLine1: _a1, deliveryAddressLine2: _a2,
+          deliveryCity: _c, deliveryState: _s, deliveryPincode: _pin,
+          ...rest
+        } = order;
+        return { order: { ...rest, ...hiddenVoucherFields(order.voucherCode) } };
       }
       return { order };
     }
@@ -3572,10 +3638,23 @@ export class RewardsService {
       where,
       include: {
         reward: { select: { name: true } },
-        partner: { select: ORDER_PARTNER_CONTACT_SELECT },
+        partner: {
+          select: {
+            ...ORDER_PARTNER_CONTACT_SELECT,
+            businessName: true,
+            ownerName: true,
+            outlets: {
+              ...ORDER_PARTNER_CONTACT_SELECT.outlets,
+              select: { outletCode: true, name: true, ownerName: true },
+            },
+          },
+        },
       },
       orderBy: { createdAt: 'asc' },
     });
+    // Delivery address = shipping PII: only a caller who may manage orders (the SAME predicate as the
+    // full voucher code). The route already requires rewards:manage_orders — defence in depth.
+    const showDelivery = await this.canSeeFullVoucherCode(user);
 
     // Audit 6: orders handed to Hubble with no code are NOT in the sheet — the upload would refuse any
     // manual move on them (HUBBLE_FORWARD_BLOCK_MESSAGE); Hubble delivers them, or ops use Retry /
@@ -3584,11 +3663,16 @@ export class RewardsService {
     return buildFulfilmentTemplateBuffer(
       sheetOrders.map((o) => {
         const contact = orderPartnerContact(o.partner);
+        const outlet = o.partner?.outlets?.[0];
         return {
           orderNumber: o.orderNumber,
           reward: o.reward?.name ?? '',
           outletCode: contact.outletCode ?? '',
           phone: contact.phone ?? '',
+          outletName: outlet?.name || o.partner?.businessName || '',
+          ownerName: outlet?.ownerName || o.partner?.ownerName || '',
+          delivery:
+            showDelivery && o.redemptionMode === PayoutMode.PHYSICAL_GIFT ? orderDeliveryFields(o) : null,
           mode: o.redemptionMode,
           currentStatus: o.status,
           redeemedAt: o.createdAt,

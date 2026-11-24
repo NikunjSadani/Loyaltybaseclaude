@@ -136,8 +136,71 @@ interface OrderItem {
   voucherProvider?: string | null;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
+  /** Delivery address (PHYSICAL_GIFT only). The server sends these ONLY to an operator who manages
+   *  orders (GIFSY_ADMIN / staff with rewards:manage_orders); omitted for everyone else. */
+  deliveryName?: string | null;
+  deliveryPhone?: string | null;
+  deliveryAddressLine1?: string | null;
+  deliveryAddressLine2?: string | null;
+  deliveryCity?: string | null;
+  deliveryState?: string | null;
+  deliveryPincode?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** The order's delivery address as copy-ready lines (empty when the server sent none). */
+function deliveryAddressLines(o: OrderItem): string[] {
+  const cityLine = [o.deliveryCity, o.deliveryState].map((s) => s?.trim()).filter(Boolean).join(', ');
+  const cityPin = [cityLine, o.deliveryPincode?.trim()].filter(Boolean).join(' - ');
+  return [
+    o.deliveryName,
+    o.deliveryPhone,
+    o.deliveryAddressLine1,
+    o.deliveryAddressLine2,
+    cityPin,
+  ].map((s) => (s ?? '').trim()).filter(Boolean);
+}
+
+/** Compact delivery block + "Copy address" for a physical-gift order row (operators who ship). */
+function DeliveryBlock({ order }: { order: OrderItem }) {
+  const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
+  const hasAddress = !!(order.deliveryAddressLine1 || order.deliveryAddressLine2 || order.deliveryCity || order.deliveryPincode);
+  if (!hasAddress && !order.deliveryName) return null;
+  const lines = deliveryAddressLines(order);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'));
+      setCopied('ok');
+    } catch {
+      setCopied('fail');
+    }
+    setTimeout(() => setCopied('idle'), 2000);
+  };
+  const cityLine = [order.deliveryCity, order.deliveryState].filter(Boolean).join(', ');
+  return (
+    <div className="mt-1.5 rounded-md border border-gray-100 bg-gray-50 px-2 py-1.5 text-[11px] leading-snug text-gray-700" data-testid="order-delivery">
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Deliver to</p>
+      {order.deliveryName && <p className="font-medium text-gray-900">{order.deliveryName}</p>}
+      {order.deliveryPhone && <p className="font-mono">{order.deliveryPhone}</p>}
+      {order.deliveryAddressLine1 && <p>{order.deliveryAddressLine1}</p>}
+      {order.deliveryAddressLine2 && <p>{order.deliveryAddressLine2}</p>}
+      {(cityLine || order.deliveryPincode) && (
+        <p>
+          {cityLine}
+          {order.deliveryPincode && <> {cityLine ? '· ' : ''}PIN <span className="font-mono">{order.deliveryPincode}</span></>}
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={copy}
+        className="mt-1 text-[10px] font-semibold text-blue-600 hover:underline"
+        aria-label={`Copy delivery address for order ${order.orderNumber ?? order.id.slice(-8)}`}
+      >
+        {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed — select the text' : 'Copy address'}
+      </button>
+    </div>
+  );
 }
 
 interface FulfilmentUploadResult {
@@ -1880,6 +1943,7 @@ function OrderRow({
           <p className="mt-0.5 font-mono text-[11px] text-gray-400" data-testid="order-outlet-id">
             <span className="sr-only">Outlet ID: </span>{order.partner?.outletCode || '—'}
           </p>
+          {order.redemptionMode === 'PHYSICAL_GIFT' && <DeliveryBlock order={order} />}
         </td>
         <td className="px-4 py-3 text-xs text-gray-600 font-mono whitespace-nowrap" data-testid="order-partner-phone">
           {order.partner?.phone || '—'}
@@ -2684,7 +2748,7 @@ function FulfilmentQueue({
           <div>
             <p className="text-sm font-semibold text-gray-900">Bulk fulfilment</p>
             <p className="text-xs text-gray-500 mt-0.5">
-              Download the fulfilment sheet, fill in voucher codes / tracking numbers, then upload it back.
+              Download the fulfilment sheet (includes the delivery address for physical gifts), fill in voucher codes / tracking numbers, then upload it back.
             </p>
           </div>
         </div>
