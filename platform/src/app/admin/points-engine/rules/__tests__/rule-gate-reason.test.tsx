@@ -10,6 +10,7 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import type { GateNode, PipelineNode, RuleConfigDraft } from '@/lib/points-engine/types';
+import { draftIssues } from '../_components/kit';
 
 vi.mock('@/lib/points-engine/api', () => ({ simulate: vi.fn() }));
 
@@ -45,11 +46,54 @@ describe('Gate card — reason + skip', () => {
     expect(latest).toMatchObject({ failAs: 'skip', onFail: 'zero', failReason: 'Target is 0' });
     rerender(<NodeCard node={latest} {...props} />);
 
+    // Back to Pay 0: the explicit failAs is KEPT ('zero'), never silently dropped; the select shows it.
     fireEvent.change(screen.getByLabelText('If the check fails'), { target: { value: 'zero' } });
-    expect((latest as GateNode).failAs).toBeUndefined();
+    expect(latest).toMatchObject({ failAs: 'zero', onFail: 'zero', failReason: 'Target is 0' });
     rerender(<NodeCard node={latest} {...props} />);
+    expect((screen.getByLabelText('If the check fails') as HTMLSelectElement).value).toBe('zero');
     fireEvent.change(screen.getByLabelText('Reason shown when it fails (optional)'), { target: { value: '' } });
-    expect(latest).toEqual(GATE); // back to exactly the default node
+    expect((latest as GateNode).failReason).toBeUndefined();
+  });
+
+  it('G1b: failAs zero on a legacy soft onFail shows "Pay 0" (the effective choice) and no soft option', () => {
+    const node: GateNode = { ...GATE, onFail: 'skipNode', failAs: 'zero', failReason: 'Target is 0' };
+    render(<NodeCard node={node} index={0} total={1} onMove={vi.fn()} onRemove={vi.fn()} onChange={vi.fn()} inputs={[]} />);
+    const sel = screen.getByLabelText('If the check fails') as HTMLSelectElement;
+    expect(sel.value).toBe('zero');
+    expect([...sel.options].map((o) => o.value)).toEqual(['zero', 'skip']);
+  });
+
+  it('G1c: a soft gate disables the reason field and says why; an over-long reason is kept and flagged (not truncated)', () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <NodeCard node={{ ...GATE, onFail: 'skipNode' }} index={0} total={1} onMove={vi.fn()} onRemove={vi.fn()} onChange={onChange} inputs={[]} />,
+    );
+    expect((screen.getByLabelText('Reason shown when it fails (optional)') as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByText(/Only shown when the gate pays 0 or skips the row/)).toBeTruthy();
+
+    const long = 'x'.repeat(205);
+    rerender(<NodeCard node={{ ...GATE }} index={0} total={1} onMove={vi.fn()} onRemove={vi.fn()} onChange={onChange} inputs={[]} />);
+    fireEvent.change(screen.getByLabelText('Reason shown when it fails (optional)'), { target: { value: long } });
+    expect(onChange.mock.calls.at(-1)![0].failReason).toHaveLength(205); // never silently cut
+    rerender(<NodeCard node={{ ...GATE, failReason: long }} index={0} total={1} onMove={vi.fn()} onRemove={vi.fn()} onChange={onChange} inputs={[]} />);
+    expect(screen.getByTestId('fail-reason-too-long').textContent).toMatch(/205 characters — shorten it to 200/);
+  });
+
+  it('G3: draftIssues — failAs zero/skip never warns "won\'t withhold"; length / soft-gate reason / bad failAs block', () => {
+    const draft = (g: Partial<GateNode>): RuleConfigDraft => ({
+      effectiveFrom: '2026-11-01', effectiveTo: null, evaluationBasis: 'PERIOD_AGGREGATE',
+      attachsTo: { scope: 'program_kpi', program: null, programCategory: null, kpiCode: 'ADHO' },
+      output: { awardType: 'POINTS', fieldId: 'cf' }, rounding: { mode: 'half_up', scale: 0 },
+      inputs: [{ ref: 'target', source: 'target:ADHO', type: 'number', nullAs: 'skipRule' }],
+      pipeline: [{ ...GATE, ...g }],
+    });
+    expect(draftIssues(draft({ onFail: 'skipNode', failAs: 'zero' })).warnings.join(' ')).not.toMatch(/won't withhold/);
+    expect(draftIssues(draft({ onFail: 'skipNode', failAs: 'skip' })).warnings.join(' ')).not.toMatch(/won't withhold/);
+    expect(draftIssues(draft({ onFail: 'skipNode' })).warnings.join(' ')).toMatch(/won't withhold/);
+    expect(draftIssues(draft({ failReason: 'x'.repeat(201) })).blocking.join(' ')).toMatch(/201 characters — keep it to 200/);
+    expect(draftIssues(draft({ onFail: 'skipNode', failReason: 'Target is 0' })).blocking.join(' ')).toMatch(/only shown when the gate pays 0/);
+    expect(draftIssues(draft({ failAs: 'nope' as never })).blocking.join(' ')).toMatch(/choose what happens/);
+    expect(draftIssues(draft({ failReason: 'Target is 0', failAs: 'zero' })).blocking).toEqual([]);
   });
 });
 

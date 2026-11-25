@@ -210,9 +210,13 @@ floor/cap/rounding order a structural guarantee.
 and `failAs: 'zero' | 'skip'`. Absent → today's behaviour exactly (pinned by a snapshot test of an existing rule).
 On failure: `failAs: 'skip'` → the row is SKIPPED (flagged for review) with `failReason`; `failAs: 'zero'`, or
 `onFail: 'zero'` with a `failReason`, → the rule pays 0 and the OK outcome carries `reason = failReason`
-(`skipNode` / `passthrough` are unchanged and carry no reason). A rule zeroed by a missing `nullAs: 'skipRule'` input
-now says why too: `reason = "No <KPI> target"` / "No <KPI> achievement" / "No visibility result" … (was an empty
-explanation). The reason is on `EvalOutcome.reason` → `row.reason` on OK rows, shown in the preview row, the simulator
+(`skipNode` / `passthrough` are unchanged and carry no reason — so `validateRule` REFUSES a `failReason` on such a soft
+gate without `failAs`, and the builder disables the field there: a reason is never silently dropped). With `failAs`
+set the builder offers only the hard outcomes and shows the effective one; `failAs` is never dropped on change; an
+over-long reason is kept and flagged (never truncated). A rule zeroed by a missing `nullAs: 'skipRule'` input now says
+why too: `reason = "No <KPI> target"` / "No <KPI> achievement" / "No visibility result" … (was an empty explanation)
+— **owner-approved 2026-11-25 for ALL rules (platform-wide, display only)**. KPI-scope skips carry a structured
+`row.skipKind = 'KPI_SCOPE'`; consumers use it, never the reason text (a failReason may say anything). The reason is on `EvalOutcome.reason` → `row.reason` on OK rows, shown in the preview row, the simulator
 and the reports' "Reason / Explanation" column as "<reason> — <explanation>" (rows with only one of the two are
 unchanged; the credit-upload file is untouched). Bajaj uses: gate `target > 0` failReason "Target is 0"; gate
 `NON_ADHO ≥ 400` failReason "NON ADHO below ₹400"; ADHO target input `nullAs: skipRule` → "No ADHO target".

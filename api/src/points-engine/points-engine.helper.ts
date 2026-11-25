@@ -1316,6 +1316,13 @@ export function validateRule(rule: PointsRuleConfig): string[] {
         if (n.failAs !== undefined && n.failAs !== 'zero' && n.failAs !== 'skip') {
           errs.push(`${w}: failAs must be 'zero' or 'skip'.`);
         }
+        // A reason is only ever SHOWN when the failure ends the rule (pay 0 / skip). On a soft gate (onFail skipNode /
+        // passthrough, no failAs) it would be silently dropped — refuse it instead.
+        if (typeof n.failReason === 'string' && n.failReason.trim() !== '' && n.failAs === undefined && n.onFail !== 'zero') {
+          errs.push(
+            `${w}: failReason is only shown when the gate pays 0 or skips the row — set onFail 'zero' or failAs 'zero' / 'skip', or remove the reason.`,
+          );
+        }
         break;
       case 'segmentFilter':
         if (typeof n.field !== 'string' || n.field === '') errs.push(`${w}: field must be a non-empty string.`);

@@ -1077,7 +1077,7 @@ describe('gate failReason / failAs + missing-input reason', () => {
     expect(expectOk(evaluateRule(r, ctx({ achievements: { NON_ADHO: 400 } }))).points).toBe(400);
   });
 
-  it('failReason alone keeps onFail (zero → 0 + reason; skipNode → continues, no reason)', () => {
+  it('failReason alone keeps onFail (zero → 0 + reason); on a SOFT gate it is refused by validateRule, never silently dropped', () => {
     const mk = (onFail: 'zero' | 'skipNode') =>
       rule({
         inputs: [{ ref: 'v', kpiCode: 'V', type: 'number', nullAs: 'zero' }],
@@ -1087,9 +1087,12 @@ describe('gate failReason / failAs + missing-input reason', () => {
         ],
       });
     expect(expectOk(evaluateRule(mk('zero'), ctx({ achievements: { V: 5 } })))).toMatchObject({ points: 0, reason: 'Below 10' });
-    const cont = expectOk(evaluateRule(mk('skipNode'), ctx({ achievements: { V: 5 } })));
-    expect(cont.points).toBe(5);
-    expect(cont.reason).toBeUndefined();
+    expect(validateRule(mk('zero'))).toEqual([]);
+    expect(validateRule(mk('skipNode')).join(' ')).toMatch(/failReason is only shown when the gate pays 0 or skips the row/);
+    // With an explicit failAs the onFail value no longer matters (failAs decides) → valid.
+    const soft = mk('skipNode');
+    (soft.pipeline[0] as { failAs?: string }).failAs = 'skip';
+    expect(validateRule(soft)).toEqual([]);
   });
 
   it('validateRule: accepts the opt-in fields, rejects a bad failAs / an over-long failReason', () => {

@@ -541,13 +541,19 @@ describe('Points Engine compute page', () => {
   it('PE-C15 (APPLIES-TO D5): a KPI-scope SKIP row shows its reason and the SKIP group counts scope skips', async () => {
     const scopeSkip = (code: string): ComputePreviewRow => ({
       outletCode: code, outletName: 'Store', kpiCode: 'UNNATI_VOL', status: 'SKIP',
-      reason: 'KPI not applicable to this outlet (KPI scope)',
+      reason: 'KPI not applicable to this outlet (KPI scope)', skipKind: 'KPI_SCOPE',
     });
     previewMock.mockResolvedValue({
       success: true,
       data: makePreview({
-        counts: { total: 3, ok: 0, skip: 3, error: 0, noRule: 0 },
-        rows: [scopeSkip('OUT-7'), scopeSkip('OUT-8'), { outletCode: 'OUT-9', kpiCode: 'CASES_SOLD', status: 'SKIP', reason: 'Target is zero' }],
+        counts: { total: 4, ok: 0, skip: 4, error: 0, noRule: 0 },
+        rows: [
+          scopeSkip('OUT-7'),
+          scopeSkip('OUT-8'),
+          { outletCode: 'OUT-9', kpiCode: 'CASES_SOLD', status: 'SKIP', reason: 'Target is zero' },
+          // A gate failReason that merely SAYS "(KPI scope)" is NOT a KPI-scope skip (structured flag only).
+          { outletCode: 'OUT-10', kpiCode: 'CASES_SOLD', status: 'SKIP', reason: 'Not eligible (KPI scope) per Bajaj' },
+        ],
       }),
     });
     render(<ComputePage />);

@@ -343,6 +343,9 @@ export function firstNumericVar(inputs: RuleInput[]): string {
   return inputs.find((i) => i.type === 'number' && i.ref.trim() !== '')?.ref ?? '';
 }
 
+/** Max length of a gate's failReason (mirrors the backend validateRule). */
+export const GATE_FAIL_REASON_MAX = 200;
+
 /** Flatten a predicate to its leaf operands (for validation). */
 export function predicateOperands(p: Predicate): Operand[] {
   if ('op' in p) return [p.left, p.right];
@@ -461,11 +464,21 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
         });
         break;
       }
-      case 'gate':
+      case 'gate': {
         predicateOperands(n.when).forEach((op) => checkOperand(op, where, false));
-        if (n.onFail !== 'zero')
-          warnings.push(`${where}: this gate won't withhold points on failure — only "Pay 0" withholds.`);
+        // failAs (opt-in) decides the failure when set: 'zero' and 'skip' both withhold.
+        const hard = n.failAs === 'zero' || n.failAs === 'skip' || n.onFail === 'zero';
+        if (!hard) warnings.push(`${where}: this gate won't withhold points on failure — only "Pay 0" withholds.`);
+        if (n.failAs !== undefined && n.failAs !== 'zero' && n.failAs !== 'skip')
+          blocking.push(`${where}: choose what happens when the check fails.`);
+        if (typeof n.failReason === 'string') {
+          if (n.failReason.length > GATE_FAIL_REASON_MAX)
+            blocking.push(`${where}: the reason is ${n.failReason.length} characters — keep it to ${GATE_FAIL_REASON_MAX}.`);
+          if (n.failReason.trim() !== '' && !hard)
+            blocking.push(`${where}: a reason is only shown when the gate pays 0 or skips the row — switch to "Pay 0" or remove the reason.`);
+        }
         break;
+      }
       case 'milestone':
         predicateOperands(n.when).forEach((op) => checkOperand(op, where, false));
         break;

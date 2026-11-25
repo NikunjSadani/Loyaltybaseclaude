@@ -55,6 +55,11 @@ export interface ComputePreviewRow {
    * — why it paid 0 (an opt-in gate `failReason`, or "No <KPI> target" for a missing skipRule input).
    */
   reason?: string;
+  /**
+   * Structured skip category — 'KPI_SCOPE' = the (outlet, KPI) pair is outside the KPI's APPLIES-TO scope (expected,
+   * nothing to fix). Consumers MUST use this, never match the reason text (a gate failReason can say anything).
+   */
+  skipKind?: 'KPI_SCOPE';
   /** One-line human explanation of the math (from the evaluator trace) for the preview report. */
   explanation?: string;
   /**

@@ -113,9 +113,9 @@ const GROUP_STYLES: Record<
   },
 };
 
-/** APPLIES-TO D5: the backend SKIPs an (outlet, KPI) pair outside the KPI's scope with the reason
- *  "KPI not applicable to this outlet (KPI scope)" — the row itself shows that reason verbatim. */
-const isKpiScopeSkip = (r: ComputePreviewRow) => (r.reason ?? '').includes('(KPI scope)');
+/** APPLIES-TO D5: the backend SKIPs an (outlet, KPI) pair outside the KPI's scope and flags it `skipKind: 'KPI_SCOPE'`
+ *  (the row shows its reason verbatim). Structured flag only — a gate's failReason text may contain anything. */
+const isKpiScopeSkip = (r: ComputePreviewRow) => r.skipKind === 'KPI_SCOPE';
 
 /** ERROR / SKIP / NO_RULE non-OK groups rendered as a reasoned panel list. */
 function NonOkGroup({ status, rows }: { status: Exclude<PreviewRowStatus, 'OK'>; rows: ComputePreviewRow[] }) {

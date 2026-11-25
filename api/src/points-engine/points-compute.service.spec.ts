@@ -591,6 +591,7 @@ describe('PointsComputeService — APPLIES-TO KPI scope (D5)', () => {
     expect(o1.points).toBe(200);
     expect(o2.status).toBe('SKIP');
     expect(o2.reason).toBe('KPI not applicable to this outlet (KPI scope)');
+    expect(o2.skipKind).toBe('KPI_SCOPE');
     expect(o2.points).toBeUndefined();
     expect(p.counts).toEqual({ total: 2, ok: 1, skip: 1, error: 0, noRule: 0 });
     // The scope lookup is tenant-pinned and limited to the active KPI codes.

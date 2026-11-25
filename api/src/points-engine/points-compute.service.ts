@@ -295,7 +295,7 @@ export class PointsComputeService {
         // D5: an (outlet, KPI) pair outside the KPI's APPLIES-TO scope is never computed.
         const inScope = kpiScopePred.get(kpiCode);
         if (inScope && !inScope(facets)) {
-          rows.push({ ...base, status: 'SKIP', reason: KPI_SCOPE_SKIP_REASON });
+          rows.push({ ...base, status: 'SKIP', reason: KPI_SCOPE_SKIP_REASON, skipKind: 'KPI_SCOPE' });
           continue;
         }
 

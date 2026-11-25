@@ -171,6 +171,8 @@ export interface ComputePreviewRow {
   achievement?: number | null;
   target?: number | null;
   reason?: string;
+  /** Structured skip category — 'KPI_SCOPE' = outside the KPI's scope (never match the reason text). */
+  skipKind?: 'KPI_SCOPE';
   explanation?: string;
   /** The outlet's visibility values the rule read (only when the rule has a visibility input). */
   visibility?: {
