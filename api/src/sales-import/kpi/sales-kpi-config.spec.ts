@@ -39,6 +39,7 @@ function txDb(extra: Record<string, unknown> = {}) {
     salesImportAggregate: { findMany: jest.fn(async () => []) },
     ...extra,
   };
+  db.$queryRaw = jest.fn(async () => []); // FOCUS-NAMES-FROM-KPI row locks
   db.$transaction = jest.fn(async (cb: (tx: unknown) => unknown) => cb(db));
   return db;
 }

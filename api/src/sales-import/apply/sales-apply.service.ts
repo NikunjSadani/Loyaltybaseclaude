@@ -54,6 +54,7 @@ import {
   focusFingerprintMatches,
   lazyCatalogue,
   reconcileMonth,
+  notCalculatedCodes,
   runMonthFocus,
   type MonthFocusRun,
 } from './month-focus';
@@ -158,6 +159,21 @@ export interface MonthWriteHooks {
  * or name of an existing row); strip owned keys from every other row of the month (full rewrite); record the apply,
  * the month's last-applied pointer and an audit row. A month that fails is reported and does not affect the others.
  */
+/**
+ * FOCUS-NAMES-FROM-KPI (owner 2026-11-25): a month whose reconciliation lists not-calculated KPIs (no focus names in the
+ * month's target file) applies everything else, leaves those KPIs EMPTY, and needs the admin's explicit acceptance.
+ * Returns the refusal text, or null when there is nothing to accept / it was accepted.
+ */
+export function notCalculatedRefusal(
+  month: string,
+  notCalculated: ReadonlyArray<{ kpiCode: string }>,
+  accepted: boolean,
+): string | null {
+  if (notCalculated.length === 0 || accepted) return null;
+  const codes = notCalculated.map((n) => n.kpiCode).join(', ');
+  return `${monthLabel(month)}: no focus names in this month's target file — ${codes} not calculated. Tick the warning to accept it (they are left empty) and try again.`;
+}
+
 @Injectable()
 export class SalesApplyService {
   private readonly log = new Logger(SalesApplyService.name);
@@ -288,6 +304,8 @@ export class SalesApplyService {
         if (!focusFingerprintMatches(run.resolution.fingerprint, req.expectedFocusFingerprints[month])) {
           throw new ConflictException(FOCUS_CHANGED_MESSAGE);
         }
+        const nc = notCalculatedRefusal(month, run.resolution.notCalculated, req.acknowledgeNotCalculatedMonths.includes(month));
+        if (nc) throw new BadRequestException(nc);
       }
     }
 
@@ -310,6 +328,10 @@ export class SalesApplyService {
     if (!Array.isArray(ack) || ack.some((m) => typeof m !== 'string')) {
       throw new BadRequestException('acknowledgePartialMonths must be a list of months.');
     }
+    const ackNc = body.acknowledgeNotCalculatedMonths ?? [];
+    if (!Array.isArray(ackNc) || ackNc.some((m) => typeof m !== 'string')) {
+      throw new BadRequestException('acknowledgeNotCalculatedMonths must be a list of months.');
+    }
     const fps: unknown = body.expectedFocusFingerprints ?? {};
     if (!fps || typeof fps !== 'object' || Array.isArray(fps) || Object.values(fps).some((v) => typeof v !== 'string')) {
       throw new BadRequestException('expectedFocusFingerprints must map months to the fingerprints from the preview.');
@@ -321,6 +343,7 @@ export class SalesApplyService {
       acknowledgePartialMonths: ack,
       acknowledgeOlderThanLastApplied: body.acknowledgeOlderThanLastApplied === true,
       expectedFocusFingerprints: fps as Record<string, string>,
+      acknowledgeNotCalculatedMonths: ackNc as string[],
     };
   }
 
@@ -332,6 +355,7 @@ export class SalesApplyService {
       acknowledgePartialMonths: string[];
       acknowledgeOlderThanLastApplied: boolean;
       expectedFocusFingerprints: Record<string, string>;
+      acknowledgeNotCalculatedMonths: string[];
     },
     /** The request-scoped focus catalogue (see lazyCatalogue). */
     catalogue: () => Promise<FocusCatalogue>,
@@ -380,6 +404,8 @@ export class SalesApplyService {
           if (!focusFingerprintMatches(focus.resolution.fingerprint, req.expectedFocusFingerprints[month])) {
             throw new MonthApplyError(FOCUS_CHANGED_MESSAGE);
           }
+          const nc = notCalculatedRefusal(month, focus.resolution.notCalculated, req.acknowledgeNotCalculatedMonths.includes(month));
+          if (nc) throw new MonthApplyError(nc);
         }
         // Day data only inside its window (current + 3 previous): an older month reads no day split at all.
         const withDays = !isBeyondDayDataRetention(month);
@@ -408,6 +434,7 @@ export class SalesApplyService {
           evalDefs: focus?.evalDefs ?? defs,
           lastDay: dayOfDate(summary.lastDate),
           focusFingerprint: focus?.resolution.fingerprint ?? '',
+          notCalculated: focus?.resolution.notCalculated ?? [],
           mapping: {
             fingerprint: imp.mappingFingerprint,
             dimensionKeys: ((snap?.mappingSnapshot as unknown as SalesColumnMapping | null)?.dimensions ?? []).map((d) => d.key),
@@ -447,6 +474,8 @@ export class SalesApplyService {
       lastDay: number | null;
       /** FOCUS-FROM-TARGETS: the focus fingerprint written with (recorded on the audit row only when non-empty). */
       focusFingerprint?: string;
+      /** FOCUS-NAMES-FROM-KPI: KPIs left empty this month, accepted by the admin (recorded on the audit row when any). */
+      notCalculated?: Array<{ kpiCode: string; namesFromKpi: string; message: string }>;
       /** IMPORT only: the mapping the lines were parsed with (stored on the history set header). */
       mapping?: { fingerprint: string | null; dimensionKeys: string[] };
       /** IMPORT of a roster-only import: roster outlets not on the processing-time roster (their sales not included). */
@@ -613,6 +642,9 @@ export class SalesApplyService {
           totals,
           dayData,
           ...(w.focusFingerprint ? { focusFingerprint: w.focusFingerprint } : {}),
+          ...(w.notCalculated && w.notCalculated.length > 0
+            ? { notCalculated: { kpiCodes: w.notCalculated.map((n) => n.kpiCode), acceptedById: user.sub, messages: w.notCalculated.map((n) => n.message) } }
+            : {}),
           ...(w.outletsNotIncluded !== undefined ? { outletsNotIncluded: w.outletsNotIncluded } : {}),
         } as unknown as Prisma.InputJsonValue,
         metadata: { clientId, applyId: applyRow.id, batchId: batch.id, source: w.source },
@@ -669,9 +701,11 @@ export class SalesApplyService {
       blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state }) ??
       set.blocked ??
       focusBlockedReason(month, focus.resolution.blockers);
+    const reconciliation = reconcileMonth(focus, comp, owned, last?.at ?? null, existing);
+    const ncCodes = notCalculatedCodes(reconciliation);
     return {
       month,
-      reconciliation: reconcileMonth(focus, comp, owned, last?.at ?? null),
+      reconciliation,
       monthState: state.state,
       canApply: blockedReason === null,
       ...(blockedReason ? { blockedReason } : {}),
@@ -700,6 +734,7 @@ export class SalesApplyService {
           delta: Math.round((newTotal - currentTotal) * 1e6) / 1e6,
           outletsNonZero: comp.stats[i].outletsNonZero,
           outletsNegative: comp.stats[i].outletsNegative,
+          ...(ncCodes.has(d.kpiCode) ? { notCalculated: true as const } : {}),
         };
       }),
     };
@@ -761,6 +796,8 @@ export class SalesApplyService {
           if (!focusFingerprintMatches(focus.resolution.fingerprint, body.expectedFocusFingerprint)) {
             throw new ConflictException(FOCUS_CHANGED_MESSAGE);
           }
+          const nc = notCalculatedRefusal(month, focus.resolution.notCalculated, body.confirmNotCalculated === true);
+          if (nc) throw new BadRequestException(nc);
         }
         const withDays = !isBeyondDayDataRetention(month);
         const comp = await computeMonthRows(historyPager(tx, clientId, month, AGG_PAGE_SIZE, { withDays }), focus?.evalDefs ?? defs, roster, {
@@ -784,6 +821,7 @@ export class SalesApplyService {
           roster,
           comp,
           focusFingerprint: focus?.resolution.fingerprint ?? '',
+          notCalculated: focus?.resolution.notCalculated ?? [],
         });
         await hooks?.inTx?.(tx, res);
         return res;

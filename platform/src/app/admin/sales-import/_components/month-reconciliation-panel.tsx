@@ -492,5 +492,6 @@ export function MonthReconciliationPanel({
 /** The amber/red facts that should open a collapsed month row by themselves. */
 export function reconciliationNeedsAttention(r: MonthReconciliation | null | undefined): boolean {
   if (!r) return false;
-  return r.blockers.length > 0 || r.targets.newerThanLastApply || (r.focus.length > 0 && r.targets.targetUploadedAt === null);
+  return r.blockers.length > 0 || r.targets.newerThanLastApply || (r.focus.length > 0 && r.targets.targetUploadedAt === null)
+    || (r.notCalculated?.length ?? 0) > 0;
 }

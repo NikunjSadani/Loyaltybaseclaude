@@ -74,6 +74,11 @@ export interface KpiDefLite {
   /** FOCUS-FROM-TARGETS: absent / 'FILTER' = `filter` for every outlet; 'TARGET_NAMES' = per-outlet products (see below). */
   productSource?: SalesKpiProductSource;
   /**
+   * FOCUS-NAMES-FROM-KPI: only on a TARGET_NAMES definition that reads ANOTHER KPI's per-outlet names (absent = its own
+   * kpiCode). The products are resolved by the same resolveMonthFocus pass, so they equal the source KPI's per outlet.
+   */
+  focusNamesFromKpi?: string;
+  /**
    * FOCUS-FROM-TARGETS (set by attachOutletFilters, only on TARGET_NAMES definitions): the filter to use for a ROSTER
    * outlet code; `undefined` → the outlet gets NO key for this KPI (omitted, not 0). Absent → `filter` for every outlet.
    */
@@ -161,6 +166,17 @@ function compiledDefScope(def: ScopeDef): CompiledScope | null {
       : { outletTypes: facetSet(eff.outletTypes), programs: facetSet(eff.programs), subPrograms: facetSet(eff.subPrograms) };
   compiledScopeCache.set(def, compiled);
   return compiled;
+}
+
+/**
+ * FOCUS-NAMES-FROM-KPI: a canonical key of the definition's EFFECTIVE scope (own outletTypes / programs ∩ the KPI's
+ * applies-to; trimmed, UPPERCASED, sorted). Two definitions with the same key write exactly the same outlets.
+ */
+export function effectiveScopeKey(def: ScopeDef): string {
+  const c = compiledDefScope(def);
+  if (c === null) return 'DISJOINT';
+  const f = (x: ReadonlySet<string> | null) => (x === null ? null : [...x].sort());
+  return JSON.stringify([f(c.outletTypes), f(c.programs), f(c.subPrograms)]);
 }
 
 /** Same rule as common/applies-to `facetHasValue`: empty facet = all; D4 blank outlet value = out; trimmed + ci. */
@@ -609,6 +625,8 @@ export function definitionsHash(
       ...canonicalScopeKey(kpiOwnScope(d)),
       // FOCUS-FROM-TARGETS: only when per-outlet — every FILTER definition's hash is unchanged.
       ...(d.productSource === 'TARGET_NAMES' ? { productSource: 'TARGET_NAMES' } : {}),
+      // FOCUS-NAMES-FROM-KPI: only when borrowing another KPI's names — every other definition's hash is unchanged.
+      ...(d.productSource === 'TARGET_NAMES' && d.focusNamesFromKpi ? { focusNamesFromKpi: d.focusNamesFromKpi } : {}),
     }))
     .sort((a, b) => (a.kpiCode < b.kpiCode ? -1 : a.kpiCode > b.kpiCode ? 1 : 0));
   return createHash('sha256').update(stableStringify(canon)).digest('hex');

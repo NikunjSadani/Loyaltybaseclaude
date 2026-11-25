@@ -196,6 +196,8 @@ export function applyBlockers(
   selected: Set<string>,
   partialAcks: Set<string>,
   olderAck: boolean,
+  /** FOCUS-NAMES-FROM-KPI: months whose not-calculated KPIs the admin accepted. */
+  notCalculatedAcks: Set<string> = new Set(),
 ): string[] {
   const out: string[] = [];
   const picked = months.filter((m) => selected.has(m.month));
@@ -205,6 +207,10 @@ export function applyBlockers(
     // FOCUS-FROM-TARGETS: the server sets canApply false for any blocker; never let one through if it ever did not.
     else if ((m.reconciliation?.blockers.length ?? 0) > 0) out.push(focusBlockedText(m));
     if (isPartialMonth(m) && !partialAcks.has(m.month)) out.push(`Confirm the partial-month replacement for ${monthLabel(m.month)}.`);
+    const nc = m.reconciliation?.notCalculated ?? [];
+    if (nc.length > 0 && !notCalculatedAcks.has(m.month)) {
+      out.push(`Accept that ${nc.map((n) => n.kpiCode).join(', ')} ${nc.length === 1 ? 'is' : 'are'} not calculated for ${monthLabel(m.month)}.`);
+    }
   }
   if (picked.some((m) => m.warnings.includes('OLDER_THAN_LAST_APPLIED')) && !olderAck) {
     out.push("Confirm that you want to roll a month back to this file's older data.");

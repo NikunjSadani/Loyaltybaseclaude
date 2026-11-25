@@ -18,6 +18,7 @@ import {
   OutletKpiAccumulator,
   SALES_KPI_MEASURES,
   definitionsHash,
+  effectiveScopeKey,
   entryMatches,
   outletInScope,
   redundantAnyOfEntries,
@@ -47,8 +48,26 @@ export const TARGET_NAMES_FILTER_MUST_BE_EMPTY =
   "A KPI whose products come from the target file can't also have its own product list. Clear the product list first.";
 export const TARGET_NAMES_NEEDS_PRODUCT_COLUMNS =
   "The column mapping has no product (dimension) columns, so a 'from the target file' KPI has no products to match the names against.";
+export const FOCUS_NAMES_FROM_NEEDS_TARGET_NAMES =
+  "Only a KPI whose products come from the target file can use another KPI's focus names.";
+export const FOCUS_NAMES_FROM_SELF = "A KPI can't use its own focus names as another KPI's. Pick a different KPI, or leave it empty.";
+export const FOCUS_NAMES_FROM_NOT_FOCUS = (code: string) =>
+  `"${code}" is not a Sales Import KPI whose products come from the target file, so it has no focus names to use. Set that KPI to 'from the target file' first.`;
+export const FOCUS_NAMES_FROM_CHAIN = (code: string, from: string) =>
+  `"${code}" itself uses the focus names of "${from}". Pick "${from}" directly.`;
+export const FOCUS_NAMES_FROM_HAS_DEPENDENTS = (code: string, dependents: readonly string[]) =>
+  `${dependents.map((d) => `"${d}"`).join(', ')} ${dependents.length === 1 ? 'uses' : 'use'} the focus names of "${code}". Change ${dependents.length === 1 ? 'that KPI' : 'those KPIs'} first.`;
+export const FOCUS_NAMES_FROM_SCOPE = (code: string, from: string) =>
+  `"${code}" must apply to exactly the same outlets as "${from}" (whose focus names it uses): make the outlet types / programmes here and the KPI's applies-to in KPI settings the same for both.`;
 export const TARGET_NAMES_TEST_MESSAGE =
   "Test a 'from the target file' KPI on the month screen: its products differ per outlet and per month, so they are checked against each month's targets there.";
+
+/** Stored focusNamesFromKpi → the code to use, or null (own kpiCode). Only meaningful with TARGET_NAMES. */
+export function focusNamesFromOf(v: unknown, productSource: unknown): string | null {
+  if (productSourceOf(productSource) !== 'TARGET_NAMES' || typeof v !== 'string') return null;
+  const t = v.trim();
+  return t === '' ? null : t;
+}
 
 /** Stored productSource → the contract value (anything but TARGET_NAMES reads as FILTER). */
 export function productSourceOf(v: unknown): SalesKpiProductSource {
@@ -56,12 +75,15 @@ export function productSourceOf(v: unknown): SalesKpiProductSource {
 }
 
 export function toDto(row: SalesKpiDefinition): SalesKpiDefinitionDto {
+  const namesFrom = focusNamesFromOf(row.focusNamesFromKpi, row.productSource);
   return {
     id: row.id,
     kpiCode: row.kpiCode,
     measure: row.measure as SalesKpiMeasure,
     filter: (row.filter ?? {}) as SalesKpiFilter,
     productSource: productSourceOf(row.productSource),
+    // FOCUS-NAMES-FROM-KPI: only when set (every other definition's DTO is unchanged).
+    ...(namesFrom ? { focusNamesFromKpi: namesFrom } : {}),
     outletTypes: row.outletTypes,
     programs: row.programs,
     enabled: row.enabled,
@@ -74,15 +96,21 @@ export function toDto(row: SalesKpiDefinition): SalesKpiDefinitionDto {
  * `kpiOutletType` and the APPLIES-TO `kpiScope`; `kpiOwnScope` resolves them exactly like `kpiAppliesTo`.
  */
 export function toLite(
-  row: Pick<SalesKpiDefinition, 'kpiCode' | 'measure' | 'filter' | 'outletTypes' | 'programs'> & { productSource?: string | null },
+  row: Pick<SalesKpiDefinition, 'kpiCode' | 'measure' | 'filter' | 'outletTypes' | 'programs'> & {
+    productSource?: string | null;
+    focusNamesFromKpi?: string | null;
+  },
   kpi: KpiScopeLike | null = null,
 ): KpiDefLite {
+  const namesFrom = focusNamesFromOf(row.focusNamesFromKpi, row.productSource);
   return {
     kpiCode: row.kpiCode,
     measure: row.measure as SalesKpiMeasure,
     filter: (row.filter ?? {}) as SalesKpiFilter,
     // FOCUS-FROM-TARGETS: only a TARGET_NAMES definition carries the field (FILTER lites stay exactly as before).
     ...(productSourceOf(row.productSource) === 'TARGET_NAMES' ? { productSource: 'TARGET_NAMES' as const } : {}),
+    // FOCUS-NAMES-FROM-KPI: only on a definition that borrows another KPI's names.
+    ...(namesFrom ? { focusNamesFromKpi: namesFrom } : {}),
     outletTypes: row.outletTypes ?? [],
     programs: row.programs ?? [],
     kpiOutletType: (kpi?.outletType ?? '').trim() || null,
@@ -224,11 +252,26 @@ export class SalesKpiDefService {
       throw new BadRequestException(`productSource must be one of ${SALES_KPI_PRODUCT_SOURCES.join(', ')}.`);
     }
     const productSource = rawSource as SalesKpiProductSource;
+    // FOCUS-NAMES-FROM-KPI: read ANOTHER KPI's per-outlet names. Only with TARGET_NAMES; never itself; the source must be
+    // an ENABLED TARGET_NAMES definition that reads its OWN names (one level only → no chains, no cycles).
+    if (dto.focusNamesFromKpi !== undefined && dto.focusNamesFromKpi !== null && typeof dto.focusNamesFromKpi !== 'string') {
+      throw new BadRequestException('focusNamesFromKpi must be a KPI code or empty.');
+    }
+    const namesFromRaw = typeof dto.focusNamesFromKpi === 'string' ? dto.focusNamesFromKpi.trim() : '';
+    const focusNamesFromKpi = namesFromRaw === '' ? null : namesFromRaw;
+    // The SOURCE itself is checked inside the write transaction (assertSourceOk), under a row lock.
+    if (focusNamesFromKpi !== null) {
+      if (productSource !== 'TARGET_NAMES') throw new BadRequestException(FOCUS_NAMES_FROM_NEEDS_TARGET_NAMES);
+      if (focusNamesFromKpi === kpiCode) throw new BadRequestException(FOCUS_NAMES_FROM_SELF);
+    }
     if (productSource === 'TARGET_NAMES') {
       if ((fv.filter.anyOf?.length ?? 0) > 0 || (fv.filter.noneOf?.length ?? 0) > 0) {
         throw new BadRequestException(TARGET_NAMES_FILTER_MUST_BE_EMPTY);
       }
-      if (!kpi.hasNameOverride || !(kpi.nameOverrideLabel ?? '').trim()) throw new BadRequestException(TARGET_NAMES_NEEDS_NAME_COLUMN);
+      // A borrowing definition reads the SOURCE KPI's name column (validated on the source), not its own.
+      if (focusNamesFromKpi === null && (!kpi.hasNameOverride || !(kpi.nameOverrideLabel ?? '').trim())) {
+        throw new BadRequestException(TARGET_NAMES_NEEDS_NAME_COLUMN);
+      }
       // The names are matched against products = combinations of the product (dimension) columns; with none, nothing
       // can ever match (same rule as PRODUCT_COUNT).
       if (profile.dimensions.length === 0) throw new BadRequestException(TARGET_NAMES_NEEDS_PRODUCT_COLUMNS);
@@ -243,6 +286,7 @@ export class SalesKpiDefService {
       measure,
       filter: productSource === 'TARGET_NAMES' ? {} : fv.filter,
       productSource,
+      focusNamesFromKpi,
       outletTypes: strList(dto.outletTypes, 'outletTypes').map((s) => s.toUpperCase()),
       programs: strList(dto.programs, 'programs'),
       enabled: dto.enabled ?? true,
@@ -258,6 +302,7 @@ export class SalesKpiDefService {
       measure: v.measure,
       filter: v.filter as Prisma.InputJsonValue,
       productSource: v.productSource,
+      focusNamesFromKpi: v.focusNamesFromKpi,
       outletTypes: v.outletTypes,
       programs: v.programs,
       enabled: v.enabled,
@@ -265,6 +310,7 @@ export class SalesKpiDefService {
       updatedById: user.sub,
     };
     return this.prisma.$transaction(async (tx) => {
+      await this.assertSourceOk(tx, clientId, v);
       const existing = await tx.salesKpiDefinition.findUnique({ where: { clientId_kpiCode: { clientId, kpiCode: v.kpiCode } } });
       if (existing?.enabled) throw new ConflictException(`"${v.kpiCode}" is already fed by Sales Import.`);
       // A disabled (released) definition is revived in place — (clientId, kpiCode) is unique.
@@ -296,7 +342,23 @@ export class SalesKpiDefService {
       const clash = await this.prisma.salesKpiDefinition.findUnique({ where: { clientId_kpiCode: { clientId, kpiCode: v.kpiCode } } });
       if (clash) throw new ConflictException(`"${v.kpiCode}" already has a Sales Import definition.`);
     }
+    const sameList = (a: readonly string[], b: readonly string[]) =>
+      JSON.stringify([...a].map((x) => x.trim().toUpperCase()).sort()) === JSON.stringify([...b].map((x) => x.trim().toUpperCase()).sort());
     return this.prisma.$transaction(async (tx) => {
+      // FOCUS-NAMES-FROM-KPI (inside the write tx, under row locks): a definition other KPIs borrow names from must stay
+      // an enabled, own-names TARGET_NAMES definition under the same code and the same outlet scope — otherwise refuse
+      // (the borrowers would silently lose their products). A borrower re-checks its source.
+      if (
+        v.kpiCode !== before.kpiCode ||
+        !v.enabled ||
+        v.productSource !== 'TARGET_NAMES' ||
+        v.focusNamesFromKpi !== null ||
+        !sameList(v.outletTypes, before.outletTypes ?? []) ||
+        !sameList(v.programs, before.programs ?? [])
+      ) {
+        await this.assertNoBorrowers(tx, clientId, before.kpiCode, before.id);
+      }
+      await this.assertSourceOk(tx, clientId, v);
       const row = await tx.salesKpiDefinition.update({
         where: { id: before.id },
         data: {
@@ -304,6 +366,7 @@ export class SalesKpiDefService {
           measure: v.measure,
           filter: v.filter as Prisma.InputJsonValue,
           productSource: v.productSource,
+          focusNamesFromKpi: v.focusNamesFromKpi,
           outletTypes: v.outletTypes,
           programs: v.programs,
           enabled: v.enabled,
@@ -326,12 +389,56 @@ export class SalesKpiDefService {
     });
   }
 
+  /** Row lock on (clientId, kpiCode)'s definition for the rest of the transaction (no-op when absent). */
+  private async lockDefinition(tx: Prisma.TransactionClient, clientId: string, kpiCode: string): Promise<void> {
+    await tx.$queryRaw(Prisma.sql`
+      SELECT "id" FROM "sales_kpi_definitions" WHERE "clientId" = ${clientId} AND "kpiCode" = ${kpiCode} FOR UPDATE`);
+  }
+
+  /**
+   * FOCUS-NAMES-FROM-KPI, inside the write tx: an ENABLED borrower's source must be an enabled own-names TARGET_NAMES
+   * definition of this tenant with exactly the same effective outlet scope. The source row is locked first, so a
+   * concurrent disable / change of the source (which locks the same row, then looks for borrowers) is serialised with
+   * this write. A DISABLED borrower is not checked (it writes nothing; enabling it re-checks).
+   */
+  private async assertSourceOk(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    v: { kpiCode: string; focusNamesFromKpi: string | null; enabled: boolean; measure: SalesKpiMeasure; outletTypes: string[]; programs: string[] },
+  ): Promise<void> {
+    const from = v.focusNamesFromKpi;
+    if (from === null || !v.enabled) return;
+    await this.lockDefinition(tx, clientId, from);
+    const src = await tx.salesKpiDefinition.findUnique({ where: { clientId_kpiCode: { clientId, kpiCode: from } } });
+    if (!src || !src.enabled || productSourceOf(src.productSource) !== 'TARGET_NAMES') {
+      throw new BadRequestException(FOCUS_NAMES_FROM_NOT_FOCUS(from));
+    }
+    const srcFrom = focusNamesFromOf(src.focusNamesFromKpi, src.productSource);
+    if (srcFrom) throw new BadRequestException(FOCUS_NAMES_FROM_CHAIN(from, srcFrom));
+    const scopes = await kpiScopesOf(tx, clientId, [v.kpiCode, from]);
+    const mine = toLite({ kpiCode: v.kpiCode, measure: v.measure, filter: {}, outletTypes: v.outletTypes, programs: v.programs }, scopes.get(v.kpiCode) ?? null);
+    const theirs = toLite(src, scopes.get(from) ?? null);
+    if (effectiveScopeKey(mine) !== effectiveScopeKey(theirs)) throw new BadRequestException(FOCUS_NAMES_FROM_SCOPE(v.kpiCode, from));
+  }
+
+  /** FOCUS-NAMES-FROM-KPI: refuse when an ENABLED definition (other than `selfId`) borrows `kpiCode`'s focus names. */
+  private async assertNoBorrowers(tx: Prisma.TransactionClient, clientId: string, kpiCode: string, selfId: string): Promise<void> {
+    await this.lockDefinition(tx, clientId, kpiCode);
+    const borrowers = await tx.salesKpiDefinition.findMany({
+      where: { clientId, enabled: true, productSource: 'TARGET_NAMES', focusNamesFromKpi: kpiCode, id: { not: selfId } },
+      select: { kpiCode: true },
+      orderBy: { kpiCode: 'asc' },
+    });
+    if (borrowers.length > 0) throw new ConflictException(FOCUS_NAMES_FROM_HAS_DEPENDENTS(kpiCode, borrowers.map((b) => b.kpiCode)));
+  }
+
   /** DELETE = disable (ownership released to the manual upload). Idempotent. */
   async disable(user: JwtPayload, id: string): Promise<SalesKpiDefinitionDto> {
     const clientId = user.clientId;
     const before = await this.prisma.salesKpiDefinition.findFirst({ where: { id, clientId } });
     if (!before) throw new NotFoundException('KPI definition not found');
     return this.prisma.$transaction(async (tx) => {
+      if (before.enabled) await this.assertNoBorrowers(tx, clientId, before.kpiCode, before.id);
       const row = await tx.salesKpiDefinition.update({ where: { id: before.id }, data: { enabled: false, updatedById: user.sub } });
       await tx.auditLog.create({
         data: {

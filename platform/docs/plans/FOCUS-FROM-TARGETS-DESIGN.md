@@ -151,3 +151,36 @@ automatically. Nothing here requires targets first:
 - Migration: `20261115130000_focus_from_targets` (unique timestamp), no redundant index.
 - Known limitations (no Bajaj instance today): a brand whose name contains `&` or `,` can't be written as a focus name; a
   token that genuinely matches two different products (AMBIGUOUS) can only be fixed in the target file.
+
+## 13. Focus names from another KPI (owner-approved 2026-11-25, platform-wide but opt-in)
+
+A TARGET_NAMES definition may set `focusNamesFromKpi = <KPI code>` (nullable column, migration
+`20261125100000_sales_kpi_focus_names_from_kpi`): it reads the per-outlet names written for THAT code instead of its own,
+in the same `resolveMonthFocus` pass, so e.g. `FB1 CASES` (QUANTITY) gets exactly `FOCUS BRAND`'s product set per outlet
+(`CNO & ADHO500` → all CNO + ADHO 500 cases).
+- Save-time: TARGET_NAMES only; not itself; the source must be an ENABLED TARGET_NAMES definition of the same tenant that
+  reads its OWN names (one level → no chains / cycles). The borrower needs no name column of its own. A source with
+  enabled borrowers cannot be disabled, renamed, switched to FILTER or made to borrow (409 naming the borrowers).
+- Month: values need NO target of the borrower's own (Bajaj: cases achieved only) — every outlet with a source name gets
+  one. `FOCUS_MISSING_NAME` when the borrower's own OR the source's target exists but the source name is blank (outlet
+  omitted); an outlet the source already flags is not flagged twice;
+  UNMATCHED / AMBIGUOUS tokens already reported on the source are not repeated (one fix / acceptance on the source clears
+  both; an acceptance on the borrower also counts); source not available at run time → `FOCUS_SOURCE_MISSING` (no outlet
+  gets a value, month blocked).
+- NULL (every existing row) = unchanged: same DTO, lite, `definitionsHash` and focus fingerprint (pinned in
+  `api/src/sales-import/kpi/focus-names-from-kpi.spec.ts`).
+- Audit round 2 (2026-11-25): a borrower must have the SAME EFFECTIVE outlet scope as its source (definition types /
+  programmes ∩ KPI applies-to) — refused at save, and `FOCUS_SCOPE_MISMATCH` (no values) at run time if the KPI
+  applies-to changes later; a source with borrowers can't change its own types / programmes. A month where the source has no
+  focus name at all is NOT blocked (owner 2026-11-25): see the last bullet. Separator-only
+  names de-dupe against the source internally (payload unchanged, still no `key`). A DISABLED borrower is editable
+  whatever its source; the source check + borrower check run INSIDE the write transaction under a row lock
+  (`SELECT … FOR UPDATE` on the source definition), so a concurrent source disable / borrower save serialise.
+- No focus names in the month (owner decision 2026-11-25): the month applies; each borrowing KPI is left EMPTY (no value,
+  not 0) and listed in `MonthReconciliation.notCalculated` (absent when none) with a red warning "No focus names in this
+  month's target file — <KPI> not calculated". Apply needs `acknowledgeNotCalculatedMonths` (400 before any write;
+  re-checked under the month lock), recalculate needs `confirmNotCalculated: true`; both are recorded on the month's
+  audit row (`notCalculated: { kpiCodes, acceptedById, messages }`). Uploading the targets and recalculating fills them.
+  When the month already holds values for such a KPI, the warning (and the tick) says "Existing <KPI> values for N outlets
+  will be REMOVED" (`existingOutlets`); its per-KPI preview row says "not calculated" (`MonthPreviewKpi.notCalculated`).
+  The tick is cleared whenever the preview reloads.
