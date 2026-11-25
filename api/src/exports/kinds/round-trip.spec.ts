@@ -53,6 +53,7 @@ const CASES: Record<string, Array<Record<string, unknown>>> = {
   'achievements-template': [{ month: '2026-10' }],
   'targets-export': [{ month: '2026-10' }],
   'achievements-export': [{ month: '2026-10' }],
+  'target-history': [{}, { outletCode: 'R0001' }, { outletCode: 'R0001', month: '2026-12', kpiCode: 'MONTH_TGT' }],
   'tds-payouts': [{}, { period: '2026-10' }, { clientId: 'bajaj', period: '2026-10' }],
   'payments-report': [{}, { status: 'FAILED', from: '2026-10-01', to: '2026-10-31' }, { clientId: 'bajaj' }],
   'delivery-status': [{}, { channel: 'SMS', from: '2026-10-01', to: '2026-11-14' }, { event: 'OTP_LOGIN' }],

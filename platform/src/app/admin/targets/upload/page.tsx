@@ -44,6 +44,7 @@ import { DownloadActionStatus } from '@/components/exports/download-action-statu
 import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 import { normalizeRowsEcho } from '@/lib/upload-rows-echo';
 import { TargetUploadHistory } from '@/components/admin/target-upload-history';
+import { TargetHistoryCard } from '@/components/admin/target-history';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -950,6 +951,9 @@ export default function TargetUploadPage() {
 
       {/* ── Section 5: Upload history ──────────────────────────────────────── */}
       <TargetUploadHistory refreshKey={historyKey} />
+
+      {/* ── Section 6: per-outlet target change history ───────────────────── */}
+      <TargetHistoryCard />
     </div>
   );
 }

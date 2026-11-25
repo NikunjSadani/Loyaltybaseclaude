@@ -171,6 +171,49 @@ export class ListBatchesQueryDto {
   before?: string;
 }
 
+// ─── Target change history ─────────────────────────────────────────────────────
+
+/** GET /v1/admin/targets/history — one outlet's target changes (all months / KPIs unless filtered), newest first. */
+export class TargetHistoryQueryDto {
+  @IsString()
+  @Matches(/^.{1,100}$/, { message: 'outletCode is required' })
+  outletCode!: string;
+
+  @IsString()
+  @IsOptional()
+  @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, { message: 'month must be YYYY-MM' })
+  month?: string;
+
+  @IsString()
+  @IsOptional()
+  @Matches(/^.{1,100}$/, { message: 'kpiCode must be 1–100 characters' })
+  kpiCode?: string;
+
+  /** Paging: the `nextCursor` of the previous page. */
+  @IsString()
+  @IsOptional()
+  @Matches(/^[A-Za-z0-9_-]{1,64}$/, { message: 'before must be a history row id' })
+  before?: string;
+}
+
+/** GET /v1/admin/targets/history/export — the change-history report, optionally filtered by month / outlet / KPI. */
+export class TargetHistoryExportQueryDto {
+  @IsString()
+  @IsOptional()
+  @Matches(/^.{1,100}$/, { message: 'outletCode must be 1–100 characters' })
+  outletCode?: string;
+
+  @IsString()
+  @IsOptional()
+  @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, { message: 'month must be YYYY-MM' })
+  month?: string;
+
+  @IsString()
+  @IsOptional()
+  @Matches(/^.{1,100}$/, { message: 'kpiCode must be 1–100 characters' })
+  kpiCode?: string;
+}
+
 // ─── List target rows ─────────────────────────────────────────────────────────
 
 export class ListTargetsQueryDto {

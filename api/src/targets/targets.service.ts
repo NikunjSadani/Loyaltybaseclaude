@@ -47,6 +47,7 @@ import {
   ListAchievementBatchesQueryDto,
   ListAchievementsQueryDto,
   PaceQueryDto,
+  TargetHistoryQueryDto,
 } from './dto/targets.dto';
 import {
   parseTargetUploadBuffer,
@@ -55,6 +56,7 @@ import {
   isMonthLocked,
   kpiCodeKeys,
   KpiDefLike,
+  NAMES_KEY,
 } from './targets.helpers';
 import { SQL_NOW_UTC } from '../sales-import/sql-time';
 import { targetUploadFocusCheck } from '../sales-import/kpi/focus-upload-check';
@@ -144,6 +146,62 @@ class TargetUploadAbort extends Error {
   constructor(readonly reason: 'ALREADY_APPLIED' | 'ACK_CHANGED', readonly error: HttpException) {
     super(error.message);
   }
+}
+
+/** One target value (or per-outlet custom KPI name) a target upload changes — a target_change_history row. */
+export interface TargetChange {
+  outletCode: string;
+  month: string;
+  kpiCode: string;
+  /** 'VALUE' = the target number; 'NAME' = the per-outlet custom KPI name (`__names`). */
+  field: 'VALUE' | 'NAME';
+  oldValue: unknown;
+  newValue: unknown;
+  changeType: 'CREATED' | 'UPDATED' | 'DELETED';
+}
+
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const pick = (o: Record<string, unknown> | undefined, keys: readonly string[]) =>
+  Object.fromEntries(keys.filter((k) => o && k in o).map((k) => [k, o![k]]));
+
+/**
+ * What a target upload will change, per value (pure; the apply calls it inside its transaction with the values read
+ * under the tenant lock). The stored map after the write mirrors the write statement exactly: the uploaded map
+ * REPLACES the stored one, except the carried (out-of-scope) codes — their stored values and custom names are kept.
+ * Unchanged values produce NO row. `stored` is keyed "<month>|<outletCode>" (absent = no stored row yet).
+ */
+export function targetChangesFor(
+  writes: ReadonlyArray<{ month: string; outletCode: string; kpiMap: Record<string, unknown>; carry: readonly string[] }>,
+  stored: ReadonlyMap<string, Record<string, unknown>>,
+): TargetChange[] {
+  const out: TargetChange[] = [];
+  for (const w of writes) {
+    const old = stored.get(`${w.month}|${w.outletCode}`) ?? {};
+    const next: Record<string, unknown> = { ...pick(old, w.carry), ...w.kpiMap };
+    const oldNames = (old[NAMES_KEY] ?? {}) as Record<string, unknown>;
+    const carriedNames = pick(oldNames, w.carry);
+    if (Object.keys(carriedNames).length > 0) {
+      next[NAMES_KEY] = { ...carriedNames, ...((w.kpiMap[NAMES_KEY] ?? {}) as Record<string, unknown>) };
+    }
+    const nextNames = (next[NAMES_KEY] ?? {}) as Record<string, unknown>;
+    const diff = (field: 'VALUE' | 'NAME', a: Record<string, unknown>, b: Record<string, unknown>, codes: string[]) => {
+      for (const kpiCode of codes) {
+        const has = (o: Record<string, unknown>) => Object.prototype.hasOwnProperty.call(o, kpiCode) && o[kpiCode] !== null;
+        const o = has(a) ? a[kpiCode] : undefined;
+        const n = has(b) ? b[kpiCode] : undefined;
+        if (o === undefined && n === undefined) continue;
+        if (o !== undefined && n !== undefined && sameValue(o, n)) continue;
+        out.push({
+          outletCode: w.outletCode, month: w.month, kpiCode, field,
+          oldValue: o ?? null, newValue: n ?? null,
+          changeType: o === undefined ? 'CREATED' : n === undefined ? 'DELETED' : 'UPDATED',
+        });
+      }
+    };
+    diff('VALUE', old, next, [...new Set([...kpiCodeKeys(old), ...kpiCodeKeys(next)])].sort());
+    diff('NAME', oldNames, nextNames, [...new Set([...Object.keys(oldNames), ...Object.keys(nextNames)])].sort());
+  }
+  return out;
 }
 
 /** The real current instant (UTC, Prisma DateTime-comparable) — unlike now(), NOT frozen at the transaction start. */
@@ -1030,6 +1088,8 @@ export class TargetsService {
     db: Pick<Prisma.TransactionClient, 'outletTarget'>,
     clientId: string,
     writes: readonly TargetUploadWrite[],
+    /** The apply transaction: the same read also returns the stored values (for the change history). */
+    withValues = false,
   ) {
     const byMonth = new Map<string, TargetUploadWrite[]>();
     for (const w of writes) {
@@ -1040,14 +1100,21 @@ export class TargetsService {
     const perMonth: Array<{ month: string; newCount: number; overwriteCount: number }> = [];
     const sample: TargetUploadWrite[] = [];
     const overwriteKeys: string[] = [];
+    /** `${month}|${outletCode}` → stored targetValues (withValues only). */
+    const storedValues = new Map<string, Record<string, unknown>>();
     let newCount = 0;
     let overwriteCount = 0;
     for (const month of [...byMonth.keys()].sort()) {
       const stored = await db.outletTarget.findMany({
         where: { clientId, month },
-        select: { outletCode: true },
+        select: withValues ? { outletCode: true, targetValues: true } : { outletCode: true },
       });
       const existing = new Set((stored ?? []).map((r) => r.outletCode));
+      if (withValues) {
+        for (const r of (stored ?? []) as Array<{ outletCode: string; targetValues?: unknown }>) {
+          storedValues.set(`${month}|${r.outletCode}`, (r.targetValues ?? {}) as Record<string, unknown>);
+        }
+      }
       let n = 0;
       let o = 0;
       for (const w of byMonth.get(month)!) {
@@ -1061,7 +1128,7 @@ export class TargetsService {
       newCount += n;
       overwriteCount += o;
     }
-    return { newCount, overwriteCount, perMonth, sample, overwriteKeys };
+    return { newCount, overwriteCount, perMonth, sample, overwriteKeys, storedValues };
   }
 
   /**
@@ -1298,7 +1365,12 @@ export class TargetsService {
     const statements = this.targetWriteStatements(user.clientId, batch.id, p.writes);
     const savedCount = p.writes.length;
     const overwriteAcked = notApplied.find((c) => c.category === 'OVERWRITE');
-    let final: { newCount: number; overwriteCount: number; perMonth: Array<{ month: string; newCount: number; overwriteCount: number }> };
+    let final: {
+      newCount: number;
+      overwriteCount: number;
+      perMonth: Array<{ month: string; newCount: number; overwriteCount: number }>;
+      historyRowCount?: number;
+    };
     try {
       final = await this.prisma.$transaction(
         async (tx) => {
@@ -1308,7 +1380,8 @@ export class TargetsService {
             const prior = await this.appliedBatchForToken(tx, user.clientId, tokenNonce);
             if (prior) throw new TargetUploadAbort('ALREADY_APPLIED', new ConflictException(TargetsService.alreadyAppliedMessage(prior)));
           }
-          const cls = await this.classifyTargetWrites(tx, user.clientId, p.writes);
+          // The split AND the stored values (for the change history) come from ONE read per month, under the lock.
+          const cls = await this.classifyTargetWrites(tx, user.clientId, p.writes, true);
           if (tokenNonce) {
             const nowOverwrite = TargetsService.notApplied(p, cls.overwriteKeys).find((c) => c.category === 'OVERWRITE');
             if ((nowOverwrite?.fingerprint ?? null) !== (overwriteAcked?.fingerprint ?? null)) {
@@ -1318,8 +1391,11 @@ export class TargetsService {
               ));
             }
           }
-          // Multi-row statements (WRITE_CHUNK rows each) — ~160 statements for 6,500 outlets × 12 months.
+          // Multi-row statements (WRITE_CHUNK rows each) — ≤ ~80 statements for 6,500 outlets × 12 months.
           for (const stmt of statements) await tx.$executeRaw(stmt);
+          // TARGET CHANGE HISTORY (owner 2026-11-25): one row per value that ACTUALLY changed, in this same transaction.
+          const changes = targetChangesFor(p.writes, cls.storedValues);
+          for (const stmt of this.historyStatements(user.clientId, batch.id, user.sub, changes)) await tx.$executeRaw(stmt);
           await tx.targetUploadBatch.update({ where: { id: batch.id }, data: { status: 'APPLIED' } });
           await tx.auditLog.create({
             data: {
@@ -1334,10 +1410,11 @@ export class TargetsService {
                 newCount:       cls.newCount,
                 overwriteCount: cls.overwriteCount,
                 perMonth:       cls.perMonth,
+                historyRowCount: changes.length,
               } as unknown as Prisma.InputJsonValue,
             },
           });
-          return { newCount: cls.newCount, overwriteCount: cls.overwriteCount, perMonth: cls.perMonth };
+          return { newCount: cls.newCount, overwriteCount: cls.overwriteCount, perMonth: cls.perMonth, historyRowCount: changes.length };
         },
         { maxWait: 10_000, timeout: TargetsService.APPLY_TX_TIMEOUT_MS },
       );
@@ -1536,7 +1613,31 @@ export class TargetsService {
   }
 
   /** Rows per multi-row INSERT … ON CONFLICT statement (≈ 7 bound params per row, far under Postgres's 65,535). */
-  static readonly WRITE_CHUNK = 500;
+  static readonly WRITE_CHUNK = 1000;
+  /** Change-history rows per INSERT … SELECT unnest(…) statement (8 array params, whatever the row count). */
+  static readonly HISTORY_CHUNK = 10_000;
+
+  /**
+   * The change-history rows as INSERT … SELECT FROM unnest(arrays) statements (HISTORY_CHUNK rows each, 8 bound
+   * arrays per statement), stamped with the real write time.
+   */
+  private historyStatements(clientId: string, batchId: string, userId: string, changes: readonly TargetChange[]): Prisma.Sql[] {
+    const out: Prisma.Sql[] = [];
+    for (let i = 0; i < changes.length; i += TargetsService.HISTORY_CHUNK) {
+      const part = changes.slice(i, i + TargetsService.HISTORY_CHUNK);
+      const json = (v: unknown) => (v === undefined || v === null ? null : JSON.stringify(v));
+      out.push(Prisma.sql`
+        INSERT INTO "target_change_history"
+          ("id","clientId","outletCode","month","kpiCode","field","oldValue","newValue","changeType","batchId","changedById","changedAt")
+        SELECT t.id, ${clientId}, t.o, t.m, t.k, t.f, t.ov::jsonb, t.nv::jsonb, t.ct::"TargetChangeType", ${batchId}, ${userId}, ${SQL_CLOCK_UTC}
+        FROM unnest(
+          ${part.map(() => randomUUID())}::text[], ${part.map((c) => c.outletCode)}::text[], ${part.map((c) => c.month)}::text[],
+          ${part.map((c) => c.kpiCode)}::text[], ${part.map((c) => c.field)}::text[], ${part.map((c) => json(c.oldValue))}::text[],
+          ${part.map((c) => json(c.newValue))}::text[], ${part.map((c) => c.changeType)}::text[]
+        ) AS t(id, o, m, k, f, ov, nv, ct)`);
+    }
+    return out;
+  }
 
   /**
    * The upload's writes as MULTI-ROW statements (WRITE_CHUNK rows each), run in order inside the apply transaction.
@@ -2350,6 +2451,90 @@ export class TargetsService {
     const obj = await this.storage.openBoundedObject(key);
     if (!obj) throw notKept();
     return { ...obj, fileName: typeof m.fileName === 'string' && m.fileName ? m.fileName : `targets-${batch.id}.xlsx` };
+  }
+
+  // ─── Target change history (owner 2026-11-25, all clients) ─────────────────
+
+  static readonly TARGET_HISTORY_PAGE = 100;
+
+  /**
+   * One outlet's target changes, newest first, in keyset pages of TARGET_HISTORY_PAGE (?before=<nextCursor>), tenant-
+   * scoped. Each row: month, KPI (+ label), field, old → new, change type, who (a tenant user's name; another tenant's
+   * operator = "Gifsy team"), when, and the upload (batch id + whether its file is kept). `trackingSince` = the tenant's
+   * first recorded change (null = none yet) — changes before it were made before history tracking started.
+   */
+  async listTargetHistory(user: JwtPayload, q: TargetHistoryQueryDto) {
+    const clientId = user.clientId;
+    let cursor: { changedAt: Date; id: string } | null = null;
+    if (q.before) {
+      cursor = await this.prisma.targetChangeHistory.findFirst({
+        where: { id: q.before, clientId },
+        select: { changedAt: true, id: true },
+      });
+      if (!cursor) throw new BadRequestException('That page of the target history is no longer available — reload the page.');
+    }
+    const page = await this.prisma.targetChangeHistory.findMany({
+      where: {
+        clientId,
+        outletCode: q.outletCode,
+        ...(q.month ? { month: q.month } : {}),
+        ...(q.kpiCode ? { kpiCode: q.kpiCode } : {}),
+        ...(cursor
+          ? { OR: [{ changedAt: { lt: cursor.changedAt } }, { changedAt: cursor.changedAt, id: { lt: cursor.id } }] }
+          : {}),
+      },
+      orderBy: [{ changedAt: 'desc' }, { id: 'desc' }],
+      take: TargetsService.TARGET_HISTORY_PAGE + 1,
+    });
+    const hasMore = page.length > TargetsService.TARGET_HISTORY_PAGE;
+    const rows = hasMore ? page.slice(0, TargetsService.TARGET_HISTORY_PAGE) : page;
+    const [first, kpis, users, kept] = await Promise.all([
+      this.prisma.targetChangeHistory.findFirst({ where: { clientId }, orderBy: { changedAt: 'asc' }, select: { changedAt: true } }),
+      this.prisma.kpiDef.findMany({ where: { clientId }, select: { code: true, label: true } }),
+      this.prisma.user.findMany({
+        where: { id: { in: [...new Set(rows.map((r) => r.changedById).filter((x): x is string => !!x))] } },
+        select: { id: true, name: true, clientId: true },
+      }),
+      this.keptUploadFiles(clientId, [...new Set(rows.map((r) => r.batchId).filter((x): x is string => !!x))]),
+    ]);
+    const label = new Map((kpis ?? []).map((k) => [k.code, k.label]));
+    const nameBy = new Map((users ?? []).map((u) => [u.id, u.clientId === clientId ? u.name : 'Gifsy team']));
+    return {
+      items: rows.map((r) => ({
+        id:            r.id,
+        outletCode:    r.outletCode,
+        month:         r.month,
+        kpiCode:       r.kpiCode,
+        kpiLabel:      label.get(r.kpiCode) ?? r.kpiCode,
+        field:         r.field,
+        oldValue:      r.oldValue,
+        newValue:      r.newValue,
+        changeType:    r.changeType,
+        batchId:       r.batchId,
+        batchFileKept: !!r.batchId && kept.has(r.batchId),
+        changedByName: r.changedById ? nameBy.get(r.changedById) ?? null : null,
+        changedAt:     r.changedAt,
+      })),
+      pageSize:      TargetsService.TARGET_HISTORY_PAGE,
+      hasMore,
+      nextCursor:    hasMore ? rows[rows.length - 1].id : null,
+      trackingSince: first?.changedAt ?? null,
+    };
+  }
+
+  /** Of these batch ids, the APPLIED uploads of THIS tenant whose file is kept (the "upload" link). */
+  private async keptUploadFiles(clientId: string, batchIds: string[]): Promise<Set<string>> {
+    if (batchIds.length === 0) return new Set();
+    const audits = await this.prisma.auditLog.findMany({
+      where: { entityType: TARGET_UPLOAD_AUDIT_ENTITY, entityId: { in: batchIds } },
+      select: { entityId: true, metadata: true },
+    });
+    const out = new Set<string>();
+    for (const a of audits ?? []) {
+      const m = (a.metadata ?? {}) as Record<string, unknown>;
+      if (m.clientId === clientId && m.status === 'APPLIED' && typeof m.fileKey === 'string') out.add(a.entityId);
+    }
+    return out;
   }
 
   // ─── List targets ──────────────────────────────────────────────────────────

@@ -1008,7 +1008,20 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           </Link>
           <div>
             <h1 className="text-lg font-bold text-gray-900">{kyc.outletName}</h1>
-            <p className="text-xs text-gray-500">Outlet ID: <span className="font-mono">{kyc.outletCode || '—'}</span> · Submitted: {kyc.submittedDate}</p>
+            <p className="text-xs text-gray-500">
+              Outlet ID: <span className="font-mono">{kyc.outletCode || '—'}</span> · Submitted: {kyc.submittedDate}
+              {kyc.outletCode && (
+                <>
+                  {' '}·{' '}
+                  <Link
+                    href={`/admin/targets/history?outletCode=${encodeURIComponent(kyc.outletCode)}`}
+                    className="font-semibold text-[var(--brand-primary)] hover:underline"
+                  >
+                    Target history
+                  </Link>
+                </>
+              )}
+            </p>
             {kyc.addressNameMismatch && (
               <span
                 data-testid="address-name-mismatch-badge"

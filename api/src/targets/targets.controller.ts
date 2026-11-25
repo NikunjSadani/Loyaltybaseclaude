@@ -14,6 +14,8 @@
  *     POST   /v1/admin/targets/upload          multipart xlsx upload: ?preview=1 (nothing written) → ?confirmToken=&ack= (verbatim write; no token = refused)
  *     GET    /v1/admin/targets/batches         upload history, pages of 100 newest first (?before=<nextCursor>) + audit details
  *     GET    /v1/admin/targets/batches/:id/file  the kept file of a confirmed upload
+ *     GET    /v1/admin/targets/history         one outlet's target change history (?outletCode=&month=&kpiCode=&before=)
+ *     GET    /v1/admin/targets/history/export  target change history report (xlsx; filters month / outlet / KPI)
  *     GET    /v1/admin/targets                 list target rows (query: month=YYYY-MM)
  *
  *   Achievements:
@@ -66,6 +68,8 @@ import {
   AchievementTemplateQueryDto,
   KpiScopeCountQueryDto,
   UploadTargetsQueryDto,
+  TargetHistoryQueryDto,
+  TargetHistoryExportQueryDto,
 } from './dto/targets.dto';
 import { HeavyOp } from '../common/heavy-op-limiter';
 
@@ -260,6 +264,32 @@ export class TargetsController {
       type: contentType,
       disposition: `attachment; filename="${safeName}"`,
     });
+  }
+
+  /**
+   * GET /v1/admin/targets/history?outletCode=&month=&kpiCode=&before= — one outlet's target change history (newest
+   * first, pages of 100, tenant-scoped) + `trackingSince` (changes before it predate history tracking).
+   */
+  @Get('history')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  listTargetHistory(@CurrentUser() user: JwtPayload, @Query() q: TargetHistoryQueryDto) {
+    return this.targets.listTargetHistory(user, q);
+  }
+
+  /**
+   * GET /v1/admin/targets/history/export?outletCode=&month=&kpiCode= — the change-history report (xlsx, streamed via
+   * the 'target-history' export kind: one outlet → now (200); a whole program → Downloads page (202)).
+   */
+  @Get('history/export')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  exportTargetHistory(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: TargetHistoryExportQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.exports.respond(res, user, 'target-history', q);
   }
 
   /** GET /v1/admin/targets?month=YYYY-MM — list stored target rows. */

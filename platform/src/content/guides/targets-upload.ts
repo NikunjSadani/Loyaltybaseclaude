@@ -75,5 +75,14 @@ At the bottom of the page, **Upload history** lists uploads newest first (times 
 - **Did not finish — nothing saved** — the save was interrupted; nothing from it was saved.
 - **Being saved…** — the upload is being saved right now; refresh in a minute.
 - **Failed part-way (older upload) — may be partly saved** — only uploads from before 25 Nov 2026, when large files were saved in parts. Check with **Download Final Targets**.
+
+## Target history (per outlet)
+
+Every target value an upload **actually changes** is recorded: month, KPI, **old → new** (or *removed* / *new*), who and when, and the upload it came from. Values that stay the same are not recorded.
+
+- Open **Target change history → See an outlet's history** on the Targets page (or **Target history** next to the Outlet ID on an outlet's KYC page), enter the **Outlet ID** and press **Show history**. The newest 100 changes show first; **Load older changes** shows more.
+- **Download target history** (Targets page) gets the whole program's report as Excel (it is prepared on the **Downloads** page); **Download this outlet's history** gets one outlet's.
+- History is recorded **from when tracking started** — the screen and the report say from when (**Target history is recorded from …**). Changes made before then are not listed.
+
 `,
 };

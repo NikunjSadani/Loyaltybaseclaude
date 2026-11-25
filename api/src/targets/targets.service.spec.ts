@@ -31,7 +31,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import * as XLSX from 'xlsx';
-import { TargetsService } from './targets.service';
+import { TargetsService, targetChangesFor } from './targets.service';
 import type { AnyExportKind } from '../exports/export-kinds';
 import {
   ACHIEVEMENTS_EXPORT_KIND,
@@ -120,6 +120,7 @@ const mockPrisma = {
     findMany: jest.fn(),
     upsert: mockTx.outletSalesRecord.upsert,
   },
+  targetChangeHistory: { findMany: jest.fn(), findFirst: jest.fn() },
   targetUploadBatch: {
     findMany: jest.fn(),
     create: mockTx.targetUploadBatch.create,
@@ -175,6 +176,25 @@ function writtenTargets(): Array<{ outletCode: string; outletName: string; month
         out.push({ outletCode: v[i + 2] as string, outletName: v[i + 3] as string, month: v[i + 4] as string, targetValues: JSON.parse(v[i + 5] as string), batchId: v[i + 6] as string });
         i += 6;
       }
+    }
+  }
+  return out;
+}
+function historyInsertCalls(): unknown[][] {
+  return mockTx.$executeRaw.mock.calls.filter((c: unknown[]) => /INSERT INTO "target_change_history"/.test(sqlStr(c)));
+}
+/** Change-history rows decoded from the unnest(...) arrays (ids, outlet, month, kpi, field, old, new, type). */
+function historyRows(): Array<{ outletCode: string; month: string; kpiCode: string; field: string; oldValue: unknown; newValue: unknown; changeType: string }> {
+  const out: Array<{ outletCode: string; month: string; kpiCode: string; field: string; oldValue: unknown; newValue: unknown; changeType: string }> = [];
+  for (const c of historyInsertCalls()) {
+    const arrays = (((c[0] as { values?: unknown[] }).values ?? []) as unknown[]).filter(Array.isArray) as unknown[][];
+    const [ids, o, m, k, f, ov, nv, ct] = arrays;
+    for (let i = 0; i < ids.length; i++) {
+      out.push({
+        outletCode: o[i] as string, month: m[i] as string, kpiCode: k[i] as string, field: f[i] as string,
+        oldValue: ov[i] === null ? null : JSON.parse(ov[i] as string), newValue: nv[i] === null ? null : JSON.parse(nv[i] as string),
+        changeType: ct[i] as string,
+      });
     }
   }
   return out;
@@ -1162,6 +1182,7 @@ describe('TargetsService', () => {
           newCount: 1,
           overwriteCount: 1,
           perMonth: [{ month: WRITABLE_MONTH.ym, newCount: 1, overwriteCount: 1 }],
+          historyRowCount: 4,
           acknowledged: acks,
           notApplied: p.notApplied,
         });
@@ -1171,6 +1192,58 @@ describe('TargetsService', () => {
         expect(r.notApplied).toEqual(p.notApplied);
         expect(r.acknowledged).toEqual(acks);
       });
+
+      it('TARGET HISTORY: the apply writes one row per value that ACTUALLY changed, in the same transaction', async () => {
+        const b = buf();
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
+        expect(historyInsertCalls()).toHaveLength(1);
+        // O001: 10 → 100 (UPDATED), Focus 5 → removed (DELETED); O002: two new values (CREATED). GHOST: rejected, nothing.
+        expect(historyRows()).toEqual([
+          { outletCode: 'O001', month: WRITABLE_MONTH.ym, kpiCode: 'FOCUS_PACK_1', field: 'VALUE', oldValue: 5, newValue: null, changeType: 'DELETED' },
+          { outletCode: 'O001', month: WRITABLE_MONTH.ym, kpiCode: 'MONTH_TGT', field: 'VALUE', oldValue: 10, newValue: 100, changeType: 'UPDATED' },
+          { outletCode: 'O002', month: WRITABLE_MONTH.ym, kpiCode: 'FOCUS_PACK_1', field: 'VALUE', oldValue: null, newValue: 2, changeType: 'CREATED' },
+          { outletCode: 'O002', month: WRITABLE_MONTH.ym, kpiCode: 'MONTH_TGT', field: 'VALUE', oldValue: null, newValue: 1, changeType: 'CREATED' },
+        ]);
+        const sql = sqlStr(historyInsertCalls()[0]);
+        expect(sql).toMatch(/FROM unnest\(/);
+        const bound = ((historyInsertCalls()[0][0] as { values: unknown[] }).values);
+        expect(bound).toContain('deoleo'); // tenant
+        expect(bound).toContain(r.batchId); // upload
+        expect(bound).toContain('admin1'); // who
+        // written after the targets, inside the transaction (before the audit row)
+        expect(mockTx.$executeRaw.mock.invocationCallOrder[mockTx.$executeRaw.mock.calls.indexOf(historyInsertCalls()[0])])
+          .toBeGreaterThan(insertOrder('last'));
+      });
+
+      it('TARGET HISTORY: re-applying the SAME values logs nothing (unchanged values are never logged)', async () => {
+        const same = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 5]]);
+        const p = await service.previewTargetUpload(admin, xfile(same));
+        await service.uploadTargets(admin, xfile(same), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
+        expect(writtenTargets()).toHaveLength(1);
+        expect(historyRows()).toEqual([]);
+        expect(historyInsertCalls()).toHaveLength(0);
+      });
+
+      it('targetChangesFor: carried (out-of-scope) values and names are kept, not logged; names are tracked', () => {
+        const stored = new Map<string, Record<string, unknown>>([
+          ['2026-12|O1', { A: 1, B: 2, C: 3, __names: { A: 'Old A', C: 'Kept C' } }],
+        ]);
+        const changes = targetChangesFor(
+          [{ month: '2026-12', outletCode: 'O1', kpiMap: { A: 1, B: 20, __names: { A: 'New A' } }, carry: ['C'] }],
+          stored,
+        );
+        expect(changes).toEqual([
+          { outletCode: 'O1', month: '2026-12', kpiCode: 'B', field: 'VALUE', oldValue: 2, newValue: 20, changeType: 'UPDATED' },
+          { outletCode: 'O1', month: '2026-12', kpiCode: 'A', field: 'NAME', oldValue: 'Old A', newValue: 'New A', changeType: 'UPDATED' },
+        ]);
+        // a brand-new outlet-month: every value CREATED; an identical re-upload: nothing
+        expect(targetChangesFor([{ month: '2026-12', outletCode: 'O2', kpiMap: { A: 0 }, carry: [] }], stored))
+          .toEqual([{ outletCode: 'O2', month: '2026-12', kpiCode: 'A', field: 'VALUE', oldValue: null, newValue: 0, changeType: 'CREATED' }]);
+        expect(targetChangesFor([{ month: '2026-12', outletCode: 'O1', kpiMap: { A: 1, B: 2, __names: { A: 'Old A' } }, carry: ['C'] }], stored))
+          .toEqual([]);
+      });
+
 
       it('the confirmed file is KEPT in the private bucket (tenant + batch folder) BEFORE any target is written', async () => {
         const b = buf();
@@ -1281,7 +1354,7 @@ describe('TargetsService', () => {
         expect(refusals().map((d) => [d.metadata.reason, d.metadata.decidedInsideTransaction])).toEqual([['ACK_CHANGED', true]]);
       });
 
-      it('SCALE: 6,500 outlets × 12 months (78,000 rows) → ≤ 200 statements in the ONE transaction (multi-row chunks of 500)', async () => {
+      it('SCALE: 6,500 outlets × 12 months × 5 KPIs → targets + change history in ≤ 200 statements, ONE transaction', async () => {
         jest.spyOn(TargetsService, 'confirmRequired').mockReturnValue(false);
         sharedTargetFindMany.mockImplementation(async () => []);
         const months = Array.from({ length: 12 }, (_, i) => {
@@ -1289,7 +1362,12 @@ describe('TargetsService', () => {
           return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
         });
         const writes = months.flatMap((month) =>
-          Array.from({ length: 6500 }, (_, i) => ({ month, outletCode: `O${i}`, outletName: `Outlet ${i}`, kpiMap: { MONTH_TGT: i }, carry: [] as string[] })),
+          Array.from({ length: 6500 }, (_, i) => ({
+            month, outletCode: `O${i}`, outletName: `Outlet ${i}`,
+            // 5 KPIs per outlet-month, all new → 390,000 change-history rows (the worst case for the history writes)
+            kpiMap: { MONTH_TGT: i, FOCUS_PACK_1: 1, FOCUS_PACK_2: 2, FOCUS_CATEGORY: 3, CONSISTENCY: 4 },
+            carry: [] as string[],
+          })),
         );
         const p = {
           scopeEnforced: false,
@@ -1306,7 +1384,9 @@ describe('TargetsService', () => {
         expect(r.savedCount).toBe(78_000);
         expect(r.newCount).toBe(78_000);
         expect(writtenTargets()).toHaveLength(78_000);
-        expect(targetInsertCalls()).toHaveLength(156); // 78,000 / 500
+        expect(targetInsertCalls()).toHaveLength(78); // 78,000 / 1,000
+        expect(historyInsertCalls()).toHaveLength(39); // 390,000 changes / 10,000
+        expect(historyRows()).toHaveLength(390_000);
         expect(statements).toBeLessThanOrEqual(200);
         const interactive = mockPrisma.$transaction.mock.calls.filter((c) => typeof c[0] === 'function');
         expect(interactive).toHaveLength(1);
@@ -1421,6 +1501,73 @@ describe('TargetsService', () => {
       expect(rows[5]).toEqual(expect.objectContaining({ id: 'pending_old', outcome: 'ABANDONED' }));
     });
   });
+
+  describe('listTargetHistory (Target history)', () => {
+    const at = (min: number) => new Date(Date.UTC(2026, 10, 26, 6, min));
+    const row = (id: string, extra: Record<string, unknown> = {}) => ({
+      id, clientId: 'deoleo', outletCode: 'O001', month: '2026-12', kpiCode: 'MONTH_TGT', field: 'VALUE',
+      oldValue: 10, newValue: 12, changeType: 'UPDATED', batchId: 'b1', changedById: 'admin1', changedAt: at(5), ...extra,
+    });
+    beforeEach(() => {
+      mockPrisma.targetChangeHistory.findMany.mockReset();
+      mockPrisma.targetChangeHistory.findFirst.mockReset();
+      mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow]);
+      mockPrisma.user.findMany.mockResolvedValue([
+        { id: 'admin1', name: 'Asha Admin', clientId: 'deoleo' },
+        { id: 'gifsy1', name: 'Ravi Ops', clientId: 'gifsy' },
+      ]);
+      mockPrisma.auditLog.findMany.mockResolvedValue([
+        { entityId: 'b1', metadata: { clientId: 'deoleo', status: 'APPLIED', fileKey: 'target-uploads/deoleo/b1/x.xlsx' } },
+        // another tenant's audit row for a colliding id is never trusted
+        { entityId: 'b2', metadata: { clientId: 'other', status: 'APPLIED', fileKey: 'target-uploads/other/b2/x.xlsx' } },
+      ]);
+    });
+
+    it('TENANT-SCOPED: the query, the tracking start and the cursor are all limited to the caller tenant', async () => {
+      mockPrisma.targetChangeHistory.findMany.mockResolvedValueOnce([row('h2'), row('h1', { batchId: 'b2', changedById: 'gifsy1' })]);
+      mockPrisma.targetChangeHistory.findFirst.mockResolvedValueOnce({ changedAt: at(1) }); // tracking since
+      const r = await service.listTargetHistory(admin, { outletCode: 'O001' });
+      const args = mockPrisma.targetChangeHistory.findMany.mock.calls[0][0];
+      expect(args.where).toEqual({ clientId: 'deoleo', outletCode: 'O001' });
+      expect(args.orderBy).toEqual([{ changedAt: 'desc' }, { id: 'desc' }]);
+      expect(args.take).toBe(101);
+      expect(mockPrisma.targetChangeHistory.findFirst.mock.calls[0][0].where).toEqual({ clientId: 'deoleo' });
+      expect(r.trackingSince).toEqual(at(1));
+      expect(r.items[0]).toEqual(expect.objectContaining({
+        id: 'h2', kpiLabel: 'Month Target', oldValue: 10, newValue: 12, changeType: 'UPDATED', changedByName: 'Asha Admin', batchFileKept: true,
+      }));
+      // another tenant's operator is not named; another tenant's file is never linked
+      expect(r.items[1]).toEqual(expect.objectContaining({ changedByName: 'Gifsy team', batchFileKept: false }));
+      expect(r).toEqual(expect.objectContaining({ hasMore: false, nextCursor: null, pageSize: 100 }));
+    });
+
+    it('filters by month / KPI; pages with `before` (cursor looked up in THIS tenant only)', async () => {
+      mockPrisma.targetChangeHistory.findFirst.mockResolvedValueOnce({ id: 'h9', changedAt: at(9) }); // cursor
+      mockPrisma.targetChangeHistory.findMany.mockResolvedValueOnce([]);
+      mockPrisma.targetChangeHistory.findFirst.mockResolvedValueOnce(null); // tracking since
+      const r = await service.listTargetHistory(admin, { outletCode: 'O001', month: '2026-12', kpiCode: 'MONTH_TGT', before: 'h9' });
+      expect(mockPrisma.targetChangeHistory.findFirst.mock.calls[0][0].where).toEqual({ id: 'h9', clientId: 'deoleo' });
+      expect(mockPrisma.targetChangeHistory.findMany.mock.calls[0][0].where).toEqual({
+        clientId: 'deoleo', outletCode: 'O001', month: '2026-12', kpiCode: 'MONTH_TGT',
+        OR: [{ changedAt: { lt: at(9) } }, { changedAt: at(9), id: { lt: 'h9' } }],
+      });
+      expect(r.trackingSince).toBeNull();
+    });
+
+    it("another tenant's (or unknown) cursor → 400, never a cross-tenant page", async () => {
+      mockPrisma.targetChangeHistory.findFirst.mockResolvedValueOnce(null);
+      await expect(service.listTargetHistory(admin, { outletCode: 'O001', before: 'theirs' })).rejects.toThrow(BadRequestException);
+      expect(mockPrisma.targetChangeHistory.findMany).not.toHaveBeenCalled();
+    });
+
+    it('101 rows → 100 shown + nextCursor', async () => {
+      mockPrisma.targetChangeHistory.findMany.mockResolvedValueOnce(Array.from({ length: 101 }, (_, i) => row(`h${i}`)));
+      const r = await service.listTargetHistory(admin, { outletCode: 'O001' });
+      expect(r.items).toHaveLength(100);
+      expect(r).toEqual(expect.objectContaining({ hasMore: true, nextCursor: 'h99' }));
+    });
+  });
+
 
   describe('openBatchFile (Download file)', () => {
     const obj = { stream: {} as never, size: 3, contentType: 'application/x' };
