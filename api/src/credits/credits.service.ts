@@ -2341,7 +2341,7 @@ export class CreditsService {
       try {
         const partner = await this.prisma.channelPartner.findFirst({ where: { id: partnerId }, select: { userId: true } });
         if (!partner?.userId) continue;
-        const fmt = (n: number) => new Intl.NumberFormat('en-IN').format(n);
+        const fmt = (n: number) => `${n < 0 ? '−' : ''}${new Intl.NumberFormat('en-IN').format(Math.abs(n))}`;
         await this.notifications.notifyUser({
           userId: partner.userId,
           subject: 'Points deducted',
