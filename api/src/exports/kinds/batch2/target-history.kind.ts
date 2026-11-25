@@ -43,8 +43,13 @@ function whereFor(p: TargetHistoryParams): Prisma.TargetChangeHistoryWhereInput 
   };
 }
 
-async function run(ctx: ExportRunContext, p: TargetHistoryParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
-  const cap = TARGET_HISTORY_EXPORT_MAX_ROWS;
+/** The report body; `cap` = the row limit (one extra row is read to know whether anything was actually cut). */
+export async function runTargetHistory(
+  ctx: ExportRunContext,
+  p: TargetHistoryParams,
+  out: XlsxStreamWriter,
+  cap = TARGET_HISTORY_EXPORT_MAX_ROWS,
+): Promise<{ rowCount: number }> {
   const [first, kpis] = await Promise.all([
     ctx.prisma.targetChangeHistory.findFirst({ where: { clientId: p.clientId }, orderBy: { changedAt: 'asc' }, select: { changedAt: true } }),
     ctx.prisma.kpiDef.findMany({ where: { clientId: p.clientId }, select: { code: true, label: true } }),
@@ -59,20 +64,29 @@ async function run(ctx: ExportRunContext, p: TargetHistoryParams, out: XlsxStrea
     '', '', '', '', '', '', '', '', '', '',
   ]);
   let written = 0;
-  for await (const page of keysetPages((q) =>
-    ctx.prisma.targetChangeHistory.findMany({
+  let fetched = 0;
+  let truncated = false;
+  for await (const page of keysetPages(async (q) => {
+    // Read up to cap + 1 rows in total: the (cap + 1)-th row only proves that rows were cut — it is never written.
+    const rows = await ctx.prisma.targetChangeHistory.findMany({
       where: whereFor(p),
       orderBy: [{ changedAt: 'asc' }, { id: 'asc' }],
       ...q,
-      take: Math.min(q.take, cap - written),
-    }),
-  )) {
+      take: Math.min(q.take, cap + 1 - fetched),
+    });
+    fetched += rows.length;
+    return rows;
+  })) {
     const missing = [...new Set(page.map((r) => r.changedById).filter((x): x is string => !!x && !userNames.has(x)))];
     if (missing.length) {
       const users = await ctx.prisma.user.findMany({ where: { id: { in: missing } }, select: { id: true, name: true, clientId: true } });
       for (const u of users) userNames.set(u.id, u.clientId === p.clientId ? u.name : 'Gifsy team');
     }
     for (const r of page) {
+      if (written >= cap) {
+        truncated = true;
+        break;
+      }
       await sheet.addRow([
         istDateTimeCell(r.changedAt),
         r.outletCode,
@@ -88,9 +102,12 @@ async function run(ctx: ExportRunContext, p: TargetHistoryParams, out: XlsxStrea
       ]);
       written++;
     }
-    if (written >= cap) break;
+    if (truncated || fetched > cap) {
+      truncated = true;
+      break;
+    }
   }
-  if (written >= cap) {
+  if (truncated) {
     await sheet.addRow([
       `⚠️ Export truncated at ${cap.toLocaleString('en-US')} rows — filter by month, outlet or KPI for a complete export.`,
       '', '', '', '', '', '', '', '', '', '',
@@ -114,5 +131,5 @@ export const TARGET_HISTORY_KIND: ExportKindDef<TargetHistoryParams> = {
     [p.outletCode ? `Outlet ${p.outletCode}` : 'All outlets', p.month ? monthWords(p.month) : 'All months', ...(p.kpiCode ? [p.kpiCode] : [])].join(' · '),
   fileName: (p, now) =>
     `target-history${p.outletCode ? `-${p.outletCode.replace(/[^\w-]+/g, '_').slice(0, 40)}` : ''}${p.month ? `-${p.month}` : ''}-${now.toISOString().slice(0, 10)}.xlsx`,
-  run,
+  run: (ctx, p, out) => runTargetHistory(ctx, p, out),
 };

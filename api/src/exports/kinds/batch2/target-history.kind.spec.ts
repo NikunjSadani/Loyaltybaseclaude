@@ -5,8 +5,8 @@
 import * as XLSX from 'xlsx';
 import { BadRequestException } from '@nestjs/common';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
-import { TARGET_HISTORY_KIND } from './target-history.kind';
-import { ctxFor, renderKind } from './parity.support-spec';
+import { TARGET_HISTORY_KIND, runTargetHistory } from './target-history.kind';
+import { collectXlsx, ctxFor, renderKind } from './parity.support-spec';
 
 const admin = { sub: 'admin1', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '', name: '' } as JwtPayload;
 const at = new Date(Date.UTC(2026, 10, 26, 6, 30));
@@ -15,7 +15,7 @@ function prismaWith(rows: unknown[], first: Date | null) {
   return {
     targetChangeHistory: {
       findFirst: jest.fn().mockResolvedValue(first ? { changedAt: first } : null),
-      findMany: jest.fn().mockImplementation(async (a: { cursor?: unknown }) => (a.cursor ? [] : rows)),
+      findMany: jest.fn().mockImplementation(async (a: { cursor?: unknown; take: number }) => (a.cursor ? [] : rows.slice(0, a.take))),
     },
     kpiDef: { findMany: jest.fn().mockResolvedValue([{ code: 'MONTH_TGT', label: 'Month Target' }]) },
     user: { findMany: jest.fn().mockResolvedValue([{ id: 'admin1', name: 'Asha', clientId: 'bajaj' }, { id: 'g1', name: 'Ravi', clientId: 'gifsy' }]) },
@@ -51,6 +51,25 @@ describe('target-history export kind', () => {
     expect(rows[3][8]).toBe(`'=cmd`);
     expect(rows[3].slice(5, 7)).toEqual(['Custom name', 'Added']);
     expect(rows[3][9]).toBe('Gifsy team');
+  });
+
+  it('TRUNCATION note only when rows were actually cut (exactly cap rows → no note; cap + 1 → note, cap written)', async () => {
+    const render = async (n: number) => {
+      const prisma = prismaWith(Array.from({ length: n }, (_, i) => row(`h${i}`)), at);
+      let rowCount = 0;
+      const buf = await collectXlsx(async (w) => {
+        rowCount = (await runTargetHistory(ctxFor(admin, prisma), TARGET_HISTORY_KIND.parseParams({}, admin), w, 2)).rowCount;
+      });
+      return { rows: aoa(buf), rowCount, takes: prisma.targetChangeHistory.findMany.mock.calls.map((c) => c[0].take) };
+    };
+    const exact = await render(2);
+    expect(exact.rowCount).toBe(2);
+    expect(exact.rows.some((r) => String(r[0]).includes('truncated'))).toBe(false);
+    expect(exact.takes[0]).toBe(3); // cap + 1 read to know
+    const over = await render(3);
+    expect(over.rowCount).toBe(2);
+    expect(over.rows).toHaveLength(1 + 1 + 2 + 1); // header + note + 2 rows + truncation notice
+    expect(String(over.rows[4][0])).toMatch(/Export truncated at 2 rows/);
   });
 
   it('nothing recorded yet → says so (never an empty, unexplained file)', async () => {

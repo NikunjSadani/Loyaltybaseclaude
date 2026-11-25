@@ -56,6 +56,14 @@ describe('Target history panel', () => {
     expect(body[2]).toHaveTextContent('(new)');
   });
 
+  it('shows FULL precision (a real change never looks unchanged), without trailing zeros', async () => {
+    stub(async () => json(page([row('h1', { oldValue: 12.3456, newValue: 12.3457 }), row('h0', { oldValue: 12.5, newValue: 1250000.125 })])));
+    render(<TargetHistoryPanel outletCode="R1" />);
+    const body = within(await screen.findByRole('table')).getAllByRole('row').slice(1);
+    expect(body[0]).toHaveTextContent('12.3456 → 12.3457');
+    expect(body[1]).toHaveTextContent('12.5 → 12,50,000.125');
+  });
+
   it('ALWAYS says from when history is recorded (changes before that are not listed)', async () => {
     stub(async () => json(page([])));
     render(<TargetHistoryPanel outletCode="R1" />);

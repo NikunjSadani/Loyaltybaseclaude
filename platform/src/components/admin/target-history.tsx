@@ -40,7 +40,16 @@ interface HistoryPage {
   trackingSince?: string | null;
 }
 
-const show = (v: unknown) => (v === null || v === undefined || v === '' ? '—' : typeof v === 'number' ? v.toLocaleString('en-IN') : String(v));
+/**
+ * Full precision, never rounded (toLocaleString's default 3 decimals shows 12.3456 → 12.3457 as "12.346 → 12.346");
+ * trailing zeros are not shown (12.5 stays "12.5").
+ */
+const show = (v: unknown) =>
+  v === null || v === undefined || v === ''
+    ? '—'
+    : typeof v === 'number'
+      ? v.toLocaleString('en-IN', { maximumFractionDigits: 20 })
+      : String(v);
 
 export function TargetHistoryDownloadButton({ outletCode, month, label = 'Download target history' }: {
   outletCode?: string; month?: string; label?: string;
