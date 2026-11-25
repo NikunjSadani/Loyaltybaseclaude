@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Min } from 'class-validator';
+import { Allow, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Min } from 'class-validator';
 
 // ─── KpiDef DTOs ──────────────────────────────────────────────────────────────
 
@@ -138,23 +138,22 @@ export class UploadTargetsQueryDto {
   preview?: string;
 
   /**
-   * The server-signed previewToken of the preview being confirmed — the same file must be posted again. Only the
-   * charset / length is checked here: the SERVICE verifies it (signature, caller, file, expiry) so that a forged,
-   * foreign or expired token is refused AND audited, not just bounced by validation.
+   * The server-signed previewToken of the preview being confirmed — the same file must be posted again. NOT validated
+   * here on purpose: the SERVICE checks it (format, signature, caller, file, expiry) so that a malformed, forged,
+   * foreign or expired token is refused with a clear message AND audited — never bounced unrecorded by validation.
    */
   @IsOptional()
-  @IsString()
-  @Matches(/^[a-f0-9.]{1,300}$/, { message: 'confirmToken is not a valid preview token' })
-  confirmToken?: string;
+  @Allow()
+  confirmToken?: unknown;
 
   /**
    * With confirmToken: the acknowledged not-applied categories, each bound to what the preview showed —
-   * "CATEGORY:count:fingerprint", comma-separated ('' = none). Verified by the service against the state at apply.
+   * "CATEGORY:count:fingerprint", comma-separated ('' = none). Checked by the service against the state at apply
+   * (anything malformed simply never matches → refused + audited).
    */
   @IsOptional()
-  @IsString()
-  @Matches(/^[A-Za-z0-9_:,]{0,1000}$/, { message: 'ack must be a comma-separated list of CATEGORY:count:fingerprint' })
-  ack?: string;
+  @Allow()
+  ack?: unknown;
 }
 
 // ─── List target batches ──────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ import {
   InternalServerErrorException,
   NotFoundException,
   PreconditionFailedException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import * as XLSX from 'xlsx';
@@ -77,10 +78,12 @@ const sharedAuditFindFirst = jest.fn();
 const sharedTargetFindMany = jest.fn();
 const sharedBatchUpdate = jest.fn().mockResolvedValue({});
 const sharedBatchFindFirst = jest.fn();
+const sharedBatchUpdateMany = jest.fn().mockResolvedValue({ count: 1 });
+const sharedBatchDeleteMany = jest.fn().mockResolvedValue({ count: 1 });
 
 const mockTx = {
   kpiDef:             { upsert: jest.fn(), updateMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
-  targetUploadBatch:  { create: jest.fn(), update: sharedBatchUpdate, findFirst: sharedBatchFindFirst },
+  targetUploadBatch:  { create: jest.fn(), update: sharedBatchUpdate, findFirst: sharedBatchFindFirst, updateMany: sharedBatchUpdateMany, deleteMany: sharedBatchDeleteMany },
   outletTarget:       { upsert: jest.fn(), findMany: sharedTargetFindMany },
   salesUploadBatch:   { create: jest.fn(), findFirst: jest.fn(), delete: jest.fn() },
   outletSalesRecord:  { upsert: jest.fn(), findMany: jest.fn(), count: jest.fn() },
@@ -122,6 +125,8 @@ const mockPrisma = {
     create: mockTx.targetUploadBatch.create,
     update: sharedBatchUpdate,
     findFirst: sharedBatchFindFirst,
+    updateMany: sharedBatchUpdateMany,
+    deleteMany: sharedBatchDeleteMany,
   },
   salesUploadBatch: {
     findMany: jest.fn(),
@@ -152,6 +157,32 @@ const mockStorage = {
   generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-11/uuid-${name}`),
   uploadFile: jest.fn().mockResolvedValue('gs://x'),
   openBoundedObject: jest.fn(),
+  deleteFile: jest.fn().mockResolvedValue(undefined),
+};
+
+// Target writes are MULTI-ROW raw statements on the apply transaction: decode them back into rows.
+const sqlStr = (c: unknown[]) => ((c[0] as { strings?: readonly string[] }).strings ?? []).join('?');
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function targetInsertCalls(): unknown[][] {
+  return mockTx.$executeRaw.mock.calls.filter((c: unknown[]) => /INSERT INTO "outlet_targets"/.test(sqlStr(c)));
+}
+function writtenTargets(): Array<{ outletCode: string; outletName: string; month: string; targetValues: Record<string, unknown>; batchId: string }> {
+  const out: Array<{ outletCode: string; outletName: string; month: string; targetValues: Record<string, unknown>; batchId: string }> = [];
+  for (const c of targetInsertCalls()) {
+    const v = ((c[0] as { values?: unknown[] }).values ?? []) as unknown[];
+    for (let i = 0; i + 6 < v.length; i++) {
+      if (typeof v[i] === 'string' && UUID_RE.test(v[i] as string) && typeof v[i + 5] === 'string' && (v[i + 5] as string).startsWith('{')) {
+        out.push({ outletCode: v[i + 2] as string, outletName: v[i + 3] as string, month: v[i + 4] as string, targetValues: JSON.parse(v[i + 5] as string), batchId: v[i + 6] as string });
+        i += 6;
+      }
+    }
+  }
+  return out;
+}
+const insertOrder = (k: 'first' | 'last') => {
+  const calls = mockTx.$executeRaw.mock.calls;
+  const idx = calls.map((c: unknown[], i: number) => (/INSERT INTO "outlet_targets"/.test(sqlStr(c)) ? i : -1)).filter((i: number) => i >= 0);
+  return mockTx.$executeRaw.mock.invocationCallOrder[k === 'first' ? idx[0] : idx[idx.length - 1]];
 };
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -638,8 +669,7 @@ describe('TargetsService', () => {
       expect(result.acceptedCount).toBeGreaterThanOrEqual(1);
 
       // upsert should have been called with verbatim kpiMap (no compute)
-      const upsertCall = mockTx.outletTarget.upsert.mock.calls[0][0];
-      const stored = upsertCall.create.targetValues as Record<string, number>;
+      const stored = writtenTargets()[0].targetValues as Record<string, number>;
       expect(stored['MONTH_TGT']).toBe(123.45);
       expect(stored['FOCUS_PACK_1']).toBe(67);
     });
@@ -666,7 +696,7 @@ describe('TargetsService', () => {
       // the mock Prisma has no sales-import profile / history tables → the check fails internally
       const result = await service.uploadTargets(admin, file);
       expect(result.savedCount).toBe(1);
-      expect(mockTx.outletTarget.upsert).toHaveBeenCalledTimes(1);
+      expect(writtenTargets()).toHaveLength(1);
       expect(result.focusCheck).toEqual(expect.objectContaining({ checked: false, months: [] }));
     });
 
@@ -680,8 +710,7 @@ describe('TargetsService', () => {
 
       await service.uploadTargets(admin, file);
 
-      const upsertCall = mockTx.outletTarget.upsert.mock.calls[0][0];
-      const stored = upsertCall.create.targetValues as Record<string, number>;
+      const stored = writtenTargets()[0].targetValues as Record<string, number>;
       expect(stored['MONTH_TGT']).toBe(100);
       expect('FOCUS_PACK_1' in stored).toBe(false);
     });
@@ -697,7 +726,7 @@ describe('TargetsService', () => {
       await service.uploadTargets(admin, file);
 
       // No upsert should have been called
-      expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+      expect(writtenTargets()).toHaveLength(0);
     });
 
     it('records rejectedCount on the batch', async () => {
@@ -747,7 +776,7 @@ describe('TargetsService', () => {
       expect(result.problemRows.find((r) => r.outletCode === 'PENDING1')).toBeUndefined();
       expect(result.problemRowCount).toBe(0);
       // And the target is actually written for the pending outlet.
-      expect(mockTx.outletTarget.upsert).toHaveBeenCalledTimes(1);
+      expect(writtenTargets()).toHaveLength(1);
     });
 
     it('LOCK: a PAST month is skipped (no upsert) and reported in skippedLockedMonths', async () => {
@@ -768,7 +797,7 @@ describe('TargetsService', () => {
       const result = await service.uploadTargets(admin, file);
 
       // Locked month → nothing written, but the row still parses (no error).
-      expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+      expect(writtenTargets()).toHaveLength(0);
       expect(result.skippedLockedMonths).toContain('2020-01');
       expect(result.writableMonths).not.toContain('2020-01');
     });
@@ -797,7 +826,9 @@ describe('TargetsService', () => {
 
       expect(result.acceptedCount).toBe(N);
       expect(result.savedCount).toBe(N);
-      expect(mockPrisma.outletTarget.upsert).toHaveBeenCalledTimes(N);
+      expect(writtenTargets()).toHaveLength(N);
+      expect(targetInsertCalls()).toHaveLength(1); // 250 rows → ONE multi-row statement (chunks of 500)
+      expect(mockPrisma.outletTarget.upsert).not.toHaveBeenCalled();
       const interactive = mockPrisma.$transaction.mock.calls.filter((c) => typeof c[0] === 'function');
       expect(interactive).toHaveLength(1);
       expect(mockPrisma.$transaction.mock.calls.filter((c) => Array.isArray(c[0]))).toHaveLength(0);
@@ -828,6 +859,8 @@ describe('TargetsService', () => {
         sharedAuditFindFirst.mockReset();
         sharedBatchFindFirst.mockReset();
         sharedBatchUpdate.mockReset().mockResolvedValue({});
+        sharedBatchUpdateMany.mockReset().mockResolvedValue({ count: 1 });
+        sharedBatchDeleteMany.mockReset().mockResolvedValue({ count: 1 });
         (mockPrisma.targetUploadBatch as unknown as { update: jest.Mock }).update = sharedBatchUpdate;
         sharedTargetFindMany.mockImplementation(async (args: { select: Record<string, boolean> }) =>
           args.select.targetValues ? stored : stored.map((s) => ({ outletCode: s.outletCode })),
@@ -851,7 +884,7 @@ describe('TargetsService', () => {
         const r = await service.previewTargetUpload(admin, xfile(buf()));
 
         expect(mockTx.targetUploadBatch.create).not.toHaveBeenCalled();
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
         expect(mockPrisma.$executeRaw).not.toHaveBeenCalled();
         expect(mockPrisma.$transaction).not.toHaveBeenCalled();
         expect(notify.targetsUploaded).not.toHaveBeenCalled();
@@ -895,7 +928,7 @@ describe('TargetsService', () => {
         expect(r.newCount).toBe(p.newCount);
         expect(r.overwriteCount).toBe(p.overwriteCount);
         expect(r.perMonth).toEqual(p.perMonth);
-        expect(mockTx.outletTarget.upsert).toHaveBeenCalledTimes(2);
+        expect(writtenTargets()).toHaveLength(2);
         expect(r.batchId).toBe('batch1');
         const created = mockTx.targetUploadBatch.create.mock.calls[0][0].data;
         expect(created.id).toBeUndefined(); // the DB generates it — never derived from the client's token
@@ -910,7 +943,7 @@ describe('TargetsService', () => {
       it('NO PREVIEW: an upload without a confirm token is REFUSED (400) and audited — nothing written', async () => {
         await expect(service.uploadTargets(admin, xfile(buf()))).rejects.toThrow(/Preview the file first/);
         expect(mockTx.targetUploadBatch.create).not.toHaveBeenCalled();
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
         expect(refusals()).toEqual([expect.objectContaining({
           action: 'REJECT', entityId: 'no-preview', actorId: 'admin1',
           metadata: expect.objectContaining({ clientId: 'deoleo', reason: 'NO_PREVIEW', status: 400, fileName: 'targets.xlsx' }),
@@ -929,9 +962,11 @@ describe('TargetsService', () => {
         const tampered = p.previewToken.replace(/.$/, (c) => (c === '0' ? '1' : '0'));
         await expect(service.uploadTargets(admin, xfile(b), { confirmToken: tampered, acknowledged: acksOf(p) }))
           .rejects.toThrow(/not valid for your account/);
-        await expect(service.uploadTargets(admin, xfile(b), { confirmToken: 'nope' })).rejects.toThrow(BadRequestException);
+        await expect(service.uploadTargets(admin, xfile(b), { confirmToken: 'nope' })).rejects.toThrow(/not in the expected format.*Nothing was saved/);
+        await expect(service.uploadTargets(admin, xfile(b), { confirmToken: 'x'.repeat(5000) })).rejects.toThrow(BadRequestException);
         expect(mockTx.targetUploadBatch.create).not.toHaveBeenCalled();
-        expect(refusals().map((d) => d.metadata.reason)).toEqual(['INVALID_TOKEN', 'INVALID_TOKEN', 'INVALID_TOKEN', 'INVALID_TOKEN']);
+        expect(refusals().map((d) => d.metadata.reason)).toEqual(['INVALID_TOKEN', 'INVALID_TOKEN', 'INVALID_TOKEN', 'MALFORMED_TOKEN', 'MALFORMED_TOKEN']);
+        expect(refusals()[4].metadata.tokenLength).toBe(5000);
       });
 
       it('EXPIRED: a preview older than 30 minutes → 410 with a clear message, audited, nothing written', async () => {
@@ -958,7 +993,7 @@ describe('TargetsService', () => {
         await expect(service.uploadTargets(admin, xfile(other), { confirmToken: p.previewToken, acknowledged: acksOf(p) }))
           .rejects.toThrow(/not the one you previewed/);
         expect(mockTx.targetUploadBatch.create).not.toHaveBeenCalled();
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
         expect(refusals().map((d) => d.metadata.reason)).toEqual(['DIFFERENT_FILE']);
       });
 
@@ -969,7 +1004,7 @@ describe('TargetsService', () => {
         await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }))
           .rejects.toThrow(/already applied on .* IST \(upload pplied01\) — it was not applied again/);
         expect(mockTx.targetUploadBatch.create).not.toHaveBeenCalled();
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
         // the guard looks for an APPLIED audit row of THIS token nonce in THIS tenant
         expect(sharedAuditFindFirst.mock.calls[0][0].where).toEqual({
           entityType: 'TARGET_UPLOAD',
@@ -982,17 +1017,21 @@ describe('TargetsService', () => {
         expect(refusals().map((d) => d.metadata.reason)).toEqual(['ALREADY_APPLIED']);
       });
 
-      it('DOUBLE-APPLY RACE: a concurrent apply committed first → rolled back, batch FAILED (nothing saved), 409', async () => {
+      it('DOUBLE-APPLY RACE: a concurrent apply committed first → rolled back, recorded as a REFUSAL (no failed batch), 409', async () => {
         const b = buf();
         const p = await service.previewTargetUpload(admin, xfile(b));
         // outside the tx: not applied yet; inside the tx (after the lock): the other request committed
         sharedAuditFindFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ entityId: 'cmotherbatch0001', createdAt: new Date() });
         await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }))
           .rejects.toThrow(ConflictException);
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
-        expect(sharedBatchUpdate).toHaveBeenCalledWith({ where: { id: 'batch1' }, data: { status: 'FAILED' } });
-        expect(uploadAudits()).toEqual([expect.objectContaining({
-          entityId: 'batch1', metadata: expect.objectContaining({ status: 'FAILED', failureReason: 'ALREADY_APPLIED', savedCount: 0 }),
+        expect(writtenTargets()).toHaveLength(0);
+        // not a failed upload: no FAILED batch / audit; the attempt's PENDING batch + kept file are removed
+        expect(sharedBatchUpdateMany).not.toHaveBeenCalled();
+        expect(uploadAudits()).toEqual([]);
+        expect(sharedBatchDeleteMany).toHaveBeenCalledWith({ where: { id: 'batch1', status: 'PENDING' } });
+        expect(mockStorage.deleteFile).toHaveBeenCalledWith('target-uploads/deoleo/batch1/2026-11/uuid-targets.xlsx');
+        expect(refusals()).toEqual([expect.objectContaining({
+          metadata: expect.objectContaining({ reason: 'ALREADY_APPLIED', decidedInsideTransaction: true, discardedBatchId: 'batch1' }),
         })]);
       });
 
@@ -1000,10 +1039,12 @@ describe('TargetsService', () => {
         const b = buf();
         const p = await service.previewTargetUpload(admin, xfile(b));
         mockPrisma.$transaction.mockImplementationOnce(() => Promise.reject(new Error('db down')));
+        sharedBatchFindFirst.mockResolvedValueOnce({ status: 'PENDING' }); // the re-read: rolled back
         const err = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }).catch((e: unknown) => e);
         expect(err).toBeInstanceOf(InternalServerErrorException);
         expect((err as Error).message).toMatch(/NOTHING from this file was saved.*Press Confirm & apply again to retry/);
-        expect(sharedBatchUpdate).toHaveBeenCalledWith({ where: { id: 'batch1' }, data: { status: 'FAILED' } });
+        // FAILED only via a CONDITIONAL update (still PENDING)
+        expect(sharedBatchUpdateMany).toHaveBeenCalledWith({ where: { id: 'batch1', status: 'PENDING' }, data: { status: 'FAILED' } });
         expect(uploadAudits()).toEqual([expect.objectContaining({
           metadata: expect.objectContaining({ status: 'FAILED', failureReason: 'WRITE_FAILED', savedCount: 0, error: 'db down' }),
         })]);
@@ -1013,7 +1054,7 @@ describe('TargetsService', () => {
         const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
         expect(r.batchId).toBe('batch2');
         expect(r.status).toBe('APPLIED');
-        expect(mockTx.outletTarget.upsert).toHaveBeenCalledTimes(2);
+        expect(writtenTargets()).toHaveLength(2);
         expect(uploadAudits().map((d) => [d.entityId, d.metadata.status])).toEqual([['batch1', 'FAILED'], ['batch2', 'APPLIED']]);
       });
 
@@ -1027,7 +1068,7 @@ describe('TargetsService', () => {
         const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
         expect(r.status).toBe('APPLIED');
         expect(r.newCount).toBe(1);
-        expect(sharedBatchUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'FAILED' } }));
+        expect(sharedBatchUpdateMany).not.toHaveBeenCalled();
       });
 
       it('ACK BINDING: counts changed since the preview → 412 naming old vs new, audited, NOTHING written', async () => {
@@ -1039,7 +1080,7 @@ describe('TargetsService', () => {
         expect(err).toBeInstanceOf(PreconditionFailedException);
         expect((err as Error).message).toMatch(/existing outlet-month targets that will be replaced: now 2 \(you confirmed 1\)/);
         expect(mockTx.targetUploadBatch.create).not.toHaveBeenCalled();
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
         expect(refusals().map((d) => d.metadata.reason)).toEqual(['ACK_CHANGED']);
       });
 
@@ -1049,7 +1090,7 @@ describe('TargetsService', () => {
         sharedTargetFindMany.mockImplementation(async () => [{ outletCode: 'O002' }]);
         await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }))
           .rejects.toThrow(/still 1, but not the same ones you confirmed/);
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
       });
 
       it('ACK BINDING: a tick sent with a wrong count (not what was shown) → 412, nothing written', async () => {
@@ -1058,7 +1099,7 @@ describe('TargetsService', () => {
         const acks = acksOf(p).map((a) => (a.category === 'REJECTED_ROWS' ? { ...a, count: 0 } : a));
         await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acks }))
           .rejects.toThrow(PreconditionFailedException);
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
       });
 
       it('ACK ENFORCEMENT: a confirm missing an acknowledgement → 400 naming the missing category, audited, NOTHING written', async () => {
@@ -1071,7 +1112,7 @@ describe('TargetsService', () => {
         expect((err as Error).message).toMatch(/1 existing outlet-month targets that will be replaced \(OVERWRITE\)/);
         expect((err as Error).message).not.toMatch(/REJECTED_ROWS/);
         expect(mockTx.targetUploadBatch.create).not.toHaveBeenCalled();
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
         expect(uploadAudits()).toEqual([]);
         expect(refusals().map((d) => d.metadata.reason)).toEqual(['ACK_MISSING']);
       });
@@ -1081,7 +1122,7 @@ describe('TargetsService', () => {
         const p = await service.previewTargetUpload(admin, xfile(b));
         await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken }))
           .rejects.toThrow(/\(REJECTED_ROWS\).*\(OVERWRITE\)/);
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
       });
 
       it('ACK ENFORCEMENT is checked against the state AT APPLY: a category that appeared since the preview is refused', async () => {
@@ -1092,7 +1133,7 @@ describe('TargetsService', () => {
         sharedTargetFindMany.mockImplementation(async () => [{ outletCode: 'O002' }]);
         await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: [] }))
           .rejects.toThrow(/\(OVERWRITE\)/);
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
       });
 
       it('the TARGET_UPLOAD audit row is written INSIDE the transaction, once, with what was actually written', async () => {
@@ -1126,7 +1167,7 @@ describe('TargetsService', () => {
         });
         // written after every target, before the transaction returned
         expect(sharedAuditCreate.mock.invocationCallOrder[0])
-          .toBeGreaterThan(mockTx.outletTarget.upsert.mock.invocationCallOrder[1]);
+          .toBeGreaterThan(insertOrder('last'));
         expect(r.notApplied).toEqual(p.notApplied);
         expect(r.acknowledged).toEqual(acks);
       });
@@ -1140,18 +1181,19 @@ describe('TargetsService', () => {
         expect(bytes).toBe(b);
         expect(key).toBe(`target-uploads/deoleo/${r.batchId}/2026-11/uuid-targets.xlsx`);
         expect(mockStorage.uploadFile.mock.invocationCallOrder[0])
-          .toBeLessThan(mockTx.outletTarget.upsert.mock.invocationCallOrder[0]);
+          .toBeLessThan(insertOrder('first'));
       });
 
       it('the file cannot be stored → 503 "nothing was saved", batch FAILED + FAILED audit, no target written', async () => {
         mockStorage.uploadFile.mockRejectedValueOnce(new Error('gcs down'));
+        sharedBatchUpdateMany.mockResolvedValueOnce({ count: 1 });
         const b = buf();
         const p = await service.previewTargetUpload(admin, xfile(b));
         await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }))
           .rejects.toThrow(/could not be stored, so nothing was saved/);
-        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(writtenTargets()).toHaveLength(0);
         expect(mockPrisma.$transaction).not.toHaveBeenCalled();
-        expect(sharedBatchUpdate).toHaveBeenCalledWith({ where: { id: 'batch1' }, data: { status: 'FAILED' } });
+        expect(sharedBatchUpdateMany).toHaveBeenCalledWith({ where: { id: 'batch1', status: 'PENDING' }, data: { status: 'FAILED' } });
         expect(uploadAudits()).toEqual([expect.objectContaining({
           metadata: expect.objectContaining({ status: 'FAILED', failureReason: 'STORAGE_FAILED', fileKey: null }),
         })]);
@@ -1194,6 +1236,83 @@ describe('TargetsService', () => {
           metadata: expect.objectContaining({ change: 'target-upload-direct', status: 'APPLIED', tokenNonce: null, fileKey: null }),
         })]);
       });
+
+      it('LOST REPLY, DB unreadable → UNKNOWN: "couldn\'t confirm whether it saved", never marked FAILED, recorded', async () => {
+        const b = buf();
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        mockPrisma.$transaction.mockImplementationOnce(() => Promise.reject(new Error('connection reset')));
+        sharedBatchFindFirst.mockRejectedValueOnce(new Error('db unreachable'));
+        const err = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(ServiceUnavailableException);
+        expect((err as Error).message).toMatch(/couldn't confirm whether the targets were saved\. Refresh .* Upload history .* before retrying/);
+        expect(sharedBatchUpdateMany).not.toHaveBeenCalled();
+        expect(uploadAudits()).toEqual([]);
+        const unconfirmed = sharedAuditCreate.mock.calls.map((c) => c[0].data).filter((d) => d.entityType === 'TARGET_UPLOAD_UNCONFIRMED');
+        expect(unconfirmed).toEqual([expect.objectContaining({
+          entityId: 'batch1', metadata: expect.objectContaining({ status: 'UNKNOWN', error: 'connection reset' }),
+        })]);
+      });
+
+      it('LOST REPLY, batch no longer PENDING when marking FAILED (a commit landed meanwhile) → UNKNOWN, not "nothing saved"', async () => {
+        const b = buf();
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        mockPrisma.$transaction.mockImplementationOnce(() => Promise.reject(new Error('timeout')));
+        sharedBatchFindFirst.mockResolvedValueOnce({ status: 'PENDING' });
+        sharedBatchUpdateMany.mockResolvedValueOnce({ count: 0 }); // WHERE status = 'PENDING' matched nothing
+        const err = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(ServiceUnavailableException);
+        expect((err as Error).message).not.toMatch(/NOTHING/);
+        expect(uploadAudits()).toEqual([]); // no FAILED row
+      });
+
+      it('CHANGED WHILE APPLYING (inside the tx) → 412 recorded as a REFUSAL, no failed batch, nothing written', async () => {
+        const b = buf();
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        // the pre-check read sees the preview's state; the in-transaction read (after the lock) sees O002 stored too
+        let reads = 0;
+        sharedTargetFindMany.mockImplementation(async () => (++reads <= 1 ? [{ outletCode: 'O001' }] : [{ outletCode: 'O001' }, { outletCode: 'O002' }]));
+        const err = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(PreconditionFailedException);
+        expect((err as Error).message).toMatch(/changed while applying \(now 2 would be replaced, you confirmed 1\)\. Nothing was saved/);
+        expect(writtenTargets()).toHaveLength(0);
+        expect(uploadAudits()).toEqual([]);
+        expect(sharedBatchUpdateMany).not.toHaveBeenCalled();
+        expect(sharedBatchDeleteMany).toHaveBeenCalledWith({ where: { id: 'batch1', status: 'PENDING' } });
+        expect(refusals().map((d) => [d.metadata.reason, d.metadata.decidedInsideTransaction])).toEqual([['ACK_CHANGED', true]]);
+      });
+
+      it('SCALE: 6,500 outlets × 12 months (78,000 rows) → ≤ 200 statements in the ONE transaction (multi-row chunks of 500)', async () => {
+        jest.spyOn(TargetsService, 'confirmRequired').mockReturnValue(false);
+        sharedTargetFindMany.mockImplementation(async () => []);
+        const months = Array.from({ length: 12 }, (_, i) => {
+          const d = new Date(new Date().getFullYear() + 1, i, 1);
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        });
+        const writes = months.flatMap((month) =>
+          Array.from({ length: 6500 }, (_, i) => ({ month, outletCode: `O${i}`, outletName: `Outlet ${i}`, kpiMap: { MONTH_TGT: i }, carry: [] as string[] })),
+        );
+        const p = {
+          scopeEnforced: false,
+          parseResult: { rows: [], acceptedTargets: {}, summary: { total: 6500, accepted: 6500, rejected: 0, ignoredOutOfScope: 0 } },
+          sortedMonths: months, lockedMonths: [], writableMonths: months, batchMonth: months[0], writes, lockedKeys: [],
+          kpiLabels: new Map(),
+        };
+        // count every DB statement the transaction issues
+        const counted = [mockTx.$executeRaw, sharedTargetFindMany, sharedBatchUpdate, sharedAuditCreate, sharedAuditFindFirst];
+        const r = await (service as unknown as {
+          applyTargetUpload: (...a: unknown[]) => Promise<{ savedCount: number; newCount: number }>;
+        }).applyTargetUpload(admin, xfile(Buffer.from('x')), p, [], [], undefined, { fileName: 'x.xlsx', fileSize: 1, fileSha256: 'h' });
+        const statements = counted.reduce((n, m) => n + m.mock.calls.length, 0);
+        expect(r.savedCount).toBe(78_000);
+        expect(r.newCount).toBe(78_000);
+        expect(writtenTargets()).toHaveLength(78_000);
+        expect(targetInsertCalls()).toHaveLength(156); // 78,000 / 500
+        expect(statements).toBeLessThanOrEqual(200);
+        const interactive = mockPrisma.$transaction.mock.calls.filter((c) => typeof c[0] === 'function');
+        expect(interactive).toHaveLength(1);
+        expect(((interactive[0] as unknown[])[1] as { timeout: number }).timeout).toBe(5 * 60 * 1000);
+      });
+
 
       it('the scope helper defaults to ALL tenants (owner 2026-11-25, incl. Deoleo)', () => {
         jest.restoreAllMocks();

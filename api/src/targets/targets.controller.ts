@@ -229,8 +229,9 @@ export class TargetsController {
     if (q?.preview === '1' || q?.preview === 'true') return this.targets.previewTargetUpload(user, file);
     // No token → the service refuses + audits ("Preview the file first") for every confirmRequired tenant.
     if (q?.confirmToken === undefined) return this.targets.uploadTargets(user, file, undefined);
+    // A non-string token (e.g. a repeated param) is passed as '' → the service refuses + audits it as malformed.
     return this.targets.uploadTargets(user, file, {
-      confirmToken: q.confirmToken,
+      confirmToken: typeof q.confirmToken === 'string' ? q.confirmToken : '',
       acknowledged: TargetsService.parseAckParam(q.ack),
     });
   }

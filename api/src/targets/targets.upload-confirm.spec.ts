@@ -99,14 +99,25 @@ describe('UploadTargetsQueryDto', () => {
     expect(errs({})).toHaveLength(0);
     expect(errs({ confirmToken: TOKEN, ack: '' })).toHaveLength(0);
     expect(errs({ confirmToken: TOKEN, ack: 'REJECTED_ROWS:1:0123456789abcdef,OVERWRITE:12:fedcba9876543210' })).toHaveLength(0);
-    // a well-shaped but forged token passes validation ON PURPOSE: the service refuses AND audits it
-    expect(errs({ confirmToken: 'abc' })).toHaveLength(0);
   });
 
-  it('rejects garbage characters / lengths and an unknown preview value', () => {
-    expect(errs({ confirmToken: 'not a token!' })).not.toHaveLength(0);
-    expect(errs({ confirmToken: 'a'.repeat(301) })).not.toHaveLength(0);
+  it('a malformed / forged token or ack passes validation ON PURPOSE: the service refuses it with a clear message AND audits it', () => {
+    expect(errs({ confirmToken: 'abc' })).toHaveLength(0);
+    expect(errs({ confirmToken: 'not a token!' })).toHaveLength(0);
+    expect(errs({ confirmToken: 'a'.repeat(5000) })).toHaveLength(0);
+    expect(errs({ confirmToken: ['a', 'b'] })).toHaveLength(0);
+    expect(errs({ ack: 'OVERWRITE;DROP' })).toHaveLength(0);
+  });
+
+  it('still rejects an unknown preview value', () => {
     expect(errs({ preview: 'yes' })).not.toHaveLength(0);
-    expect(errs({ ack: 'OVERWRITE;DROP' })).not.toHaveLength(0);
+  });
+});
+
+describe('POST /admin/targets/upload — a non-string token reaches the service as malformed', () => {
+  it('a repeated confirmToken param (array) is passed as "" → the service refuses + audits MALFORMED_TOKEN', async () => {
+    const { ctrl, targets } = make();
+    await ctrl.uploadTargets(user, file, { confirmToken: ['x', 'y'] as unknown as string });
+    expect(targets.uploadTargets).toHaveBeenCalledWith(user, file, { confirmToken: '', acknowledged: [] });
   });
 });
