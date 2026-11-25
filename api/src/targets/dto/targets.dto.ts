@@ -142,6 +142,17 @@ export class UploadTargetsQueryDto {
   @IsString()
   @Matches(/^[a-f0-9]{64}\.[a-f0-9]{32}$/, { message: 'confirmToken is not a valid preview token' })
   confirmToken?: string;
+
+  /**
+   * With confirmToken: the not-applied categories the admin acknowledged, comma-separated
+   * (REJECTED_ROWS,OVERWRITE,LOCKED_MONTHS,BLANK_ROWS,IGNORED_VALUES). '' = none.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^$|^(REJECTED_ROWS|OVERWRITE|LOCKED_MONTHS|BLANK_ROWS|IGNORED_VALUES)(,(REJECTED_ROWS|OVERWRITE|LOCKED_MONTHS|BLANK_ROWS|IGNORED_VALUES))*$/, {
+    message: 'ack must be a comma-separated list of REJECTED_ROWS, OVERWRITE, LOCKED_MONTHS, BLANK_ROWS, IGNORED_VALUES',
+  })
+  ack?: string;
 }
 
 // ─── List target batches ──────────────────────────────────────────────────────

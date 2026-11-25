@@ -77,6 +77,19 @@ export function kpiScopeEnforced(kpis: ReadonlyArray<KpiScopeLike>): boolean {
   return kpis.some((k) => !isUnscoped(kpiAppliesTo(k)));
 }
 
+/**
+ * What a target upload will NOT apply as typed — each must be explicitly acknowledged before a confirmed apply
+ * (owner rule 2026-11-25, "no silent failure"). Plain-words labels are used in the 400 that names missing ones.
+ */
+export const TARGET_UPLOAD_ACK_CATEGORIES = {
+  REJECTED_ROWS:  'rows that will not be saved (rejected)',
+  OVERWRITE:      'existing outlet-month targets that will be replaced',
+  LOCKED_MONTHS:  'outlet-month targets in past (locked) months that will not be saved',
+  BLANK_ROWS:     'blank rows that will not be saved',
+  IGNORED_VALUES: "values ignored because the KPI doesn't apply to the outlet",
+} as const;
+export type TargetUploadAckCategory = keyof typeof TARGET_UPLOAD_ACK_CATEGORIES;
+
 /** One outlet-month a target upload writes: the uploaded KPI map + the stored KPI codes it must carry over. */
 interface TargetUploadWrite {
   month: string;
@@ -675,10 +688,15 @@ export class TargetsService {
 
     // One write per (outletCode, writable month) with ≥1 non-blank value — exactly the rows apply upserts.
     const writes: TargetUploadWrite[] = [];
+    let lockedOutletMonths = 0; // accepted outlet-months with values in a LOCKED (past) month — not written
     for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
-      if (isMonthLocked(month, currentMonth)) continue; // past month — not editable
+      const locked = isMonthLocked(month, currentMonth); // past month — not editable
       for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
         if (Object.keys(kpiMap).length === 0) continue; // safety: skip fully-blank
+        if (locked) {
+          lockedOutletMonths++;
+          continue;
+        }
         writes.push({
           month,
           outletCode,
@@ -699,8 +717,30 @@ export class TargetsService {
       writableMonths,
       batchMonth,
       writes,
+      lockedOutletMonths,
       kpiLabels: new Map(kpiRows.map((k) => [k.code, k.label])),
     };
+  }
+
+  /**
+   * NO SILENT FAILURE (owner rule 2026-11-25): every category of the file that will NOT be applied as typed, with
+   * its count — only categories that are present (count > 0). The preview shows one required "I understand…"
+   * checkbox per entry; a confirmed apply must acknowledge every entry present AT APPLY TIME (else 400).
+   */
+  private static notApplied(
+    p: Awaited<ReturnType<TargetsService['prepareTargetUpload']>>,
+    overwriteCount: number,
+  ): Array<{ category: TargetUploadAckCategory; count: number }> {
+    let blank = 0;
+    for (const r of p.parseResult.rows) if (r.status === 'skipped_blank') blank++;
+    const all: Array<{ category: TargetUploadAckCategory; count: number }> = [
+      { category: 'REJECTED_ROWS',  count: p.parseResult.summary.rejected },
+      { category: 'OVERWRITE',      count: overwriteCount },
+      { category: 'LOCKED_MONTHS',  count: p.lockedOutletMonths },
+      { category: 'BLANK_ROWS',     count: blank },
+      { category: 'IGNORED_VALUES', count: p.scopeEnforced ? p.parseResult.summary.ignoredOutOfScope : 0 },
+    ];
+    return all.filter((c) => c.count > 0);
   }
 
   /** The response fields shared by preview and apply (same shape the screen already renders). */
@@ -824,6 +864,8 @@ export class TargetsService {
       overwriteExamples,
       // How many overwritten outlet-months were compared to find the examples (the examples are a sample).
       overwriteExamplesSampled: cls.sample.length,
+      // Every category NOT applied as typed — each must be acknowledged on confirm (absent categories omitted).
+      notApplied: TargetsService.notApplied(p, cls.overwriteCount),
       ...targetUploadRowsEcho(p.parseResult.rows),
       focusCheck,
     };
@@ -837,8 +879,14 @@ export class TargetsService {
    * Tracks totals on a TargetUploadBatch row.
    *
    * `opts.confirmToken` (from previewTargetUpload): the file must be the previewed one, and a token applies ONCE.
+   * `opts.acknowledged` (required with a token): every not-applied category present at apply time must be in it,
+   * else 400 naming the missing ones and NOTHING is written. Recorded on an AuditLog row with the batch.
    */
-  async uploadTargets(user: JwtPayload, file: Express.Multer.File, opts?: { confirmToken?: string }) {
+  async uploadTargets(
+    user: JwtPayload,
+    file: Express.Multer.File,
+    opts?: { confirmToken?: string; acknowledged?: readonly string[] },
+  ) {
     if (!file) throw new BadRequestException('No file uploaded');
 
     let batchId: string | undefined;
@@ -857,6 +905,21 @@ export class TargetsService {
     // Classified against the stored targets just before the write (the final, real split — the preview may differ
     // if targets were changed in between).
     const cls = await this.classifyTargetWrites(user.clientId, p.writes);
+    const notApplied = TargetsService.notApplied(p, cls.overwriteCount);
+
+    // NO SILENT FAILURE: a confirmed apply must acknowledge everything that will not be applied as typed — checked
+    // against the state NOW (a category that appeared since the preview is missing → re-preview).
+    const acknowledged = [...new Set(opts?.acknowledged ?? [])];
+    if (batchId) {
+      const missing = notApplied.filter((c) => !acknowledged.includes(c.category));
+      if (missing.length > 0) {
+        throw new BadRequestException(
+          `Please confirm what will not be applied before applying: ${missing
+            .map((c) => `${c.count.toLocaleString('en-IN')} ${TARGET_UPLOAD_ACK_CATEGORIES[c.category]} (${c.category})`)
+            .join('; ')}. Nothing was saved. Pick the file again to see the up-to-date preview.`,
+        );
+      }
+    }
 
     // ── Persist ────────────────────────────────────────────────────────────────
     // The outlet roster is now EVERY non-deleted outlet (not just active), so an
@@ -869,7 +932,7 @@ export class TargetsService {
     // idempotent (upsert semantics preserved).
     let batch: { id: string };
     try {
-      batch = await this.prisma.targetUploadBatch.create({
+      const createBatch = this.prisma.targetUploadBatch.create({
         data: {
           ...(batchId ? { id: batchId } : {}),
           clientId:     user.clientId,
@@ -881,6 +944,31 @@ export class TargetsService {
           status: 'COMPLETED',
         },
       });
+      if (batchId) {
+        // A confirmed apply records WHAT the admin acknowledged as not applied, atomically with the batch row.
+        const [created] = await this.prisma.$transaction([
+          createBatch,
+          this.prisma.auditLog.create({
+            data: {
+              action: 'CREATE',
+              entityType: 'TARGET_UPLOAD_BATCH',
+              entityId: batchId,
+              actorId: user.sub,
+              newValues: {
+                acknowledged,
+                notApplied,
+                willSave: p.writes.length,
+                newCount: cls.newCount,
+                overwriteCount: cls.overwriteCount,
+              } as unknown as Prisma.InputJsonValue,
+              metadata: { clientId: user.clientId, change: 'target-upload-confirm', fileName: file.originalname ?? null },
+            },
+          }),
+        ]);
+        batch = created;
+      } else {
+        batch = await createBatch;
+      }
     } catch (e) {
       // Double-apply guard: the deterministic batch id of a preview token already exists → this preview was applied.
       if (batchId && e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
@@ -975,6 +1063,9 @@ export class TargetsService {
       newCount:       cls.newCount,
       overwriteCount: cls.overwriteCount,
       perMonth:       cls.perMonth,
+      // What was NOT applied as typed (the done screen lists it), + what the admin acknowledged (confirm path).
+      notApplied,
+      ...(batchId ? { acknowledged } : {}),
       // Memory-safety (2026-11-13): only the rejected rows + the ignored-value warning rows come back
       // (each capped at 500, slimmed to row/outlet/status/remarks) — not every parsed row with its values.
       ...targetUploadRowsEcho(p.parseResult.rows),

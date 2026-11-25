@@ -42,11 +42,19 @@ describe('POST /admin/targets/upload dispatch', () => {
     expect(targets.uploadTargets).not.toHaveBeenCalled();
   });
 
-  it('?confirmToken= → apply with that token', async () => {
+  it('?confirmToken=&ack= → apply with that token and the acknowledged categories', async () => {
+    const { ctrl, targets } = make();
+    await ctrl.uploadTargets(user, file, { confirmToken: TOKEN, ack: 'REJECTED_ROWS,OVERWRITE' });
+    expect(targets.uploadTargets).toHaveBeenCalledWith(user, file, {
+      confirmToken: TOKEN, acknowledged: ['REJECTED_ROWS', 'OVERWRITE'],
+    });
+    expect(targets.previewTargetUpload).not.toHaveBeenCalled();
+  });
+
+  it('?confirmToken= without ack → apply with NO acknowledgements (the service then enforces them)', async () => {
     const { ctrl, targets } = make();
     await ctrl.uploadTargets(user, file, { confirmToken: TOKEN });
-    expect(targets.uploadTargets).toHaveBeenCalledWith(user, file, { confirmToken: TOKEN });
-    expect(targets.previewTargetUpload).not.toHaveBeenCalled();
+    expect(targets.uploadTargets).toHaveBeenCalledWith(user, file, { confirmToken: TOKEN, acknowledged: [] });
   });
 
   it('no params → direct apply, exactly as before (scripts / e2e harness)', async () => {
@@ -64,10 +72,13 @@ describe('UploadTargetsQueryDto', () => {
     expect(errs({ preview: '1' })).toHaveLength(0);
     expect(errs({ confirmToken: TOKEN })).toHaveLength(0);
     expect(errs({})).toHaveLength(0);
+    expect(errs({ confirmToken: TOKEN, ack: '' })).toHaveLength(0);
+    expect(errs({ confirmToken: TOKEN, ack: 'REJECTED_ROWS,OVERWRITE,LOCKED_MONTHS,BLANK_ROWS,IGNORED_VALUES' })).toHaveLength(0);
   });
 
-  it('rejects a malformed token and an unknown preview value', () => {
+  it('rejects a malformed token, an unknown preview value and an unknown ack category', () => {
     expect(errs({ confirmToken: 'abc' })).not.toHaveLength(0);
     expect(errs({ preview: 'yes' })).not.toHaveLength(0);
+    expect(errs({ ack: 'OVERWRITE,EVERYTHING' })).not.toHaveLength(0);
   });
 });

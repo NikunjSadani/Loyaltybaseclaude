@@ -114,6 +114,8 @@ const mockPrisma = {
     findMany: jest.fn().mockResolvedValue([]),
   },
   $executeRaw: jest.fn(),
+  // Target upload confirm: the acknowledged not-applied categories are audited with the batch row.
+  auditLog: { create: jest.fn() },
   // Handles BOTH forms: the array form ($transaction([...ops])) used by the chunked
   // upload persistence, and the interactive callback form used by upsertKpi.
   $transaction: jest.fn((arg: unknown) =>
@@ -795,6 +797,8 @@ describe('TargetsService', () => {
         ['O002', 'Outlet Two', 'HORECA', 1, 2],
         ['GHOST', 'Ghost', 'RETAIL', 3, 4],
       ]);
+      // This file has 1 rejected row (GHOST) and 1 overwritten outlet-month (O001) → both must be acknowledged.
+      const ACKS = ['REJECTED_ROWS', 'OVERWRITE'];
 
       it('PREVIEW writes NOTHING (no batch, no targets, no raw SQL, no notifications) and reports new vs overwritten', async () => {
         const notify = (service as unknown as { salesNotifications: { targetsUploaded: jest.Mock } }).salesNotifications;
@@ -823,6 +827,11 @@ describe('TargetsService', () => {
           ],
         }]);
         expect(r.overwriteExamplesSampled).toBe(1);
+        // NO SILENT FAILURE: only the categories present, with counts (no blank / locked / ignored here).
+        expect(r.notApplied).toEqual([
+          { category: 'REJECTED_ROWS', count: 1 },
+          { category: 'OVERWRITE', count: 1 },
+        ]);
         // the key query is tenant-scoped
         expect(mockPrisma.outletTarget.findMany.mock.calls[0][0].where).toEqual({ clientId: 'deoleo', month: WRITABLE_MONTH.ym });
       });
@@ -830,7 +839,7 @@ describe('TargetsService', () => {
       it('CONFIRM applies exactly the previewed write set: same new/overwritten counts, batch id from the token', async () => {
         const b = buf();
         const p = await service.previewTargetUpload(admin, xfile(b));
-        const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken });
+        const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: ACKS });
 
         expect(r.savedCount).toBe(p.willSaveCount);
         expect(r.newCount).toBe(p.newCount);
@@ -844,14 +853,14 @@ describe('TargetsService', () => {
       it('DOUBLE-APPLY guard: a second confirm of the same preview → 409 and NOTHING written again', async () => {
         const b = buf();
         const p = await service.previewTargetUpload(admin, xfile(b));
-        await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken });
+        await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: ACKS });
         mockTx.outletTarget.upsert.mockClear();
         // the batch row with that id now exists → the DB unique PK rejects the second create
         mockTx.targetUploadBatch.create.mockRejectedValueOnce(
           new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }),
         );
 
-        await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken }))
+        await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: ACKS }))
           .rejects.toThrow(ConflictException);
         expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
       });
@@ -859,7 +868,7 @@ describe('TargetsService', () => {
       it('a DIFFERENT file than the previewed one → 409, nothing written', async () => {
         const p = await service.previewTargetUpload(admin, xfile(buf()));
         const other = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 999, 999]]);
-        await expect(service.uploadTargets(admin, xfile(other), { confirmToken: p.previewToken }))
+        await expect(service.uploadTargets(admin, xfile(other), { confirmToken: p.previewToken, acknowledged: ACKS }))
           .rejects.toThrow(/not the one you previewed/);
         expect(mockTx.targetUploadBatch.create).not.toHaveBeenCalled();
         expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
@@ -876,11 +885,81 @@ describe('TargetsService', () => {
         const p = await service.previewTargetUpload(admin, xfile(b));
         // O002 got a target from elsewhere in between → now both are overwrites.
         mockPrisma.outletTarget.findMany.mockImplementation(async () => [{ outletCode: 'O001' }, { outletCode: 'O002' }]);
-        const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken });
+        const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: ACKS });
         expect(p.newCount).toBe(1);
         expect(r.newCount).toBe(0);
         expect(r.overwriteCount).toBe(2);
         expect(r.savedCount).toBe(2);
+      });
+
+      it('ACK ENFORCEMENT: a confirm missing an acknowledgement → 400 naming the missing category, NOTHING written', async () => {
+        const b = buf();
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        const err = await service
+          .uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: ['REJECTED_ROWS'] })
+          .catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(BadRequestException);
+        expect((err as Error).message).toMatch(/1 existing outlet-month targets that will be replaced \(OVERWRITE\)/);
+        expect((err as Error).message).not.toMatch(/REJECTED_ROWS/);
+        expect(mockTx.targetUploadBatch.create).not.toHaveBeenCalled();
+        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+      });
+
+      it('ACK ENFORCEMENT: no acknowledgements at all → 400 naming every present category', async () => {
+        const b = buf();
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken }))
+          .rejects.toThrow(/\(REJECTED_ROWS\).*\(OVERWRITE\)/);
+        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+      });
+
+      it('ACK ENFORCEMENT is checked against the state AT APPLY: a category that appeared since the preview → 400', async () => {
+        // A clean file: no rejected rows, O002 new → preview has nothing to acknowledge.
+        const b = buildTestXlsx([['O002', 'Outlet Two', 'HORECA', 1, 2]]);
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        expect(p.notApplied).toEqual([]);
+        // O002 got a stored target in between → it is now an overwrite the admin never acknowledged.
+        mockPrisma.outletTarget.findMany.mockImplementation(async () => [{ outletCode: 'O002' }]);
+        await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: [] }))
+          .rejects.toThrow(/\(OVERWRITE\)/);
+        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+      });
+
+      it('the acknowledgements are AUDITED atomically with the batch row, and the result lists what was not applied', async () => {
+        const b = buf();
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: ACKS });
+        expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
+        const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
+        expect(audit).toEqual(expect.objectContaining({ entityType: 'TARGET_UPLOAD_BATCH', entityId: r.batchId, actorId: 'admin1' }));
+        expect(audit.newValues).toEqual(expect.objectContaining({
+          acknowledged: ACKS,
+          notApplied: [{ category: 'REJECTED_ROWS', count: 1 }, { category: 'OVERWRITE', count: 1 }],
+        }));
+        expect(audit.metadata).toEqual(expect.objectContaining({ clientId: 'deoleo', change: 'target-upload-confirm' }));
+        // batch + audit go in ONE array transaction
+        const first = mockPrisma.$transaction.mock.calls.find((c) => Array.isArray(c[0]));
+        expect((first![0] as unknown[]).length).toBe(2);
+        expect(r.notApplied).toEqual(p.notApplied);
+        expect(r.acknowledged).toEqual(ACKS);
+      });
+
+      it('locked past-month outlet-months and blank rows are their own categories', async () => {
+        const ws = XLSX.utils.aoa_to_sheet([
+          ['', '', '', "Jan '20 Target", '', WRITABLE_MONTH.label, ''],
+          ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'Month Target', 'Focus Pack - 1'],
+          ['O001', 'Outlet One', 'RETAIL', 5, 5, 7, 7],
+          ['O002', 'Outlet Two', 'HORECA', null, null, null, null],
+        ]);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Targets');
+        mockPrisma.outletTarget.findMany.mockImplementation(async () => []);
+        const p = await service.previewTargetUpload(admin, xfile(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer));
+        expect(p.notApplied).toEqual([
+          { category: 'LOCKED_MONTHS', count: 1 },
+          { category: 'BLANK_ROWS', count: 1 },
+        ]);
       });
 
       it('a write failure mid-apply marks the batch FAILED (never left claiming COMPLETED) and rethrows', async () => {

@@ -199,7 +199,8 @@ export class TargetsController {
    *
    * Preview → confirm (owner decision 2026-11-25, the admin screen):
    *   ?preview=1            → same validation, NOTHING written; returns counts (new vs overwritten) + previewToken.
-   *   ?confirmToken=<token> → applies the SAME file (409 if the bytes differ, 409 if this preview was already applied).
+   *   ?confirmToken=<token>&ack=<categories> → applies the SAME file (409 if the bytes differ, 409 if this preview
+   *                           was already applied, 400 naming any not-applied category that was not acknowledged).
    *   neither               → applies directly (unchanged behaviour for scripts / the e2e harness).
    */
   @Post('upload')
@@ -220,7 +221,11 @@ export class TargetsController {
     @Query() q: UploadTargetsQueryDto,
   ) {
     if (q?.preview === '1' || q?.preview === 'true') return this.targets.previewTargetUpload(user, file);
-    return this.targets.uploadTargets(user, file, q?.confirmToken !== undefined ? { confirmToken: q.confirmToken } : undefined);
+    if (q?.confirmToken === undefined) return this.targets.uploadTargets(user, file, undefined);
+    return this.targets.uploadTargets(user, file, {
+      confirmToken: q.confirmToken,
+      acknowledged: (q.ack ?? '').split(',').filter(Boolean),
+    });
   }
 
   /** GET /v1/admin/targets/batches — list upload batches (optionally filter by month). */
