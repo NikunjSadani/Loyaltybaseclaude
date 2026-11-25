@@ -11,8 +11,9 @@
  *
  *   Targets:
  *     GET    /v1/admin/targets/template        download .xlsx template (query: months=YYYY-MM,…)
- *     POST   /v1/admin/targets/upload          multipart xlsx upload → verbatim write
- *     GET    /v1/admin/targets/batches         list upload batches
+ *     POST   /v1/admin/targets/upload          multipart xlsx upload: ?preview=1 (nothing written) → ?confirmToken=&ack= (verbatim write)
+ *     GET    /v1/admin/targets/batches         upload history (newest 100 + audit details)
+ *     GET    /v1/admin/targets/batches/:id/file  the kept file of a confirmed upload
  *     GET    /v1/admin/targets                 list target rows (query: month=YYYY-MM)
  *
  *   Achievements:

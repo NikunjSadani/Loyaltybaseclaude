@@ -23,8 +23,9 @@ import { tdsGuide } from './tds';
 import { offersGuide } from './offers';
 import { salesImportGuide } from './sales-import';
 import { fundGuide } from './fund';
+import { targetsUploadGuide } from './targets-upload';
 
-export const GUIDES: Guide[] = [payoutsGuide, tdsGuide, offersGuide, salesImportGuide, fundGuide];
+export const GUIDES: Guide[] = [payoutsGuide, tdsGuide, offersGuide, salesImportGuide, fundGuide, targetsUploadGuide];
 
 export function getGuide(slug: string): Guide | undefined {
   return GUIDES.find((g) => g.slug === slug);
