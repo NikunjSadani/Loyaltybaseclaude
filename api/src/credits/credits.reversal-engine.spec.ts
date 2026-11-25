@@ -24,6 +24,20 @@ jest.mock('../common/reward-account.helper', () => ({
 
 const NOW = new Date('2026-06-01T00:00:00.000Z');
 const ALL_ACKS = ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'];
+
+/**
+ * The confirm body an admin who ticked `cats` (default: everything) sends: the categories + the EXACT item keys the
+ * server would require now (U1 round 3 — computed with the confirm's own presentAckItems, read-only, no audit row).
+ */
+async function ackFor(credits: CreditsService, models: any, batchId: string, cats: string[] = ALL_ACKS, extra: Row = {}) {
+  const batch = models.__T.batches.find((b: Row) => b.id === batchId);
+  const rows = batch.rows as Row[];
+  const on = models.__T.settings.get(`${TENANT}:creditUploadNegativeDeductions`) === true;
+  const deductRows = on ? rows.filter((r) => r.awardType === 'POINTS' && r.status === 'OK' && r.amount < 0) : [];
+  const items = await (credits as any).presentAckItems(models, TENANT, batchId, batch.period, rows, deductRows);
+  const ackItems = Object.fromEntries(Object.entries(items).filter(([c]) => cats.includes(c)).map(([c, list]) => [c, (list as Row[]).map((x) => x.key)]));
+  return { acknowledged: cats, ackItems, ...extra };
+}
 const later = (ms: number) => new Date(NOW.getTime() + ms);
 const TENANT = 'bajaj';
 
@@ -297,6 +311,7 @@ function world(opts: WorldOpts = {}) {
     }
     return [];
   };
+  models.__T = T;
   models.$transaction = async (cb: any) => {
     // Atomic like Postgres: on a throw, every table is restored to its pre-transaction state.
     const snap = Object.fromEntries(
@@ -348,7 +363,7 @@ function world(opts: WorldOpts = {}) {
         })),
       });
       // These scenarios are about the engine, not the preview: every acknowledgement given (own tests below).
-      return credits.confirmBatch(admin, batchId, { acknowledged: [...ALL_ACKS] });
+      return credits.confirmBatch(admin, batchId, await ackFor(credits, models, batchId));
     },
     redeem: (partnerId: string, amount: number) => wallet.debitRedeem(partnerId, amount, { referenceId: `ord-${amount}` }),
     create: (batchId: string, outlet: string, amount: number, field = 'F') =>
@@ -562,7 +577,7 @@ async function allOrdersV2(open: number, prefix: ModelEvent[], finals: ModelEven
     });
     // no shadow / refusal rows — only the A1 one-engine marker, one per reversal created
     // (the confirm's own acknowledgement record, CREDIT_BATCH_CONFIRM, is not a reversal audit row)
-    const revAudit = h.T.auditLogs.filter((a) => a.entityType !== 'CREDIT_BATCH_CONFIRM');
+    const revAudit = h.T.auditLogs.filter((a) => !String(a.entityType).startsWith('CREDIT_BATCH'));
     expect(revAudit.filter((a) => a.entityType !== POINTS_REVERSAL_ENGINE_MARKER_ENTITY)).toHaveLength(0);
     expect(revAudit.map((a) => a.entityId).sort()).toEqual(h.T.reversals.map((r) => r.id).sort());
     results.push({
@@ -770,7 +785,7 @@ describe('WP4 — V2 attribution: relinked outlets (T-f1/f2), unresolved / unkno
       "ReversalAttentionException: Can't reverse: the wallet of outlet O1 (Bajaj Consumer Care Ltd) has points history that has not been prepared for reversals yet. Gifsy: run the wallet backfill (dry run, then APPLY) for this client — see BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C, then retry. Nothing was changed — earning and redeeming on this wallet keep working meanwhile.",
     );
     expect(h.T.reversals).toHaveLength(0);
-    expect(h.T.auditLogs.filter((a) => a.entityType !== 'CREDIT_BATCH_CONFIRM')).toEqual([
+    expect(h.T.auditLogs.filter((a) => !String(a.entityType).startsWith('CREDIT_BATCH'))).toEqual([
       expect.objectContaining({
         action: 'REJECT', entityType: 'REVERSAL_ENGINE_REFUSAL', entityId: 'B0', actorId: 'client-admin',
         metadata: expect.objectContaining({
@@ -841,7 +856,7 @@ describe('WP4 — V2 attribution: relinked outlets (T-f1/f2), unresolved / unkno
     );
     expect(h.T.reversals[0].status).toBe('PENDING_GIFSY');
     expect(h.w('cp1').redeemablePoints).toBe(300);
-    expect(h.T.auditLogs.filter((a) => a.entityType !== 'CREDIT_BATCH_CONFIRM').map((a) => [a.entityType, a.entityId, a.metadata.phase])).toEqual([
+    expect(h.T.auditLogs.filter((a) => !String(a.entityType).startsWith('CREDIT_BATCH')).map((a) => [a.entityType, a.entityId, a.metadata.phase])).toEqual([
       [POINTS_REVERSAL_ENGINE_MARKER_ENTITY, r.id, undefined], // A1 marker written at create
       ['REVERSAL_ENGINE_REFUSAL', r.id, 'APPROVE'],
     ]);
@@ -1108,7 +1123,7 @@ describe('fix round A — M3 through the credits endpoints (sequenced wallet)', 
 describe('upload deductions — negative POINTS rows deduct from the wallet (tenant switch)', () => {
   const ON = (h: World) => h.T.settings.set(`${TENANT}:creditUploadNegativeDeductions`, true);
   const adminUser = { sub: 'client-admin', role: 'CLIENT_ADMIN', clientId: TENANT } as JwtPayload;
-  const deductBatch = (h: World, batchId: string, rows: { outlet: string; field?: string; amount: number; narration?: string }[], ack?: string[]) => {
+  const deductBatch = async (h: World, batchId: string, rows: { outlet: string; field?: string; amount: number; narration?: string }[], ack?: string[]) => {
     h.T.batches.push({
       id: batchId, clientId: TENANT, status: 'PENDING_CONFIRM', period: '2026-05', uploadedBy: 'client-admin',
       totalOutlets: rows.length, totalPoints: rows.filter((r) => r.amount > 0).reduce((s, r) => s + r.amount, 0), totalPayoutPaise: 0n,
@@ -1117,7 +1132,7 @@ describe('upload deductions — negative POINTS rows deduct from the wallet (ten
         amount: r.amount, narration: r.narration ?? '', awardType: 'POINTS', status: 'OK',
       })),
     });
-    return h.credits.confirmBatch(adminUser, batchId, { acknowledged: ack ?? [...ALL_ACKS] });
+    return h.credits.confirmBatch(adminUser, batchId, await ackFor(h.credits, h.models, batchId, ack ?? ALL_ACKS));
   };
   const createUndo = (h: World, batchId: string, outlet: string, requested: number, field = 'F') =>
     h.credits.createReversal(adminUser, batchId, {
@@ -1198,6 +1213,7 @@ describe('upload deductions — negative POINTS rows deduct from the wallet (ten
       ['CONFIRM_DEDUCTION', 'WALLET_NOT_SEQUENCED'],
     ]);
     expect(h.T.auditLogs.find((a) => a.entityType === 'REVERSAL_ENGINE_REFUSAL')!.metadata.gifsyNextStep).toMatch(/BAJAJ-PROD-FOLLOWUPS-RUNBOOK §C/);
+    expect(h.T.auditLogs.filter((a) => a.entityType === 'CREDIT_BATCH')).toHaveLength(0); // round-3 #3: not logged twice
   });
 
   it('the movement itself refuses an un-sequenced wallet (defence in depth, under the wallet lock)', async () => {
@@ -1225,10 +1241,12 @@ describe('upload deductions — negative POINTS rows deduct from the wallet (ten
     expect(h.T.batches.find((b) => b.id === 'B1')!.status).toBe('PENDING_CONFIRM');
     expect(h.T.walletTxns).toHaveLength(0);
     spy.mockImplementation(real);
-    const res = (await h.credits.confirmBatch(adminUser, 'B1', { acknowledged: [...ALL_ACKS] })) as Row;
+    const res = (await h.credits.confirmBatch(adminUser, 'B1', await ackFor(h.credits, h.models, 'B1'))) as Row;
     expect(res).toMatchObject({ pointsCreditedTotal: 500, pointsDeductedTotal: 100 });
     expect(h.w('cp2')).toMatchObject({ redeemablePoints: -100, debtPoints: 100 });
     expect(await errorOf(h.credits.confirmBatch(adminUser, 'B1', { acknowledged: [...ALL_ACKS] }))).toBe('BadRequestException: Batch is already CONFIRMED');
+    // round-3 #3: the claim race / already-confirmed refusal is not recorded as a refused confirm
+    expect(h.T.auditLogs.filter((a) => a.entityType === 'CREDIT_BATCH')).toHaveLength(0);
     expect(h.T.walletTxns.filter((t) => t.transactionType === 'DEBIT_ADJUSTMENT')).toHaveLength(1);
   });
 
@@ -1294,8 +1312,8 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
         rowNum: i + 3, outletName: `Outlet ${r.outletId}`, fieldId: 'F', fieldName: 'Field', narration: '', awardType: 'POINTS', status: 'OK', ...r,
       })),
     });
-  const confirm = (h: World, batchId: string, acknowledged: string[] = [...ALL_ACKS]) =>
-    h.credits.confirmBatch(adminUser, batchId, { acknowledged, skippedRows: 7 });
+  const confirm = async (h: World, batchId: string, acknowledged: string[] = [...ALL_ACKS]) =>
+    h.credits.confirmBatch(adminUser, batchId, await ackFor(h.credits, h.models, batchId, acknowledged, { skippedRows: 7 }));
   const undo = (h: World, batchId: string, outlet: string, n: number) =>
     h.credits.createReversal(adminUser, batchId, {
       outletId: outlet, outletName: `Outlet ${outlet}`, fieldId: 'F', fieldName: 'Field',
@@ -1331,8 +1349,8 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     // Payout Status reads the same rule from the actual wallet rows
     const detail = (await h.credits.getBatch(adminUser, 'B1')) as Row;
     expect(detail.deductionLines).toEqual([
-      { outletId: 'O1', fieldId: 'F', points: 300, givenBack: 0, undoBlockedReason: expect.stringMatching(/^Can't undo: points were added to this wallet after the deduction on /) },
-      { outletId: 'O2', fieldId: 'F', points: 200, givenBack: 200, undoBlockedReason: null },
+      { outletId: 'O1', fieldId: 'F', points: 300, givenBack: 0, undoBlockedReason: expect.stringMatching(/^Can't undo: points were added to this wallet after the deduction on /), pastExpiryPoints: 0 },
+      { outletId: 'O2', fieldId: 'F', points: 200, givenBack: 200, undoBlockedReason: null, pastExpiryPoints: 0 },
     ]);
   });
 
@@ -1397,6 +1415,7 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
       metadata: {
         acknowledged: ['ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'SKIPPED'],
         required: { ROUNDED: 1, NOT_APPLIED: 1, BELOW_ZERO: 1 },
+        acknowledgedItems: { ROUNDED: ['O1|F|POINTS|200|199.5'], NOT_APPLIED: ['O2|F'], BELOW_ZERO: ['cp1|-300'] },
         skippedRowsReported: 7,
         notAppliedCount: 1,
         notApplied: [{ outletId: 'O2', fieldName: 'Field', points: 40, reason: 'OUTLET_NOT_LINKED_TO_PARTNER' }],
@@ -1491,6 +1510,76 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     // −60 looks covered by the 100 balance, but those 100 expire first → the wallet goes below zero → tick required
     push(h, 'B1', [{ outletId: 'O1', amount: -60 }]);
     expect(await errorOf(confirm(h, 'B1', []))).toMatch(/wallets that will go below zero \(1\)/);
+  });
+
+  it('round-3 #1: undo give-backs never block — field A + B on one wallet: undo A then undo B; duplicate rows on one line: partial then the rest', async () => {
+    const h = world();
+    ON(h);
+    push(h, 'B1', [{ outletId: 'O1', amount: -100 }, { outletId: 'O1', fieldId: 'G', fieldName: 'Returns', amount: -40 }]);
+    await confirm(h, 'B1');
+    const ra = (await undo(h, 'B1', 'O1', 100)) as Row;
+    await h.approve(ra.id);
+    const rb = (await h.credits.createReversal(adminUser, 'B1', {
+      outletId: 'O1', outletName: 'Outlet O1', fieldId: 'G', fieldName: 'Returns', awardType: CreditAwardType.POINTS, originalPaise: 40, requestedPaise: 40,
+    })) as Row;
+    await h.approve(rb.id);
+    expect(h.w('cp1')).toMatchObject({ redeemablePoints: 0, debtPoints: 0 });
+    // duplicate rows (d1 + d2) on one line
+    push(h, 'B2', [{ outletId: 'O1', amount: -30 }, { outletId: 'O1', amount: -20 }]);
+    await confirm(h, 'B2');
+    const p1 = (await undo(h, 'B2', 'O1', 35)) as Row; // all of d1 + 5 of d2
+    await h.approve(p1.id);
+    const p2 = (await undo(h, 'B2', 'O1', 15)) as Row; // the rest
+    await h.approve(p2.id);
+    expect(h.w('cp1')).toMatchObject({ redeemablePoints: 0, debtPoints: 0 });
+    // a real credit still blocks
+    push(h, 'B3', [{ outletId: 'O1', amount: -10 }]);
+    await confirm(h, 'B3');
+    push(h, 'B4', [{ outletId: 'O1', amount: 7 }]);
+    await confirm(h, 'B4');
+    expect(await errorOf(undo(h, 'B3', 'O1', 10))).toMatch(/Can't undo: points were added to this wallet after the deduction/);
+    const detail = (await h.credits.getBatch(adminUser, 'B3')) as Row;
+    expect(detail.deductionLines[0].undoBlockedReason).toMatch(/Can't undo/);
+  });
+
+  it('U1 round 3: a tick binds to the exact items — the balance moved after the tick → refused, the server returns the row to re-show', async () => {
+    const h = world();
+    ON(h);
+    await h.confirm('B0', [{ outlet: 'O1', amount: 100 }]);
+    push(h, 'B1', [{ outletId: 'O1', amount: -300 }]);
+    const ticked = await ackFor(h.credits, h.models, 'B1'); // BELOW_ZERO: w-cp1 100 → −200
+    expect(ticked.ackItems).toEqual({ BELOW_ZERO: ['cp1|-200'] });
+    await h.confirm('B9', [{ outlet: 'O1', field: 'H', amount: 50 }]); // the balance moves: now 150 → −150
+    let e: any;
+    try { await h.credits.confirmBatch(adminUser, 'B1', ticked); } catch (x) { e = x; }
+    expect(e.getResponse()).toMatchObject({
+      details: { missingAcknowledgements: ['BELOW_ZERO'], items: { BELOW_ZERO: [{ key: 'cp1|-150', text: 'Wallet of O1: 150 → -150' }] } },
+    });
+    expect(h.T.walletTxns.filter((t) => t.transactionType === 'DEBIT_ADJUSTMENT')).toHaveLength(0);
+    await h.credits.confirmBatch(adminUser, 'B1', { acknowledged: ['BELOW_ZERO'], ackItems: { BELOW_ZERO: ['cp1|-150'] } });
+    expect(h.w('cp1').redeemablePoints).toBe(-150);
+  });
+
+  it('round-3 #4: points coming back on a lot already past its expiry are said so (passbook line + approve outcome + request reply)', async () => {
+    const h = world();
+    ON(h);
+    await h.confirm('B0', [{ outlet: 'O1', amount: 100 }]);
+    const lot = h.T.ledger.find((l) => l.points > 0)!;
+    lot.expiresAt = new Date(Date.now() + 60 * 60_000); // valid when the deduction consumes it
+    push(h, 'B1', [{ outletId: 'O1', amount: -40 }]);
+    await confirm(h, 'B1');
+    // the consumed lot's expiry passes before the undo
+    const d = h.T.walletTxns.find((t) => t.transactionType === 'DEBIT_ADJUSTMENT')!;
+    d.metadata.giveBackSegments = [{ points: 40, expiresAt: new Date(Date.now() - 1000).toISOString() }];
+    const r = (await undo(h, 'B1', 'O1', 40)) as Row;
+    expect(r.pastExpiryPoints).toBe(40);
+    const a = (await h.approve(r.id)) as Row;
+    expect(a.pointsOutcome.headline).toBe(
+      'Approved · 40 pts given back to the wallet — deduction undone · 40 pts returned already past their expiry and will expire at the next sweep',
+    );
+    expect(h.T.walletTxns.find((t) => t.transactionType === 'CREDIT_REVERSAL')!.description).toBe(
+      '40 points given back — deduction undone (Field, May 2026) · 40 pts returned already past their expiry and will expire at the next sweep',
+    );
   });
 
   it('a clean batch needs no acknowledgement (confirms exactly as before) and a repeat deduction must be acknowledged', async () => {

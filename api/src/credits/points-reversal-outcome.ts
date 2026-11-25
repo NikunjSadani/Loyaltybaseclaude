@@ -172,14 +172,18 @@ export function storedPointsSplit(
  */
 export function deductionUndoOutcome(
   givenBack: number,
-  opts: { requested?: number } = {},
-): PointsOutcome & { kind: 'DEDUCTION_UNDO' } {
+  opts: { requested?: number; pastExpiry?: number } = {},
+): PointsOutcome & { kind: 'DEDUCTION_UNDO'; pastExpiryPoints: number } {
   const partial = opts.requested !== undefined && opts.requested > givenBack;
   const prefix = partial ? `Partially approved (${pts(opts.requested!)} pts requested)` : 'Approved';
+  const past = opts.pastExpiry ?? 0;
   const summary =
-    givenBack > 0 ? `${pts(givenBack)} pts given back to the wallet — deduction undone` : '0 pts given back — the wallet is unchanged';
+    (givenBack > 0 ? `${pts(givenBack)} pts given back to the wallet — deduction undone` : '0 pts given back — the wallet is unchanged') +
+    // round-3 #4 (no silent): points returned on a lot whose own expiry already passed
+    (past > 0 ? ` · ${pts(past)} pts returned already past their expiry and will expire at the next sweep` : '');
   return {
     kind: 'DEDUCTION_UNDO',
+    pastExpiryPoints: past,
     reversed: givenBack,
     recovered: 0,
     debtRestored: 0,

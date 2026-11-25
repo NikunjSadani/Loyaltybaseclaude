@@ -18,6 +18,19 @@ import {
 
 /** Audit entityType marking a POINTS reversal created under the one engine (audit A1) — entityId = the reversal id. */
 export const POINTS_REVERSAL_ENGINE_MARKER_ENTITY = 'POINTS_REVERSAL_ENGINE_MARKER';
+/** One item the admin must have ticked (key = what the tick binds to; text = what the screen shows). */
+export interface AckItem {
+  key: string;
+  text: string;
+}
+
+/** The confirm body: the ticked categories and, per category, the exact item keys ticked (U1 round 3). */
+export interface UploadAck {
+  acknowledged?: string[];
+  ackItems?: Partial<Record<string, string[]>>;
+  skippedRows?: number;
+}
+
 /** Audit row of an operator batch confirm: acknowledgements + what was not applied (owner rule 2026-11-25). */
 export const CREDIT_BATCH_CONFIRM_ENTITY = 'CREDIT_BATCH_CONFIRM';
 /** Marker metadata.kind of a POINTS reversal that UNDOES an upload deduction (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §6). */
@@ -1585,66 +1598,103 @@ export class CreditsService {
     clientId: string,
     batchId: string,
     period: string,
-    rows: { outletId: string; fieldId: string; amount: number; awardType: string; status: string; originalAmount?: number }[],
+    rows: { outletId: string; fieldId: string; fieldName?: string; amount: number; awardType: string; status: string; originalAmount?: number }[],
     deductRows: { outletId: string; fieldId: string; amount: number }[],
     deductionsEnabled: boolean,
-  ): Promise<Partial<Record<UploadAckCategory, number>>> {
-    const all = await this.presentAckCategories(db, clientId, batchId, period, rows, deductRows);
+  ): Promise<Partial<Record<UploadAckCategory, AckItem[]>>> {
+    const all = await this.presentAckItems(db, clientId, batchId, period, rows, deductRows);
     // The ONE place deciding which categories this client must tick (upload-ack-scope.ts).
     const scope = new Set(uploadAckScope({ deductionsEnabled }).categories);
-    return Object.fromEntries(Object.entries(all).filter(([c]) => scope.has(c as UploadAckCategory))) as Partial<Record<UploadAckCategory, number>>;
+    return Object.fromEntries(Object.entries(all).filter(([c]) => scope.has(c as UploadAckCategory))) as Partial<Record<UploadAckCategory, AckItem[]>>;
   }
 
-  /** Every category the batch actually has (counts), before the client's scope is applied. */
-  private async presentAckCategories(
+  /**
+   * Every category the batch actually has, as the EXACT items the admin must have ticked (UI audit U1, round 3 — a tick
+   * binds to these items, not to the wording). Item keys (the screen builds the same keys from the same data):
+   *   ROUNDED          `${outletId}|${fieldId}|${awardType}|${amount}|${originalAmount}`
+   *   NOT_APPLIED      `${outletId}|${fieldId}`
+   *   BELOW_ZERO       `${partnerId}|${after}` — one wallet per partner (stable even for a wallet the confirm creates)
+   *   REPEAT_DEDUCTION `${outletCode}|${fieldId}|${batchId}|${points still deducted}`
+   * BELOW_ZERO after = balance + held opening balance (when it posts first) + this file's credits − min(points due to
+   * expire, what the balance then backs — the deduction expires them AFTER the credits land, U5) + deductions.
+   */
+  private async presentAckItems(
     db: Prisma.TransactionClient,
     clientId: string,
     batchId: string,
     period: string,
-    rows: { outletId: string; fieldId: string; amount: number; awardType: string; status: string; originalAmount?: number }[],
+    rows: { outletId: string; fieldId: string; fieldName?: string; amount: number; awardType: string; status: string; originalAmount?: number }[],
     deductRows: { outletId: string; fieldId: string; amount: number }[],
-  ): Promise<Partial<Record<UploadAckCategory, number>>> {
-    const req: Partial<Record<UploadAckCategory, number>> = {};
+  ): Promise<Partial<Record<UploadAckCategory, AckItem[]>>> {
+    const req: Partial<Record<UploadAckCategory, AckItem[]>> = {};
     const ok = rows.filter((r) => r.status === 'OK');
-    const rounded = ok.filter((r) => typeof r.originalAmount === 'number').length;
-    if (rounded > 0) req.ROUNDED = rounded;
+    const fmt = (n: number) => new Intl.NumberFormat('en-IN').format(n);
+    const rounded = ok.filter((r) => typeof r.originalAmount === 'number');
+    if (rounded.length > 0) {
+      req.ROUNDED = rounded.map((r) => ({
+        key: `${r.outletId}|${r.fieldId}|${r.awardType}|${r.amount}|${r.originalAmount}`,
+        text: `${r.outletId} · ${r.fieldName ?? r.fieldId}: ${r.originalAmount} → ${r.awardType === 'PAYOUT' ? `₹${fmt(r.amount / 100)}` : `${fmt(r.amount)} pts`}`,
+      }));
+    }
     const pointsRows = ok.filter((r) => r.awardType === 'POINTS' && r.amount !== 0);
     if (pointsRows.length > 0) {
       const outlets = await db.outlet.findMany({
         where: { clientId, outletCode: { in: [...new Set(pointsRows.map((r) => r.outletId))] }, deletedAt: null },
         select: { outletCode: true, partnerId: true },
       });
-      const linked = new Set((outlets ?? []).filter((o) => !!o.partnerId).map((o) => o.outletCode));
-      const notApplied = pointsRows.filter((r) => !linked.has(r.outletId)).length;
-      if (notApplied > 0) req.NOT_APPLIED = notApplied;
+      const found = new Map((outlets ?? []).map((o) => [o.outletCode, o.partnerId]));
+      const notApplied = pointsRows.filter((r) => !found.get(r.outletId));
+      if (notApplied.length > 0) {
+        req.NOT_APPLIED = notApplied.map((r) => ({
+          key: `${r.outletId}|${r.fieldId}`,
+          text: `${r.outletId} · ${r.fieldName ?? r.fieldId}: ${found.has(r.outletId) ? 'outlet not linked to a partner' : 'outlet not found'} — ${fmt(r.amount)} pts not ${r.amount < 0 ? 'deducted' : 'credited'}`,
+        }));
+      }
     }
     if (deductRows.length > 0) {
       const readiness = await this.walletService.uploadDeductionReadiness(clientId, pointsRows.map((r) => r.outletId), db);
-      // Per WALLET (F5 — outlets of one partner share it; no wallet yet → one per partner, U3): balance − points due to
-      // expire first (U2) + the partner's held opening balance when it would post first (U4, partner-level — counted
-      // ONCE) + this file's credits − deductions. Counted only for wallets this file DEDUCTS from (a wallet already
-      // below zero that only receives credits is not "going below zero").
       const walletOf = new Map(readiness.map((o) => [o.outletCode, o]));
-      const keyOf = (o: (typeof readiness)[number]) => o.walletId ?? `partner:${o.partnerId}`;
-      const after = new Map<string, number>();
+      // One wallet per partner (wallets.partnerId is unique) — the partner id is the stable key, also for a wallet this
+      // confirm creates (the preview sees no wallet yet; the in-transaction check sees the new one).
+      const keyOf = (o: (typeof readiness)[number]) => String(o.partnerId);
+      const w = new Map<string, { start: number; due: number; credits: number; deductions: number; outlets: string[] }>();
       for (const o of readiness) {
         if (!o.linked) continue;
-        const key = keyOf(o);
-        if (!after.has(key)) after.set(key, (o.balance ?? 0) - (o.dueExpiry ?? 0) + (o.heldOpeningBalance ?? 0));
+        const k = keyOf(o);
+        const cur = w.get(k) ?? { start: (o.balance ?? 0) + (o.heldOpeningBalance ?? 0), due: o.dueExpiry ?? 0, credits: 0, deductions: 0, outlets: [] };
+        if (!cur.outlets.includes(o.outletCode)) cur.outlets.push(o.outletCode);
+        w.set(k, cur);
       }
-      const deducted = new Set<string>();
       for (const r of pointsRows) {
         const o = walletOf.get(r.outletId);
         if (!o?.linked) continue;
-        after.set(keyOf(o), (after.get(keyOf(o)) ?? 0) + r.amount);
-        if (r.amount < 0) deducted.add(keyOf(o));
+        const cur = w.get(keyOf(o))!;
+        if (r.amount > 0) cur.credits += r.amount;
+        else cur.deductions += -r.amount;
       }
-      const below = [...deducted].filter((k) => (after.get(k) ?? 0) < 0).length;
-      if (below > 0) req.BELOW_ZERO = below;
+      const below: AckItem[] = [];
+      for (const [k, v] of w) {
+        if (v.deductions === 0) continue; // only wallets this file deducts from
+        const beforeDeduct = v.start + v.credits;
+        const expired = Math.min(v.due, Math.max(0, beforeDeduct));
+        const after = beforeDeduct - expired - v.deductions;
+        if (after < 0) {
+          below.push({
+            key: `${k}|${after}`,
+            text: `Wallet of ${v.outlets.sort().join(', ')}: ${fmt(v.start)} → ${fmt(after)}${expired > 0 ? ` (after ${fmt(expired)} points expiring now are taken off)` : ''}`,
+          });
+        }
+      }
+      if (below.length > 0) req.BELOW_ZERO = below;
       const repeats = await this.priorDeductions(
         db, clientId, period, deductRows.map((r) => ({ outletCode: r.outletId, fieldId: r.fieldId })), batchId,
       );
-      if (repeats.length > 0) req.REPEAT_DEDUCTION = new Set(repeats.map((x) => `${x.outletCode}|${x.fieldId}`)).size;
+      if (repeats.length > 0) {
+        req.REPEAT_DEDUCTION = repeats.map((x) => ({
+          key: `${x.outletCode}|${x.fieldId}|${x.batchId}|${x.points}`,
+          text: `${x.outletCode}: already deducted in batch ${x.batchCode} (${fmt(x.points)} pts still deducted) — check this isn't a repeat`,
+        }));
+      }
     }
     return req;
   }
@@ -1822,13 +1872,15 @@ export class CreditsService {
   }
 
   // ─── POST /v1/admin/credits/batches/:id/confirm ────────────────────────────
-  async confirmBatch(user: JwtPayload, id: string, ack: { acknowledged?: string[]; skippedRows?: number } = {}) {
+  async confirmBatch(user: JwtPayload, id: string, ack: UploadAck = {}) {
     try {
       return await this.confirmBatchOnce(user, id, ack);
     } catch (e) {
       // Audit #5: a REFUSED confirm leaves a record too (missing acknowledgements, the row guards, held balances, an
       // unprepared wallet, the upload window …) — written after the refused transaction rolled back. Best effort.
-      if (e instanceof HttpException && !(e instanceof NotFoundException)) {
+      const raceOrDone = e instanceof HttpException && /^Batch (is )?already /.test(e.message);
+      // ReversalAttentionException (an unprepared wallet) is already audited as REVERSAL_ENGINE_REFUSAL — never twice.
+      if (e instanceof HttpException && !(e instanceof NotFoundException) && !(e instanceof ReversalAttentionException) && !raceOrDone) {
         const body = e.getResponse();
         const message = typeof body === 'string' ? body : String((body as { message?: unknown }).message ?? e.message);
         const details = typeof body === 'object' && body ? (body as { details?: { missingAcknowledgements?: unknown } }).details : undefined;
@@ -1855,7 +1907,7 @@ export class CreditsService {
     }
   }
 
-  private async confirmBatchOnce(user: JwtPayload, id: string, ack: { acknowledged?: string[]; skippedRows?: number }) {
+  private async confirmBatchOnce(user: JwtPayload, id: string, ack: UploadAck) {
     // Read the batch first for its data (rows, period, etc.). The status-flip below
     // uses a guarded updateMany claim so a concurrent double-confirm cannot
     // double-credit points.
@@ -1919,7 +1971,7 @@ export class CreditsService {
     // own compute preview. Recorded in the confirm audit row (same transaction as the money writes).
     const acknowledged = [...new Set((ack.acknowledged ?? []).filter((c): c is UploadAckCategory => UPLOAD_ACK_CATEGORIES.includes(c as UploadAckCategory)))];
     // Audit #5: the required set is computed INSIDE the confirm transaction, under the wallet locks (see below).
-    let required: Partial<Record<UploadAckCategory, number>> = {};
+    let required: Partial<Record<UploadAckCategory, AckItem[]>> = {};
     // Rows that genuinely cannot be credited, WITH a reason surfaced to the admin
     // (never dropped silently). The only remaining skip causes are an unresolvable
     // outlet code or an outlet not linked to any partner — a missing wallet is no
@@ -2102,13 +2154,23 @@ export class CreditsService {
       required = batch.sourceKind
         ? {}
         : await this.requiredAcknowledgements(tx, user.clientId, id, batch.period, rows, deductRows, deductionsOn);
-      const missing = (Object.keys(required) as UploadAckCategory[]).filter((c) => !acknowledged.includes(c));
+      // U1 (round 3): a tick binds to the EXACT items — refused when the items the server would apply now differ from the
+      // ticked ones (a balance moved, a row changed). SKIPPED rows never reach the server: category tick only.
+      const missing = (Object.keys(required) as UploadAckCategory[]).filter((c) => {
+        if (!acknowledged.includes(c)) return true;
+        if (c === 'SKIPPED') return false;
+        const raw = ack.ackItems?.[c];
+        const ticked = new Set(Array.isArray(raw) ? raw.filter((k): k is string => typeof k === 'string') : []);
+        const want = (required[c] ?? []).map((x) => x.key);
+        return ticked.size !== want.length || want.some((k) => !ticked.has(k));
+      });
       if (missing.length > 0) {
         throw new BadRequestException({
           message:
-            `Before confirming, reload the page and tick: ${missing.map((c) => `${UPLOAD_ACK_LABELS[c]} (${required[c]})`).join('; ')}. ` +
+            `Before confirming, reload the page and tick: ${missing.map((c) => `${UPLOAD_ACK_LABELS[c]} (${required[c]?.length ?? 0})`).join('; ')}. ` +
             'Nothing was credited or deducted — the batch is still waiting.',
-          details: { missingAcknowledgements: missing, required },
+          // U2 (round 3): the exact items to show with each box — never a box without its rows.
+          details: { missingAcknowledgements: missing, items: Object.fromEntries(missing.map((c) => [c, required[c] ?? []])) },
         });
       }
 
@@ -2249,7 +2311,10 @@ export class CreditsService {
             metadata: JSON.parse(JSON.stringify({
               clientId: user.clientId,
               acknowledged,
-              required,
+              required: Object.fromEntries(Object.entries(required).map(([c, items]) => [c, (items ?? []).length])),
+              acknowledgedItems: Object.fromEntries(
+                Object.entries(required).map(([c, items]) => [c, (items ?? []).slice(0, 1000).map((x) => x.key)]),
+              ),
               skippedRowsReported: typeof ack.skippedRows === 'number' && ack.skippedRows >= 0 ? Math.floor(ack.skippedRows) : null,
               notApplied: skipped.slice(0, 5000),
               notAppliedCount: skipped.length,
@@ -2677,7 +2742,11 @@ export class CreditsService {
         },
       },
     });
-    return { ...created, kind: 'DEDUCTION_UNDO' as const };
+    // Round-3 #4 (no silent): how many of these points would come back already past their own expiry.
+    const pastExpiryPoints = await this.walletService.uploadDeductionUndoPastExpiry(
+      tx, { batchId, outletCode: dto.outletId, fieldId: dto.fieldId }, Number(requested),
+    );
+    return { ...created, kind: 'DEDUCTION_UNDO' as const, pastExpiryPoints };
   }
 
   /**
@@ -4651,7 +4720,18 @@ export class CreditsService {
     });
     const undo = new Set((markers ?? []).map((m) => m.entityId));
     if (undo.size === 0) return reversals;
-    return reversals.map((r) => (undo.has(r.id) ? { ...r, kind: 'DEDUCTION_UNDO' as const } : r));
+    // Round-3 #4 (no silent): a PENDING undo says up front how many points would come back already past their expiry.
+    const past = new Map<string, number>();
+    for (const r of reversals as Array<T & { status?: string; batchId?: string; outletId?: string; fieldId?: string; requestedPaise?: bigint }>) {
+      if (!undo.has(r.id) || r.status !== 'PENDING_GIFSY' || !r.batchId || !r.outletId || !r.fieldId) continue;
+      const n = await this.walletService.uploadDeductionUndoPastExpiry(
+        this.prisma, { batchId: r.batchId, outletCode: r.outletId, fieldId: r.fieldId }, Number(r.requestedPaise ?? 0n),
+      );
+      if (n > 0) past.set(r.id, n);
+    }
+    return reversals.map((r) =>
+      undo.has(r.id) ? { ...r, kind: 'DEDUCTION_UNDO' as const, ...(past.has(r.id) ? { pastExpiryPoints: past.get(r.id) } : {}) } : r,
+    );
   }
 
   /**
@@ -4777,6 +4857,7 @@ export class CreditsService {
     // Set inside the transaction: this POINTS reversal is the UNDO of an upload deduction (§6 of the design note).
     let isDeductionUndo = false;
     let deductionGivenBack = 0;
+    let deductionPastExpiry = 0;
     return this.prisma.$transaction(async (tx) => {
       // Policy round A Q5: a POINTS approval is refused while the tenant's reversal approvals are paused (wallet
       // backfill window). Reject is never paused (it moves no points).
@@ -4916,6 +4997,7 @@ export class CreditsService {
           passbookLabel: `${reversal.fieldName}, ${monthYearIST(reversal.period)}`,
         });
         deductionGivenBack = undo.givenBack;
+        deductionPastExpiry = undo.pastExpiryPoints;
       } else if (approvingPoints && (finalApprovedPaise ?? 0n) > 0n) {
         const res = await this.walletService.reverseCreditBatchPoints(tx, {
           ...pointsKey,
@@ -5219,7 +5301,7 @@ export class CreditsService {
             : action === ReversalAction.reject
               ? rejectedPointsOutcome()
               : isDeductionUndo
-                ? deductionUndoOutcome(deductionGivenBack, { requested: requestedPaiseNum })
+                ? deductionUndoOutcome(deductionGivenBack, { requested: requestedPaiseNum, pastExpiry: deductionPastExpiry })
                 : pointsOutcome(
                   pointsSplit ?? { reversed: Number(finalApprovedPaise ?? 0n), recovered: 0, debtRestored: 0, owed: 0, shortfall: 0 },
                   { requested: requestedPaiseNum },

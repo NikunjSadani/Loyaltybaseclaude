@@ -715,7 +715,9 @@ describe('CreditsService', () => {
 
       // owner rule (no silent failure): the row that won't be applied must be acknowledged first
       await expect(service.confirmBatch(admin, 'b1')).rejects.toThrow(/reload the page and tick: rows that will not be applied/);
-      const res = await service.confirmBatch(admin, 'b1', { acknowledged: ['NOT_APPLIED'] });
+      // the tick binds to the exact row (U1 round 3)
+      await expect(service.confirmBatch(admin, 'b1', { acknowledged: ['NOT_APPLIED'] })).rejects.toThrow(/reload the page and tick/);
+      const res = await service.confirmBatch(admin, 'b1', { acknowledged: ['NOT_APPLIED'], ackItems: { NOT_APPLIED: ['O1|f1'] } });
 
       expect(res.pointsCredited).toBe(0);
       expect(res.skipped).toEqual([

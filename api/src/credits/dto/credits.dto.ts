@@ -135,6 +135,14 @@ export class ConfirmBatchDto {
   @IsString({ each: true })
   acknowledged?: string[];
 
+  /**
+   * Per category, the exact item keys the admin ticked (U1 round 3 — a tick binds to the items). Keys are
+   * strings; the server compares them with the items it would apply now.
+   */
+  @IsOptional()
+  @IsObject()
+  ackItems?: Record<string, string[]>;
+
   /** Blank / zero rows of the file (they are never saved — recorded as reported). */
   @IsOptional()
   @IsInt()

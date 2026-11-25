@@ -357,7 +357,10 @@ export interface UploadDeductionReadiness {
    * confirm (no wallet, or an empty one); null otherwise. Count it ONCE per wallet.
    */
   heldOpeningBalance: number | null;
-  /** U2: points that will expire before the deduction (due, not yet swept) — current = balance − dueExpiry */
+  /**
+   * U2 / U5: points of DUE (not yet swept) lots — the deduction expires them first, after this file's credits land.
+   * RAW: expired = min(dueExpiry, max(0, balance + held + this file's credits)).
+   */
   dueExpiry: number;
 }
 
@@ -2626,7 +2629,9 @@ export class WalletService {
         partnerId,
         walletId: w.id,
         heldOpeningBalance: pristine ? held : null,
-        dueExpiry: Math.min(dueBy.get(w.id) ?? 0, Math.max(0, w.redeemablePoints)),
+        // RAW points due to expire (U5, round 3): the deduction expires them AFTER this file's credits land, clamped at
+        // what the balance then backs — so the clamp is applied by the caller (min(due, max(0, balance + held + credits))).
+        dueExpiry: dueBy.get(w.id) ?? 0,
         found: true,
         linked: true,
         balance: w.redeemablePoints,
@@ -2777,21 +2782,67 @@ export class WalletService {
   }
 
   /**
-   * D2 = STRICT BLOCK (owner 2026-11-25): an undo of a deduction is refused when ANY points were added to that wallet
-   * after the deduction — any positive movement after it (by the wallet's movement seq; by time on an un-sequenced row),
-   * except give-backs of THIS deduction. Returns the refusal text, or null.
+   * D2 = STRICT BLOCK (owner 2026-11-25) — the ONE rule used by undo create, approve (under the wallet lock) and Payout
+   * Status: an undo of a deduction is refused when NEW points were added to that wallet after it — any positive movement
+   * with a higher movement seq (by time only on an un-sequenced row), EXCEPT give-backs of upload deductions
+   * (metadata.kind UPLOAD_DEDUCTION_UNDO — any deduction's, round-3 money #1: an undo is not new points). Returns the
+   * deductions that are blocked (id → refusal text). One read per call, seq-based (no time pre-filter, round-3 #2).
    */
-  private async undoBlockedFor(db: Prisma.TransactionClient, d: Pick<UploadDeductionLine, 'id' | 'walletId' | 'seq' | 'createdAt'>): Promise<string | null> {
-    const later = await db.walletTransaction.findFirst({
-      where: {
-        walletId: d.walletId,
-        points: { gt: 0 },
-        ...(d.seq != null ? { seq: { gt: d.seq } } : { createdAt: { gt: d.createdAt } }),
-        OR: [{ reversedCreditTxId: null }, { reversedCreditTxId: { not: d.id } }],
-      },
-      select: { id: true },
-    });
-    return later ? deductionUndoBlockedMessage(formatDateIST(d.createdAt)) : null;
+  private async undoBlockedMap(
+    db: Prisma.TransactionClient,
+    ds: Array<Pick<UploadDeductionLine, 'id' | 'walletId' | 'seq' | 'createdAt'>>,
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (ds.length === 0) return out;
+    const byWallet = new Map<string, Array<Pick<UploadDeductionLine, 'id' | 'walletId' | 'seq' | 'createdAt'>>>();
+    for (const d of ds) byWallet.set(d.walletId, [...(byWallet.get(d.walletId) ?? []), d]);
+    const or: Prisma.WalletTransactionWhereInput[] = [];
+    for (const [walletId, list] of byWallet) {
+      const seqs = list.map((d) => d.seq).filter((x): x is number => x != null);
+      if (seqs.length === list.length) or.push({ walletId, points: { gt: 0 }, seq: { gt: Math.min(...seqs) } });
+      else or.push({ walletId, points: { gt: 0 }, createdAt: { gt: new Date(Math.min(...list.map((d) => d.createdAt.getTime()))) } });
+    }
+    const later =
+      (await db.walletTransaction.findMany({
+        where: { OR: or },
+        select: { walletId: true, seq: true, createdAt: true, metadata: true },
+      })) ?? [];
+    const isGiveBack = (m: Prisma.JsonValue) =>
+      !!m && typeof m === 'object' && !Array.isArray(m) && (m as Record<string, unknown>).kind === UPLOAD_DEDUCTION_UNDO_KIND;
+    for (const d of ds) {
+      const hit = later.some(
+        (r) =>
+          r.walletId === d.walletId &&
+          !isGiveBack(r.metadata) &&
+          (d.seq != null && r.seq != null ? r.seq > d.seq : r.createdAt.getTime() > d.createdAt.getTime()),
+      );
+      if (hit) out.set(d.id, deductionUndoBlockedMessage(formatDateIST(d.createdAt)));
+    }
+    return out;
+  }
+
+  /**
+   * Round-3 #4 (no silent): how many of the next `points` to give back would come back on a lot whose own expiry has
+   * already passed (they expire at the next sweep). Read-only — the request / approve screens say so up front.
+   */
+  pastExpiryOf(d: Pick<UploadDeductionLine, 'segments' | 'givenBack'>, points: number, now = new Date()): number {
+    return takeGiveBack(d.segments, d.givenBack, points)
+      .filter((x) => x.expiresAt !== 'NEW' && x.expiresAt !== null && new Date(x.expiresAt).getTime() <= now.getTime())
+      .reduce((n, x) => n + x.points, 0);
+  }
+
+  /** Round-3 #4: past-expiry points of a give-back of `points` on a (batch, outlet, field) line (oldest deduction first). */
+  async uploadDeductionUndoPastExpiry(db: Prisma.TransactionClient, key: CreditKey, points: number): Promise<number> {
+    let left = points;
+    let past = 0;
+    for (const d of await this.findUploadDeductions(db, key)) {
+      if (left <= 0) break;
+      const give = Math.min(left, d.points - d.givenBack);
+      if (give <= 0) continue;
+      past += this.pastExpiryOf(d, give);
+      left -= give;
+    }
+    return past;
   }
 
   /**
@@ -2802,7 +2853,7 @@ export class WalletService {
   async uploadDeductionLinesOfBatch(
     db: Prisma.TransactionClient,
     batchId: string,
-  ): Promise<Array<{ outletId: string; fieldId: string; points: number; givenBack: number; undoBlockedReason: string | null }>> {
+  ): Promise<Array<{ outletId: string; fieldId: string; points: number; givenBack: number; undoBlockedReason: string | null; pastExpiryPoints: number }>> {
     const rows =
       (await db.walletTransaction.findMany({
         where: {
@@ -2815,28 +2866,19 @@ export class WalletService {
       })) ?? [];
     if (rows.length === 0) return [];
     const back = await this.givenBackOf(db, rows.map((r) => r.id));
-    // One read for the whole batch: every positive movement on these wallets since the batch's first deduction.
-    const since = new Date(Math.min(...rows.map((r) => r.createdAt.getTime())));
-    const credits =
-      (await db.walletTransaction.findMany({
-        where: { walletId: { in: [...new Set(rows.map((r) => r.walletId))] }, points: { gt: 0 }, createdAt: { gte: since } },
-        select: { walletId: true, seq: true, createdAt: true, reversedCreditTxId: true },
-      })) ?? [];
-    const lines = new Map<string, { outletId: string; fieldId: string; points: number; givenBack: number; undoBlockedReason: string | null }>();
-    for (const r of rows) {
-      const m = r.metadata as Record<string, unknown>;
+    const ds = rows.map((r) => this.lineOf(r, back.get(r.id) ?? 0));
+    // The SAME rule as undo create / approve (one shared helper, round-3 #2).
+    const blocked = await this.undoBlockedMap(db, ds.filter((d) => d.points - d.givenBack > 0));
+    const lines = new Map<string, { outletId: string; fieldId: string; points: number; givenBack: number; undoBlockedReason: string | null; pastExpiryPoints: number }>();
+    for (const d of ds) {
+      const m = rows.find((r) => r.id === d.id)!.metadata as Record<string, unknown>;
       if (m?.kind !== UPLOAD_DEDUCTION_KIND) continue;
       const k = `${m.outletCode}|${m.fieldId}`;
-      const blocked = credits.some(
-        (c) =>
-          c.walletId === r.walletId &&
-          c.reversedCreditTxId !== r.id &&
-          (r.seq != null && c.seq != null ? c.seq > r.seq : c.createdAt.getTime() > r.createdAt.getTime()),
-      );
-      const cur = lines.get(k) ?? { outletId: String(m.outletCode), fieldId: String(m.fieldId), points: 0, givenBack: 0, undoBlockedReason: null };
-      cur.points += Math.abs(r.points);
-      cur.givenBack += back.get(r.id) ?? 0;
-      if (blocked && Math.abs(r.points) - (back.get(r.id) ?? 0) > 0) cur.undoBlockedReason = deductionUndoBlockedMessage(formatDateIST(r.createdAt));
+      const cur = lines.get(k) ?? { outletId: String(m.outletCode), fieldId: String(m.fieldId), points: 0, givenBack: 0, undoBlockedReason: null, pastExpiryPoints: 0 };
+      cur.points += d.points;
+      cur.givenBack += d.givenBack;
+      cur.pastExpiryPoints += this.pastExpiryOf(d, d.points - d.givenBack);
+      if (blocked.has(d.id)) cur.undoBlockedReason = blocked.get(d.id)!;
       lines.set(k, cur);
     }
     return [...lines.values()];
@@ -2847,12 +2889,9 @@ export class WalletService {
    * wallet after the deduction), or null. Re-checked under the wallet lock at approve (undoUploadDeduction).
    */
   async uploadDeductionUndoBlocked(tx: Prisma.TransactionClient, key: CreditKey): Promise<string | null> {
-    for (const d of await this.findUploadDeductions(tx, key)) {
-      if (d.points - d.givenBack <= 0) continue;
-      const why = await this.undoBlockedFor(tx, d);
-      if (why) return why;
-    }
-    return null;
+    const open = (await this.findUploadDeductions(tx, key)).filter((d) => d.points - d.givenBack > 0);
+    const blocked = await this.undoBlockedMap(tx, open);
+    return open.map((d) => blocked.get(d.id)).find((x) => !!x) ?? null;
   }
 
   /**
@@ -2867,18 +2906,18 @@ export class WalletService {
   async undoUploadDeduction(
     tx: Prisma.TransactionClient,
     a: CreditKey & { clientId: string; creditReversalId: string; points: number; passbookLabel: string },
-  ): Promise<{ givenBack: number; transactionIds: string[]; walletIds: string[]; balanceBefore: number; balanceAfter: number }> {
+  ): Promise<{ givenBack: number; pastExpiryPoints: number; transactionIds: string[]; walletIds: string[]; balanceBefore: number; balanceAfter: number }> {
     if (!Number.isInteger(a.points) || a.points <= 0) throw new BadRequestException('Points to give back must be a positive whole number');
     const pre = await this.findUploadDeductions(tx, a);
     if (pre.length === 0) throw new BadRequestException('No deduction was made for this outlet and field in this batch');
     const walletIds = [...new Set(pre.map((d) => d.walletId))].sort();
     for (const id of walletIds) await this.lockWallet(tx, id);
     const deductions = await this.findUploadDeductions(tx, a); // re-read under the wallet locks
-    for (const d of deductions) {
-      if (d.points - d.givenBack <= 0) continue;
-      const why = await this.undoBlockedFor(tx, d); // D2 strict, under the lock
-      if (why) throw new BadRequestException(why);
-    }
+    // D2 strict, under the lock — the same shared rule as create and Payout Status.
+    const open = deductions.filter((d) => d.points - d.givenBack > 0);
+    const blocked = await this.undoBlockedMap(tx, open);
+    const why = open.map((d) => blocked.get(d.id)).find((x) => !!x);
+    if (why) throw new BadRequestException(why);
     const room = deductions.reduce((n, d) => n + Math.max(0, d.points - d.givenBack), 0);
     if (a.points > room) {
       throw new BadRequestException(
@@ -2886,6 +2925,7 @@ export class WalletService {
       );
     }
     const normalExpiry = await this.resolveExpiresAt(tx, a.clientId, null);
+    let pastExpiryPoints = 0;
     let remaining = a.points;
     const transactionIds: string[] = [];
     const firstBefore = new Map<string, number>();
@@ -2898,6 +2938,9 @@ export class WalletService {
         const w = await this.lockWallet(tx, d.walletId); // fresh read (an earlier part may have moved this wallet)
         if (!firstBefore.has(w.id)) firstBefore.set(w.id, w.redeemablePoints);
         const expiresAt = part.expiresAt === 'NEW' ? normalExpiry : part.expiresAt === null ? null : new Date(part.expiresAt);
+        // Round-3 #4 (no silent): points coming back on a lot whose own expiry already passed are named as such.
+        const past = part.expiresAt !== 'NEW' && expiresAt !== null && expiresAt.getTime() <= Date.now();
+        if (past) pastExpiryPoints += part.points;
         const res = await this.applyMovement(tx, {
           wallet: w,
           walletTxType: 'CREDIT_REVERSAL',
@@ -2908,7 +2951,9 @@ export class WalletService {
           referenceId: a.creditReversalId,
           sourceType: 'CREDIT_FIELD',
           sourceId: a.fieldId,
-          description: `${fmtPts(part.points)} points given back — deduction undone (${a.passbookLabel})`,
+          description:
+            `${fmtPts(part.points)} points given back — deduction undone (${a.passbookLabel})` +
+            (past ? ` · ${fmtPts(part.points)} pts returned already past their expiry and will expire at the next sweep` : ''),
           metadata: { kind: UPLOAD_DEDUCTION_UNDO_KIND, undoneDeductionTxId: d.id },
           reversedCreditTxId: d.id,
           creditReversalId: a.creditReversalId,
@@ -2920,7 +2965,7 @@ export class WalletService {
     }
     if (remaining !== 0) throw new Error('undoUploadDeduction: room check passed but the give-back did not cover the request');
     const sum = (m: Map<string, number>) => [...m.values()].reduce((n, v) => n + v, 0);
-    return { givenBack: a.points, transactionIds, walletIds, balanceBefore: sum(firstBefore), balanceAfter: sum(lastAfter) };
+    return { givenBack: a.points, pastExpiryPoints, transactionIds, walletIds, balanceBefore: sum(firstBefore), balanceAfter: sum(lastAfter) };
   }
 
   // ─── Expiry sweep ────────────────────────────────────────────────────────────
