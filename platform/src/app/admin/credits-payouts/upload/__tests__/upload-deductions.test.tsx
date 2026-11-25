@@ -439,9 +439,11 @@ describe('UND — upload with deductions + Before you confirm', () => {
     await upload(MIXED);
     await tickAll(3);
     fireEvent.click(confirmBtn());
-    expect(await screen.findByTestId('credits-confirm-blocked'))
-      .toHaveTextContent('This batch is saved and waiting. The wallet check failed — press Check again, then Retry confirm.');
-    expect(screen.getByRole('button', { name: 'Retry confirm for CB-1' })).toBeDisabled();
+    // The blocked panel first renders with the refusal text, then updates once the re-check
+    // fails — wait for the final text instead of asserting on the first render (load flake).
+    await waitFor(() => expect(screen.getByTestId('credits-confirm-blocked'))
+      .toHaveTextContent('This batch is saved and waiting. The wallet check failed — press Check again, then Retry confirm.'), { timeout: 5000 });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry confirm for CB-1' })).toBeDisabled());
   });
 
   it('UND18: a 409 wallet-not-ready confirm refusal re-runs the check at once and lists the wallets — saved-batch wording', async () => {
