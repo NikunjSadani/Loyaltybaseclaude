@@ -204,7 +204,10 @@ export function targetChangesFor(
   return out;
 }
 
-/** The real current instant (UTC, Prisma DateTime-comparable) — unlike now(), NOT frozen at the transaction start. */
+/**
+ * The real current instant (UTC, Prisma DateTime-comparable) — unlike the SQL transaction-start
+ * clock, NOT frozen at the transaction start.
+ */
 const SQL_CLOCK_UTC = Prisma.sql`(clock_timestamp() AT TIME ZONE 'UTC')`;
 /** Private-bucket folder of the kept upload files: `target-uploads/<clientId>/<batchId>/…`. */
 export const TARGET_UPLOAD_FILE_PREFIX = 'target-uploads/';
