@@ -631,6 +631,10 @@ export interface WalletBalance {
   owedPoints?: number;
   /** Negative wallets only: the debt comes from a reversed credit (V2 over-reversal). */
   owedFromReversal?: boolean;
+  /** Negative wallets only: the current below-zero stretch includes a Credits & Payouts upload DEDUCTION. */
+  owedFromDeduction?: boolean;
+  /** With owedFromDeduction: the deducted field names (may be empty). */
+  owedDeductionFields?: string[];
 }
 
 // ─── TDS Computation Result ───────────────────────────────────────────────────

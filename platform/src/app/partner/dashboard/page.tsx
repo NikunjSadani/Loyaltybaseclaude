@@ -773,11 +773,13 @@ function HeroUntargetedLine({ kpi }: { kpi: AggKpi | null }) {
 ══════════════════════════════════════════════════════════════════════════ */
 
 function WholesalerHero({
-  primary, walletPoints, lastUpdatedLabel, v2 = false, soFarKpi = null, owedFromReversal = false,
+  primary, walletPoints, lastUpdatedLabel, v2 = false, soFarKpi = null, owedFromReversal = false, owedDeductionFields = null,
 }: {
   primary: AggKpi | null; walletPoints: number | null; lastUpdatedLabel?: string; v2?: boolean;
   /** Negative wallets only (fix round 4, item 6): the debt comes from a reversed credit — same signal as the wallet page. */
   owedFromReversal?: boolean;
+  /** Negative wallets only (F4): an upload deduction is behind it — its field names; null = not from a deduction. */
+  owedDeductionFields?: string[] | null;
   /** v2 only: set when no KPI has a target → the neutral "so far" zone replaces the scored KPI zone. */
   soFarKpi?: AggKpi | null;
 }) {
@@ -854,7 +856,10 @@ function WholesalerHero({
           {/* Owner decision 2 (2026-11-19): a negative balance is shown as it is, with what it means */}
           {walletPoints !== null && walletPoints < 0 && (
             <p data-testid="hero-negative-note" className="text-[10px] text-amber-200 mt-1 max-w-[14rem] leading-snug">
-              {negativeBalanceNote({ redeemable: walletPoints, owedFromReversal })}
+              {negativeBalanceNote({
+                redeemable: walletPoints, owedFromReversal,
+                ...(owedDeductionFields ? { owedFromDeduction: true, owedDeductionFields } : {}),
+              })}
             </p>
           )}
         </div>
@@ -1138,6 +1143,8 @@ export default function PartnerDashboard() {
   const [walletPoints, setWalletPoints] = useState<number | null>(null);
   // Fix round 4 (item 6): for a NEGATIVE balance only, the wallet page's own signal (GET /api/wallet owedFromReversal).
   const [owedFromReversal, setOwedFromReversal] = useState(false);
+  // F4: same source — the below-zero stretch includes an upload deduction (field names); null = not from a deduction.
+  const [owedDeductionFields, setOwedDeductionFields] = useState<string[] | null>(null);
 
   // Outlet type is sourced from the AUTHORITATIVE /partner/me identity hook (NOT the
   // unreliable denormalized target-upload string) — see the hero selection below.
@@ -1215,8 +1222,14 @@ export default function PartnerDashboard() {
         if (typeof pts === 'number' && pts < 0) {
           return fetch('/api/wallet', { headers: { ...authHeader() } })
             .then((r) => r.json())
-            .then((w: { success?: boolean; data?: { owedFromReversal?: boolean } }) => {
-              if (!cancelled && w?.success) setOwedFromReversal(w.data?.owedFromReversal === true);
+            .then((w: { success?: boolean; data?: { owedFromReversal?: boolean; owedFromDeduction?: boolean; owedDeductionFields?: string[] } }) => {
+              if (cancelled || !w?.success) return;
+              setOwedFromReversal(w.data?.owedFromReversal === true);
+              setOwedDeductionFields(
+                w.data?.owedFromDeduction === true
+                  ? (Array.isArray(w.data.owedDeductionFields) ? w.data.owedDeductionFields : [])
+                  : null,
+              );
             })
             .catch(() => {}); // the generic note stays
         }
@@ -1351,7 +1364,7 @@ export default function PartnerDashboard() {
       )}
 
       {/* ── 1. CURRENT CYCLE KPI HERO (outlet-specific) ── */}
-      {isWholesaler && <WholesalerHero primary={primary} walletPoints={walletPoints} lastUpdatedLabel={lastUpdatedLabel} v2={v2} soFarKpi={soFarKpi} owedFromReversal={owedFromReversal} />}
+      {isWholesaler && <WholesalerHero primary={primary} walletPoints={walletPoints} lastUpdatedLabel={lastUpdatedLabel} v2={v2} soFarKpi={soFarKpi} owedFromReversal={owedFromReversal} owedDeductionFields={owedDeductionFields} />}
       {isMT         && <MTHero aggKpis={aggKpis} lastUpdatedLabel={lastUpdatedLabel} v2={v2} />}
       {!isWholesaler && !isMT && <RetailerHero primary={primary} lastUpdatedLabel={lastUpdatedLabel} v2={v2} soFarKpi={soFarKpi} />}
 

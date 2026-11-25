@@ -35,6 +35,9 @@ interface ApiSummary {
     /** Negative wallets only (owner decision 2, 2026-11-19). */
     owedPoints?:       number;
     owedFromReversal?: boolean;
+    /** Negative wallets only: an upload deduction is behind the below-zero stretch (field names may be empty). */
+    owedFromDeduction?:   boolean;
+    owedDeductionFields?: string[];
   };
 }
 
@@ -508,6 +511,8 @@ export default function OutletWalletPage() {
                         redeemable: wallet.redeemablePoints,
                         owedPoints: wallet.owedPoints,
                         owedFromReversal: wallet.owedFromReversal,
+                        owedFromDeduction: wallet.owedFromDeduction,
+                        owedDeductionFields: wallet.owedDeductionFields,
                       },
                       'staff',
                     )}

@@ -32,9 +32,10 @@ const base = { narration: '', status: 'OK', errors: [], awardType: 'POINTS' };
 const creditRow    = { ...base, rowNum: 1, outletId: 'O1', outletName: 'Outlet One', fieldId: 'f1', fieldName: 'Volume', amount: 500 };
 const deductionRow = { ...base, rowNum: 2, outletId: 'O2', outletName: 'Outlet Two', fieldId: 'f2', fieldName: 'Target', amount: -320 };
 
+const LINE = { outletId: 'O2', fieldId: 'f2', points: 320, givenBack: 0, undoBlockedReason: null as string | null };
 const ok = (payload: unknown) => Promise.resolve({ ok: true, status: 200, json: async () => payload });
 
-function mockApi(rows: unknown[]) {
+function mockApi(rows: unknown[], extra: Record<string, unknown> = { deductionLines: [LINE] }) {
   const posts: Array<Record<string, unknown>> = [];
   global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -56,7 +57,7 @@ function mockApi(rows: unknown[]) {
       posts.push(JSON.parse(String(init.body)));
       return ok({ success: true, data: { id: 'r1' } });
     }
-    if (/\/api\/admin\/credits\/batches\/b1$/.test(url)) return ok({ success: true, data: { ...batch, rows } });
+    if (/\/api\/admin\/credits\/batches\/b1$/.test(url)) return ok({ success: true, data: { ...batch, rows, ...extra } });
     return ok({ success: true, data: null });
   }) as unknown as typeof fetch;
   return { posts };
@@ -125,5 +126,65 @@ describe('Payout status — upload deduction rows', () => {
     expect(screen.queryByTestId('batch-credit-deduct-totals')).toBeNull();
     expect(screen.queryByText('Deduction')).toBeNull();
     expect(screen.queryByRole('button', { name: /Undo deduction/ })).toBeNull();
+  });
+});
+
+describe('Payout status — undo only on ACTUAL deductions (deductionLines) + not-applied list', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useAdminSession).mockReturnValue({
+      role: 'CLIENT_ADMIN', clientId: 'bajaj', name: 'Test Admin', userId: '', canManageSchemes: true,
+    } as ReturnType<typeof useAdminSession>);
+  });
+
+  it('a negative row with no deductionLine reads "Not deducted" and has no button', async () => {
+    mockApi([creditRow, deductionRow], {});
+    render(<PayoutStatusPage />);
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    expect(await screen.findByTestId('row-not-deducted')).toHaveTextContent('Not deducted');
+    expect(screen.queryByRole('button', { name: /Undo deduction/ })).toBeNull();
+    expect(screen.getAllByRole('button', { name: /^Reverse$/ })).toHaveLength(1); // the credit row only
+    expect(screen.getByTestId('batch-credit-deduct-totals')).toHaveTextContent('Credited 500 pts · Deducted 0 pts (0 rows)');
+  });
+
+  it('undoBlockedReason → the button is disabled with the reason as visible text', async () => {
+    const reason = 'This deduction has already been repaid by later points — correct it with a manual wallet adjustment.';
+    mockApi([deductionRow], { deductionLines: [{ ...LINE, undoBlockedReason: reason }] });
+    render(<PayoutStatusPage />);
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    const btn = await screen.findByRole('button', { name: /Undo deduction/ });
+    expect(btn).toBeDisabled();
+    expect(screen.getByTestId('undo-blocked-reason')).toHaveTextContent(reason);
+    expect(btn).toHaveAttribute('aria-describedby', screen.getByTestId('undo-blocked-reason').id);
+  });
+
+  it('prefill = points − givenBack; the cap is what is still deducted', async () => {
+    const api = mockApi([deductionRow], { deductionLines: [{ ...LINE, givenBack: 120 }] });
+    render(<PayoutStatusPage />);
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    fireEvent.click(await screen.findByRole('button', { name: /Undo deduction/ }));
+    await screen.findByRole('dialog');
+    expect((screen.getByRole('spinbutton') as HTMLInputElement).value).toBe('200');
+    expect(screen.getByText('Already given back')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '201' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Submit Undo Request' }));
+    expect(await screen.findByText('Amount cannot exceed 200 pts.')).toBeInTheDocument();
+    expect(api.posts).toHaveLength(0);
+  });
+
+  it('notApplied → a "Not applied (N)" list with reasons', async () => {
+    mockApi([creditRow], {
+      notApplied: [
+        { outletId: 'O9', fieldName: 'Target', points: -50, reason: 'OUTLET_NOT_LINKED_TO_PARTNER', kind: 'DEDUCTION' },
+        { outletId: 'O8', fieldName: 'Volume', points: 70, reason: 'OUTLET_NOT_FOUND' },
+      ],
+      acknowledged: ['NOT_APPLIED'],
+    });
+    render(<PayoutStatusPage />);
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    const box = await screen.findByTestId('batch-not-applied');
+    expect(box).toHaveTextContent('Not applied (2)');
+    expect(box).toHaveTextContent('O9 · Target · −50 pts · NOT deducted — Outlet is not linked to a partner account');
+    expect(box).toHaveTextContent('O8 · Volume · 70 pts · NOT credited — Outlet ID not found in this tenant');
   });
 });

@@ -219,3 +219,26 @@ describe('periodLabel', () => {
     expect(periodLabel('2025-11', '2026-02')).toBe('Nov 2025 – Feb 2026');
   });
 });
+
+describe('U1: an upload deduction (DEBIT_ADJUSTMENT with a field name)', () => {
+  const text = '320 points deducted — Target Achievement, November 2026 · returns beat sales';
+  it('reads "Deducted" and the server text as-is (the field name is never prefixed twice)', () => {
+    const doc = buildStatementDoc(
+      api([row({ id: 'u', date: '2026-05-02T00:00:00.000Z', points: -320, after: -220, transactionType: 'DEBIT_ADJUSTMENT', fieldName: 'Target Achievement', narration: text, description: text })]),
+      [],
+      meta,
+    );
+    expect(doc.lines[0].type).toBe('Deducted');
+    expect(doc.lines[0].description).toBe(text);
+  });
+
+  it('a manual debit (no field name) keeps "Debit adjustment" and its description', () => {
+    const doc = buildStatementDoc(
+      api([row({ id: 'm', date: '2026-05-02T00:00:00.000Z', points: -5, after: 5, transactionType: 'DEBIT_ADJUSTMENT', description: 'Manual correction' })]),
+      [],
+      meta,
+    );
+    expect(doc.lines[0].type).toBe('Debit adjustment');
+    expect(doc.lines[0].description).toBe('Manual correction');
+  });
+});

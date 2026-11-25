@@ -13,7 +13,7 @@
  *       - POINTS (known outlet): a DEDUCTION row, status OK, amount = −(magnitude rounded
  *         half-up to a whole point): −199.5 → −200, −199.4 → −199. A magnitude that rounds to 0
  *         (−0.4) → SKIP (nothing to deduct). The rounded magnitude counts against the points cap.
- *       - PAYOUT: ERROR "Payout amounts can't be negative — deduct via Reversals."
+ *       - PAYOUT: ERROR "Payout amounts can't be negative — use Reverse on Payout Status."
  *       - unknown outlet: only the "not found" error.
  *     Deductions are summed separately (summary.deducted / totalDeductedPoints); totalPoints
  *     stays the CREDITED (positive) total.
@@ -258,7 +258,7 @@ export function parseCreditUpload(
         if (!outlet) {
           // Unknown outlet: the "not found" error above is the only error.
         } else if (awardType === 'PAYOUT') {
-          errors.push(`Payout amounts can't be negative — deduct via Reversals.`);
+          errors.push(`Payout amounts can't be negative — use Reverse on Payout Status.`);
         } else {
           const typed     = -trimFloatNoise(Math.abs(numVal));
           const magnitude = roundHalfUpWhole(Math.abs(numVal));

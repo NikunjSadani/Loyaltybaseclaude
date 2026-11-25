@@ -765,7 +765,7 @@ describe('N — negative values: deductions behind the negativeDeductions option
     const { parseCreditUpload } = await import('../credits-payouts-parser');
     const r = parseCreditUpload(one(-500, 'RT-001'), ON).rows[0];
     expect(r.status).toBe('ERROR');
-    expect(r.errors).toEqual(["Payout amounts can't be negative — deduct via Reversals."]);
+    expect(r.errors).toEqual(["Payout amounts can't be negative — use Reverse on Payout Status."]);
   });
 
   it('N5: ON — unknown outlet with a negative value: only the "not found" error', async () => {

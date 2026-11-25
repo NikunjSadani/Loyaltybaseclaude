@@ -82,8 +82,26 @@ function istMonthStart(key: string): Date {
   return new Date(Date.UTC(y, m - 1, 1) - 330 * 60_000);
 }
 
+/**
+ * A DEBIT_ADJUSTMENT row that carries a field name is an UPLOAD DEDUCTION (negative points in a credits upload).
+ * A manual debit has no field name and keeps "Debit adjustment".
+ */
+export function isUploadDeductionRow(r: { transactionType: string; fieldName?: string | null }): boolean {
+  return r.transactionType === 'DEBIT_ADJUSTMENT' && !!r.fieldName;
+}
+
+/** Type label for a statement / passbook row ("Deducted" for an upload deduction). */
+export function statementTypeLabel(r: { transactionType: string; fieldName?: string | null }): string {
+  if (isUploadDeductionRow(r)) return 'Deducted';
+  return TYPE_LABEL[r.transactionType] ?? r.transactionType;
+}
+
 function pointsLine(r: StatementApiRow): StatementLine {
-  const description = r.fieldName
+  // An upload deduction's server text already names the field ("320 points deducted — Target, November 2026 ·
+  // <narration>") — never prefix the field name again.
+  const description = isUploadDeductionRow(r)
+    ? (r.narration ?? r.description)
+    : r.fieldName
     ? r.narration
       ? `${r.fieldName} · ${r.narration}`
       : r.fieldName
@@ -93,7 +111,7 @@ function pointsLine(r: StatementApiRow): StatementLine {
     id: r.id,
     date: new Date(r.date),
     description,
-    type: TYPE_LABEL[r.transactionType] ?? r.transactionType,
+    type: statementTypeLabel(r),
     points: r.points,
     balance: r.balanceAfter,
   };

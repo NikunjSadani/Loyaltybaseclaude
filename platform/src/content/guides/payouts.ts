@@ -63,18 +63,26 @@ On top of those, the platform has a **tax & invoicing layer** (TDS, self-billed 
 
 **Step 1 — Upload the spreadsheet** *(Credits & Payouts → Upload Credits)*
 - **The operator does:** Download the template, fill in each outlet and amount, and upload it.
-- **Whole units only:** points and ₹ payouts are credited in whole units. A decimal amount is rounded **half-up** (199.5 → 200, 199.4 → 199; ₹199.50 → ₹200). The preview lists every rounded amount ("199.5 → 200") before you confirm; an amount that rounds to 0 is skipped.
+- **Whole units only:** points and ₹ payouts are applied in whole units. A decimal amount is rounded to the nearest whole unit (.5 goes away from zero): 199.5 → 200, 199.4 → 199; ₹199.50 → ₹200; −199.5 → −200. An amount that rounds to 0 is skipped.
 - **The system does:** Creates a **batch** marked **Pending confirm**. Nothing is paid or credited yet — this is just a draft.
 
 ![Upload Credits screen](/guides/payouts/upload.png)
 
+**Before you confirm** *(every client)* — the preview checks the file against the wallets and lists every kind of row that won't be applied exactly as typed, each with its rows and **one box to tick**:
+- rows that **will not be credited** (blank, zero or not applicable),
+- rows that were **rounded** to whole units,
+- rows that **won't be applied** because the outlet wasn't found or isn't linked to a partner (the reason is shown),
+- wallets that **will go below zero** ("1,200 → −320" — one line per wallet; outlets of one partner share a wallet; a held opening balance that posts first is included and called out),
+- deductions that **may be a repeat** ("Already deducted on 3 Nov in batch CB-… — check this isn't a repeat").
+
+**Confirm & Credit** switches on only when every box is ticked; a clean file shows no boxes. A new file or **Upload Again** clears the ticks. Some things can't be ticked away — Confirm stays off with the reason shown: error rows (fix and re-upload), the wallet check still running or failed (use **Check again**), deductions switched off for the client while the file has negative points, or a wallet not prepared for deductions (the server would refuse the whole batch — ask Gifsy). The done screen repeats what you accepted.
+
 **Negative points = a deduction** *(only when Gifsy has switched this on for the client — otherwise a negative amount is an error)*
-- A **negative points** value (e.g. −320 because returns beat sales) **takes those points out** of the outlet's wallet on confirm. A negative **₹ payout** is never allowed — undo a payout through a Reversal instead.
-- Rounded half-up to whole points (−199.5 → −200, −199.4 → −199); a value that rounds to 0 (−0.4) is skipped. The per-row points safety cap applies to the deduction too.
-- Before you confirm, the preview shows **Total credited** and **Total deducted**, a **"Will be deducted"** list, and each outlet whose balance **will go below zero** ("1,200 → −320").
+- A **negative points** value (e.g. −320 because returns beat sales) **takes those points out** of the outlet's wallet on confirm. A negative **₹ payout** is never allowed — use **Reverse** on Payout Status instead.
+- The per-row points safety cap applies to the deduction too. The preview shows **Total credited** and **Total deducted** (both in pts) and a **"Will be deducted"** list.
 - A wallet **can go below zero**: it is repaid from the outlet's future earnings, and the outlet **can't redeem** until it is back to zero or more.
-- If an outlet's wallet is **not prepared** for deductions, Confirm is switched off and the server would refuse the whole batch — ask Gifsy to prepare it (or remove those rows). An outlet not linked to a partner is skipped and shown as **NOT deducted**.
-- **To undo a deduction:** on **Payout Status**, open the batch and click **Undo deduction** on that row. Gifsy approves it, and the points go back to the same wallet (clearing any below-zero debt first).
+- An outlet not linked to a partner is skipped and shown as **NOT deducted**.
+- **To undo a deduction:** on **Payout Status**, open the batch and click **Undo deduction** on that row — it appears only on rows that were actually deducted (a row that wasn't reads **Not deducted**). Gifsy approves it, and the points go back to the same wallet (clearing any below-zero debt first). Once later points have already repaid a deduction, Undo is switched off with the reason — correct it with a manual wallet adjustment instead. Payout Status also lists what a confirm did **not apply** and why.
 
 **Step 2 — Confirm the batch**
 - **The operator does:** Review the batch and click **Confirm**.

@@ -82,3 +82,33 @@ describe('mappers carry the new optional fields only when present', () => {
     expect(mapApiTransaction({ ...t, referenceType: 'ORDER', referenceId: 'O1' }).reversalRef).toBeNull();
   });
 });
+
+describe('upload deductions (U1 / F4)', () => {
+  const base = {
+    earnedPoints: 1, lockedPoints: 0, redeemablePoints: -220, redeemedPoints: 0, expiredPoints: 0, lifetimeEarned: 1, lifetimeRedeemed: 0,
+  };
+  it('F4: mapApiBalance carries owedFromDeduction + fields; the staff card names the deduction', () => {
+    const bal2 = mapApiBalance({ ...base, owedPoints: 220, owedFromDeduction: true, owedDeductionFields: ['Target Achievement'] });
+    expect(bal2).toMatchObject({ owedFromDeduction: true, owedDeductionFields: ['Target Achievement'] });
+    render(<BalanceCard balance={bal2} audience="staff" />);
+    expect(screen.getByText(/because points were deducted \(Target Achievement\) — it owes 220 pts/)).toBeInTheDocument();
+    expect(mapApiBalance({ ...base })).not.toHaveProperty('owedFromDeduction');
+  });
+
+  it('U1: an upload deduction row shows the server text as its header, no field-name prefix / sub-line', () => {
+    const text = '320 points deducted — Target Achievement, November 2026 · returns';
+    const t = {
+      id: 'u', transactionType: 'DEBIT_ADJUSTMENT', description: text, narration: text, fieldName: 'Target Achievement',
+      points: -320, date: '2026-11-19T00:00:00Z', balanceAfter: -220, referenceType: 'CREDIT_BATCH', referenceId: 'b1',
+    };
+    const m = mapApiTransaction(t);
+    expect(m.description).toBe(text);
+    expect(m.narration).toBeUndefined();
+    expect(m.kpiLabel).toBe('Target Achievement'); // the KPI filter still finds it
+    // A manual debit (no field name) keeps its own description.
+    expect(mapApiTransaction({ ...t, fieldName: null, narration: null, description: 'Manual correction' }).description).toBe('Manual correction');
+    // A credit keeps field name header + narration sub-line.
+    const c = mapApiTransaction({ ...t, transactionType: 'CREDIT_POINTS_EARNED', narration: 'Scheme', points: 50 });
+    expect([c.description, c.narration]).toEqual(['Target Achievement', 'Scheme']);
+  });
+});

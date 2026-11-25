@@ -151,6 +151,18 @@ function installFetch(outlets: TemplateOutlet[], save: Reply, confirms: Reply[] 
     const url = String(input);
     if (url.includes('/credits/fields')) return respond(jsonReply({ success: true, data: FIELDS }));
     if (url.includes('/eligible-outlets')) return respond(jsonReply({ success: true, data: outlets }));
+    // Server check of the points rows (every tenant): every outlet found + linked, its own wallet, ready.
+    if (url.includes('/upload-preview')) {
+      const { outletCodes } = JSON.parse(String(init?.body)) as { outletCodes: string[] };
+      return respond(jsonReply({ success: true, data: {
+        deductionsEnabled: false,
+        outlets: outletCodes.map((c) => ({
+          outletCode: c, found: true, linked: true, walletId: `W-${c}`, partnerId: `P-${c}`, balance: 0,
+          heldOpeningBalance: null, ready: true, reason: null, code: null,
+        })),
+        priorDeductions: [],
+      } }));
+    }
     if (url.endsWith('/confirm')) {
       confirmUrls.push(url);
       return respond(queue.length > 1 ? queue.shift()! : queue[0]);
@@ -167,7 +179,16 @@ async function uploadFile(container: HTMLElement, file: File) {
   await waitFor(() => expect(container.querySelector('input[type="file"]')).not.toBeNull());
   const input = container.querySelector('input[type="file"]') as HTMLInputElement;
   fireEvent.change(input, { target: { files: [file] } });
-  return screen.findByRole('button', { name: /Confirm & Credit/ }, { timeout: 15000 });
+  const btn = await screen.findByRole('button', { name: /Confirm & Credit/ }, { timeout: 15000 });
+  // The blank cells are SKIPPED rows → "Before you confirm" needs its tick (owner rule: no silent skips).
+  // Ticks made before the preview answer are reset by it (and disabled while it loads) → tick until enabled.
+  await waitFor(() => {
+    screen.queryByTestId('before-you-confirm')
+      ?.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
+      .forEach((b) => { if (!b.checked && !b.disabled) fireEvent.click(b); });
+    expect(btn).toBeEnabled();
+  }, { timeout: 15000 });
+  return btn;
 }
 
 async function uploadAndConfirm(file: File) {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   Download,
   Upload,
@@ -20,15 +20,19 @@ import { parseCreditUpload }      from '@/lib/credits-payouts-parser';
 import { getGifsySettings }       from '@/lib/gifsy-settings';
 import { jsonToSheetSafe }        from '@/lib/xlsx-safe';
 import { downloadBlob }           from '@/lib/download';
-import { RoundedAmountsPanel }     from './_components/rounded-amounts-panel';
+import { DeductionsPanel }        from './_components/deductions-panel';
 import {
-  DeductionsPanel,
-  DeductionBalanceCallout,
-  blockingOutlets,
-  deductionOutletCodes,
-  type DeductionPreviewOutlet,
-  type DeductionPreviewState,
-} from './_components/deductions-panel';
+  ACK_ORDER,
+  BeforeYouConfirm,
+  NotReadyPanel,
+  UploadPreviewStatus,
+  notReadyOutlets,
+  presentCategories,
+  previewRequestBody,
+  type AckCategory,
+  type UploadPreviewData,
+  type UploadPreviewState,
+} from './_components/before-you-confirm';
 import type { CreditField, CreditParseResult } from '@/types';
 import type { TemplateOutlet } from '@/lib/credits-payouts-template';
 
@@ -181,6 +185,8 @@ interface SavedBatch {
   deductionsIgnored:   number;
   /** Rows the server could NOT credit, with a reason. */
   skipped: SkippedRow[];
+  /** The "Before you confirm" boxes ticked for this confirm (their checkbox text), shown on the done screen. */
+  acceptedLabels: string[];
 }
 
 /** Human-readable explanation for a server-side skip reason. */
@@ -238,14 +244,43 @@ export default function CreditsPayoutsUploadPage() {
   const [pendingBatch, setPendingBatch] = useState<PendingBatch | null>(null);
   /** Confirm reported the pending batch as already CONFIRMED — nothing left to retry. */
   const [alreadyConfirmed, setAlreadyConfirmed] = useState(false);
-  /** Wallet balance / readiness check for the deduction outlets (null = the parse has no deductions). */
-  const [deductionPreview, setDeductionPreview] = useState<DeductionPreviewState | null>(null);
-  /** Ignore a stale deduction-preview reply after a newer file replaced the parse. */
+  /**
+   * Server check of every OK POINTS row's outlet (found / linked / wallet balance / readiness / prior deductions),
+   * every tenant. null = the file has no OK POINTS rows (nothing to check).
+   */
+  const [preview, setPreview] = useState<UploadPreviewState | null>(null);
+  /** Bumped by "Check again" to re-run the preview for the same parse. */
+  const [previewRun, setPreviewRun] = useState(0);
+  /** Ignore a stale preview reply after a newer file / re-check replaced it. */
   const previewSeqRef = useRef(0);
-  const deductionCheckLoading = deductionPreview?.status === 'loading';
-  const deductionsOffOnServer = deductionPreview?.status === 'off';
-  const deductionBlocked      = blockingOutlets(deductionPreview);
-  const hasDeductions         = (parseResult?.summary.deducted ?? 0) > 0;
+  /** "Before you confirm" boxes ticked (reset whenever the parse or the preview answer changes). */
+  const [acked, setAcked] = useState<Set<AckCategory>>(() => new Set());
+  const hasDeductions = (parseResult?.summary.deducted ?? 0) > 0;
+  const previewData: UploadPreviewData | null = preview?.status === 'ok' ? preview.data : null;
+  const categories = useMemo(
+    () => (parseResult && !parseResult.headerError ? presentCategories(parseResult, previewData) : []),
+    [parseResult, previewData],
+  );
+  const notReady = useMemo(
+    () => (parseResult && previewData ? notReadyOutlets(parseResult.rows, previewData) : []),
+    [parseResult, previewData],
+  );
+  const unticked = categories.filter((c) => !acked.has(c.category));
+  // HARD blocks (no tick overrides them) first, then the unticked boxes. null = Confirm may run.
+  const confirmBlockReason: string | null =
+    preview?.status === 'loading'
+      ? 'Checking wallet balances… Confirm switches on when the check is done.'
+      : preview?.status === 'error'
+        ? "Couldn't check wallet balances — use Check again. Confirm stays off until the check succeeds."
+        : hasDeductions && previewData && !previewData.deductionsEnabled
+          ? 'Deductions are switched off for this client — remove the negative rows or ask Gifsy.'
+          : notReady.length > 0
+            ? `${notReady.length} outlet wallet${notReady.length !== 1 ? 's are' : ' is'} not prepared for deductions, so the server would refuse the whole batch (nothing credited or deducted). Ask Gifsy to prepare ${notReady.length !== 1 ? 'these wallets' : 'this wallet'}, or remove those rows and re-upload.`
+            : unticked.length > 0
+              ? `Tick ${unticked.length === 1 ? 'the box' : `all ${unticked.length} boxes`} under "Before you confirm" to continue.`
+              : null;
+  /** A hard block (not just unticked boxes) — shown in red. */
+  const isHardBlock = !!confirmBlockReason && !confirmBlockReason.startsWith('Tick ');
 
   const fileInputRef    = useRef<HTMLInputElement>(null);
   const confirmErrorRef = useRef<HTMLDivElement>(null);
@@ -269,36 +304,57 @@ export default function CreditsPayoutsUploadPage() {
     }).catch(() => {});
   }, []);
 
-  // Below-zero / readiness check — ONLY when the parse has deduction rows (never on the OFF path).
+  // Server check of the file's points rows — every tenant, whenever the parse has OK POINTS rows (a PAYOUT-only file
+  // needs none). Re-run by "Check again" (previewRun). Any failure is a visible hard block, never silent.
   useEffect(() => {
     const seq = ++previewSeqRef.current;
-    const codes = parseResult ? deductionOutletCodes(parseResult.rows) : [];
-    if (codes.length === 0) {
-      setDeductionPreview(null);
+    const req = parseResult && !parseResult.headerError ? previewRequestBody(parseResult.rows, period) : null;
+    if (!req) {
+      setPreview(null);
       return;
     }
-    setDeductionPreview({ status: 'loading' });
+    setPreview({ status: 'loading' });
     (async () => {
-      let next: DeductionPreviewState = { status: 'error' };
+      let next: UploadPreviewState;
       try {
-        const res = await fetch('/api/admin/credits/deduction-preview', {
+        const res = await fetch('/api/admin/credits/upload-preview', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ outletCodes: codes }),
+          body:    JSON.stringify(req),
         });
-        const { body } = await readReply(res);
-        const outlets = (body?.data as { outlets?: unknown } | undefined)?.outlets;
-        if (res.ok && body?.success && Array.isArray(outlets)) {
-          next = { status: 'ok', outlets: outlets as DeductionPreviewOutlet[] };
-        } else if (res.status === 400 && /not turned on/i.test(serverErrorOf(body) ?? '')) {
-          // The program's switch is OFF on the server (this screen's settings were stale) — never confirm then:
-          // the server would ignore the negative rows.
-          next = { status: 'off', message: serverErrorOf(body)! };
+        const { status, body } = await readReply(res);
+        const d = body?.data as Partial<UploadPreviewData> | undefined;
+        if (res.ok && body?.success && d && Array.isArray(d.outlets)) {
+          next = {
+            status: 'ok',
+            data: {
+              deductionsEnabled: d.deductionsEnabled === true,
+              outlets:           d.outlets,
+              priorDeductions:   Array.isArray(d.priorDeductions) ? d.priorDeductions : [],
+            },
+          };
+        } else {
+          next = { status: 'error', message: `${(serverErrorOf(body) ?? `the server answered HTTP ${status}`).replace(/\.+$/, '')}.` };
         }
-      } catch { /* network drop → visible error state */ }
-      if (seq === previewSeqRef.current) setDeductionPreview(next);
+      } catch {
+        next = { status: 'error', message: 'the server could not be reached.' };
+      }
+      if (seq === previewSeqRef.current) setPreview(next);
     })();
-  }, [parseResult]);
+  }, [parseResult, period, previewRun]);
+
+  // New file / Upload Again / a fresh preview answer → every box must be ticked again.
+  useEffect(() => {
+    setAcked(new Set());
+  }, [parseResult, preview]);
+
+  function toggleAck(c: AckCategory) {
+    setAcked((cur) => {
+      const next = new Set(cur);
+      if (next.has(c)) next.delete(c); else next.add(c);
+      return next;
+    });
+  }
 
   // ─── Step 1: Download template ──────────────────────────────────────────────
 
@@ -352,8 +408,8 @@ export default function CreditsPayoutsUploadPage() {
 
   async function handleConfirm() {
     if (!parseResult?.canProceed || inFlightRef.current) return;
-    // A deduction outlet whose wallet isn't prepared → the server would refuse the whole batch.
-    if (!pendingBatch && (deductionCheckLoading || deductionsOffOnServer || deductionBlocked.length > 0)) return;
+    // Hard blocks + unticked "Before you confirm" boxes (the button is disabled too; this guards keyboard / races).
+    if (!pendingBatch && confirmBlockReason) return;
     inFlightRef.current = true;
     setConfirming(true);
     setConfirmError('');
@@ -424,10 +480,17 @@ export default function CreditsPayoutsUploadPage() {
 
   /** POST /confirm for an already-saved batch (first attempt or a retry). Never saves a batch. */
   async function confirmSavedBatch(batch: PendingBatch) {
+    // Only the ticked categories that are present; the server refuses a confirm missing one it finds.
+    const acknowledged = ACK_ORDER.filter((c) => acked.has(c) && categories.some((x) => x.category === c));
+    const acceptedLabels = categories.filter((c) => acknowledged.includes(c.category)).map((c) => c.label);
     let reply: Awaited<ReturnType<typeof readReply>>;
     try {
       // Confirm (creates payout entries + notifies Gifsy)
-      const confirmRes = await fetch(`/api/admin/credits/batches/${batch.id}/confirm`, { method: 'POST' });
+      const confirmRes = await fetch(`/api/admin/credits/batches/${batch.id}/confirm`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ acknowledged, skippedRows: parseResult?.summary.skipped ?? 0 }),
+      });
       reply = await readReply(confirmRes);
     } catch {
       showConfirmError(confirmUnknownMsg(batch.batchCode));
@@ -471,6 +534,7 @@ export default function CreditsPayoutsUploadPage() {
         ? (parseResult?.summary.deducted ?? 0) : 0,
       pointsDeductedTotal:  Math.abs(Number(cd.pointsDeductedTotal ?? 0)),
       skipped:             Array.isArray(cd.skipped) ? (cd.skipped as SkippedRow[]) : [],
+      acceptedLabels,
     });
     setSaved(true);
     setStep('done');
@@ -510,6 +574,22 @@ export default function CreditsPayoutsUploadPage() {
       const ws = jsonToSheetSafe(rows);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Upload Report');
+
+      // The server-check findings ("Before you confirm" lists beyond the first 20, and unprepared wallets) — skipped
+      // and rounded rows are already in the main sheet. Absent when there is nothing to report.
+      const checkRows = [
+        ...categories
+          .filter((c) => c.category !== 'SKIPPED' && c.category !== 'ROUNDED')
+          .flatMap((c) => c.items.map((it) => ({ 'Check': c.title, 'Row': it.text, 'Detail': it.detail ?? '' }))),
+        ...notReady.map((o) => ({
+          'Check':  'Wallet not prepared for deductions — confirm refused',
+          'Row':    o.outletCode,
+          'Detail': o.reason ?? '',
+        })),
+      ];
+      if (checkRows.length > 0) {
+        XLSX.utils.book_append_sheet(wb, jsonToSheetSafe(checkRows), 'Before you confirm');
+      }
 
       // After a confirm, append the server-side skipped rows (what was NOT credited
       // and why) so the report actually explains the skips — not just the client parse.
@@ -669,20 +749,25 @@ export default function CreditsPayoutsUploadPage() {
             {[
               { label: 'OK Rows',   value: parseResult.summary.ok,      color: 'text-emerald-600',
                 sub: hasDeductions
-                  ? `${parseResult.summary.ok - parseResult.summary.deducted} to credit · ${parseResult.summary.deducted} to deduct`
+                  ? `${parseResult.summary.ok - parseResult.summary.deducted} to credit or pay · ${parseResult.summary.deducted} to deduct`
                   : undefined },
               { label: 'Skipped',   value: parseResult.summary.skipped,  color: 'text-gray-500' },
               { label: 'Errors',    value: parseResult.summary.errors,   color: 'text-red-600' },
+              // Same unit ("pts") on both totals when there are deductions; "Total Pts" exactly as before otherwise.
               { label: hasDeductions ? 'Total credited' : 'Total Pts',
-                value: parseResult.summary.totalPoints.toLocaleString('en-IN'), color: 'text-blue-600' },
+                value: hasDeductions
+                  ? `${parseResult.summary.totalPoints.toLocaleString('en-IN')} pts`
+                  : parseResult.summary.totalPoints.toLocaleString('en-IN'),
+                color: 'text-blue-600' },
               ...(hasDeductions
                 ? [{ label: 'Total deducted', value: `${parseResult.summary.totalDeductedPoints.toLocaleString('en-IN')} pts`, color: 'text-orange-600' }]
                 : []),
             ].map((c: { label: string; value: string | number; color: string; sub?: string }) => (
-              <div key={c.label} className="bg-white rounded-xl border border-gray-200 p-3 text-center">
-                <p className={`text-xl font-bold ${c.color}`}>{c.value}</p>
+              <div key={c.label} className="bg-white rounded-xl border border-gray-200 p-3 text-center min-w-0">
+                {/* 5 cards at 640px: smaller value text that wraps instead of overflowing. */}
+                <p className={`${hasDeductions ? 'text-lg sm:text-base md:text-xl break-words' : 'text-xl'} font-bold ${c.color}`}>{c.value}</p>
                 <p className="text-xs text-gray-500 mt-0.5">{c.label}</p>
-                {c.sub && <p className="text-[11px] text-gray-400 mt-0.5" data-testid="credits-ok-split">{c.sub}</p>}
+                {c.sub && <p className="text-[11px] text-gray-600 mt-0.5 break-words" data-testid="credits-ok-split">{c.sub}</p>}
               </div>
             ))}
           </div>
@@ -696,10 +781,21 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
-          <RoundedAmountsPanel rows={parseResult.rows} />
-
           <DeductionsPanel rows={parseResult.rows} />
-          <DeductionBalanceCallout rows={parseResult.rows} state={deductionPreview} />
+
+          <UploadPreviewStatus state={preview} onRetry={() => setPreviewRun((n) => n + 1)} />
+
+          {hasDeductions && previewData && !previewData.deductionsEnabled && (
+            <div role="alert" className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 flex items-start gap-2" data-testid="credits-deductions-off">
+              <XCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" aria-hidden="true" />
+              <p className="text-xs text-red-800">
+                Deductions are switched off for this client — remove the negative rows or ask Gifsy. Nothing in this file
+                can be confirmed while it has negative points.
+              </p>
+            </div>
+          )}
+
+          <NotReadyPanel outlets={notReady} />
 
           {parseResult.hasErrors && (
             <div className="bg-white rounded-xl border border-red-200 overflow-hidden">
@@ -727,31 +823,13 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
-          {parseResult.summary.skipped > 0 && (
-            <div className="bg-white rounded-xl border border-amber-200 overflow-hidden">
-              <div className="px-4 py-3 bg-amber-50 border-b border-amber-100">
-                <p className="text-xs font-semibold text-amber-800 flex items-center gap-2">
-                  <AlertTriangle className="w-3.5 h-3.5" />
-                  {parseResult.summary.skipped} row{parseResult.summary.skipped !== 1 ? 's' : ''} skipped — nothing credited
-                </p>
-              </div>
-              <div className="divide-y divide-gray-100 max-h-52 overflow-y-auto">
-                {parseResult.rows
-                  .filter((r) => r.status === 'SKIP')
-                  .slice(0, 10)
-                  .map((r, i) => (
-                    <div key={i} className="px-4 py-2.5">
-                      <p className="text-xs font-medium text-gray-800">
-                        Row {r.rowNum} · {r.outletId} · {r.fieldName}
-                      </p>
-                      {r.skipReason && (
-                        <p className="text-xs text-amber-700 mt-0.5">• {r.skipReason}</p>
-                      )}
-                    </div>
-                  ))}
-              </div>
-            </div>
-          )}
+          {/* Skipped / rounded / not applied / below zero / repeat — each listed with a required tick. */}
+          <BeforeYouConfirm
+            categories={categories}
+            acked={acked}
+            onToggle={toggleAck}
+            disabled={saved || preview?.status === 'loading'}
+          />
 
           {/* Next to the buttons (and scrolled into view) so a failed click is never invisible. */}
           {confirmError && (
@@ -766,11 +844,13 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
-          {parseResult.canProceed && !saved && !pendingBatch && deductionBlocked.length > 0 && (
-            <p className="text-xs text-red-700" data-testid="credits-confirm-blocked">
-              Confirm is disabled: {deductionBlocked.length} outlet wallet{deductionBlocked.length !== 1 ? 's are' : ' is'} not
-              prepared for deductions, so the server would refuse the whole batch (nothing credited or deducted). Ask
-              Gifsy to prepare {deductionBlocked.length !== 1 ? 'these wallets' : 'this wallet'}, or remove those rows and re-upload.
+          {parseResult.canProceed && !saved && !pendingBatch && confirmBlockReason && (
+            <p
+              id="confirm-block-reason"
+              className={`text-xs ${isHardBlock ? 'text-red-700' : 'text-amber-800'}`}
+              data-testid="credits-confirm-blocked"
+            >
+              Confirm is disabled: {confirmBlockReason}
             </p>
           )}
 
@@ -778,7 +858,8 @@ export default function CreditsPayoutsUploadPage() {
             {parseResult.canProceed && !saved && !pendingBatch && (
               <button
                 onClick={handleConfirm}
-                disabled={!uploadWindowOpen || confirming || deductionCheckLoading || deductionsOffOnServer || deductionBlocked.length > 0}
+                aria-describedby={confirmBlockReason ? 'confirm-block-reason' : undefined}
+                disabled={!uploadWindowOpen || confirming || !!confirmBlockReason}
                 className="flex items-center gap-2 px-4 py-2.5 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <CheckCircle className="w-4 h-4" />
@@ -849,6 +930,17 @@ export default function CreditsPayoutsUploadPage() {
                 ` · ${savedBatch.pointsDeductedRows} deduction${savedBatch.pointsDeductedRows !== 1 ? 's' : ''} · ${savedBatch.pointsDeductedTotal.toLocaleString('en-IN')} pts deducted`}
             </p>
           </div>
+
+          {savedBatch.acceptedLabels.length > 0 && (
+            <div className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-left" data-testid="credits-accepted">
+              <p className="text-xs font-semibold text-gray-800">You accepted:</p>
+              <ul className="list-disc pl-4 mt-1 space-y-0.5">
+                {savedBatch.acceptedLabels.map((l) => (
+                  <li key={l} className="text-xs text-gray-700">{l.replace(/^I understand /, '')}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {savedBatch.deductionsIgnored > 0 && (
             <div role="alert" data-testid="credits-deductions-ignored" className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-left">

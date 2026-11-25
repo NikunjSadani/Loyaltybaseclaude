@@ -72,9 +72,40 @@ interface BatchRow {
   errors:    string[];
 }
 
+/** A deduction the server actually wrote to a wallet (GET batch detail `deductionLines`). */
+interface DeductionLine {
+  outletId:          string;
+  fieldId:           string;
+  /** Points deducted (positive). */
+  points:            number;
+  /** Points already given back by approved undos. */
+  givenBack:         number;
+  /** Set when the deduction can't be undone any more (e.g. already repaid by later points). */
+  undoBlockedReason: string | null;
+}
+
+/** A row the confirm did NOT apply (GET batch detail `notApplied`, batches confirmed after the acknowledgement release). */
+interface NotAppliedEntry {
+  outletId:  string;
+  fieldName: string;
+  points:    number;
+  reason:    string;
+  kind?:     'DEDUCTION';
+}
+
 interface BatchDetail extends BatchSummary {
   rows: BatchRow[];
+  /** Present only when the batch has actual wallet deduction rows. */
+  deductionLines?: DeductionLine[];
+  notApplied?:     NotAppliedEntry[];
+  acknowledged?:   string[];
 }
+
+const NOT_APPLIED_REASON: Record<string, string> = {
+  OUTLET_NOT_FOUND:             'Outlet ID not found in this tenant',
+  OUTLET_NOT_LINKED_TO_PARTNER: 'Outlet is not linked to a partner account (onboard/KYC the outlet first)',
+};
+const notAppliedReason = (r: string) => NOT_APPLIED_REASON[r] ?? r;
 
 interface Pagination {
   page:  number;
@@ -97,11 +128,27 @@ interface ReversalTarget {
   originalPaise: number;
   /** An upload DEDUCTION row (negative points) — the request undoes it (gives the points back). */
   isDeduction?: boolean;
+  /** Deductions: points already given back (shown in the modal; the undo cap is originalPaise − givenBack). */
+  givenBack?: number;
 }
 
-/** An OK POINTS row with a negative amount = an upload deduction (tenant negative-deductions setting). */
+/** An OK POINTS row with a negative amount = an upload deduction row (tenant negative-deductions setting). */
 function isDeductionRow(r: BatchRow): boolean {
   return r.status === 'OK' && r.awardType === 'POINTS' && r.amount < 0;
+}
+
+/** The wallet deduction the server actually wrote for this row (undo works only on these). */
+function deductionLineFor(detail: BatchDetail, r: BatchRow): DeductionLine | undefined {
+  return detail.deductionLines?.find((l) => l.outletId === r.outletId && l.fieldId === r.fieldId);
+}
+
+/**
+ * A confirmed batch's negative row with no actual wallet deduction behind it was NOT deducted (outlet skipped /
+ * switch off) — never offer an undo for it. An unconfirmed batch hasn't deducted anything yet (planned deduction).
+ */
+function deductionState(detail: BatchDetail, r: BatchRow, confirmed: boolean): 'DEDUCTED' | 'NOT_DEDUCTED' | 'PLANNED' {
+  if (!confirmed) return 'PLANNED';
+  return deductionLineFor(detail, r) ? 'DEDUCTED' : 'NOT_DEDUCTED';
 }
 
 /** WP5 — a payout entry a PAYOUT reversal picks (every tenant — a payout reversal always covers whole entries). */
@@ -233,6 +280,10 @@ export default function PayoutStatusPage() {
     if (!detail) return;
     // "Type" only when the batch has deduction rows (a credit-only report is unchanged).
     const withType = detail.rows.some(isDeductionRow);
+    const confirmed = batch.status === 'CONFIRMED' || batch.status === 'PARTIALLY_REVERSED';
+    const typeOf = (r: BatchRow) =>
+      !isDeductionRow(r) ? 'Credit'
+        : deductionState(detail, r, confirmed) === 'NOT_DEDUCTED' ? 'Deduction (NOT deducted)' : 'Deduction';
     import('xlsx').then((XLSX) => {
       const rows = detail.rows
         .filter((r) => r.status === 'OK')
@@ -241,7 +292,7 @@ export default function PayoutStatusPage() {
           'Outlet Name':  r.outletName,
           'Field':        r.fieldName,
           'Award Type':   r.awardType,
-          ...(withType ? { 'Type': isDeductionRow(r) ? 'Deduction' : 'Credit' } : {}),
+          ...(withType ? { 'Type': typeOf(r) } : {}),
           'Amount':       r.amount,
           'Narration':    r.narration,
           'Batch Code':   batch.batchCode,
@@ -252,6 +303,16 @@ export default function PayoutStatusPage() {
       const ws  = jsonToSheetSafe(rows);
       const wb  = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Payout Status');
+      // What the confirm did NOT apply (batches confirmed after the acknowledgement release) — absent otherwise.
+      if (detail.notApplied && detail.notApplied.length > 0) {
+        XLSX.utils.book_append_sheet(wb, jsonToSheetSafe(detail.notApplied.map((n) => ({
+          'Outlet ID': n.outletId,
+          'Field':     n.fieldName,
+          'Type':      n.kind === 'DEDUCTION' ? 'Deduction (NOT deducted)' : 'Credit (NOT credited)',
+          'Points':    n.points,
+          'Reason':    notAppliedReason(n.reason),
+        }))), 'Not applied');
+      }
       const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
       const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       downloadBlob(blob, `payout-status-${batch.period}-${batch.batchCode}.xlsx`);
@@ -260,11 +321,13 @@ export default function PayoutStatusPage() {
 
   // ─── Reversal ───────────────────────────────────────────────────────────────
 
-  function openReversal(batch: BatchSummary, row: BatchRow, trigger?: HTMLElement | null) {
+  function openReversal(batch: BatchSummary, row: BatchRow, trigger?: HTMLElement | null, line?: DeductionLine) {
     revTriggerRef.current = trigger ?? (document.activeElement as HTMLElement | null);
-    if (isDeductionRow(row)) {
-      // Undo of an upload deduction: same POINTS request shape, the magnitude as the original.
-      const magnitude = Math.abs(row.amount);
+    if (isDeductionRow(row) && line) {
+      // Undo of an ACTUAL wallet deduction: same POINTS request shape; original = points deducted, prefill = what is
+      // still deducted (points − given back).
+      const magnitude = Math.abs(line.points);
+      const remaining = Math.max(0, magnitude - Math.max(0, line.givenBack ?? 0));
       setRevTarget({
         batchId:       batch.id,
         outletId:      row.outletId,
@@ -275,8 +338,9 @@ export default function PayoutStatusPage() {
         awardType:     'POINTS',
         originalPaise: magnitude,
         isDeduction:   true,
+        givenBack:     magnitude - remaining,
       });
-      setRevAmount(String(magnitude));
+      setRevAmount(String(remaining));
       setRevRemarks('');
       setRevMsg(null);
       setRevEntries(null);
@@ -285,6 +349,8 @@ export default function PayoutStatusPage() {
       revRequestRef.current++;
       return;
     }
+    // A negative row with no wallet deduction behind it was NOT deducted — there is nothing to undo or reverse.
+    if (isDeductionRow(row)) return;
     setRevTarget({
       batchId:       batch.id,
       outletId:      row.outletId,
@@ -453,8 +519,10 @@ export default function PayoutStatusPage() {
     }
     // POINTS rows: whole points (the DTO field is named requestedPaise for both award types).
     const requestedPaise = inputAmt;
-    if (requestedPaise > revTarget.originalPaise) {
-      setRevMsg({ type: 'err', text: `Amount cannot exceed ${revTarget.originalPaise.toLocaleString('en-IN')} pts.` });
+    // A deduction undo can give back at most what is still deducted.
+    const cap = revTarget.originalPaise - (revTarget.givenBack ?? 0);
+    if (requestedPaise > cap) {
+      setRevMsg({ type: 'err', text: `Amount cannot exceed ${cap.toLocaleString('en-IN')} pts.` });
       return;
     }
     setRevLoading(true);
@@ -618,14 +686,38 @@ export default function PayoutStatusPage() {
                     {detail && detail.rows.some(isDeductionRow) && (() => {
                       const ok = detail.rows.filter((r) => r.status === 'OK' && r.awardType === 'POINTS');
                       const credited = ok.filter((r) => r.amount > 0).reduce((s, r) => s + r.amount, 0);
-                      const deducted = ok.filter((r) => r.amount < 0);
-                      const deductedPts = deducted.reduce((s, r) => s + Math.abs(r.amount), 0);
+                      // Confirmed: what was ACTUALLY deducted (wallet rows); unconfirmed: what the file plans to deduct.
+                      const lines = isConfirmed
+                        ? (detail.deductionLines ?? []).map((l) => Math.abs(l.points))
+                        : ok.filter((r) => r.amount < 0).map((r) => Math.abs(r.amount));
+                      const deductedPts = lines.reduce((s, p) => s + p, 0);
                       return (
                         <p className="px-5 py-2 text-xs text-gray-600 border-b border-gray-100" data-testid="batch-credit-deduct-totals">
-                          Credited {credited.toLocaleString('en-IN')} pts · Deducted {deductedPts.toLocaleString('en-IN')} pts ({deducted.length} row{deducted.length !== 1 ? 's' : ''})
+                          {isConfirmed ? 'Credited' : 'To credit'} {credited.toLocaleString('en-IN')} pts · {isConfirmed ? 'Deducted' : 'To deduct'}{' '}
+                          {deductedPts.toLocaleString('en-IN')} pts ({lines.length} row{lines.length !== 1 ? 's' : ''})
                         </p>
                       );
                     })()}
+
+                    {detail?.notApplied && detail.notApplied.length > 0 && (
+                      <div className="px-5 py-3 border-b border-amber-100 bg-amber-50" data-testid="batch-not-applied">
+                        <p className="text-xs font-semibold text-amber-800">Not applied ({detail.notApplied.length})</p>
+                        <ul className="mt-1 space-y-0.5 max-h-40 overflow-y-auto">
+                          {detail.notApplied.slice(0, 20).map((n, i) => (
+                            <li key={i} className="text-xs text-amber-900">
+                              {n.outletId} · {n.fieldName} ·{' '}
+                              {n.kind === 'DEDUCTION'
+                                ? `−${Math.abs(n.points).toLocaleString('en-IN')} pts · NOT deducted`
+                                : `${n.points.toLocaleString('en-IN')} pts · NOT credited`}
+                              {' — '}{notAppliedReason(n.reason)}
+                            </li>
+                          ))}
+                        </ul>
+                        {detail.notApplied.length > 20 && (
+                          <p className="text-xs text-amber-800 mt-1">…and {detail.notApplied.length - 20} more — download the report for the full list.</p>
+                        )}
+                      </div>
+                    )}
 
                     {!detail ? (
                       <p className="px-5 py-4 text-xs text-gray-400 animate-pulse">Loading rows…</p>
@@ -643,13 +735,20 @@ export default function PayoutStatusPage() {
                             {detail.rows
                               .filter((r) => r.status === 'OK')
                               .slice(0, 20)
-                              .map((r, i) => (
+                              .map((r, i) => {
+                                const dState = isDeductionRow(r) ? deductionState(detail, r, isConfirmed) : null;
+                                const dLine = dState === 'DEDUCTED' ? deductionLineFor(detail, r) : undefined;
+                                return (
                                 <tr key={i} className="hover:bg-gray-50">
                                   <td className="px-4 py-2 font-mono text-gray-700">{r.outletId}</td>
                                   <td className="px-4 py-2 text-gray-700">{r.outletName}</td>
                                   <td className="px-4 py-2 text-gray-700">{r.fieldName}</td>
                                   <td className="px-4 py-2">
-                                    {isDeductionRow(r) ? (
+                                    {dState === 'NOT_DEDUCTED' ? (
+                                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700" data-testid="row-not-deducted">
+                                        Not deducted
+                                      </span>
+                                    ) : dState ? (
                                       <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700">
                                         Deduction
                                       </span>
@@ -671,17 +770,39 @@ export default function PayoutStatusPage() {
                                   <td className="px-4 py-2 text-gray-500">{r.narration || '—'}</td>
                                   {isConfirmed && (
                                     <td className="px-4 py-2">
+                                      {dState === 'NOT_DEDUCTED' ? (
+                                        <span className="text-xs text-gray-500">—</span>
+                                      ) : dLine ? (
+                                        <div className="space-y-1">
+                                          <button
+                                            onClick={(e) => openReversal(batch, r, e.currentTarget, dLine)}
+                                            disabled={!!dLine.undoBlockedReason}
+                                            aria-describedby={dLine.undoBlockedReason ? `undo-blocked-${batch.id}-${i}` : undefined}
+                                            className="flex items-center gap-1 px-2 py-1 text-xs text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                                          >
+                                            <RotateCcw className="w-3 h-3" />
+                                            Undo deduction
+                                          </button>
+                                          {dLine.undoBlockedReason && (
+                                            <p id={`undo-blocked-${batch.id}-${i}`} className="text-xs text-gray-600 max-w-[16rem]" data-testid="undo-blocked-reason">
+                                              {dLine.undoBlockedReason}
+                                            </p>
+                                          )}
+                                        </div>
+                                      ) : (
                                       <button
                                         onClick={(e) => openReversal(batch, r, e.currentTarget)}
                                         className="flex items-center gap-1 px-2 py-1 text-xs text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg"
                                       >
                                         <RotateCcw className="w-3 h-3" />
-                                        {isDeductionRow(r) ? 'Undo deduction' : 'Reverse'}
+                                        Reverse
                                       </button>
+                                      )}
                                     </td>
                                   )}
                                 </tr>
-                              ))}
+                                );
+                              })}
                           </tbody>
                         </table>
                         {detail.rows.filter((r) => r.status === 'OK').length > 20 && (
@@ -772,6 +893,12 @@ export default function PayoutStatusPage() {
                     : `${revTarget.originalPaise.toLocaleString('en-IN')} pts`}
                 </span>
               </div>
+              {revTarget.isDeduction && (revTarget.givenBack ?? 0) > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Already given back</span>
+                  <span className="font-medium text-gray-800">{(revTarget.givenBack ?? 0).toLocaleString('en-IN')} pts</span>
+                </div>
+              )}
             </div>
 
             {revMsg && (
