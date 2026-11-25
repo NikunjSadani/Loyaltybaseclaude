@@ -164,3 +164,33 @@ export function storedPointsSplit(
   const shortfall = Math.min(reversed, Number(r.shortfallPaise ?? 0));
   return { reversed, recovered: reversed - shortfall, debtRestored: 0, owed: 0, alreadyExpired: 0, debtExposed: 0, belowZero: 0, shortfall };
 }
+
+/**
+ * An approved UNDO of an upload deduction (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §6): the deducted points were given
+ * back to the wallet that was charged. Nothing is taken, owed or written off. `kind` lets the screens word it apart
+ * from a credit reversal.
+ */
+export function deductionUndoOutcome(
+  givenBack: number,
+  opts: { requested?: number } = {},
+): PointsOutcome & { kind: 'DEDUCTION_UNDO' } {
+  const partial = opts.requested !== undefined && opts.requested > givenBack;
+  const prefix = partial ? `Partially approved (${pts(opts.requested!)} pts requested)` : 'Approved';
+  const summary =
+    givenBack > 0 ? `${pts(givenBack)} pts given back to the wallet — deduction undone` : '0 pts given back — the wallet is unchanged';
+  return {
+    kind: 'DEDUCTION_UNDO',
+    reversed: givenBack,
+    recovered: 0,
+    debtRestored: 0,
+    owed: 0,
+    alreadyExpired: 0,
+    debtExposed: 0,
+    belowZero: 0,
+    shortfall: 0,
+    taken: 0,
+    headline: `${prefix} · ${summary}`,
+    summary,
+    lines: [summary.charAt(0).toUpperCase() + summary.slice(1)],
+  };
+}

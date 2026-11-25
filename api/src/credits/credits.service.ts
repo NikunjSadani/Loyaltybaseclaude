@@ -5,11 +5,18 @@ import { PrismaService } from '../prisma/prisma.service';
 import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Msg91Service } from '../notifications/msg91.service';
-import { WalletService } from '../wallet/wallet.service';
-import { assertPointsReversalsNotPaused, RAISED_UNDER_OLD_ENGINE_MESSAGE, ReversalAttentionException } from '../wallet/reversal-policy';
+import { UPLOAD_DEDUCTION_UNDO_KIND, WalletService } from '../wallet/wallet.service';
+import {
+  assertPointsReversalsNotPaused,
+  deductionWalletNotReadyMessage,
+  RAISED_UNDER_OLD_ENGINE_MESSAGE,
+  ReversalAttentionException,
+} from '../wallet/reversal-policy';
 
 /** Audit entityType marking a POINTS reversal created under the one engine (audit A1) — entityId = the reversal id. */
 export const POINTS_REVERSAL_ENGINE_MARKER_ENTITY = 'POINTS_REVERSAL_ENGINE_MARKER';
+/** Marker metadata.kind of a POINTS reversal that UNDOES an upload deduction (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §6). */
+export const DEDUCTION_UNDO_MARKER_KIND = 'UPLOAD_DEDUCTION_UNDO';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import {
@@ -43,6 +50,7 @@ function boundedList(items: string[], max = 20): string {
 // The (client, FY) 194R advisory-lock key — shared with the reversal engine's TDS-credit code.
 import { r194LockKey } from './r194-lock';
 import {
+  deductionUndoOutcome,
   pointsOutcome,
   PointsReversalSplit,
   rejectedPointsOutcome,
@@ -1405,6 +1413,62 @@ export class CreditsService {
     }
   }
 
+  /**
+   * Upload deductions (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md), run ONLY when the tenant's switch is ON and the batch
+   * carries a negative row: a negative PAYOUT row is refused ("deduct via Reversals"); a negative POINTS row's MAGNITUDE
+   * counts against the points safety cap; a negative `originalAmount` (typed value) is only valid on a deduction row;
+   * and one (outlet, field) can't be both a credit and a deduction in one batch (undo is per line).
+   */
+  private assertDeductionRows(
+    rows: { outletId: string; outletName?: string; fieldId?: string; fieldName?: string; amount: number; awardType: string; status: string; originalAmount?: number }[],
+    safetyCapPoints: number,
+  ): void {
+    const sign = new Map<string, number>();
+    for (const r of rows) {
+      if (r.status !== 'OK') continue;
+      const who = `${r.outletName ?? r.outletId} (${r.outletId})${r.fieldName ? ` / field "${r.fieldName}"` : ''}`;
+      if (r.awardType === 'PAYOUT' && r.amount < 0) {
+        throw new BadRequestException(`Payout amounts can't be negative — deduct via Reversals. Row for ${who} has ₹${(r.amount / 100).toFixed(2)}.`);
+      }
+      if (typeof r.originalAmount === 'number' && r.originalAmount < 0 && !(r.awardType === 'POINTS' && r.amount < 0)) {
+        throw new BadRequestException(`Row for ${who}: a negative typed amount is only allowed on a points deduction.`);
+      }
+      if (r.awardType !== 'POINTS' || r.amount === 0) continue;
+      if (r.amount < 0 && -r.amount > safetyCapPoints) {
+        throw new BadRequestException(
+          `Row for ${who} deducts ${-r.amount} points, exceeding the safety cap of ${safetyCapPoints} points.`,
+        );
+      }
+      const k = `${r.outletId}|${r.fieldId ?? ''}`;
+      const s = Math.sign(r.amount);
+      const prev = sign.get(k);
+      if (prev !== undefined && prev !== s) {
+        throw new BadRequestException(
+          `Row for ${who} is both a credit and a deduction in this batch — put one net value per outlet and field.`,
+        );
+      }
+      sign.set(k, s);
+    }
+  }
+
+  /** The DTO's former `originalAmount ≥ 0` rule, kept for tenants without upload deductions (moved from the DTO). */
+  private assertNoNegativeOriginalAmount(rows: { originalAmount?: number }[]): void {
+    if (rows.some((r) => typeof r.originalAmount === 'number' && r.originalAmount < 0)) {
+      throw new BadRequestException('originalAmount must not be less than 0');
+    }
+  }
+
+  // ─── POST /v1/admin/credits/deduction-preview ──────────────────────────────
+  /**
+   * Upload deductions preview (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §5): per deduction outlet its current balance and
+   * whether the confirm can deduct on it. Refused unless the tenant's switch is ON. Read-only, tenant-scoped.
+   */
+  async deductionPreview(user: JwtPayload, outletCodes: string[]) {
+    const on = await this.tenantSettings.getCreditUploadNegativeDeductionsUncached(user.clientId);
+    if (!on) throw new BadRequestException('Negative points (deductions) are not turned on for this program.');
+    return { outlets: await this.walletService.uploadDeductionReadiness(user.clientId, outletCodes) };
+  }
+
   // ─── Code generators ───────────────────────────────────────────────────────
 
   /** Batch code: CB-YYYY-MM-NNN (per client + period). */
@@ -1501,6 +1565,16 @@ export class CreditsService {
       creditsPayouts.safetyCapInr,
     );
     this.assertWholeUnitAmounts(dto.rows);
+    // Upload deductions (tenant switch, read only when a negative value is present — an ordinary batch reads nothing
+    // more). OFF: exactly the previous rules (the DTO's originalAmount ≥ 0 now lives here).
+    const hasNegative = dto.rows.some((r) => r.amount < 0 || (typeof r.originalAmount === 'number' && r.originalAmount < 0));
+    if (hasNegative) {
+      if (await this.tenantSettings.getCreditUploadNegativeDeductionsUncached(user.clientId)) {
+        this.assertDeductionRows(dto.rows, creditsPayouts.safetyCapPoints);
+      } else {
+        this.assertNoNegativeOriginalAmount(dto.rows);
+      }
+    }
 
     // Generate the code + create UNDER a per-(clientId, period) advisory lock so concurrent
     // createBatch calls for the same tenant/period serialize into sequential codes (batchCode is
@@ -1588,6 +1662,7 @@ export class CreditsService {
 
     // Parse rows from JSON.
     const rows = batch.rows as unknown as {
+      rowNum?: number;
       outletId: string;
       outletName: string;
       fieldId: string;
@@ -1596,6 +1671,7 @@ export class CreditsService {
       narration: string;
       awardType: string;
       status: string;
+      originalAmount?: number;
     }[];
 
     // Whole-unit safety net on confirm too: a PENDING batch stored before the rounding rule
@@ -1608,6 +1684,13 @@ export class CreditsService {
     const pointsRows = rows.filter(
       (r) => r.awardType === 'POINTS' && r.status === 'OK' && r.amount > 0,
     );
+    // Upload DEDUCTIONS (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md): negative POINTS rows, applied only when the tenant's
+    // switch is ON (read only when such a row exists). OFF: ignored exactly as before (design §10).
+    const negativePointsRows = rows.filter((r) => r.awardType === 'POINTS' && r.status === 'OK' && r.amount < 0);
+    const deductionsOn =
+      negativePointsRows.length > 0 && (await this.tenantSettings.getCreditUploadNegativeDeductionsUncached(user.clientId));
+    const deductRows = deductionsOn ? negativePointsRows : [];
+    if (deductRows.length > 0) this.assertDeductionRows(rows, creditsPayouts.safetyCapPoints);
     // Rows that genuinely cannot be credited, WITH a reason surfaced to the admin
     // (never dropped silently). The only remaining skip causes are an unresolvable
     // outlet code or an outlet not linked to any partner — a missing wallet is no
@@ -1617,7 +1700,12 @@ export class CreditsService {
       fieldName: string;
       points: number;
       reason: 'OUTLET_NOT_FOUND' | 'OUTLET_NOT_LINKED_TO_PARTNER';
+      /** only on a skipped upload DEDUCTION (its points are negative) */
+      kind?: 'DEDUCTION';
     }[] = [];
+    // Upload deductions actually applied (confirm response + post-commit notice).
+    const deductionsApplied: { outletId: string; fieldName: string; points: number; balanceBefore: number; balanceAfter: number }[] = [];
+    const deductedByPartner = new Map<string, { points: number; fields: string[]; balanceAfter: number }>();
     let pointsCredited = 0; // count of credited rows
     let pointsCreditedTotal = 0; // sum of credited points
     // Collected for the best-effort PUSH "points earned" trigger AFTER commit. We
@@ -1631,13 +1719,13 @@ export class CreditsService {
     // is credited, the batch stays PENDING_CONFIRM, and the admin retries once Gifsy fixes / applies / cancels the held
     // row. A credit never lands on an empty wallet over a not-yet-posted held passbook. Dormant (one indexed count)
     // for every tenant without live held rows.
-    if (pointsRows.length > 0) {
+    if (pointsRows.length > 0 || deductRows.length > 0) {
       let blocking: { outletCode: string; reason: string }[] = [];
       try {
         blocking = (
           await prepareHeldBeforeCredit(this.prisma, {
             clientId: user.clientId,
-            outletCodes: [...new Set(pointsRows.map((r) => r.outletId))],
+            outletCodes: [...new Set([...pointsRows, ...deductRows].map((r) => r.outletId))],
             actorId: user.sub,
             ensureWallet: async (partnerId) => {
               await this.prisma.$transaction(async (tx) => {
@@ -1663,6 +1751,23 @@ export class CreditsService {
             '. Nothing was credited and the batch is still waiting — retry after Gifsy posts or cancels them (Gifsy → Held Balances).',
           heldBlocking: blocking,
         });
+      }
+    }
+
+    // Upload deductions — the WALLET_NOT_SEQUENCED gate, read-only BEFORE the transaction (UPLOAD-NEGATIVE-DEDUCTIONS
+    // §3): a deduction can't land on a wallet with un-sequenced history (the pre-engine path floors at 0). Refuses the
+    // WHOLE batch, naming every such outlet; audited for the attention banner. Re-checked under the wallet lock.
+    if (deductRows.length > 0) {
+      const readiness = await this.walletService.uploadDeductionReadiness(user.clientId, deductRows.map((r) => r.outletId));
+      const notReady = readiness.filter((o) => o.found && o.linked && !o.ready);
+      if (notReady.length > 0) {
+        const e = new ReversalAttentionException(
+          notReady.some((o) => o.code === 'WALLET_NEEDS_ATTENTION') ? 'WALLET_NEEDS_ATTENTION' : 'WALLET_NOT_SEQUENCED',
+          deductionWalletNotReadyMessage(notReady.map((o) => ({ outletCode: o.outletCode, reason: o.reason ?? '' }))),
+          { batchId: id, outlets: notReady.map((o) => ({ outletCode: o.outletCode, code: o.code, reason: o.reason })) },
+        );
+        await this.auditReversalRefusal(user, 'CONFIRM_DEDUCTION', id, e, { batchId: id });
+        throw e;
       }
     }
 
@@ -1737,8 +1842,8 @@ export class CreditsService {
       // the confirm takes every EXISTING target wallet's row lock up front in the SAME order (one statement) before
       // crediting in CSV order. The credits themselves (order, amounts) are unchanged. Every tenant (one engine since
       // 2026-11-21).
-      if (pointsRows.length > 0) {
-        const codes = [...new Set(pointsRows.map((r) => r.outletId))];
+      if (pointsRows.length > 0 || deductRows.length > 0) {
+        const codes = [...new Set([...pointsRows, ...deductRows].map((r) => r.outletId))];
         // B9 first: lock every EXISTING target wallet in ascending id (the reversal engine's order) — so the get-or-create
         // below never waits on an existing row.
         await tx.$queryRaw`SELECT w."id" FROM "wallets" w JOIN "outlets" o ON o."partnerId" = w."partnerId" WHERE o."clientId" = ${user.clientId} AND o."outletCode" = ANY(${codes}::text[]) ORDER BY w."id" FOR UPDATE OF w`;
@@ -1831,8 +1936,86 @@ export class CreditsService {
         );
       }
 
+      // ── Upload DEDUCTIONS → wallet debit that may go below zero (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §3–4) ──
+      // After every credit (the preview's "balance after" is the true end state), in CSV order, same transaction —
+      // all or nothing with the credits. Skips (outlet not found / not linked) are reported like credit skips.
+      for (const r of deductRows) {
+        const outlet = await tx.outlet.findFirst({
+          where: { outletCode: r.outletId, clientId: user.clientId, deletedAt: null },
+          select: { partnerId: true },
+        });
+        if (!outlet || !outlet.partnerId) {
+          skipped.push({
+            outletId: r.outletId,
+            fieldName: r.fieldName,
+            points: r.amount,
+            reason: !outlet ? 'OUTLET_NOT_FOUND' : 'OUTLET_NOT_LINKED_TO_PARTNER',
+            kind: 'DEDUCTION',
+          });
+          continue;
+        }
+        const walletAccountId = await ensureOutletAccount(tx, outlet.partnerId);
+        await tx.wallet.upsert({
+          where: { partnerId: outlet.partnerId },
+          create: { partnerId: outlet.partnerId, accountId: walletAccountId },
+          update: {},
+        });
+        const moved = await this.walletService.debitUploadDeduction(tx, {
+          partnerId: outlet.partnerId,
+          points: -r.amount,
+          batchId: id,
+          outletCode: r.outletId,
+          fieldId: r.fieldId,
+          fieldName: r.fieldName,
+          period: batch.period,
+          rowNum: typeof r.rowNum === 'number' ? r.rowNum : null,
+          narration: r.narration ?? null,
+        });
+        deductionsApplied.push({
+          outletId: r.outletId,
+          fieldName: r.fieldName,
+          points: -r.amount,
+          balanceBefore: moved.balanceBefore,
+          balanceAfter: moved.balanceAfter,
+        });
+        const agg = deductedByPartner.get(outlet.partnerId) ?? { points: 0, fields: [], balanceAfter: 0 };
+        agg.points += -r.amount;
+        if (!agg.fields.includes(r.fieldName)) agg.fields.push(r.fieldName);
+        agg.balanceAfter = moved.balanceAfter;
+        deductedByPartner.set(outlet.partnerId, agg);
+      }
+
       return confirmed;
-    }, { timeout: 180_000, maxWait: 20_000 });
+    }, { timeout: 180_000, maxWait: 20_000 }).catch(async (e: unknown) => {
+      // A deduction refused under the wallet lock (un-sequenced wallet) — audited like the pre-check; nothing written.
+      if (deductRows.length > 0 && e instanceof ReversalAttentionException) {
+        await this.auditReversalRefusal(user, 'CONFIRM_DEDUCTION', id, e, { batchId: id });
+      }
+      throw e;
+    });
+
+    // Post-commit "points deducted" notice per charged partner — FREE channels only (bell + push): there is no approved
+    // SMS / WhatsApp template for it (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §7). Never affects the confirmed batch.
+    for (const [partnerId, d] of deductedByPartner) {
+      try {
+        const partner = await this.prisma.channelPartner.findFirst({ where: { id: partnerId }, select: { userId: true } });
+        if (!partner?.userId) continue;
+        const fmt = (n: number) => new Intl.NumberFormat('en-IN').format(n);
+        await this.notifications.notifyUser({
+          userId: partner.userId,
+          subject: 'Points deducted',
+          body:
+            `${fmt(d.points)} points were deducted from your wallet (${d.fields.join(', ')}, ${monthYearIST(batch.period)}). ` +
+            `Balance now ${fmt(d.balanceAfter)} points.` +
+            (d.balanceAfter < 0 ? ' A balance below zero is repaid from your future earnings.' : ''),
+          url: '/partner/wallet',
+          event: 'WALLET_POINTS_DEDUCTED',
+          variables: { pointsDeducted: String(d.points), redeemableBalance: String(d.balanceAfter), period: batch.period },
+        });
+      } catch (e) {
+        this.logger.warn(`[credit-notify] deduction notice failed for ${partnerId}: ${e}`);
+      }
+    }
 
     // Post-commit "points earned" notification per credited partner: IN_APP + PUSH to the
     // partner's login user, plus config-driven SMS/WhatsApp to the owner. Resolved AFTER commit
@@ -1892,6 +2075,10 @@ export class CreditsService {
           totalPayoutRupees: paiseToRupees(batch.totalPayoutPaise ?? 0n),
           uploadedBy: batch.uploadedBy,
           recipientEmails,
+          // Upload deductions only (absent on every batch without them — the email is unchanged).
+          ...(deductionsApplied.length > 0
+            ? { totalPointsDeducted: deductionsApplied.reduce((n, d) => n + d.points, 0) }
+            : {}),
         },
       });
     }
@@ -1902,6 +2089,14 @@ export class CreditsService {
       pointsCredited,
       pointsCreditedTotal,
       skipped,
+      // Upload deductions (only when the batch had any — every other confirm response is unchanged).
+      ...(deductRows.length > 0
+        ? {
+            pointsDeducted: deductionsApplied.length,
+            pointsDeductedTotal: deductionsApplied.reduce((n, d) => n + d.points, 0),
+            deductions: deductionsApplied,
+          }
+        : {}),
     };
   }
 
@@ -1948,6 +2143,9 @@ export class CreditsService {
         // history is not sequenced. There is no other POINTS path.
         if (dto.awardType === 'POINTS') {
           await assertPointsReversalsNotPaused(tx, this.tenantSettings, user.clientId);
+          // A deduction line (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §6): the request is an UNDO — gives the points back.
+          const deductions = await this.walletService.findUploadDeductions(tx, { batchId: id, outletCode: dto.outletId, fieldId: dto.fieldId });
+          if (deductions.length > 0) return this.createDeductionUndo(tx, user, id, batch.period, dto);
           return this.createPointsReversalV2(tx, user, id, batch.period, dto);
         }
 
@@ -2053,7 +2251,7 @@ export class CreditsService {
    */
   private async auditReversalRefusal(
     user: JwtPayload,
-    phase: 'CREATE' | 'APPROVE',
+    phase: 'CREATE' | 'APPROVE' | 'CONFIRM_DEDUCTION',
     entityId: string,
     e: ReversalAttentionException,
     extra: Record<string, unknown>,
@@ -2137,6 +2335,71 @@ export class CreditsService {
       },
     });
     return created;
+  }
+
+  /**
+   * UNDO of an upload deduction (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §6) — the per-row reversal request of a deduction
+   * line. Batch row lock; one pending request per line; cap = Σ deducted − Σ already given back − Σ pending; the
+   * one-engine marker audit row (approve requires it), tagged kind UPLOAD_DEDUCTION_UNDO.
+   */
+  private async createDeductionUndo(
+    tx: Prisma.TransactionClient,
+    user: JwtPayload,
+    batchId: string,
+    period: string,
+    dto: CreateReversalDto,
+  ) {
+    await tx.$queryRaw`SELECT id FROM credit_batches WHERE id = ${batchId} FOR UPDATE`;
+    const existingPending = await tx.creditReversal.findFirst({
+      where: { batchId, clientId: user.clientId, outletId: dto.outletId, fieldId: dto.fieldId, status: 'PENDING_GIFSY' },
+    });
+    if (existingPending) {
+      throw new BadRequestException('A pending reversal already exists for this outlet and field in this batch');
+    }
+    const deductions = await this.walletService.findUploadDeductions(tx, { batchId, outletCode: dto.outletId, fieldId: dto.fieldId });
+    const deducted = deductions.reduce((n, d) => n + d.points, 0);
+    const givenBack = deductions.reduce((n, d) => n + d.givenBack, 0);
+    const requested = toPaiseBigInt(dto.requestedPaise);
+    if (requested <= 0n) throw new BadRequestException('Points to give back must be a positive whole number');
+    if (BigInt(givenBack) + requested > BigInt(deducted)) {
+      throw new BadRequestException(
+        `Undo exceeds what was deducted for this outlet and field in this batch (deducted ${deducted} pts, already given back ${givenBack} pts, requested ${requested} pts)`,
+      );
+    }
+    const created = await tx.creditReversal.create({
+      data: {
+        clientId: user.clientId,
+        batchId,
+        outletId: dto.outletId,
+        outletName: dto.outletName,
+        fieldId: dto.fieldId,
+        fieldName: dto.fieldName,
+        period,
+        awardType: dto.awardType,
+        // Server-derived: what the batch ACTUALLY deducted for (batch, outlet, field) — never the client's figure.
+        originalPaise: BigInt(deducted),
+        requestedPaise: requested,
+        requestedBy: user.sub,
+        ...(cleanRemarks(dto.remarks) ? { requestRemarks: cleanRemarks(dto.remarks) } : {}),
+      },
+    });
+    await tx.auditLog.create({
+      data: {
+        action: 'CREATE',
+        entityType: POINTS_REVERSAL_ENGINE_MARKER_ENTITY,
+        entityId: created.id,
+        actorId: user.sub,
+        metadata: {
+          engine: 'ONE_ENGINE_2026_11_21',
+          kind: DEDUCTION_UNDO_MARKER_KIND,
+          clientId: user.clientId,
+          batchId,
+          outletId: dto.outletId,
+          fieldId: dto.fieldId,
+        },
+      },
+    });
+    return { ...created, kind: 'DEDUCTION_UNDO' as const };
   }
 
   /**
@@ -4025,7 +4288,7 @@ export class CreditsService {
     ]);
 
     return {
-      reversals: await this.withPointsOutcomes(await this.withPayoutAllocations(reversals)),
+      reversals: await this.withDeductionUndoKind(await this.withPointsOutcomes(await this.withPayoutAllocations(reversals))),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
   }
@@ -4060,9 +4323,29 @@ export class CreditsService {
       : [];
     const movesBy = new Map<string, { balanceBefore: number; balanceAfter: number }[]>();
     for (const m of moves ?? []) if (m.creditReversalId) movesBy.set(m.creditReversalId, [...(movesBy.get(m.creditReversalId) ?? []), m]);
+    // Upload-deduction UNDOs (no allocation rows; their own CREDIT_REVERSAL give-back rows) — §6 of the design note.
+    const noAlloc = approved.filter((r) => !by.has(r.id)).map((r) => r.id);
+    const undoRows = noAlloc.length
+      ? await this.prisma.walletTransaction.findMany({
+          where: {
+            creditReversalId: { in: noAlloc },
+            transactionType: 'CREDIT_REVERSAL',
+            metadata: { path: ['kind'], equals: UPLOAD_DEDUCTION_UNDO_KIND },
+          },
+          select: { creditReversalId: true, points: true },
+        })
+      : [];
+    const givenBackBy = new Map<string, number>();
+    for (const u of undoRows ?? []) if (u.creditReversalId) givenBackBy.set(u.creditReversalId, (givenBackBy.get(u.creditReversalId) ?? 0) + u.points);
     const ids = new Set(approved.map((r) => r.id));
     return reversals.map((r) =>
-      ids.has(r.id)
+      ids.has(r.id) && givenBackBy.has(r.id)
+        ? {
+            ...r,
+            kind: 'DEDUCTION_UNDO' as const,
+            pointsOutcome: deductionUndoOutcome(givenBackBy.get(r.id)!, { requested: Number(r.requestedPaise) }),
+          }
+        : ids.has(r.id)
         ? {
             ...r,
             pointsOutcome: pointsOutcome(storedPointsSplit(r, by.get(r.id) ?? [], movesBy.get(r.id) ?? []), {
@@ -4071,6 +4354,26 @@ export class CreditsService {
           }
         : r,
     );
+  }
+
+  /**
+   * Tag every POINTS reversal that is an UNDO of an upload deduction (any status — so a PENDING request is labelled
+   * before approval) with `kind: 'DEDUCTION_UNDO'`, from its create marker. Other reversals come back unchanged.
+   */
+  private async withDeductionUndoKind<T extends { id: string; awardType: string }>(reversals: T[]) {
+    const ids = reversals.filter((r) => r.awardType === 'POINTS' && !(r as { kind?: string }).kind).map((r) => r.id);
+    if (ids.length === 0) return reversals;
+    const markers = await this.prisma.auditLog.findMany({
+      where: {
+        entityType: POINTS_REVERSAL_ENGINE_MARKER_ENTITY,
+        entityId: { in: ids },
+        metadata: { path: ['kind'], equals: DEDUCTION_UNDO_MARKER_KIND },
+      },
+      select: { entityId: true },
+    });
+    const undo = new Set((markers ?? []).map((m) => m.entityId));
+    if (undo.size === 0) return reversals;
+    return reversals.map((r) => (undo.has(r.id) ? { ...r, kind: 'DEDUCTION_UNDO' as const } : r));
   }
 
   /**
@@ -4193,6 +4496,9 @@ export class CreditsService {
 
     const pointsKey = { batchId: reversal.batchId, outletCode: reversal.outletId, fieldId: reversal.fieldId };
 
+    // Set inside the transaction: this POINTS reversal is the UNDO of an upload deduction (§6 of the design note).
+    let isDeductionUndo = false;
+    let deductionGivenBack = 0;
     return this.prisma.$transaction(async (tx) => {
       // Policy round A Q5: a POINTS approval is refused while the tenant's reversal approvals are paused (wallet
       // backfill window). Reject is never paused (it moves no points).
@@ -4223,9 +4529,21 @@ export class CreditsService {
             requestedAt: reversal.requestedAt ?? null,
           });
         }
-        // Position-based approve cap + the safety gate (a receiving wallet with un-sequenced history → refused,
-        // WALLET_NOT_SEQUENCED) — before the guarded flip, so a refusal writes nothing.
-        await this.assertV2PointsApproval(tx, pointsKey, finalApprovedPaise ?? 0n);
+        // An upload-deduction line (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §6): the approval gives points back — capped by
+        // what was deducted and not yet given back. Otherwise the position-based approve cap + the safety gate (a
+        // receiving wallet with un-sequenced history → refused, WALLET_NOT_SEQUENCED) — before the guarded flip.
+        const deductionLine = await this.walletService.findUploadDeductions(tx, pointsKey);
+        isDeductionUndo = deductionLine.length > 0;
+        if (isDeductionUndo) {
+          const room = deductionLine.reduce((n, d) => n + Math.max(0, d.points - d.givenBack), 0);
+          if ((finalApprovedPaise ?? 0n) > BigInt(room)) {
+            throw new BadRequestException(
+              `Approval exceeds what is still to give back for this deduction (deducted ${deductionLine.reduce((n, d) => n + d.points, 0)} pts, still to give back ${room} pts, approving ${finalApprovedPaise ?? 0n} pts)`,
+            );
+          }
+        } else {
+          await this.assertV2PointsApproval(tx, pointsKey, finalApprovedPaise ?? 0n);
+        }
       }
       // ── Over-reversal guard (PAYOUT approve) ──────────────────────────────
       // Re-validated server-side at approval against the STORED batch rows, under the batch
@@ -4311,7 +4629,16 @@ export class CreditsService {
       let clawbackShortfall = 0;
       // What the POINTS reversal did, for the approver's plain-words summary (display only).
       let pointsSplit: PointsReversalSplit | null = null;
-      if (approvingPoints && (finalApprovedPaise ?? 0n) > 0n) {
+      if (approvingPoints && isDeductionUndo && (finalApprovedPaise ?? 0n) > 0n) {
+        const undo = await this.walletService.undoUploadDeduction(tx, {
+          ...pointsKey,
+          clientId: user.clientId,
+          creditReversalId: id,
+          points: Number(finalApprovedPaise ?? 0n),
+          passbookLabel: `${reversal.fieldName}, ${reversal.period}`,
+        });
+        deductionGivenBack = undo.givenBack;
+      } else if (approvingPoints && (finalApprovedPaise ?? 0n) > 0n) {
         const res = await this.walletService.reverseCreditBatchPoints(tx, {
           ...pointsKey,
           clientId: user.clientId,
@@ -4613,7 +4940,9 @@ export class CreditsService {
             ? null
             : action === ReversalAction.reject
               ? rejectedPointsOutcome()
-              : pointsOutcome(
+              : isDeductionUndo
+                ? deductionUndoOutcome(deductionGivenBack, { requested: requestedPaiseNum })
+                : pointsOutcome(
                   pointsSplit ?? { reversed: Number(finalApprovedPaise ?? 0n), recovered: 0, debtRestored: 0, owed: 0, shortfall: 0 },
                   { requested: requestedPaiseNum },
                 );

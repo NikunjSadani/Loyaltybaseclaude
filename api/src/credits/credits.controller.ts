@@ -27,6 +27,7 @@ import {
   CreateFieldDto,
   CreatePayoutDownloadDto,
   CreateReversalDto,
+  DeductionPreviewDto,
   ListBatchesQueryDto,
   ListFieldsQueryDto,
   ListPayoutDownloadsQueryDto,
@@ -183,6 +184,15 @@ export class CreditsController {
     @Param('attId') attId: string,
   ) {
     return this.evidence.deleteEvidence(user, id, attId);
+  }
+
+  // ─── Upload deductions preview (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §5) ───
+
+  @Post('deduction-preview')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:upload')
+  deductionPreview(@CurrentUser() user: JwtPayload, @Body() dto: DeductionPreviewDto) {
+    return this.credits.deductionPreview(user, dto.outletCodes);
   }
 
   // ─── Eligible outlets ──────────────────────────────────────────────────────

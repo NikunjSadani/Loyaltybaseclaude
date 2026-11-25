@@ -5,6 +5,7 @@ import { POINTS_REVERSAL_PAUSE_SETTING_KEY, TenantSettingsService } from '../ten
 import {
   batchLineAmount,
   creditUnmappedMessage,
+  deductionWalletNotReadyMessage,
   ReversalAttentionException,
   unresolvedBlockingLine,
   WALLET_NOT_YET_BACKFILLED_REASON,
@@ -16,6 +17,7 @@ import {
   credit as modelCredit,
   CreditPosition,
   expire as modelExpire,
+  legacyDebtDebit as modelDebtDebit,
   legacyReversalDecrement,
   reverse as modelReverse,
   ReversalModelError,
@@ -73,6 +75,15 @@ interface MovementParams {
   // Optional WalletTransaction.metadata (e.g. a credit-batch credit's { fieldId, outletCode },
   // so a later reversal can identify the EXACT credit it undoes). Omitted → column untouched.
   metadata?: Prisma.InputJsonValue;
+  /**
+   * An upload DEDUCTION (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §3): a debit that may take the balance below zero — the
+   * WP0 debt-creating debit (legacyDebtDebit: B −= d; D += max(0, d − H); lots consume min(d, H) FIFO). Only valid on
+   * a DEBIT. Never takes the pre-engine write path (it floors debits at 0 — the deduction would silently be smaller):
+   * an un-sequenced wallet REFUSES (WALLET_NOT_SEQUENCED / WALLET_NEEDS_ATTENTION), nothing written.
+   */
+  allowDebt?: boolean;
+  /** Outlet code named by an allowDebt refusal message. */
+  outletCode?: string | null;
   // v2 only (tracked wallets; ignored by the legacy path) ───────────────────────────
   /** A credit-batch POINTS credit: create its WalletCreditPosition (§5 step 5). */
   creditPosition?: { batchId: string; outletCode: string; fieldId: string } | null;
@@ -247,6 +258,23 @@ export function belowZeroBy(plan: Pick<PlannedReversalStep, 'position' | 'before
 }
 
 const fmtPts = (n: number) => new Intl.NumberFormat('en-IN').format(n);
+
+/** WalletTransaction.metadata.kind of an upload deduction (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md) / of its undo. */
+export const UPLOAD_DEDUCTION_KIND = 'UPLOAD_DEDUCTION';
+export const UPLOAD_DEDUCTION_UNDO_KIND = 'UPLOAD_DEDUCTION_UNDO';
+
+/** One outlet of the upload-deduction preview / pre-confirm readiness read. */
+export interface UploadDeductionReadiness {
+  outletCode: string;
+  found: boolean;
+  linked: boolean;
+  /** current balance; null = no wallet yet (a deduction would create it at 0) */
+  balance: number | null;
+  /** false ⇒ confirm is refused (wallet not prepared) or the row is skipped (not found / not linked) */
+  ready: boolean;
+  reason: string | null;
+  code: string | null;
+}
 
 /**
  * Owner decision 2 (2026-11-19 — the retailer sees the negative balance as it is): the V2 reversal's passbook row
@@ -473,6 +501,20 @@ export class WalletService {
     tx: Prisma.TransactionClient,
     params: MovementParams,
   ): Promise<{ transactionId: string; newRedeemable: number; ledgerId: string }> {
+    if (params.allowDebt) {
+      // Upload deduction: ALWAYS the locked, tracked path — never the L5 fast path / pre-engine path (they floor at 0).
+      if (params.points >= 0) throw new Error('applyMovement: allowDebt is only valid on a debit');
+      const locked = await this.lockWallet(tx, params.wallet.id);
+      if ((await this.movementPath(tx, locked)) === 'UNSEQUENCED') {
+        const reason = await this.deductionReadinessOf(tx, locked);
+        throw new ReversalAttentionException(
+          reason.code ?? 'WALLET_NOT_SEQUENCED',
+          deductionWalletNotReadyMessage([{ outletCode: params.outletCode ?? locked.partnerId, reason: reason.reason ?? WALLET_NOT_YET_BACKFILLED_REASON }]),
+          { walletId: locked.id, outletCode: params.outletCode ?? null, reason: reason.reason ?? WALLET_NOT_YET_BACKFILLED_REASON },
+        );
+      }
+      return this.applyMovementV2(tx, locked, params);
+    }
     // Fix round A, L5 — fast path for an un-sequenced wallet whose read VISIBLY has history: the pre-engine write path
     // with no extra row lock. Its wallet UPDATE carries `AND movementSeq = 0` (atomic in the one statement): if a
     // backfill sequenced the wallet after the caller's read, nothing was written → fall through to the locked path.
@@ -605,6 +647,19 @@ export class WalletService {
         counters.earnedPoints = { increment: magnitude };
         counters.lifetimeEarned = { increment: magnitude };
       }
+    } else if (params.allowDebt) {
+      // Upload deduction (§3 of UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md): the WP0 debt-creating debit — the whole d leaves
+      // the balance (it may go below zero), the part beyond holdings becomes debt D, repaid by future credits first.
+      let step: Step;
+      try {
+        step = modelDebtDebit(model, magnitude);
+      } catch (e) {
+        if (e instanceof ReversalModelError) throw new BadRequestException(e.message);
+        throw e;
+      }
+      after = step.model.state;
+      pointsDelta = step.movement.pointsDelta;
+      lotDraw = Math.min(magnitude, Math.max(0, before.B + before.D));
     } else if (requireSufficientRedeemable) {
       if (before.B < magnitude) throw new BadRequestException(insufficientMessage);
       const step = modelSpend(model, magnitude);
@@ -2377,6 +2432,210 @@ export class WalletService {
   }
 
 
+  // ─── Upload deductions (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md) ────────────────────────────────────────────
+
+  /**
+   * Can an upload deduction land on this wallet? Ready when it is sequenced (movementSeq > 0) or pristine (its first
+   * movement becomes seq 1). Otherwise: BLOCKED by the backfill → WALLET_NEEDS_ATTENTION with its reason; history the
+   * backfill has not processed → WALLET_NOT_SEQUENCED. Read-only.
+   */
+  async deductionReadinessOf(
+    db: Prisma.TransactionClient,
+    w: Pick<Wallet, 'id' | 'redeemablePoints'> & Partial<Wallet>,
+  ): Promise<{ ready: boolean; code: 'WALLET_NOT_SEQUENCED' | 'WALLET_NEEDS_ATTENTION' | null; reason: string | null }> {
+    if ((w.movementSeq ?? 0) > 0) return { ready: true, code: null, reason: null };
+    if (await this.isWalletPristine(db, w)) return { ready: true, code: null, reason: null };
+    if (w.backfillStatus === 'BLOCKED') {
+      return { ready: false, code: 'WALLET_NEEDS_ATTENTION', reason: w.backfillBlockedReason ?? 'blocked by the wallet backfill' };
+    }
+    return { ready: false, code: 'WALLET_NOT_SEQUENCED', reason: WALLET_NOT_YET_BACKFILLED_REASON };
+  }
+
+  /**
+   * Preview / pre-confirm read for upload deductions: per outlet code (tenant-scoped, soft-deleted outlets excluded),
+   * whether it is linked to a partner, its current balance (null = no wallet yet → 0) and whether a deduction can land
+   * on it (deductionReadinessOf). Outlet codes that don't resolve come back `found: false`.
+   */
+  async uploadDeductionReadiness(
+    clientId: string,
+    outletCodes: string[],
+    db: Prisma.TransactionClient = this.prisma,
+  ): Promise<UploadDeductionReadiness[]> {
+    const codes = [...new Set(outletCodes.filter((c) => typeof c === 'string' && c.length > 0))];
+    if (codes.length === 0) return [];
+    const outlets = await db.outlet.findMany({
+      where: { clientId, outletCode: { in: codes }, deletedAt: null },
+      select: { outletCode: true, partnerId: true },
+    });
+    const byCode = new Map(outlets.map((o) => [o.outletCode, o.partnerId]));
+    const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter((p): p is string => !!p))];
+    const wallets = partnerIds.length ? await db.wallet.findMany({ where: { partnerId: { in: partnerIds } } }) : [];
+    const walletBy = new Map(wallets.map((w) => [w.partnerId, w]));
+    const out: UploadDeductionReadiness[] = [];
+    for (const code of codes) {
+      if (!byCode.has(code)) {
+        out.push({ outletCode: code, found: false, linked: false, balance: null, ready: false, reason: 'Outlet ID not found in this program', code: 'OUTLET_NOT_FOUND' });
+        continue;
+      }
+      const partnerId = byCode.get(code);
+      if (!partnerId) {
+        out.push({ outletCode: code, found: true, linked: false, balance: null, ready: false, reason: 'Outlet is not linked to a partner account', code: 'OUTLET_NOT_LINKED_TO_PARTNER' });
+        continue;
+      }
+      const w = walletBy.get(partnerId);
+      if (!w) {
+        out.push({ outletCode: code, found: true, linked: true, balance: null, ready: true, reason: null, code: null });
+        continue;
+      }
+      const r = await this.deductionReadinessOf(db, w);
+      out.push({ outletCode: code, found: true, linked: true, balance: w.redeemablePoints, ready: r.ready, reason: r.reason, code: r.code });
+    }
+    return out;
+  }
+
+  /**
+   * One upload deduction (credit-batch confirm, in the caller's transaction): debit `points` (> 0) from the partner's
+   * wallet through the single write path with allowDebt — the balance may go below zero (owner rule: negative wallets
+   * repay from future earnings). The passbook row reads "320 points deducted — <field>, <period>" (+ narration) and is
+   * linked to the batch row (referenceType CREDIT_BATCH / referenceId batch, metadata kind UPLOAD_DEDUCTION + outlet,
+   * field, row) for audit and undo. Refuses (409) an un-sequenced wallet — see MovementParams.allowDebt.
+   */
+  async debitUploadDeduction(
+    tx: Prisma.TransactionClient,
+    a: {
+      partnerId: string;
+      points: number;
+      batchId: string;
+      outletCode: string;
+      fieldId: string;
+      fieldName: string;
+      period: string;
+      rowNum: number | null;
+      narration?: string | null;
+    },
+  ): Promise<{ transactionId: string; balanceBefore: number; balanceAfter: number }> {
+    if (!Number.isInteger(a.points) || a.points <= 0) throw new BadRequestException('Deduction must be a positive whole number of points');
+    const wallet = await this.requireWallet(tx, a.partnerId);
+    const narration = a.narration?.trim();
+    const description = `${fmtPts(a.points)} points deducted — ${a.fieldName}, ${a.period}${narration ? ` · ${narration}` : ''}`;
+    const res = await this.applyMovement(tx, {
+      wallet,
+      allowDebt: true,
+      outletCode: a.outletCode,
+      walletTxType: 'DEBIT_ADJUSTMENT',
+      ledgerType: PointsLedgerType.ADJUST,
+      points: -a.points,
+      referenceType: 'CREDIT_BATCH',
+      referenceId: a.batchId,
+      sourceType: 'CREDIT_FIELD',
+      sourceId: a.fieldId,
+      description,
+      metadata: {
+        kind: UPLOAD_DEDUCTION_KIND,
+        fieldId: a.fieldId,
+        fieldName: a.fieldName,
+        outletCode: a.outletCode,
+        period: a.period,
+        rowNum: a.rowNum,
+      },
+    });
+    return { transactionId: res.transactionId, balanceBefore: res.newRedeemable + a.points, balanceAfter: res.newRedeemable };
+  }
+
+  /**
+   * The upload deductions of one (batch, outlet, field) line, oldest first, with how much of each was already given
+   * back (Σ of the undo credits that name it in reversedCreditTxId). Empty ⇔ the line is not a deduction line.
+   */
+  async findUploadDeductions(
+    tx: Prisma.TransactionClient,
+    key: CreditKey,
+  ): Promise<Array<{ id: string; walletId: string; points: number; givenBack: number; createdAt: Date; seq: number | null }>> {
+    const rows =
+      (await tx.walletTransaction.findMany({
+        where: {
+          transactionType: 'DEBIT_ADJUSTMENT',
+          referenceType: 'CREDIT_BATCH',
+          referenceId: key.batchId,
+          metadata: { path: ['kind'], equals: UPLOAD_DEDUCTION_KIND },
+        },
+        select: { id: true, walletId: true, points: true, createdAt: true, seq: true, metadata: true },
+      })) ?? [];
+    const line = rows.filter((r) => {
+      const m = r.metadata && typeof r.metadata === 'object' && !Array.isArray(r.metadata) ? (r.metadata as Record<string, unknown>) : null;
+      return !!m && m.kind === UPLOAD_DEDUCTION_KIND && m.outletCode === key.outletCode && m.fieldId === key.fieldId;
+    });
+    if (line.length === 0) return [];
+    const undo =
+      (await tx.walletTransaction.findMany({
+        where: { reversedCreditTxId: { in: line.map((r) => r.id) }, transactionType: 'CREDIT_REVERSAL' },
+        select: { reversedCreditTxId: true, points: true },
+      })) ?? [];
+    const back = new Map<string, number>();
+    for (const u of undo) if (u.reversedCreditTxId) back.set(u.reversedCreditTxId, (back.get(u.reversedCreditTxId) ?? 0) + u.points);
+    return line
+      .map((r) => ({ id: r.id, walletId: r.walletId, points: Math.abs(r.points), givenBack: back.get(r.id) ?? 0, createdAt: r.createdAt, seq: r.seq }))
+      .sort((x, y) => x.createdAt.getTime() - y.createdAt.getTime() || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  }
+
+  /**
+   * Undo (part of) a line's upload deduction — an APPROVED POINTS reversal of a deduction line. The CALLER holds the
+   * credit_batches lock and has flipped the CreditReversal (guarded — never twice). Locks the charged wallet(s) in
+   * ascending id (§5 lock order), re-reads what is still undoable under the locks, then gives the points back to the
+   * SAME wallet that was charged, oldest deduction first, as a credit movement (CREDIT_REVERSAL / ledger REVERSE — not
+   * new earning; a spendable lot with the tenant's normal expiry, like a refund). The credit repays the debt the
+   * deduction created first (WP0 credit), so a full undo restores the balance and the debt exactly.
+   */
+  async undoUploadDeduction(
+    tx: Prisma.TransactionClient,
+    a: CreditKey & { clientId: string; creditReversalId: string; points: number; passbookLabel: string },
+  ): Promise<{ givenBack: number; transactionIds: string[]; walletIds: string[]; balanceBefore: number; balanceAfter: number }> {
+    if (!Number.isInteger(a.points) || a.points <= 0) throw new BadRequestException('Points to give back must be a positive whole number');
+    const pre = await this.findUploadDeductions(tx, a);
+    if (pre.length === 0) throw new BadRequestException('No deduction was made for this outlet and field in this batch');
+    const walletIds = [...new Set(pre.map((d) => d.walletId))].sort();
+    for (const id of walletIds) await this.lockWallet(tx, id);
+    const deductions = await this.findUploadDeductions(tx, a); // re-read under the wallet locks
+    const room = deductions.reduce((n, d) => n + Math.max(0, d.points - d.givenBack), 0);
+    if (a.points > room) {
+      throw new BadRequestException(
+        `Can't give back more than was deducted for this outlet and field in this batch (still to give back ${room} pts, requested ${a.points} pts)`,
+      );
+    }
+    const expiresAt = await this.resolveExpiresAt(tx, a.clientId, null);
+    let remaining = a.points;
+    const transactionIds: string[] = [];
+    const firstBefore = new Map<string, number>();
+    const lastAfter = new Map<string, number>();
+    for (const d of deductions) {
+      if (remaining <= 0) break;
+      const give = Math.min(remaining, d.points - d.givenBack);
+      if (give <= 0) continue;
+      const w = await this.lockWallet(tx, d.walletId); // fresh read (an earlier step may have moved this wallet)
+      if (!firstBefore.has(w.id)) firstBefore.set(w.id, w.redeemablePoints);
+      const res = await this.applyMovement(tx, {
+        wallet: w,
+        walletTxType: 'CREDIT_REVERSAL',
+        ledgerType: PointsLedgerType.REVERSE,
+        points: give,
+        expiresAt,
+        referenceType: 'CREDIT_REVERSAL',
+        referenceId: a.creditReversalId,
+        sourceType: 'CREDIT_FIELD',
+        sourceId: a.fieldId,
+        description: `${fmtPts(give)} points given back — deduction undone (${a.passbookLabel})`,
+        metadata: { kind: UPLOAD_DEDUCTION_UNDO_KIND, undoneDeductionTxId: d.id },
+        reversedCreditTxId: d.id,
+        creditReversalId: a.creditReversalId,
+      });
+      lastAfter.set(w.id, res.newRedeemable);
+      transactionIds.push(res.transactionId);
+      remaining -= give;
+    }
+    if (remaining !== 0) throw new Error('undoUploadDeduction: room check passed but the give-back did not cover the request');
+    const sum = (m: Map<string, number>) => [...m.values()].reduce((n, v) => n + v, 0);
+    return { givenBack: a.points, transactionIds, walletIds, balanceBefore: sum(firstBefore), balanceAfter: sum(lastAfter) };
+  }
+
   // ─── Expiry sweep ────────────────────────────────────────────────────────────
 
   /**
@@ -2591,7 +2850,7 @@ export class WalletService {
         });
         const walletIds = wallets.map((w) => w.id);
         if (walletIds.length === 0) {
-          return { total, agg, wallets, outlets: [], allocations: [], lastNonNeg: [], reversalRows: [] };
+          return { total, agg, wallets, outlets: [], allocations: [], lastNonNeg: [], reversalRows: [], deductionRows: [] };
         }
         const outlets = await tx.outlet.findMany({
           // B8: deleted outlets are not listed
@@ -2639,7 +2898,18 @@ export class WalletService {
               },
             })
           : [];
-        return { total, agg, wallets, outlets, allocations, lastNonNeg, reversalRows };
+        // Upload deductions (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md) in the same current negative stretch — so a balance taken
+        // below zero by an upload deduction is explained, never "from imported / earlier history".
+        const deductionRows = await tx.walletTransaction.findMany({
+          where: {
+            transactionType: 'DEBIT_ADJUSTMENT',
+            referenceType: 'CREDIT_BATCH',
+            metadata: { path: ['kind'], equals: UPLOAD_DEDUCTION_KIND },
+            OR: after,
+          },
+          select: { id: true, walletId: true, points: true, referenceId: true, metadata: true, createdAt: true },
+        });
+        return { total, agg, wallets, outlets, allocations, lastNonNeg, reversalRows, deductionRows };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000, maxWait: 10_000 },
     );
@@ -2655,6 +2925,9 @@ export class WalletService {
     const allocBy = new Map<string, Alloc[]>();
     for (const a of snap.allocations as Alloc[]) allocBy.set(a.position.walletId, [...(allocBy.get(a.position.walletId) ?? []), a]);
     // The reversal rows were already read ONLY after each wallet's last row at or above zero → the current reversals.
+    type DedRow = { id: string; walletId: string; points: number; referenceId: string | null; metadata: Prisma.JsonValue; createdAt: Date };
+    const deductionsBy = new Map<string, DedRow[]>();
+    for (const d of (snap.deductionRows ?? []) as DedRow[]) deductionsBy.set(d.walletId, [...(deductionsBy.get(d.walletId) ?? []), d]);
     const currentBy = new Map<string, Set<string>>();
     for (const r of snap.reversalRows as RevRow[]) {
       if (!r.creditReversalId) continue;
@@ -2693,6 +2966,20 @@ export class WalletService {
             outletCode: a.position.outletCode ?? null,
           }))
           .sort((x, y) => (x.approvedAt?.getTime() ?? 0) - (y.approvedAt?.getTime() ?? 0));
+        const deductionSources = (deductionsBy.get(w.id) ?? []).map((d) => {
+          const m = d.metadata && typeof d.metadata === 'object' && !Array.isArray(d.metadata) ? (d.metadata as Record<string, unknown>) : {};
+          return {
+            kind: 'UPLOAD_DEDUCTION' as const,
+            transactionId: d.id,
+            batchId: d.referenceId,
+            fieldName: typeof m.fieldName === 'string' ? m.fieldName : null,
+            period: typeof m.period === 'string' ? m.period : null,
+            outletCode: typeof m.outletCode === 'string' ? m.outletCode : null,
+            deductedPoints: Math.abs(d.points),
+            at: d.createdAt,
+            approvedAt: d.createdAt,
+          };
+        });
         return {
           walletId: w.id,
           partnerId: w.partnerId,
@@ -2701,8 +2988,11 @@ export class WalletService {
           balance: w.redeemablePoints,
           debtPoints: w.debtPoints,
           owedPoints: -w.redeemablePoints,
-          sources,
-          note: sources.length ? null : 'No reversal behind it — negative from imported / earlier history',
+          sources: [...sources, ...deductionSources].sort(
+            (x, y) => (x.approvedAt?.getTime() ?? 0) - (y.approvedAt?.getTime() ?? 0),
+          ),
+          note:
+            sources.length || deductionSources.length ? null : 'No reversal behind it — negative from imported / earlier history',
         };
       }),
     };

@@ -67,10 +67,11 @@ export class UploadRowDto {
    * The amount exactly as typed in the upload (points, or RUPEES for PAYOUT rows), before
    * the parser rounded it half-up to a whole unit. Display/audit only — every money path
    * reads `amount`. Optional: absent on rows from older clients and the points engine.
+   * Negative only on an upload DEDUCTION row (tenant switch ON) — the former `@Min(0)` is enforced in
+   * CreditsService.createBatch for every other case (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md).
    */
   @IsOptional()
   @IsNumber()
-  @Min(0)
   originalAmount?: number;
 
   @IsOptional()
@@ -96,6 +97,14 @@ export class UploadRowDto {
   @IsOptional()
   @IsString()
   skipReason?: string;
+}
+
+/** POST /admin/credits/deduction-preview — balances + readiness of the upload's deduction outlets. */
+export class DeductionPreviewDto {
+  @IsArray()
+  @ArrayMaxSize(20000)
+  @IsString({ each: true })
+  outletCodes!: string[];
 }
 
 /** POST /admin/credits/batches — create a new batch. */

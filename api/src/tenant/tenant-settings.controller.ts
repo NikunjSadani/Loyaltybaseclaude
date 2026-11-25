@@ -3,7 +3,7 @@ import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decor
 import { TenantSettingsService, EffectiveSettings, OutletTypeOption } from './tenant-settings.service';
 import { TenantService, VisibilityCaptureMode } from './tenant.service';
 
-type SettingsResponse = (EffectiveSettings | Omit<EffectiveSettings, 'creditsPayouts'>) & {
+type SettingsResponse = (EffectiveSettings | Omit<EffectiveSettings, 'creditsPayouts' | 'creditUploadNegativeDeductions'>) & {
   visibilityCaptureMode: VisibilityCaptureMode;
 };
 
@@ -32,8 +32,9 @@ export class TenantSettingsController {
     ]);
     const isAdmin = user.role === 'GIFSY_ADMIN' || user.role === 'CLIENT_ADMIN';
     if (isAdmin) return { ...eff, visibilityCaptureMode };
+    // creditUploadNegativeDeductions (upload deductions switch) is operator-internal too.
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { creditsPayouts, ...rest } = eff;
+    const { creditsPayouts, creditUploadNegativeDeductions, ...rest } = eff;
     return { ...rest, visibilityCaptureMode };
   }
 

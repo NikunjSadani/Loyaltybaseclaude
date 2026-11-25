@@ -59,6 +59,11 @@ const mockWalletService = {
       return { cap: positions.reduce((s, p) => s + p.amount, 0), positions, unallocatedApproved: 0 };
     },
   ),
+  // Upload deductions: no deduction line by default (every credit reversal path below).
+  findUploadDeductions: jest.fn().mockResolvedValue([]),
+  uploadDeductionReadiness: jest.fn().mockResolvedValue([]),
+  debitUploadDeduction: jest.fn(),
+  undoUploadDeduction: jest.fn(),
   reverseCreditBatchPoints: jest.fn(async (_tx: unknown, a: { points: number }) => ({
     shortfall: 0, recovered: a.points, debtRestored: 0, owed: 0, alreadyExpired: 0, debtExposed: 0, balanceBelowZero: 0, walletIds: ['w1'],
   })),
@@ -173,6 +178,8 @@ const mockTenantSettings = {
   // (No reversal-engine mode reader: the mode is retired — one engine for every tenant.)
   // Policy round A Q5: POINTS reversal approvals pause switch (absent row → not paused).
   getPointsReversalPauseUncached: jest.fn(async () => ({ paused: false, since: null, by: null, reason: null })),
+  // Upload deductions switch (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md) — OFF unless a test turns it on.
+  getCreditUploadNegativeDeductionsUncached: jest.fn(async () => false),
 };
 
 // Stream B: SERVICE invoice-at-confirm + gross-up TDS invoice-at-download are delegated here.
@@ -434,6 +441,84 @@ describe('CreditsService', () => {
       mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
       const res = await service.listOutletTypes(admin);
       expect(res.map((r) => r.code)).toEqual(['RETAIL', 'WHOLESALE']);
+    });
+  });
+
+  describe('createBatch — upload deductions (negative POINTS, tenant switch)', () => {
+    const row = (o: Partial<Record<string, unknown>>) => ({
+      rowNum: 3, outletId: 'O1', outletName: 'Outlet 1', fieldId: 'f1', fieldName: 'Target', amount: 100,
+      narration: '', awardType: 'POINTS', status: 'OK', errors: [], ...o,
+    });
+    const dto = (rows: unknown[]): CreateBatchDto =>
+      ({ period: '2026-05', totalOutlets: 1, totalPoints: 0, totalPayoutPaise: 0, rows }) as unknown as CreateBatchDto;
+    beforeEach(() => {
+      mockTx.creditBatch.count.mockResolvedValue(0);
+      mockTx.creditBatch.create.mockResolvedValue({ id: 'b-new' });
+      mockCreditsPayouts.safetyCapPoints = 500;
+    });
+    afterEach(() => mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(false));
+
+    it('a batch without negative values never reads the switch (byte-identical for every tenant)', async () => {
+      await service.createBatch(admin, dto([row({})]));
+      expect(mockTenantSettings.getCreditUploadNegativeDeductionsUncached).not.toHaveBeenCalled();
+    });
+
+    it('switch OFF: a negative POINTS row is accepted exactly as before; a negative typed amount keeps the old 400', async () => {
+      await service.createBatch(admin, dto([row({ amount: -50 })]));
+      expect(mockTx.creditBatch.create).toHaveBeenCalled();
+      await expect(service.createBatch(admin, dto([row({ amount: 5, originalAmount: -5 })]))).rejects.toThrow(
+        'originalAmount must not be less than 0',
+      );
+    });
+
+    it('switch ON: a deduction within the cap (magnitude) is accepted, with its negative typed amount', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await service.createBatch(admin, dto([row({ amount: -200, originalAmount: -199.5 })]));
+      expect(mockTx.creditBatch.create).toHaveBeenCalled();
+    });
+
+    it('switch ON: the magnitude counts against the points cap', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await expect(service.createBatch(admin, dto([row({ amount: -501 })]))).rejects.toThrow(
+        'Row for Outlet 1 (O1) / field "Target" deducts 501 points, exceeding the safety cap of 500 points.',
+      );
+      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
+    });
+
+    it('switch ON: a negative PAYOUT row is refused — deduct via Reversals', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await expect(service.createBatch(admin, dto([row({ awardType: 'PAYOUT', amount: -10000 })]))).rejects.toThrow(
+        /^Payout amounts can't be negative — deduct via Reversals\./,
+      );
+    });
+
+    it('switch ON: one (outlet, field) cannot be both a credit and a deduction', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await expect(service.createBatch(admin, dto([row({ amount: 100 }), row({ amount: -40 })]))).rejects.toThrow(
+        /both a credit and a deduction/,
+      );
+      // a different field of the same outlet is fine
+      await service.createBatch(admin, dto([row({ amount: 100 }), row({ fieldId: 'f2', amount: -40 })]));
+      expect(mockTx.creditBatch.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('deduction preview: refused while the switch is OFF; ON returns each outlet\'s balance + readiness', async () => {
+      await expect(service.deductionPreview(admin, ['O1'])).rejects.toThrow(
+        'Negative points (deductions) are not turned on for this program.',
+      );
+      expect(mockWalletService.uploadDeductionReadiness).not.toHaveBeenCalled();
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      const outlets = [{ outletCode: 'O1', found: true, linked: true, balance: 100, ready: true, reason: null, code: null }];
+      mockWalletService.uploadDeductionReadiness.mockResolvedValueOnce(outlets);
+      await expect(service.deductionPreview(admin, ['O1'])).resolves.toEqual({ outlets });
+      expect(mockWalletService.uploadDeductionReadiness).toHaveBeenCalledWith('deoleo', ['O1']);
+    });
+
+    it('switch ON: a negative typed amount on a positive row is refused', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await expect(service.createBatch(admin, dto([row({ amount: 5, originalAmount: -5 })]))).rejects.toThrow(
+        /negative typed amount is only allowed on a points deduction/,
+      );
     });
   });
 
