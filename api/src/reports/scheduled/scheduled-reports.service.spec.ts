@@ -108,6 +108,8 @@ function makePrisma() {
     kycSubmission: { count: jest.fn().mockResolvedValue(0) },
     kycStatusHistory: { count: jest.fn().mockResolvedValue(0) },
     pointsLedger: { groupBy: jest.fn().mockResolvedValue([]) },
+    // upload deductions (L3): Σ deducted / given back in the window — none by default (section unchanged)
+    walletTransaction: { aggregate: jest.fn().mockResolvedValue({ _sum: { points: null } }) },
     wallet: {
       aggregate: jest.fn().mockResolvedValue({ _count: { _all: 0 }, _sum: { redeemablePoints: null } }),
       // reversal readiness (engine retired 2026-11-21): un-sequenced-with-history + BLOCKED counts

@@ -64,6 +64,10 @@ export interface PointsSection {
   redeemed: number;
   /** |Σ PointsLedger EXPIRE points| in the window. */
   expired: number;
+  /** Upload deductions (negative upload points) in the window, in points. Present only when > 0. */
+  deductedUploads?: number;
+  /** Points given back by approved "Undo deduction" requests in the window. Present only when > 0. */
+  deductionsGivenBack?: number;
   /** Wallets with redeemablePoints < 0 right now. */
   negativeWallets: number;
   /** Owner D1 (2026-11-19): Σ |negative balances| — "points owed". Present only when negativeWallets > 0. */

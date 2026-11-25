@@ -763,12 +763,14 @@ function tenantSections(t: TenantDigest): string {
       t.points,
       (p) =>
         p.credited === 0 && p.redeemed === 0 && p.expired === 0 && p.negativeWallets === 0 &&
-        !p.walletsNotSequenced && !p.walletsBlocked,
+        !p.walletsNotSequenced && !p.walletsBlocked && !p.deductedUploads && !p.deductionsGivenBack,
       (p) =>
         metricLine('In window', [
           ['credited', intIN(p.credited)],
           ['redeemed', intIN(p.redeemed)],
           ['expired', intIN(p.expired)],
+          ...(p.deductedUploads ? [['points deducted (uploads)', intIN(p.deductedUploads)] as [string, string]] : []),
+          ...(p.deductionsGivenBack ? [['given back', intIN(p.deductionsGivenBack)] as [string, string]] : []),
         ]) +
         (p.negativeWallets > 0
           ? metricLine('Wallets', [

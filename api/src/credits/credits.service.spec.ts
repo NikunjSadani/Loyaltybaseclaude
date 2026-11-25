@@ -275,7 +275,11 @@ describe('CreditsService', () => {
 
     // Default: outlet lookups (uploadUtr resolves per-outlet bank accounts for the same-account
     // shared-UTR rule before the tx; createPayoutDownload/uploadUtr tests override per case).
-    mockPrisma.outlet.findMany.mockResolvedValue([]);
+    // Confirm's acknowledgement check (owner rule 2026-11-25) resolves the batch's POINTS outlets: by default every
+    // asked-for code is a linked outlet (nothing to acknowledge); other outlet reads get [] as before.
+    mockPrisma.outlet.findMany.mockImplementation(async (a?: { where?: { outletCode?: { in?: string[] } } }) =>
+      (a?.where?.outletCode?.in ?? []).map((outletCode) => ({ outletCode, partnerId: 'p1' })),
+    );
     // Default: no per-tenant outlet-type displayName (eligibleOutlets loads this) → empty map →
     // eligibleOutlets `type` falls back to outletType.code (Deoleo parity). Overridden per case.
     mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
@@ -463,12 +467,24 @@ describe('CreditsService', () => {
       expect(mockTenantSettings.getCreditUploadNegativeDeductionsUncached).not.toHaveBeenCalled();
     });
 
-    it('switch OFF: a negative POINTS row is accepted exactly as before; a negative typed amount keeps the old 400', async () => {
-      await service.createBatch(admin, dto([row({ amount: -50 })]));
-      expect(mockTx.creditBatch.create).toHaveBeenCalled();
+    it('D1 (every tenant) — switch OFF (Deoleo): a negative POINTS row is refused; a negative typed amount keeps the old 400', async () => {
+      await expect(service.createBatch(admin, dto([row({ amount: -50 })]))).rejects.toThrow(
+        'Deductions are switched off for this client — remove the negative rows or ask Gifsy. Row for Outlet 1 (O1) / field "Target" has -50 points.',
+      );
       await expect(service.createBatch(admin, dto([row({ amount: 5, originalAmount: -5 })]))).rejects.toThrow(
         'originalAmount must not be less than 0',
       );
+      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an OK PAYOUT row below zero', { awardType: 'PAYOUT', amount: -10000 }, /^Payout amounts can't be negative — use Reverse on Payout Status\. Row for Outlet 1 \(O1\)/],
+      ['an OK row of amount 0 (POINTS)', { amount: 0 }, /is marked OK but its amount is 0/],
+      ['an OK row of amount 0 (PAYOUT)', { awardType: 'PAYOUT', amount: 0 }, /is marked OK but its amount is 0/],
+    ])('D1 (every tenant, switch OFF): %s is refused at create', async (_n, o, msg) => {
+      await expect(service.createBatch(admin, dto([row(o)]))).rejects.toThrow(msg);
+      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
+      expect(mockTenantSettings.getCreditUploadNegativeDeductionsUncached).not.toHaveBeenCalled();
     });
 
     it('switch ON: a deduction within the cap (magnitude) is accepted, with its negative typed amount', async () => {
@@ -488,7 +504,7 @@ describe('CreditsService', () => {
     it('switch ON: a negative PAYOUT row is refused — deduct via Reversals', async () => {
       mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
       await expect(service.createBatch(admin, dto([row({ awardType: 'PAYOUT', amount: -10000 })]))).rejects.toThrow(
-        /^Payout amounts can't be negative — deduct via Reversals\./,
+        /^Payout amounts can't be negative — use Reverse on Payout Status\./,
       );
     });
 
@@ -502,22 +518,19 @@ describe('CreditsService', () => {
       expect(mockTx.creditBatch.create).toHaveBeenCalledTimes(1);
     });
 
-    it('deduction preview: refused while the switch is OFF; ON returns each outlet\'s balance + readiness', async () => {
-      await expect(service.deductionPreview(admin, ['O1'])).rejects.toThrow(
-        'Negative points (deductions) are not turned on for this program.',
-      );
-      expect(mockWalletService.uploadDeductionReadiness).not.toHaveBeenCalled();
-      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
-      const outlets = [{ outletCode: 'O1', found: true, linked: true, balance: 100, ready: true, reason: null, code: null }];
+    it('upload preview (every tenant): outlets for a switch-OFF tenant, no repeat lookup; says whether deductions are on', async () => {
+      const outlets = [{ outletCode: 'O1', found: true, linked: true, walletId: 'w1', partnerId: 'p1', balance: 100, heldOpeningBalance: null, ready: true, reason: null, code: null }];
       mockWalletService.uploadDeductionReadiness.mockResolvedValueOnce(outlets);
-      await expect(service.deductionPreview(admin, ['O1'])).resolves.toEqual({ outlets });
+      await expect(service.uploadPreview(admin, { outletCodes: ['O1'], period: '2026-05', lines: [] })).resolves.toEqual({
+        deductionsEnabled: false, outlets, priorDeductions: [],
+      });
       expect(mockWalletService.uploadDeductionReadiness).toHaveBeenCalledWith('deoleo', ['O1']);
     });
 
     it('switch ON: a negative typed amount on a positive row is refused', async () => {
       mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
-      await expect(service.createBatch(admin, dto([row({ amount: 5, originalAmount: -5 })]))).rejects.toThrow(
-        /negative typed amount is only allowed on a points deduction/,
+      await expect(service.createBatch(admin, dto([row({ fieldId: 'f2', amount: -5 }), row({ amount: 5, originalAmount: -5 })]))).rejects.toThrow(
+        /originalAmount must not be less than 0/,
       );
     });
   });
@@ -930,6 +943,8 @@ describe('CreditsService', () => {
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'u1', ownerName: 'Ravi', phone: '9900000041' });
       mockNotifications.notifyUserWithChannels.mockRejectedValueOnce(new Error('MSG91 down'));
+      // the outlet resolves and is linked (nothing for the admin to acknowledge)
+      mockPrisma.outlet.findMany.mockResolvedValueOnce([{ outletCode: 'O1', partnerId: 'p1' }]);
 
       const res = await service.confirmBatch(admin, 'b1');
       expect(res.pointsCredited).toBe(1);

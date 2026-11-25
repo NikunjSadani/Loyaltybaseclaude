@@ -99,12 +99,47 @@ export class UploadRowDto {
   skipReason?: string;
 }
 
-/** POST /admin/credits/deduction-preview — balances + readiness of the upload's deduction outlets. */
-export class DeductionPreviewDto {
+/** One deduction line of the upload preview (repeat check). */
+export class UploadPreviewLineDto {
+  @IsString()
+  outletCode!: string;
+
+  @IsString()
+  fieldId!: string;
+}
+
+/** POST /admin/credits/upload-preview — what the confirm would do to each POINTS outlet (every tenant). */
+export class UploadPreviewDto {
   @IsArray()
   @ArrayMaxSize(20000)
   @IsString({ each: true })
   outletCodes!: string[];
+
+  @IsOptional()
+  @Matches(PERIOD_RE, { message: 'Period must be YYYY-MM' })
+  period?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20000)
+  @ValidateNested({ each: true })
+  @Type(() => UploadPreviewLineDto)
+  lines?: UploadPreviewLineDto[];
+}
+
+/** POST /admin/credits/batches/:id/confirm — the preview categories the admin acknowledged (owner rule 2026-11-25). */
+export class ConfirmBatchDto {
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  acknowledged?: string[];
+
+  /** Blank / zero rows of the file (they are never saved — recorded as reported). */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  skippedRows?: number;
 }
 
 /** POST /admin/credits/batches — create a new batch. */

@@ -44,17 +44,20 @@ export function walletNeedsAttentionMessage(outletCode: string, reason: string):
 /**
  * Upload deductions (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §3): a deduction may only land on a SEQUENCED (or pristine)
  * wallet — the pre-engine write path floors debits at 0, so the deduction would silently be smaller. The whole confirm
- * is refused, naming every such outlet (first 10) and what Gifsy must do.
+ * is refused. U2: tenant-facing wording (the Gifsy runbook pointer goes only into the audit row / the Gifsy banner).
  */
-export function deductionWalletNotReadyMessage(outlets: { outletCode: string; reason: string }[]): string {
-  const shown = outlets.slice(0, 10).map((o) => `${o.outletCode} (${o.reason})`).join('; ');
-  const more = outlets.length > 10 ? `; …and ${outlets.length - 10} more` : '';
+export function deductionWalletNotReadyMessage(outletCodes: string[]): string {
+  const shown = outletCodes.slice(0, 10).join(', ');
+  const more = outletCodes.length > 10 ? ` and ${outletCodes.length - 10} more` : '';
   return (
-    `Can't deduct: ${outlets.length} outlet wallet(s) in this batch have points history that has not been prepared ` +
-    `yet: ${shown}${more}. ${BACKFILL_NEXT_STEP}, then retry the confirm. Nothing was credited or deducted — the batch ` +
-    `is still waiting.`
+    "Some outlets' wallets aren't ready for deductions yet — ask Gifsy to prepare them, then upload again. " +
+    `Outlets: ${shown}${more}. Nothing was credited or deducted.`
   );
 }
+
+/** D2 (owner 2026-11-25): an undo of an upload deduction whose debt later points already repaid. */
+export const DEDUCTION_REPAID_MESSAGE =
+  'This deduction has already been repaid by later points — correct it with a manual wallet adjustment.';
 
 /** Reason text for a wallet the backfill has never processed (status NULL, history present). */
 export const WALLET_NOT_YET_BACKFILLED_REASON = 'not yet prepared by the wallet backfill';
