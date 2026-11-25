@@ -255,3 +255,23 @@ undone deductions are not repeats).
 **One scope switch:** `api/src/credits/upload-ack-scope.ts` — `uploadAckScope()` returns the categories a client must
 tick (the preview returns them as `ackCategories`; the screen shows / requires exactly those) and whether OK rows of
 amount 0 are refused. `ALL_CLIENTS = true` (owner: every client, Deoleo included).
+
+## 13. Fix round 3 (re-audits, 2026-11-25) — supersedes §12 where they differ
+
+- **D2 strict block, one shared rule** (`WalletService.undoBlockedMap`, used by undo create, approve under the lock and
+  Payout Status): "new points" = any positive movement after the deduction by movement seq, EXCLUDING every upload
+  deduction give-back on that wallet (`metadata.kind UPLOAD_DEDUCTION_UNDO`, any deduction's). Undoing field A then B,
+  or a partial then the rest, is allowed; a real credit still blocks.
+- **Refused-confirm audit:** not written for the claim race / "Batch is already …"; an unprepared wallet is audited once
+  (REVERSAL_ENGINE_REFUSAL), not twice.
+- **Past expiry (no silent):** points an undo returns on a lot whose own expiry already passed are named on the undo
+  request reply (`pastExpiryPoints`), Payout Status lines, the pending approval card, the approve outcome and the passbook
+  line ("N pts returned already past their expiry and will expire at the next sweep").
+- **Ticks bind to items:** the confirm body carries `ackItems` — per category the exact item keys the admin saw
+  (ROUNDED `outlet|field|award|amount|typed`, NOT_APPLIED `outlet|field`, BELOW_ZERO `partnerId|after`, REPEAT
+  `outlet|field|batch|points`). The server recomputes them inside the transaction and refuses unless they match; the 400
+  returns `details.items` (key + text) so the screen shows the rows with each re-shown box; the screen clears a tick when
+  its item list changes.
+- **Expiry in "after" (U5):** the deduction expires due lots after the file's credits land, so after = balance + held +
+  credits − min(due, max(0, balance + held + credits)) − deductions (preview `dueExpiry` is now the raw due total).
+- **Saved pending batch + hard block:** the screen says how to resolve it and retry — never "upload again".
