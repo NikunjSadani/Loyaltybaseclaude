@@ -41,6 +41,25 @@ export function walletNeedsAttentionMessage(outletCode: string, reason: string):
   );
 }
 
+/**
+ * Upload deductions (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §3): a deduction may only land on a SEQUENCED (or pristine)
+ * wallet — the pre-engine write path floors debits at 0, so the deduction would silently be smaller. The whole confirm
+ * is refused. U2: tenant-facing wording (the Gifsy runbook pointer goes only into the audit row / the Gifsy banner).
+ */
+export function deductionWalletNotReadyMessage(outletCodes: string[]): string {
+  const shown = outletCodes.slice(0, 10).join(', ');
+  const more = outletCodes.length > 10 ? ` and ${outletCodes.length - 10} more` : '';
+  return (
+    "Some outlets' wallets aren't ready for deductions yet — ask Gifsy to prepare them, then upload again. " +
+    `Outlets: ${shown}${more}. Nothing was credited or deducted.`
+  );
+}
+
+/** D2 = strict block (owner 2026-11-25): points were added to the wallet after the deduction → no undo. */
+export function deductionUndoBlockedMessage(deductedOn: string): string {
+  return `Can't undo: points were added to this wallet after the deduction on ${deductedOn}. Give the points back with a manual credit instead.`;
+}
+
 /** Reason text for a wallet the backfill has never processed (status NULL, history present). */
 export const WALLET_NOT_YET_BACKFILLED_REASON = 'not yet prepared by the wallet backfill';
 

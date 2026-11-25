@@ -82,8 +82,27 @@ function istMonthStart(key: string): Date {
   return new Date(Date.UTC(y, m - 1, 1) - 330 * 60_000);
 }
 
+/**
+ * An UPLOAD DEDUCTION (negative points in a credits upload): a DEBIT_ADJUSTMENT written by a credit batch
+ * (referenceType 'CREDIT_BATCH') — independent of whether its field name could be resolved. A manual debit (any
+ * other reference) keeps "Debit adjustment".
+ */
+export function isUploadDeductionRow(r: { transactionType: string; referenceType?: string | null }): boolean {
+  return r.transactionType === 'DEBIT_ADJUSTMENT' && r.referenceType === 'CREDIT_BATCH';
+}
+
+/** Type label for a statement / passbook row ("Deducted" for an upload deduction). */
+export function statementTypeLabel(r: { transactionType: string; referenceType?: string | null }): string {
+  if (isUploadDeductionRow(r)) return 'Deducted';
+  return TYPE_LABEL[r.transactionType] ?? r.transactionType;
+}
+
 function pointsLine(r: StatementApiRow): StatementLine {
-  const description = r.fieldName
+  // An upload deduction's own server text already names the field ("320 points deducted — Target, November 2026 ·
+  // <narration>") — shown as-is, the field name is never prefixed again.
+  const description = isUploadDeductionRow(r)
+    ? r.description
+    : r.fieldName
     ? r.narration
       ? `${r.fieldName} · ${r.narration}`
       : r.fieldName
@@ -93,7 +112,7 @@ function pointsLine(r: StatementApiRow): StatementLine {
     id: r.id,
     date: new Date(r.date),
     description,
-    type: TYPE_LABEL[r.transactionType] ?? r.transactionType,
+    type: statementTypeLabel(r),
     points: r.points,
     balance: r.balanceAfter,
   };

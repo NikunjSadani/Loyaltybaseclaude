@@ -1128,6 +1128,16 @@ describe('AdminCoreService', () => {
       expect(mockTenantSettings.invalidate).toHaveBeenCalledWith('deoleo');
     });
 
+    // Upload deductions switch: stored as a strict boolean, failing toward OFF.
+    it.each([
+      [true, true], ['true', true], [false, false], ['false', false], ['yes', false], [1, false], [null, false],
+    ])('creditUploadNegativeDeductions %j is stored as %j', async (value, stored) => {
+      await service.upsertSetting(gifsy, { key: 'creditUploadNegativeDeductions', value });
+      const call = mockPrisma.programSetting.upsert.mock.calls.at(-1)[0];
+      expect(call.update.settingValue).toBe(stored);
+      expect(call.create.settingValue).toBe(stored);
+    });
+
     // Wallet Reversal Engine: the POINTS reversal pause and the RETIRED engine-mode key are NEVER written by the generic
     // upsert — not even with allowPlatformOnlyKey (the pause has its dedicated GIFSY_ADMIN endpoint; the mode is gone).
     it.each([

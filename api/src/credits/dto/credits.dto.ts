@@ -67,10 +67,11 @@ export class UploadRowDto {
    * The amount exactly as typed in the upload (points, or RUPEES for PAYOUT rows), before
    * the parser rounded it half-up to a whole unit. Display/audit only — every money path
    * reads `amount`. Optional: absent on rows from older clients and the points engine.
+   * Negative only on an upload DEDUCTION row (tenant switch ON) — the former `@Min(0)` is enforced in
+   * CreditsService.createBatch for every other case (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md).
    */
   @IsOptional()
   @IsNumber()
-  @Min(0)
   originalAmount?: number;
 
   @IsOptional()
@@ -96,6 +97,57 @@ export class UploadRowDto {
   @IsOptional()
   @IsString()
   skipReason?: string;
+}
+
+/** One deduction line of the upload preview (repeat check). */
+export class UploadPreviewLineDto {
+  @IsString()
+  outletCode!: string;
+
+  @IsString()
+  fieldId!: string;
+}
+
+/** POST /admin/credits/upload-preview — what the confirm would do to each POINTS outlet (every tenant). */
+export class UploadPreviewDto {
+  @IsArray()
+  @ArrayMaxSize(20000)
+  @IsString({ each: true })
+  outletCodes!: string[];
+
+  @IsOptional()
+  @Matches(PERIOD_RE, { message: 'Period must be YYYY-MM' })
+  period?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20000)
+  @ValidateNested({ each: true })
+  @Type(() => UploadPreviewLineDto)
+  lines?: UploadPreviewLineDto[];
+}
+
+/** POST /admin/credits/batches/:id/confirm — the preview categories the admin acknowledged (owner rule 2026-11-25). */
+export class ConfirmBatchDto {
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  acknowledged?: string[];
+
+  /**
+   * Per category, the exact item keys the admin ticked (U1 round 3 — a tick binds to the items). Keys are
+   * strings; the server compares them with the items it would apply now.
+   */
+  @IsOptional()
+  @IsObject()
+  ackItems?: Record<string, string[]>;
+
+  /** Blank / zero rows of the file (they are never saved — recorded as reported). */
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  skippedRows?: number;
 }
 
 /** POST /admin/credits/batches — create a new batch. */

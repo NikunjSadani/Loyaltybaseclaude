@@ -19,7 +19,7 @@
 import React, { useState, useMemo, useEffect, useId } from 'react';
 import { Coins, Calendar, X } from 'lucide-react';
 import { StatementDownloadButton } from '@/components/wallet/statement-download-button';
-import type { StatementDoc } from '@/lib/wallet-statement/statement-model';
+import { isUploadDeductionRow, type StatementDoc } from '@/lib/wallet-statement/statement-model';
 import { BalanceCard } from '@/components/wallet/balance-card';
 import { TransactionItem } from '@/components/wallet/transaction-item';
 import { PayoutStatementRow } from '@/components/wallet/payout-statement-row';
@@ -44,6 +44,9 @@ export interface ApiWalletBalance {
   /** Negative wallets only (owner decision 2, 2026-11-19). */
   owedPoints?:       number;
   owedFromReversal?: boolean;
+  /** Negative wallets only: the below-zero stretch includes an upload deduction (field names may be empty). */
+  owedFromDeduction?:   boolean;
+  owedDeductionFields?: string[];
 }
 
 /** A row of GET /api/wallet/statement (the FULL, unpaginated statement) — also the row shape of
@@ -90,6 +93,8 @@ export function mapApiBalance(api: ApiWalletBalance): WalletBalance {
     available:  api.redeemablePoints,
     ...(api.owedPoints !== undefined ? { owedPoints: api.owedPoints } : {}),
     ...(api.owedFromReversal !== undefined ? { owedFromReversal: api.owedFromReversal } : {}),
+    ...(api.owedFromDeduction !== undefined ? { owedFromDeduction: api.owedFromDeduction } : {}),
+    ...(Array.isArray(api.owedDeductionFields) ? { owedDeductionFields: api.owedDeductionFields } : {}),
   };
 }
 
@@ -98,8 +103,13 @@ export function mapApiTransaction(t: ApiWalletTransaction): WalletTransaction {
   // upload narration as a small gray sub-line below (only when non-empty). Non-credit
   // rows keep their own description (narration, else the per-type default such as
   // "Points redeemed" / "Points expired") as the header and carry no sub-line.
-  const hasFieldName = !!t.fieldName;
-  const header    = hasFieldName ? (t.fieldName as string) : t.description;
+  // An UPLOAD DEDUCTION (DEBIT_ADJUSTMENT written by a credit batch): its own server text already names the field
+  // ("320 points deducted — Target, November 2026 · <note>") — shown as-is, never with the field name again.
+  const isUploadDeduction = isUploadDeductionRow(t);
+  const hasFieldName = !!t.fieldName && !isUploadDeduction;
+  const header    = isUploadDeduction
+    ? t.description
+    : hasFieldName ? (t.fieldName as string) : t.description;
   const narration = hasFieldName && t.narration ? t.narration : undefined;
 
   return {

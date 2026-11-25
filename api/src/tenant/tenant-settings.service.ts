@@ -61,6 +61,14 @@ export const REVERSAL_ENGINE_SETTING_KEY = 'reversalEngine';
  */
 export const POINTS_REVERSAL_PAUSE_SETTING_KEY = 'pointsReversalApprovalsPaused';
 
+/**
+ * Per-tenant switch (owner decision 2026-11-25, UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md): when `true`, a NEGATIVE POINTS
+ * value in the Credits & Payouts upload DEDUCTS those points from the outlet's wallet instead of being an error. A
+ * scalar boolean row in program_settings; absent / malformed / anything but a strict `true` ⇒ OFF (every tenant today,
+ * incl. Deoleo). Turned ON for Bajaj only.
+ */
+export const CREDIT_UPLOAD_NEGATIVE_DEDUCTIONS_KEY = 'creditUploadNegativeDeductions';
+
 export interface PointsReversalPause {
   paused: boolean;
   since: string | null;
@@ -277,6 +285,11 @@ export interface EffectiveSettings {
    * Reader + default only at Wave 0 — enforcement is NOT wired yet.
    */
   pointsEngine:           PointsEngineSettings;
+  /**
+   * Upload negative POINTS deduct from the wallet (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md). Default FALSE. Display only
+   * here — the money path reads getCreditUploadNegativeDeductionsUncached().
+   */
+  creditUploadNegativeDeductions: boolean;
 }
 
 /**
@@ -307,7 +320,8 @@ type SettingKey =
   | 'uniquenessPolicy'
   | 'visibilityConfig'
   | 'tdsPolicy'
-  | 'pointsEngine';
+  | 'pointsEngine'
+  | typeof CREDIT_UPLOAD_NEGATIVE_DEDUCTIONS_KEY;
 
 const NESTED_KEYS: ReadonlySet<SettingKey> = new Set([
   'redemptionChannels',
@@ -434,6 +448,8 @@ export class TenantSettingsService {
         enabled:             false,
         directCreditEnabled: false,
       },
+      // Upload negative POINTS → wallet deductions — OFF by default (owner 2026-11-25: Bajaj only).
+      creditUploadNegativeDeductions: false,
     };
   }
 
@@ -601,6 +617,25 @@ export class TenantSettingsService {
       select: { settingValue: true },
     });
     return parsePointsReversalPause(row ? row.settingValue : undefined);
+  }
+
+  /**
+   * UNCACHED read of the upload-deductions switch — the MONEY gate of createBatch / confirmBatch / the deduction
+   * preview (same rationale as getVisibilityEnabledUncached: a Gifsy "turn it off" must apply fleet-wide at once).
+   * Fails CLOSED: only a strict boolean `true` is ON; an absent row, a read error or any other value → OFF. Called
+   * only when a batch actually carries a negative row, so an ordinary upload makes no extra read.
+   */
+  async getCreditUploadNegativeDeductionsUncached(clientId: string): Promise<boolean> {
+    try {
+      const row = await this.prisma.programSetting.findUnique({
+        where: { clientId_settingKey: { clientId, settingKey: CREDIT_UPLOAD_NEGATIVE_DEDUCTIONS_KEY } },
+        select: { settingValue: true },
+      });
+      return row?.settingValue === true;
+    } catch (e) {
+      this.logger.warn(`${CREDIT_UPLOAD_NEGATIVE_DEDUCTIONS_KEY} read failed for ${clientId}; treating as OFF: ${e}`);
+      return false;
+    }
   }
 
   /** Bust the cache for a tenant — called by AdminCoreService.upsertSetting after a write. */
@@ -786,6 +821,10 @@ export class TenantSettingsService {
               directCreditEnabled: this.bool(v.directCreditEnabled, base.pointsEngine.directCreditEnabled),
             };
           }
+          break;
+        }
+        case CREDIT_UPLOAD_NEGATIVE_DEDUCTIONS_KEY: {
+          out.creditUploadNegativeDeductions = v === true;
           break;
         }
         case 'tdsPolicy': {

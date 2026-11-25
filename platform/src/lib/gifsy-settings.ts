@@ -29,6 +29,8 @@ export const DEFAULT_SETTINGS: GifsySettings = {
   visibilityEnabled:       false,
   visibilityCaptureMode:   'PHOTO_APPROVAL',
   kycGstinRequired:        true,
+  // Negative POINTS in the credits upload deduct from the wallet — per-tenant, Gifsy-set, OFF by default.
+  creditUploadNegativeDeductions: false,
   redemptionChannels: {
     physicalGifts: true,
     vouchers:      true,
@@ -73,6 +75,8 @@ interface ServerSettings {
   /** Present on the /me settings block only (authoritative ClientConfig flag). */
   visibilityCaptureMode?: 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
   kycGstinRequired:       boolean;
+  /** Admin GET /settings only (omitted for partner / sales and on /me). */
+  creditUploadNegativeDeductions?: boolean;
   redemptionChannels:     GifsySettings['redemptionChannels'];
   salesApp:               GifsySettings['salesApp'];
   creditsPayouts?:        GifsySettings['creditsPayouts'];
@@ -130,7 +134,10 @@ function fromServer(srv: ServerSettings, prev: GifsySettings): GifsySettings {
     visibilityCaptureMode:  srv.visibilityCaptureMode  ?? prev.visibilityCaptureMode ?? 'PHOTO_APPROVAL',
     // Default TRUE when absent (GSTIN compulsory; opt-out) — prev is seeded from DEFAULT_SETTINGS (true).
     kycGstinRequired:       srv.kycGstinRequired       ?? prev.kycGstinRequired,
-    redemptionChannels:     srv.redemptionChannels     ?? prev.redemptionChannels,
+    // Admin-only key (absent on /me) — keep the cached value then; never undefined.
+    creditUploadNegativeDeductions:
+      srv.creditUploadNegativeDeductions ?? prev.creditUploadNegativeDeductions ?? false,
+    redemptionChannels:    srv.redemptionChannels     ?? prev.redemptionChannels,
     salesApp:               srv.salesApp               ?? prev.salesApp,
     // /me omits creditsPayouts (operator-only) — keep the previous/cached value then.
     creditsPayouts:         srv.creditsPayouts         ?? prev.creditsPayouts,

@@ -404,6 +404,15 @@ describe('GET reversal-engine/wallets-in-debt (audit item 9 + fix rounds 3/4 + o
         groupBy: rec('wt.groupBy', lastNonNeg),
         // round 6: the DB filters reversal rows to those AFTER each wallet's last row at or above zero — emulate it
         findMany: jest.fn(async (a: any) => {
+          // upload deductions (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md): rows tagged metadata.kind UPLOAD_DEDUCTION
+          if (a.where?.metadata?.equals === 'UPLOAD_DEDUCTION') {
+            (calls['wt.findMany.deductions'] ??= []).push(a);
+            return (rows as any[]).filter(
+              (r) =>
+                r.metadata?.kind === 'UPLOAD_DEDUCTION' &&
+                a.where.OR.some((c: any) => c.walletId === r.walletId && (!c.seq || (r.seq != null && r.seq > c.seq.gt))),
+            );
+          }
           (calls['wt.findMany'] ??= []).push(a);
           return (rows as any[]).filter(
             (r) =>
@@ -464,6 +473,28 @@ describe('GET reversal-engine/wallets-in-debt (audit item 9 + fix rounds 3/4 + o
     expect(res.wallets[1]).toMatchObject({ walletId: 'w2', owedPoints: 841, sources: [], note: expect.stringMatching(/imported/) });
   });
 
+  it('upload deductions: a below-zero stretch caused by an upload deduction is explained, never "from imported history"', async () => {
+    const at = new Date('2026-11-25T06:00:00Z');
+    const { svc, calls } = harness(
+      [],
+      [{ walletId: 'w1', _max: { seq: 4, createdAt: null } }],
+      [
+        // before the last ≥ 0 row (seq 3) — not the current stretch
+        { id: 'tOld', walletId: 'w1', seq: 3, points: -50, referenceId: 'B0', createdAt: at, metadata: { kind: 'UPLOAD_DEDUCTION', fieldName: 'Old', period: '2026-09', outletCode: 'O2' } },
+        { id: 't1', walletId: 'w1', seq: 5, points: -841, referenceId: 'B7', createdAt: at, metadata: { kind: 'UPLOAD_DEDUCTION', fieldName: 'Target', period: '2026-10', outletCode: 'O2' } },
+      ],
+    );
+    const res = await svc.walletsInDebt('bajaj', { limit: 2 });
+    expect(calls['wt.findMany.deductions'][0].where).toMatchObject({
+      transactionType: 'DEBIT_ADJUSTMENT', referenceType: 'CREDIT_BATCH', metadata: { path: ['kind'], equals: 'UPLOAD_DEDUCTION' },
+    });
+    expect(res.wallets[0]).toMatchObject({
+      walletId: 'w1', note: null,
+      sources: [{ kind: 'UPLOAD_DEDUCTION', batchId: 'B7', fieldName: 'Target', period: '2026-10', outletCode: 'O2', deductedPoints: 841 }],
+    });
+    expect(res.wallets[0].sources).toHaveLength(1); // the deduction before the last ≥ 0 row is not the current stretch
+  });
+
   it('item 2: decided by SEQ, not approvedAt — a reversal approved "before" a later earn still counts when its row comes after the last ≥ 0 row; both positions of one reversal are listed', async () => {
     const early = new Date('2026-11-01T00:00:00Z'); // approvedAt stamped before the lock / an earlier clock
     const { svc } = harness(
@@ -480,7 +511,7 @@ describe('GET reversal-engine/wallets-in-debt (audit item 9 + fix rounds 3/4 + o
       ],
     );
     const res = await svc.walletsInDebt('bajaj');
-    expect(res.wallets[0].sources.map((x: { allocationId: string }) => x.allocationId)).toEqual(['a1', 'a2']);
+    expect(res.wallets[0].sources.map((x: Record<string, unknown>) => x.allocationId)).toEqual(['a1', 'a2']);
   });
 
   it('programName applies the dashboards programme scope', async () => {
@@ -529,6 +560,6 @@ describe('GET reversal-engine/wallets-in-debt (audit item 9 + fix rounds 3/4 + o
       ],
     );
     const res = await svc.walletsInDebt('bajaj');
-    expect(res.wallets[0].sources.map((x: { creditReversalId: string }) => x.creditReversalId)).toEqual(['RNEW']);
+    expect(res.wallets[0].sources.map((x: Record<string, unknown>) => x.creditReversalId)).toEqual(['RNEW']);
   });
 });

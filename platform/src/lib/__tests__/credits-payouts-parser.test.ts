@@ -700,3 +700,126 @@ describe('I — Excel float noise before half-up rounding', () => {
     expect('originalAmount' in noise).toBe(false);
   });
 });
+
+// ─── N — Negative points become deductions (tenant setting creditUploadNegativeDeductions) ──────
+
+describe('N — negative values: deductions behind the negativeDeductions option', () => {
+  const ON = { ...DEFAULT_OPTS, negativeDeductions: true };
+  const one = (val: string | number, outlet = 'WS-001') =>
+    buildXlsx(makeHeaders([FIELD_VOL]), [[outlet, 'Name', val, '']]);
+
+  it('N1: setting OFF (default) — a negative value keeps the old error, row ERROR', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const r = parseCreditUpload(one(-320), DEFAULT_OPTS);
+    expect(r.rows[0].status).toBe('ERROR');
+    expect(r.rows[0].errors).toContain('Amount cannot be negative (got -320).');
+    expect(r.canProceed).toBe(false);
+    expect(r.summary.deducted).toBe(0);
+    expect(r.summary.totalDeductedPoints).toBe(0);
+  });
+
+  it('N1b: explicit negativeDeductions:false behaves exactly like the default', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = one(-320);
+    expect(parseCreditUpload(buf, { ...DEFAULT_OPTS, negativeDeductions: false }))
+      .toEqual(parseCreditUpload(buf, DEFAULT_OPTS));
+  });
+
+  it('N2: ON — a negative POINTS value is an OK deduction row with amount −N', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const r = parseCreditUpload(one(-320), ON);
+    expect(r.rows[0].status).toBe('OK');
+    expect(r.rows[0].amount).toBe(-320);
+    expect(r.rows[0].awardType).toBe('POINTS');
+    expect(r.rows[0].errors).toEqual([]);
+    expect('originalAmount' in r.rows[0]).toBe(false);
+    expect(r.canProceed).toBe(true);
+  });
+
+  it('N3: ON — rounding: −199.5 → −200, −199.4 → −199 (originalAmount kept), −0.4 → SKIP', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const a = parseCreditUpload(one(-199.5), ON).rows[0];
+    expect(a.status).toBe('OK');
+    expect(a.amount).toBe(-200);
+    expect(a.originalAmount).toBe(-199.5);
+    const b = parseCreditUpload(one(-199.4), ON).rows[0];
+    expect(b.amount).toBe(-199);
+    expect(b.originalAmount).toBe(-199.4);
+    const c = parseCreditUpload(one(-0.4), ON);
+    expect(c.rows[0].status).toBe('SKIP');
+    expect(c.rows[0].amount).toBe(0);
+    expect(c.rows[0].skipReason).toBe(
+      'Value -0.4 rounds to 0 — amounts are deducted in whole units, so nothing is deducted for this row.',
+    );
+    expect(c.canProceed).toBe(false);
+  });
+
+  it('N3b: ON — −0.5 rounds to −1 (half-up on the magnitude), not to 0', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const r = parseCreditUpload(one(-0.5), ON).rows[0];
+    expect(r.status).toBe('OK');
+    expect(r.amount).toBe(-1);
+  });
+
+  it('N4: ON — a negative PAYOUT value is an error with the exact payout message', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const r = parseCreditUpload(one(-500, 'RT-001'), ON).rows[0];
+    expect(r.status).toBe('ERROR');
+    expect(r.errors).toEqual(["Payout amounts can't be negative — use Reverse on Payout Status."]);
+  });
+
+  it('N5: ON — unknown outlet with a negative value: only the "not found" error', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const r = parseCreditUpload(one(-50, 'NOPE-1'), ON).rows[0];
+    expect(r.status).toBe('ERROR');
+    expect(r.errors).toEqual(['Outlet ID "NOPE-1" not found in the active outlet master.']);
+  });
+
+  it('N6: ON — safety cap on the ROUNDED magnitude (−50000.5 → −50001 errors; −50000 is fine)', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const over = parseCreditUpload(one(-50000.5), ON).rows[0];
+    expect(over.status).toBe('ERROR');
+    expect(over.errors).toEqual(['Deduction -50000.5 (rounds to -50001) exceeds the safety cap of 50000 for points.']);
+    const over2 = parseCreditUpload(one(-50001), ON).rows[0];
+    expect(over2.errors).toEqual(['Deduction -50001 exceeds the safety cap of 50000 for points.']);
+    const at = parseCreditUpload(one(-50000), ON).rows[0];
+    expect(at.status).toBe('OK');
+    expect(at.amount).toBe(-50000);
+  });
+
+  it('N7: ON — summary: totalPoints = credited only, deducted totals separate, ok counts both', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(
+      makeHeaders([FIELD_VOL, FIELD_VIS]),
+      [
+        ['WS-001', 'A', 500, -199.5, '', ''],   // credit 500, deduction 200 (rounded)
+        ['RT-001', 'B', 1000, '', '', ''],      // payout ₹1000
+      ],
+    );
+    const r = parseCreditUpload(buf, { ...ON, outlets: [...OUTLETS, { id: 'WS-002', name: 'W2', type: 'WHOLESALER' }] });
+    expect(r.summary.ok).toBe(3);
+    expect(r.summary.totalPoints).toBe(500);
+    expect(r.summary.deducted).toBe(1);
+    expect(r.summary.totalDeductedPoints).toBe(200);
+    expect(r.summary.totalPayoutPaise).toBe(100000);
+    expect(r.summary.rounded).toBe(1);
+    expect(r.summary.errors).toBe(0);
+    expect(r.canProceed).toBe(true);
+  });
+
+  it('N8: ON — float noise on a negative is trimmed on the magnitude (−14.499999999999998 → −15)', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const r = parseCreditUpload(one(-14.499999999999998), ON).rows[0];
+    expect(r.amount).toBe(-15);
+    expect(r.originalAmount).toBe(-14.5);
+  });
+
+  it('N9: early-return summaries carry deducted/totalDeductedPoints = 0', async () => {
+    const { parseCreditUpload } = await import('../credits-payouts-parser');
+    const buf = buildXlsx(['Wrong'], []);
+    const r = parseCreditUpload(buf, ON);
+    expect(r.headerError).not.toBeNull();
+    expect(r.summary.deducted).toBe(0);
+    expect(r.summary.totalDeductedPoints).toBe(0);
+  });
+});

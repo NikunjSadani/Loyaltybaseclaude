@@ -711,10 +711,32 @@ export class ScheduledReportsService {
       this.prisma.wallet.count({ where: unsequencedWithHistoryWhere(clientId) }),
       this.prisma.wallet.count({ where: blockedWalletsWhere(clientId) }),
     ]);
+    // L3 (upload deductions): deductions + give-backs move the balance too — shown so the figures add up. Present only
+    // when > 0 (every tenant without deductions renders exactly as before).
+    const [ded, back] = await Promise.all([
+      this.prisma.walletTransaction.aggregate({
+        where: {
+          createdAt: this.range(w), transactionType: 'DEBIT_ADJUSTMENT', referenceType: 'CREDIT_BATCH',
+          metadata: { path: ['kind'], equals: 'UPLOAD_DEDUCTION' }, wallet: { partner: { clientId } },
+        },
+        _sum: { points: true },
+      }),
+      this.prisma.walletTransaction.aggregate({
+        where: {
+          createdAt: this.range(w), transactionType: 'CREDIT_REVERSAL',
+          metadata: { path: ['kind'], equals: 'UPLOAD_DEDUCTION_UNDO' }, wallet: { partner: { clientId } },
+        },
+        _sum: { points: true },
+      }),
+    ]);
+    const deductedUploads = Math.abs(num(ded?._sum?.points));
+    const deductionsGivenBack = Math.abs(num(back?._sum?.points));
     return {
       credited: sum('EARN'),
       redeemed: Math.abs(sum('REDEEM')),
       expired: Math.abs(sum('EXPIRE')),
+      ...(deductedUploads > 0 ? { deductedUploads } : {}),
+      ...(deductionsGivenBack > 0 ? { deductionsGivenBack } : {}),
       negativeWallets,
       ...(negativeWallets > 0 ? { owedPoints: Math.max(0, -(neg._sum.redeemablePoints ?? 0)) } : {}),
       ...((notSequenced ?? 0) > 0 ? { walletsNotSequenced: notSequenced } : {}),

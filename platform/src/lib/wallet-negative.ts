@@ -29,13 +29,24 @@ export type NoteAudience = 'partner' | 'staff';
 
 /** What a negative wallet owes, in plain words. Null for a balance at 0 or above. */
 export function negativeBalanceNote(
-  balance: Pick<WalletBalance, 'redeemable' | 'owedPoints' | 'owedFromReversal'>,
+  balance: Pick<WalletBalance, 'redeemable' | 'owedPoints' | 'owedFromReversal' | 'owedFromDeduction' | 'owedDeductionFields'>,
   audience: NoteAudience = 'partner',
 ): string | null {
   if (!(balance.redeemable < 0)) return null;
   const owed = formatPoints(balance.owedPoints ?? -balance.redeemable);
+  // An upload deduction behind the negative stretch (F4) gets its own sentence; without it the text is unchanged.
+  if (balance.owedFromDeduction === true) {
+    const fields = (balance.owedDeductionFields ?? []).filter((f) => !!f && f.trim());
+    const named = fields.length ? ` (${fields.join(', ')})` : '';
+    const because = balance.owedFromReversal
+      ? `because of a reversed credit and points deducted${named}`
+      : `because points were deducted${named}`;
+    return audience === 'staff'
+      ? `This outlet's balance is below zero ${because} — it owes ${owed} pts, repaid from its next earnings; it can't redeem until its balance is 0 or more.`
+      : `Your balance is below zero ${because}. You owe ${owed} pts — it's repaid from your next earnings. You can redeem again once your balance is 0 or more.`;
+  }
   const why = balance.owedFromReversal ? ' from a reversed credit' : '';
   return audience === 'staff'
-    ? `This outlet owes ${owed} pts${why} — repaid from its next earnings; it can't redeem until its balance is back above zero.`
+    ? `This outlet owes ${owed} pts${why} — repaid from its next earnings; it can't redeem until its balance is 0 or more.`
     : `You owe ${owed} pts${why} — it's repaid from your next earnings.`;
 }

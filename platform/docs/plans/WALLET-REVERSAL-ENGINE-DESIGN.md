@@ -98,6 +98,19 @@ A brand-new client with no imported history needs nothing.
 
 ---
 
+## 0b. Upload deductions reuse the engine (2026-11-25, branch `feat/upload-negative-deductions`, TENANT-SCOPED)
+
+A negative POINTS value in the credits upload (per-client switch `creditUploadNegativeDeductions`, Bajaj only) is a
+wallet movement through `applyMovement` with the new `allowDebt` flag: the WP0 transition `legacyDebtDebit`
+(`B −= d; D += max(0, d − H)`; lots consume `min(d, H)` FIFO) — the only debit allowed below zero, keeping I1/I2; the
+next credit repays D first. `allowDebt` never takes the pre-engine path: an un-sequenced / BLOCKED wallet refuses the
+whole confirm (WALLET_NOT_SEQUENCED / WALLET_NEEDS_ATTENTION, audited phase `CONFIRM_DEDUCTION`). Undo is a per-row
+POINTS reversal of the deduction line: the charged wallet gets a `CREDIT_REVERSAL` / `REVERSE` credit with
+`reversedCreditTxId` = the deduction row (no credit position, no allocation rows). Wallets in debt explain such a stretch
+as `UPLOAD_DEDUCTION`. Fix round (owner 2026-11-25): the deduction first expires the wallet's due lots through the
+sweep's own code (F2), records the debt it created and the lots it consumed; an undo is refused once later points repaid
+that debt (D2) and restores the earliest expiry of the consumed lots (L1). Full design: `UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md` §11.
+
 ## 1. Why this exists (history — so nobody repeats it)
 
 Points credited to partner wallets (credit-batch uploads) can later be **reversed** (an admin approves a reversal).

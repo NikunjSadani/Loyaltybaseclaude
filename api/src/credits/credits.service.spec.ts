@@ -59,6 +59,11 @@ const mockWalletService = {
       return { cap: positions.reduce((s, p) => s + p.amount, 0), positions, unallocatedApproved: 0 };
     },
   ),
+  // Upload deductions: no deduction line by default (every credit reversal path below).
+  findUploadDeductions: jest.fn().mockResolvedValue([]),
+  uploadDeductionReadiness: jest.fn().mockResolvedValue([]),
+  debitUploadDeduction: jest.fn(),
+  undoUploadDeduction: jest.fn(),
   reverseCreditBatchPoints: jest.fn(async (_tx: unknown, a: { points: number }) => ({
     shortfall: 0, recovered: a.points, debtRestored: 0, owed: 0, alreadyExpired: 0, debtExposed: 0, balanceBelowZero: 0, walletIds: ['w1'],
   })),
@@ -173,6 +178,8 @@ const mockTenantSettings = {
   // (No reversal-engine mode reader: the mode is retired — one engine for every tenant.)
   // Policy round A Q5: POINTS reversal approvals pause switch (absent row → not paused).
   getPointsReversalPauseUncached: jest.fn(async () => ({ paused: false, since: null, by: null, reason: null })),
+  // Upload deductions switch (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md) — OFF unless a test turns it on.
+  getCreditUploadNegativeDeductionsUncached: jest.fn(async () => false),
 };
 
 // Stream B: SERVICE invoice-at-confirm + gross-up TDS invoice-at-download are delegated here.
@@ -255,7 +262,11 @@ describe('CreditsService', () => {
       },
     );
     // FIX-8: tx-scoped plan reads default to empty (TDS-engine tests override per case).
-    mockTx.outlet.findMany.mockResolvedValue([]);
+    // The confirm's acknowledgement check (computed inside the tx, audit #5) resolves the batch's POINTS outlets: by
+    // default every asked-for code is a linked outlet (nothing to acknowledge); other outlet reads get [] as before.
+    mockTx.outlet.findMany.mockImplementation(async (a?: { where?: { outletCode?: { in?: string[] } } }) =>
+      (a?.where?.outletCode?.in ?? []).map((outletCode) => ({ outletCode, partnerId: 'p1' })),
+    );
     mockTx.channelPartner.findMany.mockResolvedValue([]);
     mockTx.tdsDeductionEntry.findMany.mockResolvedValue([]);
     mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]);
@@ -268,7 +279,11 @@ describe('CreditsService', () => {
 
     // Default: outlet lookups (uploadUtr resolves per-outlet bank accounts for the same-account
     // shared-UTR rule before the tx; createPayoutDownload/uploadUtr tests override per case).
-    mockPrisma.outlet.findMany.mockResolvedValue([]);
+    // Confirm's acknowledgement check (owner rule 2026-11-25) resolves the batch's POINTS outlets: by default every
+    // asked-for code is a linked outlet (nothing to acknowledge); other outlet reads get [] as before.
+    mockPrisma.outlet.findMany.mockImplementation(async (a?: { where?: { outletCode?: { in?: string[] } } }) =>
+      (a?.where?.outletCode?.in ?? []).map((outletCode) => ({ outletCode, partnerId: 'p1' })),
+    );
     // Default: no per-tenant outlet-type displayName (eligibleOutlets loads this) → empty map →
     // eligibleOutlets `type` falls back to outletType.code (Deoleo parity). Overridden per case.
     mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
@@ -434,6 +449,93 @@ describe('CreditsService', () => {
       mockPrisma.outletTypeClientConfig.findMany.mockResolvedValue([]);
       const res = await service.listOutletTypes(admin);
       expect(res.map((r) => r.code)).toEqual(['RETAIL', 'WHOLESALE']);
+    });
+  });
+
+  describe('createBatch — upload deductions (negative POINTS, tenant switch)', () => {
+    const row = (o: Partial<Record<string, unknown>>) => ({
+      rowNum: 3, outletId: 'O1', outletName: 'Outlet 1', fieldId: 'f1', fieldName: 'Target', amount: 100,
+      narration: '', awardType: 'POINTS', status: 'OK', errors: [], ...o,
+    });
+    const dto = (rows: unknown[]): CreateBatchDto =>
+      ({ period: '2026-05', totalOutlets: 1, totalPoints: 0, totalPayoutPaise: 0, rows }) as unknown as CreateBatchDto;
+    beforeEach(() => {
+      mockTx.creditBatch.count.mockResolvedValue(0);
+      mockTx.creditBatch.create.mockResolvedValue({ id: 'b-new' });
+      mockCreditsPayouts.safetyCapPoints = 500;
+    });
+    afterEach(() => mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(false));
+
+    it('a batch without negative values never reads the switch (byte-identical for every tenant)', async () => {
+      await service.createBatch(admin, dto([row({})]));
+      expect(mockTenantSettings.getCreditUploadNegativeDeductionsUncached).not.toHaveBeenCalled();
+    });
+
+    it('D1 (every tenant) — switch OFF (Deoleo): a negative POINTS row is refused; a negative typed amount keeps the old 400', async () => {
+      await expect(service.createBatch(admin, dto([row({ amount: -50 })]))).rejects.toThrow(
+        'Deductions are switched off for this client — remove the negative rows or ask Gifsy. Row for Outlet 1 (O1) / field "Target" has -50 points.',
+      );
+      await expect(service.createBatch(admin, dto([row({ amount: 5, originalAmount: -5 })]))).rejects.toThrow(
+        'originalAmount must not be less than 0',
+      );
+      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an OK PAYOUT row below zero', { awardType: 'PAYOUT', amount: -10000 }, /^Payout amounts can't be negative — use Reverse on Payout Status\. Row for Outlet 1 \(O1\)/],
+      ['an OK row of amount 0 (POINTS)', { amount: 0 }, /is marked OK but its amount is 0/],
+      ['an OK row of amount 0 (PAYOUT)', { awardType: 'PAYOUT', amount: 0 }, /is marked OK but its amount is 0/],
+    ])('D1 (every tenant, switch OFF): %s is refused at create', async (_n, o, msg) => {
+      await expect(service.createBatch(admin, dto([row(o)]))).rejects.toThrow(msg);
+      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
+      expect(mockTenantSettings.getCreditUploadNegativeDeductionsUncached).not.toHaveBeenCalled();
+    });
+
+    it('switch ON: a deduction within the cap (magnitude) is accepted, with its negative typed amount', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await service.createBatch(admin, dto([row({ amount: -200, originalAmount: -199.5 })]));
+      expect(mockTx.creditBatch.create).toHaveBeenCalled();
+    });
+
+    it('switch ON: the magnitude counts against the points cap', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await expect(service.createBatch(admin, dto([row({ amount: -501 })]))).rejects.toThrow(
+        'Row for Outlet 1 (O1) / field "Target" deducts 501 points, exceeding the safety cap of 500 points.',
+      );
+      expect(mockTx.creditBatch.create).not.toHaveBeenCalled();
+    });
+
+    it('switch ON: a negative PAYOUT row is refused — deduct via Reversals', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await expect(service.createBatch(admin, dto([row({ awardType: 'PAYOUT', amount: -10000 })]))).rejects.toThrow(
+        /^Payout amounts can't be negative — use Reverse on Payout Status\./,
+      );
+    });
+
+    it('switch ON: one (outlet, field) cannot be both a credit and a deduction', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await expect(service.createBatch(admin, dto([row({ amount: 100 }), row({ amount: -40 })]))).rejects.toThrow(
+        /both a credit and a deduction/,
+      );
+      // a different field of the same outlet is fine
+      await service.createBatch(admin, dto([row({ amount: 100 }), row({ fieldId: 'f2', amount: -40 })]));
+      expect(mockTx.creditBatch.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('upload preview (every tenant): outlets for a switch-OFF tenant, no repeat lookup; says whether deductions are on', async () => {
+      const outlets = [{ outletCode: 'O1', found: true, linked: true, walletId: 'w1', partnerId: 'p1', balance: 100, heldOpeningBalance: null, ready: true, reason: null, code: null }];
+      mockWalletService.uploadDeductionReadiness.mockResolvedValueOnce(outlets);
+      await expect(service.uploadPreview(admin, { outletCodes: ['O1'], period: '2026-05', lines: [] })).resolves.toEqual({
+        deductionsEnabled: false, ackCategories: ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'], outlets, priorDeductions: [],
+      });
+      expect(mockWalletService.uploadDeductionReadiness).toHaveBeenCalledWith('deoleo', ['O1']);
+    });
+
+    it('switch ON: a negative typed amount on a positive row is refused', async () => {
+      mockTenantSettings.getCreditUploadNegativeDeductionsUncached.mockResolvedValue(true);
+      await expect(service.createBatch(admin, dto([row({ fieldId: 'f2', amount: -5 }), row({ amount: 5, originalAmount: -5 })]))).rejects.toThrow(
+        /originalAmount must not be less than 0/,
+      );
     });
   });
 
@@ -609,8 +711,13 @@ describe('CreditsService', () => {
       });
       // Outlet resolves but has no partnerId → cannot own a wallet.
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: null });
+      mockTx.outlet.findMany.mockImplementation(async () => [{ outletCode: 'O1', partnerId: null }]);
 
-      const res = await service.confirmBatch(admin, 'b1');
+      // owner rule (no silent failure): the row that won't be applied must be acknowledged first
+      await expect(service.confirmBatch(admin, 'b1')).rejects.toThrow(/reload the page and tick: rows that will not be applied/);
+      // the tick binds to the exact row (U1 round 3)
+      await expect(service.confirmBatch(admin, 'b1', { acknowledged: ['NOT_APPLIED'] })).rejects.toThrow(/reload the page and tick/);
+      const res = await service.confirmBatch(admin, 'b1', { acknowledged: ['NOT_APPLIED'], ackItems: { NOT_APPLIED: ['O1|f1'] } });
 
       expect(res.pointsCredited).toBe(0);
       expect(res.skipped).toEqual([

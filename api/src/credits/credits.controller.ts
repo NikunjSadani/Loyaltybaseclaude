@@ -27,6 +27,8 @@ import {
   CreateFieldDto,
   CreatePayoutDownloadDto,
   CreateReversalDto,
+  ConfirmBatchDto,
+  UploadPreviewDto,
   ListBatchesQueryDto,
   ListFieldsQueryDto,
   ListPayoutDownloadsQueryDto,
@@ -87,8 +89,8 @@ export class CreditsController {
   @Post('batches/:id/confirm')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
   @RequirePermission('credits:confirm_payout')
-  confirmBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.credits.confirmBatch(user, id);
+  confirmBatch(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: ConfirmBatchDto) {
+    return this.credits.confirmBatch(user, id, dto ?? {});
   }
 
   @Get('batches/:id/reversals')
@@ -183,6 +185,15 @@ export class CreditsController {
     @Param('attId') attId: string,
   ) {
     return this.evidence.deleteEvidence(user, id, attId);
+  }
+
+  // ─── Upload preview (every tenant; UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md §5) ─
+
+  @Post('upload-preview')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:upload')
+  uploadPreview(@CurrentUser() user: JwtPayload, @Body() dto: UploadPreviewDto) {
+    return this.credits.uploadPreview(user, dto);
   }
 
   // ─── Eligible outlets ──────────────────────────────────────────────────────

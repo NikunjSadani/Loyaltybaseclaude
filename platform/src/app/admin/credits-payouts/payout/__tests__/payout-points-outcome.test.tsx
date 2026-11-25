@@ -226,3 +226,78 @@ describe('Reversal Report — fix round 3 A5/B5 (expired points and debt restore
     expect(document.body.textContent).toMatch(/Already expired = points of that credit that had already expired/);
   });
 });
+
+describe('Reversal Report — an approved undo of an upload deduction (pointsOutcome.kind DEDUCTION_UNDO)', () => {
+  beforeEach(() => {
+    vi.mocked(useAdminSession).mockReturnValue({
+      role: 'GIFSY_ADMIN', clientId: 'gifsy', name: 'Test Admin', userId: '', canManageSchemes: true,
+    } as ReturnType<typeof useAdminSession>);
+  });
+
+  it('reads "320 pts given back · Deduction undone" with the server outcome — never credit-reversal copy, no Owed column', async () => {
+    const json = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload, blob: async () => new Blob() });
+    global.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/reversals') && url.includes('APPROVED')) {
+        return json({
+          success: true,
+          data: {
+            reversals: [
+              {
+                ...base, id: 'r-undo', requestedPaise: 320, approvedPaise: 320, shortfallPaise: 0, status: 'APPROVED',
+                approvedAt: '2026-11-25T00:00:00.000Z',
+                pointsOutcome: {
+                  kind: 'DEDUCTION_UNDO', reversed: 320, recovered: 0, debtRestored: 0, owed: 0, shortfall: 0, belowZero: 220,
+                  headline: 'Approved · 320 pts given back to the wallet — deduction undone',
+                  summary: '320 pts given back to the wallet — deduction undone', lines: [],
+                },
+              },
+              { ...base, id: 'r-done-v2', requestedPaise: 10000, approvedPaise: 10000, shortfallPaise: 0, status: 'APPROVED', approvedAt: '2026-11-19T00:00:00.000Z', pointsOutcome: V2_OUTCOME },
+            ],
+            pagination: { page: 1, limit: 50, total: 2, pages: 1 },
+          },
+        });
+      }
+      if (url.includes('/reversals')) return json({ success: true, data: { reversals: [], pagination: null } });
+      return json({ success: true, data: [] });
+    }) as unknown as typeof fetch;
+    render(<PayoutDownloadPage />);
+    const cell = await screen.findByTestId('processed-deduction-undo-r-undo');
+    expect(cell.textContent).toBe('320 pts given backDeduction undone');
+    expect(screen.getByTestId('points-outcome-r-undo').textContent).toBe('Outcome: 320 pts given back to the wallet — deduction undone');
+    // The undo never adds "owed" (a belowZero on the outcome is ignored for it); the credit reversal keeps its own.
+    expect(screen.getByTestId('processed-debt-r-undo').textContent).toBe('0 pts');
+    expect(screen.getByTestId('processed-debt-r-done-v2').textContent).toBe('2,986 pts');
+    expect(screen.queryByTestId('processed-deduction-undo-r-done-v2')).toBeNull();
+  });
+  it('a PENDING undo request is labelled before approval (reversal.kind DEDUCTION_UNDO); a credit reversal is not', async () => {
+    const json = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload, blob: async () => new Blob() });
+    global.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/reversals') && url.includes('PENDING_GIFSY')) {
+        return json({
+          success: true,
+          data: {
+            reversals: [
+              { ...base, id: 'r-undo-p', requestedPaise: 320, status: 'PENDING_GIFSY', kind: 'DEDUCTION_UNDO', pastExpiryPoints: 45 },
+              { ...base, id: 'r-credit-p', requestedPaise: 100, status: 'PENDING_GIFSY' },
+            ],
+            pagination: { page: 1, limit: 50, total: 2, pages: 1 },
+          },
+        });
+      }
+      if (url.includes('/reversals')) return json({ success: true, data: { reversals: [], pagination: null } });
+      return json({ success: true, data: [] });
+    }) as unknown as typeof fetch;
+    render(<PayoutDownloadPage />);
+    expect((await screen.findByTestId('pending-deduction-undo-r-undo-p')).textContent).toBe('Undo of an upload deduction');
+    expect(screen.queryByTestId('pending-deduction-undo-r-credit-p')).toBeNull();
+    expect(screen.getAllByText('Points to give back')).toHaveLength(1);
+    // Never silent: a pending undo that would give back points already past their expiry says so on the card.
+    expect(screen.getByTestId('pending-undo-past-expiry-r-undo-p').textContent).toBe(
+      '45 pts would come back already past their expiry and will expire at the next sweep.',
+    );
+    expect(screen.queryByTestId('pending-undo-past-expiry-r-credit-p')).toBeNull();
+  });
+});
+

@@ -5,6 +5,7 @@ import { Wallet, Store, Plus, Minus, AlertTriangle } from 'lucide-react';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { TransactionItem } from '@/components/wallet/transaction-item';
 import { formatSignedPoints, negativeBalanceNote } from '@/lib/wallet-negative';
+import { isUploadDeductionRow } from '@/lib/wallet-statement/statement-model';
 import { useAdminSession } from '@/lib/admin-session';
 import { formatPoints } from '@/lib/utils';
 import { TransactionType, WalletBucket, type WalletTransaction } from '@/types';
@@ -35,6 +36,9 @@ interface ApiSummary {
     /** Negative wallets only (owner decision 2, 2026-11-19). */
     owedPoints?:       number;
     owedFromReversal?: boolean;
+    /** Negative wallets only: an upload deduction is behind the below-zero stretch (field names may be empty). */
+    owedFromDeduction?:   boolean;
+    owedDeductionFields?: string[];
   };
 }
 
@@ -81,9 +85,11 @@ function mapBucket(balanceType: string): WalletBucket {
 
 // Same treatment as the partner passbook: credit rows lead with the resolved FIELD
 // NAME as the header and show the raw upload narration as a small sub-line below.
+// An upload deduction (DEBIT_ADJUSTMENT from a credit batch) shows its own server text as-is — never the field name again.
 function mapApiTransaction(t: ApiTransaction): WalletTransaction {
-  const hasFieldName = !!t.fieldName;
-  const header    = hasFieldName ? (t.fieldName as string) : t.description;
+  const isUploadDeduction = isUploadDeductionRow(t);
+  const hasFieldName = !!t.fieldName && !isUploadDeduction;
+  const header    = isUploadDeduction ? t.description : hasFieldName ? (t.fieldName as string) : t.description;
   const narration = hasFieldName && t.narration ? t.narration : undefined;
   return {
     id:             t.id,
@@ -508,6 +514,8 @@ export default function OutletWalletPage() {
                         redeemable: wallet.redeemablePoints,
                         owedPoints: wallet.owedPoints,
                         owedFromReversal: wallet.owedFromReversal,
+                        owedFromDeduction: wallet.owedFromDeduction,
+                        owedDeductionFields: wallet.owedDeductionFields,
                       },
                       'staff',
                     )}

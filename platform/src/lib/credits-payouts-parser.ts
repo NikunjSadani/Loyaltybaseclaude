@@ -8,11 +8,19 @@
  *  1. Outlet ID must exist in eligible outlets
  *  2. Outlet must be active
  *  3. Zero or blank value → SKIP (not an error)
- *  4. Negative value → ERROR
+ *  4. Negative value → ERROR ("Amount cannot be negative") — UNLESS the tenant setting
+ *     `creditUploadNegativeDeductions` is ON (opt `negativeDeductions`), then:
+ *       - POINTS (known outlet): a DEDUCTION row, status OK, amount = −(magnitude rounded
+ *         half-up to a whole point): −199.5 → −200, −199.4 → −199. A magnitude that rounds to 0
+ *         (−0.4) → SKIP (nothing to deduct). The rounded magnitude counts against the points cap.
+ *       - PAYOUT: ERROR "Payout amounts can't be negative — use Reverse on Payout Status."
+ *       - unknown outlet: only the "not found" error.
+ *     Deductions are summed separately (summary.deducted / totalDeductedPoints); totalPoints
+ *     stays the CREDITED (positive) total.
  *  5. Any number of decimals is accepted, then ROUNDED HALF-UP to a whole unit (owner rule
  *     2026-11-12: points AND ₹ payouts are credited in whole units — 199.5 → 200, 199.4 → 199).
  *     A positive value that rounds to 0 → SKIP (nothing to credit).
- *  6. ROUNDED amount exceeds safety cap → ERROR
+ *  6. ROUNDED amount (deductions: rounded magnitude) exceeds safety cap → ERROR
  *  7. Duplicate outlet+field in the same upload → ERROR on second occurrence
  *  8. Field configured as NA for this outlet type → SKIP
  *
@@ -34,7 +42,17 @@ export interface ParseCreditUploadOpts {
   safetyCapPoints: number;
   /** Safety cap in rupees (displayed to user). Internally compared after converting input to rupees. */
   safetyCapInr:    number;
+  /**
+   * Tenant setting `creditUploadNegativeDeductions`. When true a negative POINTS value is a
+   * deduction row instead of an error. Default false (byte-identical to the pre-feature parser).
+   */
+  negativeDeductions?: boolean;
 }
+
+const EMPTY_SUMMARY: CreditParseResult['summary'] = {
+  total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0, rounded: 0,
+  deducted: 0, totalDeductedPoints: 0,
+};
 
 // ─── Whole-unit rounding ──────────────────────────────────────────────────────
 
@@ -69,6 +87,7 @@ export function parseCreditUpload(
   opts:    ParseCreditUploadOpts,
 ): CreditParseResult {
   const { fields, outlets, safetyCapPoints, safetyCapInr } = opts;
+  const negativeDeductions = opts.negativeDeductions === true;
 
   // Build outlet lookup
   const outletMap = new Map<string, TemplateOutlet>();
@@ -87,7 +106,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0, rounded: 0 },
+      summary:     { ...EMPTY_SUMMARY },
     };
   }
 
@@ -98,7 +117,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0, rounded: 0 },
+      summary:     { ...EMPTY_SUMMARY },
     };
   }
 
@@ -116,7 +135,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0, rounded: 0 },
+      summary:     { ...EMPTY_SUMMARY },
     };
   }
 
@@ -131,7 +150,7 @@ export function parseCreditUpload(
       rows:        [],
       hasErrors:   false,
       canProceed:  false,
-      summary:     { total: 0, ok: 0, skipped: 0, errors: 0, totalPoints: 0, totalPayoutPaise: 0, rounded: 0 },
+      summary:     { ...EMPTY_SUMMARY },
     };
   }
 
@@ -151,6 +170,8 @@ export function parseCreditUpload(
   const rows: CreditUploadRow[] = [];
   let totalPoints      = 0;
   let totalPayoutPaise = 0;
+  let deductedCount       = 0;
+  let totalDeductedPoints = 0;
 
   // Data rows start at index 2
   for (let rIdx = 2; rIdx < allRows.length; rIdx++) {
@@ -227,8 +248,26 @@ export function parseCreditUpload(
       // 14.499999999999998 from an Excel formula cell).
       const numVal = trimFloatNoise(Number(strVal.replace(/,/g, '')));
 
+      // Deduction (setting ON, negative value): typed value float-trimmed on its magnitude
+      // (trimFloatNoise only handles non-negatives), magnitude rounded half-up to whole points.
+      let deduction: { typed: number; magnitude: number } | null = null;
+
       if (isNaN(numVal)) {
         errors.push(`Value "${strVal}" is not a valid number.`);
+      } else if (negativeDeductions && numVal < 0) {
+        if (!outlet) {
+          // Unknown outlet: the "not found" error above is the only error.
+        } else if (awardType === 'PAYOUT') {
+          errors.push(`Payout amounts can't be negative — use Reverse on Payout Status.`);
+        } else {
+          const typed     = -trimFloatNoise(Math.abs(numVal));
+          const magnitude = roundHalfUpWhole(Math.abs(numVal));
+          if (magnitude > safetyCapPoints) {
+            const shown = magnitude !== -typed ? `${typed} (rounds to -${magnitude})` : `${typed}`;
+            errors.push(`Deduction ${shown} exceeds the safety cap of ${safetyCapPoints} for points.`);
+          }
+          deduction = { typed, magnitude };
+        }
       } else {
         // Negative
         if (numVal < 0) {
@@ -243,8 +282,27 @@ export function parseCreditUpload(
         }
       }
 
+      // A deduction whose magnitude rounds to 0 (e.g. −0.4) deducts nothing → SKIP, not an error.
+      if (deduction && errors.length === 0 && deduction.magnitude === 0) {
+        rows.push({
+          rowNum:    rIdx + 1,
+          outletId,
+          outletName: outletName || (outlet?.name ?? outletId),
+          fieldId:   field.id,
+          fieldName: field.name,
+          amount:    0,
+          originalAmount: deduction.typed,
+          narration: rawNarr,
+          awardType: 'POINTS',
+          status:    'SKIP',
+          errors:    [],
+          skipReason: `Value ${deduction.typed} rounds to 0 — amounts are deducted in whole units, so nothing is deducted for this row.`,
+        });
+        continue;
+      }
+
       // A positive amount that rounds to 0 (e.g. 0.4) credits nothing → SKIP, not an error.
-      if (errors.length === 0 && !isNaN(numVal) && roundHalfUpWhole(numVal) === 0) {
+      if (!deduction && errors.length === 0 && !isNaN(numVal) && roundHalfUpWhole(numVal) === 0) {
         rows.push({
           rowNum:    rIdx + 1,
           outletId,
@@ -271,14 +329,21 @@ export function parseCreditUpload(
       }
 
       // Whole units only: points and rupees are both rounded half-up before crediting.
-      const amount = isNaN(numVal) ? 0 : roundHalfUpWhole(numVal);
-      const wasRounded = !isNaN(numVal) && amount !== numVal;
+      // Deductions: amount = −(rounded magnitude); "rounded" compares against the typed value.
+      const amount = isNaN(numVal) ? 0
+        : deduction ? -deduction.magnitude
+        : roundHalfUpWhole(numVal);
+      const typedVal = deduction ? deduction.typed : numVal;
+      const wasRounded = !isNaN(numVal) && amount !== typedVal;
       const status: 'OK' | 'ERROR' = errors.length > 0 ? 'ERROR' : 'OK';
       // awardType at this point is always POINTS or PAYOUT (NA was handled above)
       const resolvedAwardType: 'POINTS' | 'PAYOUT' = awardType === 'PAYOUT' ? 'PAYOUT' : 'POINTS';
 
       if (status === 'OK') {
-        if (resolvedAwardType === 'POINTS') {
+        if (deduction) {
+          deductedCount       += 1;
+          totalDeductedPoints += deduction.magnitude;
+        } else if (resolvedAwardType === 'POINTS') {
           totalPoints += amount;
         } else {
           // PAYOUT rows: the user entered rupees (now rounded to whole rupees); convert to
@@ -300,7 +365,7 @@ export function parseCreditUpload(
         amount:    storedAmount,
         // Only present when rounding changed the value (as typed: points or RUPEES), so a
         // whole-number upload's payload is byte-identical to before.
-        ...(wasRounded ? { originalAmount: numVal } : {}),
+        ...(wasRounded ? { originalAmount: typedVal } : {}),
         narration: rawNarr,
         awardType: resolvedAwardType,
         status,
@@ -328,6 +393,8 @@ export function parseCreditUpload(
       totalPoints,
       totalPayoutPaise,
       rounded:        roundedCount,
+      deducted:       deductedCount,
+      totalDeductedPoints,
     },
   };
 }

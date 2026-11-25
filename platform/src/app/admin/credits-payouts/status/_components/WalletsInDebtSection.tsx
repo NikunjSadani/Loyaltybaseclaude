@@ -21,7 +21,7 @@ import * as XLSX from 'xlsx';
 import { aoaToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
 
-export interface DebtSource {
+export interface ReversalDebtSource {
   allocationId?: string;
   creditReversalId: string;
   kind: 'OVER_REVERSAL' | 'DEBT_RESTORED' | 'DEBT_EXPOSED' | 'HISTORICAL_CLAWBACK' | string;
@@ -33,6 +33,21 @@ export interface DebtSource {
   period: string | null;
   outletCode?: string | null;
 }
+/** A below-zero stretch caused by a Credits & Payouts upload DEDUCTION (negative points row). */
+export interface UploadDeductionDebtSource {
+  kind: 'UPLOAD_DEDUCTION';
+  batchId: string;
+  fieldName: string | null;
+  period: string | null;
+  /** Positive magnitude deducted. */
+  deductedPoints: number;
+  /** ISO date of the deduction (batch confirm). */
+  at: string | null;
+  outletCode?: string | null;
+}
+export type DebtSource = ReversalDebtSource | UploadDeductionDebtSource;
+
+export const isUploadDeduction = (s: DebtSource): s is UploadDeductionDebtSource => s.kind === 'UPLOAD_DEDUCTION';
 export interface DebtWallet {
   walletId: string;
   partnerName: string | null;
@@ -69,9 +84,18 @@ const day = (iso: string | null) =>
   iso ? new Date(iso).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—';
 
 /** Points a source put on the wallet's debt (owed + debt restored + points that were covering earlier debt). */
-export const sourcePoints = (s: DebtSource) => s.owedPoints + s.debtRestoredPoints + (s.debtExposedPoints ?? 0);
+export const sourcePoints = (s: DebtSource) =>
+  isUploadDeduction(s)
+    ? Math.abs(s.deductedPoints)
+    : s.owedPoints + s.debtRestoredPoints + (s.debtExposedPoints ?? 0);
+
+const UPLOAD_DEDUCTION_TEXT = 'Upload deduction';
 
 export function sourceText(s: DebtSource): string {
+  if (isUploadDeduction(s)) {
+    const parts = [UPLOAD_DEDUCTION_TEXT, s.fieldName, s.period].filter(Boolean).join(' · ');
+    return `${parts} · −${sourcePoints(s).toLocaleString('en-IN')} pts`;
+  }
   const what = KIND_TEXT[s.kind] ?? s.kind;
   const ctx = [s.outletCode, s.fieldName, s.period].filter(Boolean).join(' · ');
   return `${what} — ${sourcePoints(s).toLocaleString('en-IN')} pts${ctx ? ` (${ctx})` : ''} · reversal ${s.creditReversalId} · ${day(s.approvedAt)}`;
@@ -95,6 +119,13 @@ export function buildWalletsInDebtXlsx(list: DebtWallet[], opts: { total?: numbe
     const base = [w.outletCodes.join(', '), w.partnerName ?? '', w.balance, w.owedPoints];
     if (w.sources.length === 0) rows.push([...base, w.note ?? '', '', '', '', '', '', '']);
     for (const s of w.sources) {
+      if (isUploadDeduction(s)) {
+        rows.push([
+          ...base, UPLOAD_DEDUCTION_TEXT, sourcePoints(s), s.outletCode ?? '', '',
+          s.at ? new Date(s.at) : '', s.fieldName ?? '', s.period ?? '',
+        ]);
+        continue;
+      }
       rows.push([
         ...base, KIND_TEXT[s.kind] ?? s.kind, sourcePoints(s), s.outletCode ?? '', s.creditReversalId,
         s.approvedAt ? new Date(s.approvedAt) : '', s.fieldName ?? '', s.period ?? '',
@@ -239,7 +270,7 @@ export default function WalletsInDebtSection() {
           {data.total} wallet{data.total === 1 ? '' : 's'} below zero{scope} · {totalOwed.toLocaleString('en-IN')} pts owed
           {cut ? ` (first ${data.wallets.length} listed)` : ''}
         </p>
-        <span className="text-xs text-orange-800">Repaid from their future earnings; they can&apos;t redeem until back above zero.</span>
+        <span className="text-xs text-orange-800">Repaid from their future earnings; they can&apos;t redeem until their balance is 0 or more.</span>
         <div className="ml-auto flex items-center gap-2">
           {programs.length > 1 && (
             <label className="text-xs text-orange-900 flex items-center gap-1">
@@ -322,7 +353,11 @@ export default function WalletsInDebtSection() {
                       ) : (
                         <ul className="space-y-0.5">
                           {/* one row per allocation (a reversal can touch two positions of the same wallet) */}
-                          {w.sources.map((s, i) => <li key={s.allocationId ?? `${s.creditReversalId}-${i}`}>{sourceText(s)}</li>)}
+                          {w.sources.map((s, i) => (
+                            <li key={isUploadDeduction(s) ? `ud-${s.batchId}-${i}` : (s.allocationId ?? `${s.creditReversalId}-${i}`)}>
+                              {sourceText(s)}
+                            </li>
+                          ))}
                         </ul>
                       )}
                     </td>

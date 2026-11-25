@@ -29,7 +29,7 @@ interface ProfileData {
     gstNumber: string;
     panNumber: string;
   };
-  wallet: { redeemable: number; locked: number; owedFromReversal?: boolean };
+  wallet: { redeemable: number; locked: number; owedFromReversal?: boolean; owedFromDeduction?: boolean; owedDeductionFields?: string[] };
   /** Beneficiary on file (from /auth/me). Any field may be null when not captured yet. */
   bank: {
     bankName: string | null;
@@ -146,10 +146,21 @@ export default function ProfilePage() {
           // Fix round 4 (item 6): a NEGATIVE balance also reads the wallet page's own "from a reversed credit" signal.
           if ((w?.redeemablePoints ?? 0) < 0) {
             api
-              .get<{ owedFromReversal?: boolean }>('/api/wallet')
+              .get<{ owedFromReversal?: boolean; owedFromDeduction?: boolean; owedDeductionFields?: string[] }>('/api/wallet')
               .then((r) => {
-                if (r.success && r.data?.owedFromReversal) {
-                  setProfile((p) => (p ? { ...p, wallet: { ...p.wallet, owedFromReversal: true } } : p));
+                const d = r.success ? r.data : undefined;
+                if (d?.owedFromReversal || d?.owedFromDeduction) {
+                  setProfile((p) => (p ? {
+                    ...p,
+                    wallet: {
+                      ...p.wallet,
+                      ...(d.owedFromReversal ? { owedFromReversal: true } : {}),
+                      // F4: an upload deduction behind the negative stretch (field names may be empty).
+                      ...(d.owedFromDeduction
+                        ? { owedFromDeduction: true, owedDeductionFields: Array.isArray(d.owedDeductionFields) ? d.owedDeductionFields : [] }
+                        : {}),
+                    },
+                  } : p));
                 }
               })
               .catch(() => {});
@@ -336,7 +347,12 @@ export default function ProfilePage() {
                 {/* Owner decision 2 (2026-11-19): a negative balance is shown as it is, with what it means */}
                 {profile.wallet.redeemable < 0 && (
                   <p data-testid="profile-negative-note" className="text-xs text-amber-700 mt-1">
-                    {negativeBalanceNote({ redeemable: profile.wallet.redeemable, owedFromReversal: profile.wallet.owedFromReversal })}
+                    {negativeBalanceNote({
+                      redeemable:          profile.wallet.redeemable,
+                      owedFromReversal:    profile.wallet.owedFromReversal,
+                      owedFromDeduction:   profile.wallet.owedFromDeduction,
+                      owedDeductionFields: profile.wallet.owedDeductionFields,
+                    })}
                   </p>
                 )}
               </div>

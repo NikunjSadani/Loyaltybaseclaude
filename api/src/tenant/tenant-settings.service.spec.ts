@@ -88,6 +88,26 @@ describe('TenantSettingsService', () => {
     });
   });
 
+  describe('creditUploadNegativeDeductions (upload deductions switch — default OFF, fail closed)', () => {
+    it('defaults OFF in the effective settings; only a strict boolean true turns it on', async () => {
+      expect((await new TenantSettingsService(makePrisma([])).getEffectiveSettings('deoleo')).creditUploadNegativeDeductions).toBe(false);
+      const on = makePrisma([{ settingKey: 'creditUploadNegativeDeductions', settingValue: true }]);
+      expect((await new TenantSettingsService(on).getEffectiveSettings('bajaj')).creditUploadNegativeDeductions).toBe(true);
+      const strung = makePrisma([{ settingKey: 'creditUploadNegativeDeductions', settingValue: 'true' }]);
+      expect((await new TenantSettingsService(strung).getEffectiveSettings('bajaj')).creditUploadNegativeDeductions).toBe(false);
+    });
+
+    it('uncached money-path read: absent / non-boolean / read error → OFF; strict true → ON', async () => {
+      expect(await new TenantSettingsService(makePrisma([])).getCreditUploadNegativeDeductionsUncached('deoleo')).toBe(false);
+      const on = makePrisma([{ settingKey: 'creditUploadNegativeDeductions', settingValue: true }]);
+      expect(await new TenantSettingsService(on).getCreditUploadNegativeDeductionsUncached('bajaj')).toBe(true);
+      const one = makePrisma([{ settingKey: 'creditUploadNegativeDeductions', settingValue: 1 }]);
+      expect(await new TenantSettingsService(one).getCreditUploadNegativeDeductionsUncached('bajaj')).toBe(false);
+      const down = { programSetting: { findUnique: jest.fn().mockRejectedValue(new Error('db down')) } } as any;
+      expect(await new TenantSettingsService(down).getCreditUploadNegativeDeductionsUncached('bajaj')).toBe(false);
+    });
+  });
+
   describe('getKycGstinRequiredUncached (fail-SAFE = compulsory)', () => {
     it('returns TRUE when there is no row (default ON / opt-out)', async () => {
       expect(await new TenantSettingsService(makePrisma([])).getKycGstinRequiredUncached('deoleo')).toBe(true);

@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { TenantService } from '../tenant/tenant.service';
 import {
+  CREDIT_UPLOAD_NEGATIVE_DEDUCTIONS_KEY,
   OtpTemplatePurpose,
   OtpTemplatesSettings,
   POINTS_REVERSAL_PAUSE_SETTING_KEY,
@@ -1651,6 +1652,12 @@ export class AdminCoreService {
       const explicitlyOff =
         dto.value === false || dto.value === 'false' || dto.value === 0 || dto.value === '0';
       dto.value = !explicitlyOff;
+    }
+
+    // Upload negative-points deductions switch (UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md): a strict boolean money switch.
+    // FAIL TOWARD OFF: only an explicit `true` / 'true' turns deductions on; anything else is stored as false.
+    if (dto.key === CREDIT_UPLOAD_NEGATIVE_DEDUCTIONS_KEY) {
+      dto.value = dto.value === true || dto.value === 'true';
     }
 
     // OWNER-ONLY auth config at the DATA boundary: the per-tenant OTP SMS templates (settingKey
