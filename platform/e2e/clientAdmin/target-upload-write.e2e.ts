@@ -16,7 +16,9 @@ import * as XLSX from 'xlsx';
  *      This gives us the EXACT header rows (row 1 = month group, row 2 = column
  *      labels) that parseTargetUploadBuffer expects, plus the seeded outlet codes.
  *   3. Fill in a non-zero value for each outlet × KPI cell.
- *   4. POST the modified xlsx as multipart/form-data.
+ *   4. PREVIEW it (?preview=1, nothing written), check an un-previewed POST is REFUSED (400, owner rule
+ *      2026-11-25: preview → confirm for every client), CONFIRM (?confirmToken=…&ack=…) with the same bytes,
+ *      and check a second confirm of the same preview is refused (409).
  *   5. PERSISTENCE: GET /api/admin/targets?month=… shows the written values.
  *
  * Using a FUTURE month (2027-07) ensures the upload is never locked (isMonthLocked
@@ -26,7 +28,7 @@ import * as XLSX from 'xlsx';
  * Backend controller: api/src/targets/targets.controller.ts
  *   POST /v1/admin/kpis/seed-defaults  (CLIENT_ADMIN, targets:manage_config)
  *   GET  /v1/admin/targets/template    (CLIENT_ADMIN, targets:read)
- *   POST /v1/admin/targets/upload      (CLIENT_ADMIN, targets:upload) — multipart
+ *   POST /v1/admin/targets/upload      (CLIENT_ADMIN, targets:upload) — multipart, ?preview=1 then ?confirmToken=
  *   GET  /v1/admin/targets             (CLIENT_ADMIN, targets:read)
  * FE proxy: /api/admin/* → /v1/admin/*
  *
@@ -142,42 +144,72 @@ test.describe('@clientAdmin target upload write-persistence (W8)', () => {
         bookType: 'xlsx',
       }) as Buffer;
 
-      // ── Step 4: UPLOAD the filled template ────────────────────────────────────
-      // Must be multipart/form-data with field "file". The page.evaluate context
-      // can build a Blob from the typed bytes and post via fetch.
+      // ── Step 4: PREVIEW → (refused without preview) → CONFIRM the filled template ──
+      // Owner rule 2026-11-25 (every client): the API refuses an upload that was not previewed. Must be
+      // multipart/form-data with field "file"; page.evaluate builds a Blob from the bytes and posts via fetch.
       const modifiedBytes = Array.from(modifiedBuffer);
-      const uploadResult = await page.evaluate(
-        async ({ tok, bytes }) => {
-          const buffer = new Uint8Array(bytes);
-          const blob = new Blob([buffer], {
-            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          });
-          const fd = new FormData();
-          fd.append('file', blob, 'targets-e2e.xlsx');
-          const res = await fetch('/api/admin/targets/upload', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${tok}` },
-            body: fd,
-          });
-          return { status: res.status, body: await res.json().catch(() => null) };
-        },
-        { tok: token!, bytes: modifiedBytes },
+      const post = (query: string) =>
+        page.evaluate(
+          async ({ tok, bytes, q }) => {
+            const blob = new Blob([new Uint8Array(bytes)], {
+              type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            });
+            const fd = new FormData();
+            fd.append('file', blob, 'targets-e2e.xlsx');
+            const res = await fetch(`/api/admin/targets/upload${q}`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${tok}` },
+              body: fd,
+            });
+            return { status: res.status, body: await res.json().catch(() => null) };
+          },
+          { tok: token!, bytes: modifiedBytes, q: query },
+        );
+
+      // 4a. No preview → refused, nothing written.
+      const direct = await post('');
+      expect(direct.status, `an un-previewed upload must be refused: ${JSON.stringify(direct.body)}`).toBe(400);
+      expect(String(direct.body?.error ?? '')).toMatch(/Preview the file first/);
+
+      // 4b. Preview — nothing written; returns the signed token + what will not be applied.
+      const previewRes = await post('?preview=1');
+      expect(
+        [200, 201],
+        `POST /api/admin/targets/upload?preview=1 returned ${previewRes.status}: ${JSON.stringify(previewRes.body)}`,
+      ).toContain(previewRes.status);
+      const preview = previewRes.body?.data as {
+        preview: boolean;
+        previewToken: string;
+        willSaveCount: number;
+        notApplied: { category: string; count: number; fingerprint: string }[];
+      };
+      expect(preview.preview).toBe(true);
+      expect(preview.willSaveCount, 'the preview must have something to save (the seeded outlets)').toBeGreaterThan(0);
+
+      // 4c. Confirm with the SAME bytes, acknowledging exactly what the preview listed (count + fingerprint).
+      const ack = preview.notApplied.map((c) => `${c.category}:${c.count}:${c.fingerprint}`).join(',');
+      const uploadResult = await post(
+        `?confirmToken=${encodeURIComponent(preview.previewToken)}&ack=${encodeURIComponent(ack)}`,
       );
 
       expect(
         [200, 201],
-        `POST /api/admin/targets/upload returned ${uploadResult.status}: ${JSON.stringify(uploadResult.body)}`,
+        `POST /api/admin/targets/upload?confirmToken= returned ${uploadResult.status}: ${JSON.stringify(uploadResult.body)}`,
       ).toContain(uploadResult.status);
 
-      const uploadData = (uploadResult.body?.data ?? uploadResult.body) as
-        | { batch?: { acceptedCount?: number; status?: string }; acceptedCount?: number }
-        | undefined;
-      const batch = uploadData?.batch ?? uploadData;
-      const accepted = (batch as { acceptedCount?: number })?.acceptedCount ?? 0;
+      const uploadData = uploadResult.body?.data as { status?: string; acceptedCount?: number; savedCount?: number } | undefined;
+      expect(uploadData?.status, 'the confirmed upload must report APPLIED').toBe('APPLIED');
+      const accepted = uploadData?.acceptedCount ?? 0;
       expect(
         accepted,
         'Upload must accept at least one row (the seeded outlets)',
       ).toBeGreaterThan(0);
+
+      // 4d. The same preview cannot be applied twice.
+      const again = await post(
+        `?confirmToken=${encodeURIComponent(preview.previewToken)}&ack=${encodeURIComponent(ack)}`,
+      );
+      expect(again.status, `a second confirm of the same preview must be refused: ${JSON.stringify(again.body)}`).toBe(409);
 
       // ── Step 5: PERSISTENCE — GET /api/admin/targets?month= shows the values ──
       // TargetsService.listTargets() returns the raw Prisma outletTarget array directly
@@ -237,7 +269,7 @@ test.describe('@clientAdmin target upload write-persistence (W8)', () => {
         const blob = new Blob(['outlet_id,outlet_name\nO001,Test'], { type: 'text/csv' });
         const fd = new FormData();
         fd.append('file', blob, 'targets.csv');
-        const res = await fetch('/api/admin/targets/upload', {
+        const res = await fetch('/api/admin/targets/upload?preview=1', {
           method: 'POST',
           headers: { Authorization: `Bearer ${tok}` },
           body: fd,

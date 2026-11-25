@@ -18,7 +18,7 @@ export const targetsUploadGuide: Guide = {
 
 ## In one paragraph
 
-You download the template, fill in the targets and pick the file. The portal **checks the file and shows a preview — nothing is saved at this step**. The preview tells you how many outlet-month targets will be saved, how many of them **replace targets that already exist**, and which rows will not be saved and why. You tick one **"I understand…"** box for each thing that will not be applied as typed, then press **Confirm & apply**. Only then are the targets saved. Every applied upload is listed in **Upload history**, with its file.
+You download the template, fill in the targets and pick the file. The portal **checks the file and shows a preview — nothing is saved at this step** (since 25 Nov 2026 this is the only way to upload targets, for every program). The preview tells you how many outlet-month targets will be saved, how many of them **replace targets that already exist**, and which rows will not be saved and why. You tick one **"I understand…"** box for each thing that will not be applied as typed, then press **Confirm & apply** within 30 minutes. Only then are the targets saved — **the whole file together, or nothing at all**. Every applied upload is listed in **Upload history**, with its file.
 
 ## Step 1 — Download the template
 
@@ -36,7 +36,7 @@ You download the template, fill in the targets and pick the file. The portal **c
 
 ## Step 3 — Confirm what will not be applied
 
-For each kind of problem in the file, a box must be ticked before **Confirm & apply** is enabled. Only the kinds present in your file appear:
+For each kind of problem in the file, a box must be ticked before **Confirm & apply** is enabled. Only the kinds present in your file appear, each with a few examples of the rows or outlets it covers. A tick counts for exactly the number and the items shown — if they change before you confirm, nothing is saved and the boxes are shown again with the new numbers:
 
 | Box | Meaning |
 |---|---|
@@ -46,28 +46,34 @@ For each kind of problem in the file, a box must be ticked before **Confirm & ap
 | **I understand N blank rows will not be saved** | Rows with no values at all (normal for outlets without a target). |
 | **I understand N values for KPIs that don't apply to the outlet will be ignored** | The KPI does not apply to that outlet type / programme. |
 
-Until every box is ticked the page says **"Tick the remaining box above to enable Confirm & apply."** If nothing in the file can be saved, the button stays disabled and the reason is shown (for example **"Nothing to apply — every month in this file is in the past, and past months are locked."**).
+The preview also says until when it can be confirmed (**This preview can be confirmed until …**). Until every box is ticked the page says **"Tick the remaining box above to enable Confirm & apply."** If nothing in the file can be saved, the button stays disabled and the reason is shown (for example **"Nothing to apply — every month in this file is in the past, and past months are locked."**).
 
 ## Step 4 — Confirm & apply
 
 1. Press **Confirm & apply** once (the button shows **Applying…**; a second click does nothing). Keep the page open.
 2. The portal saves exactly the file you previewed. It checks the file again against today's outlets and targets:
-   - If something changed since the preview (for example another upload added targets for the same outlets), the targets are still saved and an amber note shows **"The final result differs from the preview…"** with both sets of numbers.
-   - If a **new** kind of problem appeared since the preview, nothing is saved and the message names it — pick the file again to see the up-to-date preview.
+   - If what will not be applied changed since the preview (for example another upload added targets for the same outlets, so more targets would be replaced), **nothing is saved**: the page checks the same file again, shows the new numbers with the boxes unticked, and you confirm again.
+   - If the preview is older than 30 minutes, **nothing is saved** and the file is checked again the same way.
 3. The green **Targets submitted successfully** box shows how many outlet-month targets were saved (new and overwritten), and **Not applied as typed** lists what was not saved. Check the stored targets anytime with **Download Final Targets**.
 
 **Messages you may see on Confirm:**
 
-- **"These targets were already applied from this preview — nothing was saved twice."** The first press already worked (for example after a network drop). Check with **Download Final Targets**.
+- **"This preview was already applied on … — it was not applied again."** The first press really did save it (for example after a network drop). Check with **Download Final Targets** or in **Upload history**. To upload the same file again, pick it again for a new preview.
+- **"Saving the targets failed, so NOTHING from this file was saved…"** Nothing changed. Press **Confirm & apply** again to retry; if it keeps failing, contact Gifsy support with the reference shown.
+- **"The file could not be stored, so nothing was saved…"** Nothing changed. Press **Confirm & apply** again.
 - **"This file is not the one you previewed…"** Pick the file again.
-- **"Couldn't reach the server (network error). Some or all of it may have been saved…"** Press **Confirm & apply** again: if the first attempt went through, it will not be applied twice.
+- **"Couldn't reach the server (network error). Some or all of it may have been saved…"** Press **Confirm & apply** again: if the first attempt went through you will see "already applied" (it is never applied twice); otherwise it is saved now.
+- **"The targets were saved, but the sales team could not be notified about them."** The targets are saved; tell the sales team yourself.
 
 ## Upload history
 
-At the bottom of the page, **Upload history** lists the latest uploads (newest first, times in IST): **When (IST)**, **Who**, **Month(s)**, **Accepted**, **Rejected**, **Overwritten** and **File**.
+At the bottom of the page, **Upload history** lists uploads newest first (times in IST), 100 at a time — it says **Showing the newest 100 uploads** and **Load older uploads** shows the next 100: **When (IST)**, **Who**, **Month(s)**, **Accepted**, **Rejected**, **Overwritten** and **File**.
 
 - **Download file** gets the exact file that was applied.
 - **File not kept** — uploads made before the preview step was introduced (25 Nov 2026) did not keep their file.
-- **Failed — not fully applied** — the save stopped part-way. Check the targets with **Download Final Targets** and upload the file again.
+- **Failed — nothing saved** — that attempt changed nothing (a save is all or nothing). Upload the file again if it was not retried.
+- **Did not finish — nothing saved** — the save was interrupted; nothing from it was saved.
+- **Being saved…** — the upload is being saved right now; refresh in a minute.
+- **Failed part-way (older upload) — may be partly saved** — only uploads from before 25 Nov 2026, when large files were saved in parts. Check with **Download Final Targets**.
 `,
 };

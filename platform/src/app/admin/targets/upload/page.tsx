@@ -7,13 +7,16 @@
  *   Server-side xlsx (the client-side parsing path is REMOVED — backend parses now):
  *     Template download: GET /api/admin/targets/template?months=YYYY-MM,YYYY-MM
  *                        → RAW xlsx binary (NOT JSON-wrapped) → browser download
- *     Upload = PREVIEW then CONFIRM (owner decision 2026-11-25, all tenants):
+ *     Upload = PREVIEW then CONFIRM (owner decision 2026-11-25, approved for ALL clients incl. Deoleo — the API
+ *     refuses an upload without a preview):
  *       1. POST /api/admin/targets/upload?preview=1 (FormData "file") → validates, writes NOTHING →
- *          { preview: true, previewToken, willSaveCount, newCount, overwriteCount, perMonth,
- *            overwriteExamples, + the usual summary / problemRows / warningRows / focusCheck }
- *       2. "Confirm & apply" → POST /api/admin/targets/upload?confirmToken=<previewToken> with the SAME
- *          file bytes (kept in memory from step 1) → { batchId, savedCount, newCount, overwriteCount, … }.
- *          The server refuses (409) a different file or a second apply of the same preview.
+ *          { preview: true, previewToken, previewExpiresAt, willSaveCount, newCount, overwriteCount, perMonth,
+ *            overwriteExamples, notApplied[{category,count,fingerprint,sample}], + summary / rows / focusCheck }
+ *       2. "Confirm & apply" → POST /api/admin/targets/upload?confirmToken=<previewToken>&ack=CAT:count:fingerprint,…
+ *          with the SAME file bytes (kept in memory from step 1) → { batchId, status: 'APPLIED', savedCount, … }.
+ *          The whole file is saved in ONE transaction (all or nothing). Refusals: 412 (what is not applied changed)
+ *          and 410 (preview expired) → the page re-checks the same bytes and re-shows the boxes; 409 (already applied /
+ *          different file) → the preview is closed; 500 / 503 (nothing saved) → Confirm can be retried.
  *       "Cancel" discards the preview; nothing was written.
  *
  * The client-side xlsx parsing path is REMOVED. The backend parses now.
@@ -31,6 +34,7 @@ import {
   readJsonSafe, responseErrorMessage, networkErrorMessage, MAYBE_SAVED_NOTE, NOTHING_SAVED_NOTE,
 } from '@/lib/safe-response';
 import { buildMonthRange, formatMonth } from '@/lib/targets';
+import { formatISTDateTime } from '@/lib/ist-date';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { IgnoredOutOfScopeNotice } from '@/components/admin/ignored-out-of-scope-notice';
 import { TargetFocusCheckNotice } from '@/components/admin/target-focus-check-notice';
@@ -89,7 +93,22 @@ interface UploadSummaryData {
 }
 
 type NotAppliedCategory = 'REJECTED_ROWS' | 'OVERWRITE' | 'LOCKED_MONTHS' | 'BLANK_ROWS' | 'IGNORED_VALUES';
-interface NotAppliedItem { category: NotAppliedCategory; count: number }
+interface NotAppliedItem {
+  category: NotAppliedCategory;
+  count: number;
+  /** Binds the tick to exactly these items — sent back on Confirm; the server refuses (412) if they changed. */
+  fingerprint?: string;
+  /** A few of the items ("Row 7 — OUT123", "OUT123 · 2026-12"). */
+  sample?: string[];
+}
+
+/** The `ack` query value: each ticked category with the count + fingerprint it was shown with. */
+function ackParam(items: NotAppliedItem[], ticked: Set<NotAppliedCategory>): string {
+  return items
+    .filter(c => ticked.has(c.category))
+    .map(c => `${c.category}:${c.count}:${c.fingerprint ?? ''}`)
+    .join(',');
+}
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString('en-IN')} ${n === 1 ? one : many}`;
 
@@ -121,6 +140,8 @@ const NOT_APPLIED_COPY: Record<NotAppliedCategory, { ack: (n: number) => string;
 interface PreviewResult extends UploadSummaryData {
   preview:       true;
   previewToken:  string;
+  /** ISO time after which the preview can no longer be confirmed (absent on older API builds). */
+  previewExpiresAt?: string;
   /** Outlet-months the apply would write if confirmed now. */
   willSaveCount: number;
   overwriteExamples?: {
@@ -137,6 +158,8 @@ interface UploadResult extends UploadSummaryData {
   batchId:       string;
   /** Ground truth: outlet-month targets actually written to the backend this upload. */
   savedCount?:   number;
+  /** Set when the targets were saved but the sales team could not be notified. */
+  notificationWarning?: string;
 }
 
 type UploadResponse = (UploadResult | PreviewResult) & { rows?: UploadRow[] };
@@ -294,8 +317,13 @@ export default function TargetUploadPage() {
 
   // ── Upload ─────────────────────────────────────────────────────────────────
 
-  /** POST the file; `query` picks the step. Returns the parsed envelope, or null after setting the error. */
-  async function postUpload(file: File, query: string, savedNote: string, seq: number) {
+  /**
+   * POST the file; `query` picks the step. null = superseded (Cancel / another file) — ignore. A failure carries the
+   * HTTP status (null = network) so the caller can react to the kind of refusal.
+   */
+  async function postUpload(
+    file: File, query: string, savedNote: string, seq: number,
+  ): Promise<{ ok: true; data: UploadResponse } | { ok: false; status: number | null; error: string } | null> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -307,21 +335,53 @@ export default function TargetUploadPage() {
         body:    formData,
       });
     } catch {
-      if (seq === requestSeq.current) setUploadError(networkErrorMessage(savedNote));
-      return null;
+      if (seq !== requestSeq.current) return null;
+      return { ok: false, status: null, error: networkErrorMessage(savedNote) };
     }
     const json = await readJsonSafe<{ success: boolean; data?: UploadResponse; error?: string }>(res);
     if (seq !== requestSeq.current) return null; // superseded (Cancel / another file) — ignore
     if (!json) {
       // Non-JSON (proxy truncation / plain-text 5xx / edge 413): readable + honest, never a raw SyntaxError.
-      setUploadError(responseErrorMessage(res, json, savedNote));
-      return null;
+      return { ok: false, status: res.status, error: responseErrorMessage(res, json, savedNote) };
     }
     if (!res.ok || !json.success) {
-      setUploadError(json.error ?? `Upload failed (HTTP ${res.status})`);
-      return null;
+      return { ok: false, status: res.status, error: json.error ?? `Upload failed (HTTP ${res.status})` };
     }
-    return json.data!;
+    return { ok: true, data: json.data! };
+  }
+
+  /**
+   * PREVIEW `file` (already snapshotted): validates on the server, writes nothing. `notice` (a refused Confirm that
+   * re-checks the file) is kept above the fresh preview so the admin sees why the boxes must be ticked again.
+   */
+  async function runPreview(file: File, seq: number, notice = '') {
+    try {
+      const out = await postUpload(file, 'preview=1', NOTHING_SAVED_NOTE, seq);
+      if (!out) return;
+      if (!out.ok) {
+        pendingFileRef.current = null;
+        setUploadError(notice ? `${notice} ${out.error}` : out.error);
+        return;
+      }
+      const normalized = normalizeRowsEcho(out.data) as unknown as UploadResponse;
+      if (isPreview(normalized)) {
+        setAcks(new Set());
+        setPreview(normalized);
+        setUploadError(notice);
+      } else {
+        // An older API build ignores ?preview and APPLIES — never present that as a preview.
+        pendingFileRef.current = null;
+        setResult(normalized as UploadResult);
+        setHistoryKey(k => k + 1);
+      }
+    } catch {
+      // Not a network error (that is handled above) — e.g. an unexpected response shape.
+      if (seq === requestSeq.current) {
+        setUploadError('Something went wrong showing the upload result. Refresh and check the targets before uploading again.');
+      }
+    } finally {
+      if (seq === requestSeq.current) setBusy('idle');
+    }
   }
 
   // Step 1 — pick a file → PREVIEW (validates on the server, writes nothing).
@@ -336,42 +396,27 @@ export default function TargetUploadPage() {
     setAcks(new Set());
     applyingRef.current = false;
 
-    try {
-      // Snapshot the bytes NOW so "Confirm & apply" posts exactly what was previewed, even if the file on disk is
-      // edited in between (the server also checks the bytes against the preview token).
-      let file = picked;
-      if (typeof picked.arrayBuffer === 'function') {
-        try {
-          file = new File([await picked.arrayBuffer()], picked.name, { type: picked.type });
-        } catch {
+    // Snapshot the bytes NOW so "Confirm & apply" posts exactly what was previewed, even if the file on disk is
+    // edited in between (the server also checks the bytes against the preview token).
+    let file = picked;
+    if (typeof picked.arrayBuffer === 'function') {
+      try {
+        file = new File([await picked.arrayBuffer()], picked.name, { type: picked.type });
+      } catch {
+        if (seq === requestSeq.current) {
           setUploadError(`Couldn't read "${picked.name}". Close it in Excel (or pick it again) and retry. ${NOTHING_SAVED_NOTE}`);
-          return;
+          setBusy('idle');
         }
+        return;
       }
-      pendingFileRef.current = file;
-
-      const data = await postUpload(file, 'preview=1', NOTHING_SAVED_NOTE, seq);
-      if (!data) return;
-      const normalized = normalizeRowsEcho(data) as unknown as UploadResponse;
-      if (isPreview(normalized)) {
-        setPreview(normalized);
-      } else {
-        // An older API build ignores ?preview and APPLIES — never present that as a preview.
-        pendingFileRef.current = null;
-        setResult(normalized as UploadResult);
-      }
-    } catch {
-      // Not a network error (that is handled above) — e.g. an unexpected response shape.
-      if (seq === requestSeq.current) {
-        setUploadError('Something went wrong showing the upload result. Refresh and check the targets before uploading again.');
-      }
-    } finally {
-      if (seq === requestSeq.current) setBusy('idle');
     }
+    pendingFileRef.current = file;
+    await runPreview(file, seq);
   }
 
-  // Step 2 — "Confirm & apply": re-post the SAME bytes with the preview token. The server re-validates and refuses
-  // a second apply of the same preview, so a double-click can never apply twice.
+  // Step 2 — "Confirm & apply": re-post the SAME bytes with the preview token and the ticked boxes (each bound to the
+  // count + items it was shown with). The server saves the whole file in ONE transaction (all or nothing) and refuses a
+  // second apply of the same preview, so a double-click / retry can never apply twice.
   async function handleConfirm() {
     const file = pendingFileRef.current;
     if (!preview || !file || applyingRef.current) return;
@@ -382,21 +427,39 @@ export default function TargetUploadPage() {
     setBusy('applying');
     setUploadError('');
     try {
-      const data = await postUpload(
+      const out = await postUpload(
         file,
-        `confirmToken=${encodeURIComponent(preview.previewToken)}&ack=${encodeURIComponent(
-          (preview.notApplied ?? []).map(c => c.category).filter(c => acks.has(c)).join(','),
-        )}`,
+        `confirmToken=${encodeURIComponent(preview.previewToken)}&ack=${encodeURIComponent(ackParam(preview.notApplied ?? [], acks))}`,
         MAYBE_SAVED_NOTE,
         seq,
       );
-      if (!data) {
-        // Error shown; the preview stays. Retrying Confirm is SAFE: if the first attempt did reach the server, the
-        // same preview token is refused ("already applied") — it can never be applied twice.
+      if (!out) { applyingRef.current = false; return; }
+      if (!out.ok) {
         applyingRef.current = false;
+        // A refused / failed attempt is recorded — show it in the history straight away.
+        setHistoryKey(k => k + 1);
+        if (out.status === 412 || out.status === 410) {
+          // What will not be applied changed since the preview (412), or the preview expired (410): nothing was saved.
+          // Check the SAME bytes again so the boxes show the up-to-date counts (unticked) and a fresh confirmation.
+          const recheck = ++requestSeq.current;
+          setPreview(null);
+          setAcks(new Set());
+          setBusy('previewing');
+          await runPreview(file, recheck, `${out.error} The file has been checked again below — read the preview and tick the boxes again.`);
+          return;
+        }
+        if (out.status === 409) {
+          // Already applied, or not the previewed file: this preview is finished — never offer to apply it again.
+          setPreview(null);
+          pendingFileRef.current = null;
+          setFileName('');
+        }
+        // 500 / 503 / network: nothing (or, for a lost reply, possibly everything) was saved — the preview stays and
+        // Confirm & apply can be pressed again safely (an applied preview is refused, never applied twice).
+        setUploadError(out.error);
         return;
       }
-      const applied = normalizeRowsEcho(data) as unknown as UploadResult;
+      const applied = normalizeRowsEcho(out.data) as unknown as UploadResult;
       setAppliedFrom(preview);
       setResult(applied);
       setHistoryKey(k => k + 1);
@@ -747,7 +810,15 @@ export default function TargetUploadPage() {
                     onChange={() => toggleAck(c.category)}
                     disabled={applying}
                   />
-                  <span>{NOT_APPLIED_COPY[c.category]?.ack(c.count) ?? `I understand ${c.count} ${c.category}`}</span>
+                  <span>
+                    {NOT_APPLIED_COPY[c.category]?.ack(c.count) ?? `I understand ${c.count} ${c.category}`}
+                    {c.sample && c.sample.length > 0 && (
+                      <span className="block text-[11px] text-gray-500">
+                        {c.count > c.sample.length ? 'For example: ' : ''}{c.sample.join('; ')}
+                        {c.count > c.sample.length ? ` … and ${(c.count - c.sample.length).toLocaleString('en-IN')} more` : ''}
+                      </span>
+                    )}
+                  </span>
                 </label>
               ))}
             </fieldset>
@@ -783,6 +854,12 @@ export default function TargetUploadPage() {
             )}
             {applying && <p className="text-xs text-gray-500">Saving the targets — keep this page open.</p>}
           </div>
+          {preview.previewExpiresAt && !Number.isNaN(new Date(preview.previewExpiresAt).getTime()) && (
+            <p data-testid="target-upload-expiry" className="text-[11px] text-gray-500">
+              This preview can be confirmed until {formatISTDateTime(preview.previewExpiresAt)} IST. After that, pick the file again.
+              The whole file is saved together or not at all.
+            </p>
+          )}
         </div>
         );
       })()}
@@ -839,6 +916,13 @@ export default function TargetUploadPage() {
                   ? ` (${result.newCount.toLocaleString()} new, ${result.overwriteCount.toLocaleString()} overwritten)` : ''}.
                 {' '}The numbers below are what was actually saved.
               </span>
+            </div>
+          )}
+
+          {result.notificationWarning && (
+            <div role="status" className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5 text-xs text-amber-800">
+              <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{result.notificationWarning}</span>
             </div>
           )}
 

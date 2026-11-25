@@ -69,7 +69,7 @@ describe('target upload — error labels', () => {
       call++;
       if (call === 1) {
         return json({ success: true, data: {
-          preview: true, previewToken: `${'a'.repeat(64)}.${'b'.repeat(32)}`, month: '2026-12', monthsInBatch: ['2026-12'],
+          preview: true, previewToken: `${'a'.repeat(64)}.${'b'.repeat(32)}.${'1'.repeat(13)}.${'c'.repeat(64)}`, month: '2026-12', monthsInBatch: ['2026-12'],
           writableMonths: ['2026-12'], totalRows: 1, acceptedCount: 1, rejectedCount: 0, willSaveCount: 1,
           newCount: 1, overwriteCount: 0, notApplied: [],
           problemRows: [], problemRowCount: 0, problemRowsTruncated: false,

@@ -19,7 +19,13 @@ vi.mock('next/navigation', () => ({
 
 import TargetUploadPage from '../page';
 
-const TOKEN = `${'a'.repeat(64)}.${'b'.repeat(32)}`;
+const TOKEN = `${'a'.repeat(64)}.${'b'.repeat(32)}.${'1'.repeat(13)}.${'c'.repeat(64)}`;
+const FP_R = '1111111111111111';
+const FP_O = '2222222222222222';
+const NA = [
+  { category: 'REJECTED_ROWS', count: 1, fingerprint: FP_R, sample: ['Row 6 — GHOST'] },
+  { category: 'OVERWRITE', count: 2, fingerprint: FP_O, sample: ['O1 · 2026-12', 'O2 · 2026-12'] },
+];
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
 const base = {
@@ -36,15 +42,17 @@ const previewBody = (extra: Record<string, unknown> = {}) => ({
   overwriteExamples: [{ outletCode: 'O1', outletName: 'Alpha', month: '2026-12',
     changes: [{ kpiCode: 'MONTH_TGT', label: 'Month Target', from: 10, to: 12 }, { kpiCode: 'FP1', label: 'Focus Pack', from: 5, to: null }] }],
   overwriteExamplesSampled: 2,
-  notApplied: [{ category: 'REJECTED_ROWS', count: 1 }, { category: 'OVERWRITE', count: 2 }],
+  notApplied: NA,
+  previewExpiresAt: '2026-11-25T07:00:00.000Z',
   ...extra,
 });
 
 const appliedBody = (extra: Record<string, unknown> = {}) => ({
   ...base, batchId: 'tgtup_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', savedCount: 3, newCount: 1, overwriteCount: 2,
   perMonth: [{ month: '2026-12', newCount: 1, overwriteCount: 2 }],
-  notApplied: [{ category: 'REJECTED_ROWS', count: 1 }, { category: 'OVERWRITE', count: 2 }],
-  acknowledged: ['REJECTED_ROWS', 'OVERWRITE'],
+  status: 'APPLIED',
+  notApplied: NA,
+  acknowledged: NA.map(({ category, count, fingerprint }) => ({ category, count, fingerprint })),
   ...extra,
 });
 
@@ -100,7 +108,7 @@ describe('target upload — preview', () => {
     expect(ow).toHaveTextContent('Month Target 10 → 12; Focus Pack 5 → removed');
     // rejected rows listed with the reason; no success banner
     expect(screen.getByText('Rejected rows (1)')).toBeInTheDocument();
-    expect(screen.getByText(/Row 6 — GHOST/).parentElement).toHaveTextContent('Outlet not found');
+    expect(screen.getByText('Rejected rows (1)').parentElement).toHaveTextContent('Row 6 — GHOST: Outlet not found');
     expect(screen.queryByText('Targets submitted successfully')).not.toBeInTheDocument();
   });
 
@@ -219,7 +227,8 @@ describe('target upload — confirm & apply', () => {
 
     expect(await screen.findByText('Targets submitted successfully')).toBeInTheDocument();
     const [p, c] = uploadCalls();
-    expect(c.url).toBe(`/api/admin/targets/upload?confirmToken=${encodeURIComponent(TOKEN)}&ack=${encodeURIComponent('REJECTED_ROWS,OVERWRITE')}`);
+    // each tick is sent with the count + fingerprint it was shown with (the server refuses if they changed)
+    expect(c.url).toBe(`/api/admin/targets/upload?confirmToken=${encodeURIComponent(TOKEN)}&ack=${encodeURIComponent(`REJECTED_ROWS:1:${FP_R},OVERWRITE:2:${FP_O}`)}`);
     // the SAME file is posted again (multipart field "file", same name and bytes)
     const f1 = (p.body as FormData).get('file') as File;
     const f2 = (c.body as FormData).get('file') as File;
@@ -303,5 +312,107 @@ describe('target upload — confirm & apply', () => {
     await pick();
     expect(await screen.findByText('Targets submitted successfully')).toBeInTheDocument();
     expect(screen.queryByTestId('target-upload-preview')).not.toBeInTheDocument();
+  });
+});
+
+describe('target upload — bound acknowledgements, expiry and refusals', () => {
+  async function previewAndTickAll() {
+    render(<TargetUploadPage />);
+    await pick();
+    await screen.findByTestId('target-upload-acks');
+    await tick(/rejected row will not be saved/);
+    await tick(/existing outlet-month targets will be replaced/);
+  }
+
+  it('each box shows which items it covers, and the preview says until when it can be confirmed', async () => {
+    stub(async () => json({ success: true, data: previewBody() }));
+    render(<TargetUploadPage />);
+    await pick();
+    const acks = await screen.findByTestId('target-upload-acks');
+    expect(acks).toHaveTextContent('Row 6 — GHOST');
+    expect(acks).toHaveTextContent('O1 · 2026-12; O2 · 2026-12');
+    // 07:00 UTC = 12:30 pm IST
+    expect(screen.getByTestId('target-upload-expiry')).toHaveTextContent(/can be confirmed until 25 Nov 2026, 12:30 pm IST/i);
+    expect(screen.getByTestId('target-upload-expiry')).toHaveTextContent('saved together or not at all');
+  });
+
+  it('412 (what is not applied changed): the SAME bytes are re-checked, the new counts shown with the boxes UNticked', async () => {
+    let previews = 0;
+    stub(async (url) => {
+      if (url.includes('preview=1')) {
+        previews++;
+        return json({ success: true, data: previews === 1 ? previewBody() : previewBody({
+          overwriteCount: 3, notApplied: [NA[0], { ...NA[1], count: 3, fingerprint: '3333333333333333' }],
+        }) });
+      }
+      return json({ success: false, error: 'What will not be applied has changed since the preview — existing outlet-month targets that will be replaced: now 3 (you confirmed 2). Nothing was saved. Check the up-to-date preview and confirm again.' }, 412);
+    });
+    await previewAndTickAll();
+    await act(async () => { fireEvent.click(confirmBtn()); });
+
+    expect(await screen.findByText(/I understand 3 existing outlet-month targets will be replaced/)).toBeInTheDocument();
+    expect(uploadCalls().map(c => c.url.split('?')[1].split('=')[0])).toEqual(['preview', 'confirmToken', 'preview']);
+    // the re-check posts the same bytes
+    const f1 = (uploadCalls()[0].body as FormData).get('file') as File;
+    const f3 = (uploadCalls()[2].body as FormData).get('file') as File;
+    expect(f3.size).toBe(f1.size);
+    expect(screen.getByRole('alert')).toHaveTextContent(/now 3 \(you confirmed 2\)\. Nothing was saved.*checked again below/);
+    expect(confirmBtn()).toBeDisabled();
+    expect(screen.getByTestId('confirm-disabled-reason')).toHaveTextContent('Tick the 2 remaining boxes above');
+    expect(screen.queryByText('Targets submitted successfully')).not.toBeInTheDocument();
+  });
+
+  it('410 (preview expired): re-checked automatically with a fresh preview, nothing claimed saved', async () => {
+    let previews = 0;
+    stub(async (url) => {
+      if (url.includes('preview=1')) { previews++; return json({ success: true, data: previewBody() }); }
+      return json({ success: false, error: 'This preview has expired (a preview can be confirmed for 30 minutes). Nothing was saved. Check the file again to get a fresh preview.' }, 410);
+    });
+    await previewAndTickAll();
+    await act(async () => { fireEvent.click(confirmBtn()); });
+    expect(await screen.findByRole('alert')).toHaveTextContent(/preview has expired.*checked again below/);
+    expect(previews).toBe(2);
+    expect(screen.getByTestId('target-upload-preview')).toBeInTheDocument();
+    expect(confirmBtn()).toBeDisabled(); // boxes reset
+  });
+
+  it('409 already applied: the message is shown, the preview is closed (never offered again), history reloads', async () => {
+    stub(async (url) => url.includes('preview=1')
+      ? json({ success: true, data: previewBody() })
+      : json({ success: false, error: 'This preview was already applied on 25 Nov 2026, 12:00 pm IST (upload abcd1234) — it was not applied again.' }, 409));
+    await previewAndTickAll();
+    const before = historyLoads;
+    await act(async () => { fireEvent.click(confirmBtn()); });
+    expect(await screen.findByRole('alert')).toHaveTextContent('already applied');
+    expect(screen.queryByTestId('target-upload-preview')).not.toBeInTheDocument();
+    expect(historyLoads).toBe(before + 1);
+  });
+
+  it('500 nothing saved: the honest message is shown, the preview stays and Confirm can be retried', async () => {
+    let confirms = 0;
+    stub(async (url) => {
+      if (url.includes('preview=1')) return json({ success: true, data: previewBody() });
+      confirms++;
+      return confirms === 1
+        ? json({ success: false, error: 'Saving the targets failed, so NOTHING from this file was saved (the whole file is saved together or not at all). Press Confirm & apply again to retry.' }, 500)
+        : json({ success: true, data: appliedBody() });
+    });
+    await previewAndTickAll();
+    await act(async () => { fireEvent.click(confirmBtn()); });
+    expect(await screen.findByRole('alert')).toHaveTextContent('NOTHING from this file was saved');
+    expect(screen.getByTestId('target-upload-preview')).toBeInTheDocument();
+    expect(confirmBtn()).toBeEnabled();
+    await act(async () => { fireEvent.click(confirmBtn()); });
+    expect(await screen.findByText('Targets submitted successfully')).toBeInTheDocument();
+    expect(confirms).toBe(2);
+  });
+
+  it('targets saved but the sales team not notified → said on the done screen', async () => {
+    stub(async (url) => json({ success: true, data: url.includes('preview=1')
+      ? previewBody()
+      : appliedBody({ notificationWarning: 'The targets were saved, but the sales team could not be notified about them.' }) }));
+    await previewAndTickAll();
+    await act(async () => { fireEvent.click(confirmBtn()); });
+    expect(await screen.findByText('The targets were saved, but the sales team could not be notified about them.')).toBeInTheDocument();
   });
 });
