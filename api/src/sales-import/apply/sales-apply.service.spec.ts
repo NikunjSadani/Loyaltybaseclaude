@@ -992,6 +992,89 @@ describe('FOCUS-FROM-TARGETS: preview / apply / recalculate with products from t
     ).rejects.toThrow(/1 problem with the focus products/);
     expect(db.salesUploadBatch.create).not.toHaveBeenCalled();
   });
+
+  // ─── FOCUS-NAMES-FROM-KPI (owner 2026-11-25): no focus names this month → the borrower is NOT calculated ─────────
+  describe('a cases KPI using FOCUS\'s names, in a month with NO focus names (owner decision: not blocked, left empty)', () => {
+    const CASES_DEF = { ...FOCUS_DEF, id: 'd4', kpiCode: 'FOCUS_CASES', measure: 'QUANTITY', order: 3, focusNamesFromKpi: 'FOCUS' };
+    const BDEFS = [...FDEFS, CASES_DEF];
+    const BEXTRA = [...EXTRA, { code: 'FOCUS_CASES', label: 'Focus Cases' }];
+    // ₹-only target rows WITHOUT any focus name (and no FOCUS ₹ target → FOCUS itself has no blocker)
+    const noNames = [
+      { outletCode: 'O1', month: PREV, batchId: 'tb1', targetValues: { OWN_AMT: 1 } },
+      { outletCode: 'O2', month: PREV, batchId: 'tb1', targetValues: { OWN_AMT: 1 } },
+    ];
+    const bdb = (over: Parameters<typeof makeDb>[0] = {}) => fdb({ defs: BDEFS, extraKpis: BEXTRA, targets: noNames, ...over });
+    const MSG = "No focus names in this month's target file — Focus Cases not calculated.";
+
+    it('import: preview is applicable with a red not-calculated warning; apply refuses without the tick (400, nothing written)', async () => {
+      const db = bdb();
+      const p = await services(db).preview.preview('t1', 'imp1');
+      const m = p.months[0];
+      expect(m.canApply).toBe(true);
+      expect(m.reconciliation.blockers).toEqual([]);
+      expect(m.reconciliation.notCalculated).toEqual([{ kpiCode: 'FOCUS_CASES', namesFromKpi: 'FOCUS', message: MSG }]);
+      await expect(services(db).apply.apply(user, 'imp1', applyBody(p))).rejects.toThrow(/Focus|FOCUS_CASES not calculated/);
+      await expect(services(db).apply.apply(user, 'imp1', applyBody(p))).rejects.toBeInstanceOf(BadRequestException);
+      expect(db.$transaction).not.toHaveBeenCalled();
+      await expect(services(db).apply.apply(user, 'imp1', applyBody(p, { acknowledgeNotCalculatedMonths: 'x' }))).rejects.toThrow(
+        /acknowledgeNotCalculatedMonths must be a list of months/,
+      );
+    });
+
+    it('import: with the tick the month applies — FILTER KPIs written, the cases KPI left EMPTY (no key, not 0), acceptance recorded', async () => {
+      const db = bdb();
+      const p = await services(db).preview.preview('t1', 'imp1');
+      const r = await services(db).apply.apply(user, 'imp1', applyBody(p, { acknowledgeNotCalculatedMonths: [PREV] }));
+      expect(r.results[0]).toEqual(expect.objectContaining({ ok: true }));
+      expect(writtenValues(db)).toEqual({ O1: { OWN_AMT: 100, OWN_QTY: 2 }, O2: { OWN_AMT: -25 }, O3: { OWN_AMT: 0 } });
+      const audit = (db.auditLog.create.mock.calls[0] as unknown as [{ data: { newValues: Record<string, unknown> } }])[0].data.newValues;
+      expect(audit.notCalculated).toEqual({ kpiCodes: ['FOCUS_CASES'], acceptedById: user.sub, messages: [MSG] });
+    });
+
+    it('import: names appear between preview and apply → the fingerprint changes (409), never a silent write', async () => {
+      const db = bdb();
+      const p = await services(db).preview.preview('t1', 'imp1');
+      db.outletTarget.findMany.mockImplementation(async () => [tgt(PREV, 'O1', 10, 'P500')] as never);
+      await expect(services(db).apply.apply(user, 'imp1', applyBody(p, { acknowledgeNotCalculatedMonths: [PREV] }))).rejects.toThrow(
+        /changed since the preview/,
+      );
+    });
+
+    it('recalculate: same red warning in the preview; refused without confirmNotCalculated; with it → applied + recorded', async () => {
+      const db = bdb({ history: HIST, historyCombos: HIST_COMBOS });
+      const rp = await services(db).apply.recalcPreview('t1', PREV);
+      expect(rp.canApply).toBe(true);
+      expect(rp.reconciliation.notCalculated).toEqual([{ kpiCode: 'FOCUS_CASES', namesFromKpi: 'FOCUS', message: MSG }]);
+      const ok = { expectedDefinitionsHash: rp.definitionsHash, expectedHistoryAppliedAt: rp.historyAppliedAt, expectedFocusFingerprint: rp.reconciliation.focusFingerprint };
+      await expect(services(db).apply.recalculate(user, PREV, ok)).rejects.toThrow(/not calculated/);
+      expect(db.salesUploadBatch.create).not.toHaveBeenCalled();
+      const r = await services(db).apply.recalculate(user, PREV, { ...ok, confirmNotCalculated: true });
+      expect(r.ok).toBe(true);
+      expect(Object.values(writtenValues(db)).some((v) => 'FOCUS_CASES' in v)).toBe(false);
+      const audit = (db.auditLog.create.mock.calls[0] as unknown as [{ data: { newValues: Record<string, unknown> } }])[0].data.newValues;
+      expect(audit.notCalculated).toEqual(expect.objectContaining({ kpiCodes: ['FOCUS_CASES'] }));
+    });
+
+    it('targets uploaded later → recalculate needs no confirmation and fills the cases values', async () => {
+      const db = bdb({ history: HIST, historyCombos: HIST_COMBOS, targets: TARGETS });
+      const rp = await services(db).apply.recalcPreview('t1', PREV);
+      expect(rp.reconciliation).not.toHaveProperty('notCalculated');
+      const r = await services(db).apply.recalculate(user, PREV, {
+        expectedDefinitionsHash: rp.definitionsHash, expectedHistoryAppliedAt: rp.historyAppliedAt, expectedFocusFingerprint: rp.reconciliation.focusFingerprint,
+      });
+      expect(r.ok).toBe(true);
+      const w = writtenValues(db);
+      expect(w.O1).toHaveProperty('FOCUS_CASES');
+      expect(w.O1.FOCUS).toBe(100);
+    });
+
+    it('a tenant without a borrowing KPI: no notCalculated key, no acknowledgement needed (unchanged)', async () => {
+      const db = fdb({ targets: [], targetBatches: [] });
+      const p = await services(db).preview.preview('t1', 'imp1');
+      expect(p.months[0].reconciliation).not.toHaveProperty('notCalculated');
+      expect((await services(db).apply.apply(user, 'imp1', applyBody(p))).results[0].ok).toBe(true);
+    });
+  });
 });
 
 // ─── FOCUS-FROM-TARGETS: the November 2026 Bajaj fixture end-to-end (REAL focus-products) ─────────────────────────

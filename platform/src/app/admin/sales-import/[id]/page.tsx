@@ -40,6 +40,7 @@ import {
 import {
   MonthReconciliationPanel, reconciliationNeedsAttention, useDimensionLabels, useOutletTypeNames, type OutletTypeNames,
 } from '../_components/month-reconciliation-panel';
+import { NotCalculatedAck, notCalculatedMonths } from '../_components/not-calculated-ack';
 import { DayDataNotice } from '../_components/day-data-notice';
 import { NotIncludedNotice, notIncludedCountText, notIncludedText } from '../_components/not-included-notice';
 
@@ -272,8 +273,10 @@ function LastAppliedRange({ m }: { m: MonthPreview }) {
 
 function MonthRow({
   m, selected, onToggle, partialAck, onPartialAck, importId, onDownloadError, canAct, dims, typeNames, onRefresh,
+  notCalculatedAck = false, onNotCalculatedAck = () => {},
 }: {
   m: MonthPreview; selected: boolean; onToggle(): void; partialAck: boolean; onPartialAck(v: boolean): void;
+  notCalculatedAck?: boolean; onNotCalculatedAck?(v: boolean): void;
   importId: string; onDownloadError(msg: string): void; canAct: boolean;
   dims: SalesDimensionMapping[];
   typeNames: OutletTypeNames;
@@ -358,6 +361,8 @@ function MonthRow({
                 ))}
               </ul>
             )}
+            <NotCalculatedAck month={m.month} label={label} items={m.reconciliation?.notCalculated}
+              checked={notCalculatedAck} onChange={onNotCalculatedAck} canAct={m.canApply && canAct} />
             {partial && m.canApply && canAct && (
               <label className="flex items-start gap-2 text-xs text-gray-800">
                 <input type="checkbox" className="mt-0.5" checked={partialAck} onChange={(e) => onPartialAck(e.target.checked)}
@@ -437,6 +442,8 @@ function PreviewSection({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [partialAcks, setPartialAcks] = useState<Set<string>>(new Set());
   const [olderAck, setOlderAck] = useState(false);
+  /** FOCUS-NAMES-FROM-KPI: months whose not-calculated KPIs the admin accepted. */
+  const [ncAcks, setNcAcks] = useState<Set<string>>(new Set());
   /** The Apply POST is in flight. */
   const [applying, setApplying] = useState(false);
   const [results, setResults] = useState<ApplyMonthResult[] | null>(null);
@@ -503,6 +510,7 @@ function PreviewSection({
       setSelected(new Set(res.filter((x) => !x.ok).map((x) => x.month)));
       setPartialAcks(new Set());
       setOlderAck(false);
+      setNcAcks(new Set());
     }
     onApplied();
     void loadPreview();
@@ -546,7 +554,7 @@ function PreviewSection({
   const noKpis = months.length > 0 && months.every((m) => m.kpis.length === 0);
   const blockers = [
     ...(noKpis ? ['No KPIs are set up for Sales Import yet, so there is nothing to apply. Add them under Settings first.'] : []),
-    ...applyBlockers(months, selected, partialAcks, olderAck),
+    ...applyBlockers(months, selected, partialAcks, olderAck, ncAcks),
   ];
   // Months held back by focus-product problems cannot be ticked; say why next to Apply even when nothing is ticked —
   // under their own "Not available:" heading, so they never read as the reason a ticked good month can't be applied.
@@ -600,6 +608,7 @@ function PreviewSection({
     if (!ok) return;
     const partialMonths = picked.filter(isPartialMonth).map((m) => m.month);
     const fingerprints = focusFingerprintsFor(months, selected);
+    const ncMonths = notCalculatedMonths(months, selected);
     await send({
       months: picked.map((m) => m.month),
       expectedDefinitionsHash: preview.definitionsHash,
@@ -607,6 +616,7 @@ function PreviewSection({
       ...(partialMonths.length ? { acknowledgePartialMonths: partialMonths } : {}),
       ...(anyOlder ? { acknowledgeOlderThanLastApplied: true } : {}),
       ...(Object.keys(fingerprints).length ? { expectedFocusFingerprints: fingerprints } : {}),
+      ...(ncMonths.length ? { acknowledgeNotCalculatedMonths: ncMonths } : {}),
       requestId: newRequestId(),
     });
   }
@@ -847,6 +857,12 @@ function PreviewSection({
                   onToggle={() => toggle(m.month)}
                   partialAck={partialAcks.has(m.month)}
                   onPartialAck={(v) => setPartialAcks((prev) => {
+                    const next = new Set(prev);
+                    if (v) next.add(m.month); else next.delete(m.month);
+                    return next;
+                  })}
+                  notCalculatedAck={ncAcks.has(m.month)}
+                  onNotCalculatedAck={(v) => setNcAcks((prev) => {
                     const next = new Set(prev);
                     if (v) next.add(m.month); else next.delete(m.month);
                     return next;

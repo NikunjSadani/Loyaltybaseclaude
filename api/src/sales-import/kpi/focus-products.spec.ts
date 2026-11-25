@@ -162,7 +162,7 @@ describe('resolveMonthFocus — design §4', () => {
 
   it('no TARGET_NAMES definition → empty resolution, fingerprint ""', () => {
     const res = resolveMonthFocus(input({ defs: [totalDef] }));
-    expect(res).toEqual({ outletFilters: new Map(), outletNameKeys: new Map(), blockers: [], focus: [], fingerprint: '' });
+    expect(res).toEqual({ outletFilters: new Map(), outletNameKeys: new Map(), blockers: [], notCalculated: [], focus: [], fingerprint: '' });
   });
 
   it('out-of-scope outlet is ignored (no filter, no blocker)', () => {

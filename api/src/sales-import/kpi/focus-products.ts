@@ -13,6 +13,7 @@ import type {
   DimMatch,
   FocusBlocker,
   FocusNameSummary,
+  FocusNotCalculated,
   FocusTokenResolution,
   MonthFocusKpi,
   MonthReconciliation,
@@ -142,6 +143,8 @@ export interface MonthFocusResolution {
   /** TARGET_NAMES kpiCode → roster outlet code → the name key the outlet carries (for achieved-by-name). */
   outletNameKeys: ReadonlyMap<string, ReadonlyMap<string, string>>;
   blockers: FocusBlocker[];
+  /** FOCUS-NAMES-FROM-KPI: borrowing KPIs left EMPTY this month (source has no focus name at all). Not blockers. */
+  notCalculated: FocusNotCalculated[];
   /** Focus summaries with `achieved` zeroed (buildMonthReconciliation fills it from the computed rows). */
   focus: MonthFocusKpi[];
   /** design §5; '' when no enabled TARGET_NAMES definition. */
@@ -221,7 +224,7 @@ interface NameGroup {
 export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution {
   const tnDefs = input.defs.filter(isTargetNamesDef);
   if (tnDefs.length === 0) {
-    return { outletFilters: new Map(), outletNameKeys: new Map(), blockers: [], focus: [], fingerprint: '' };
+    return { outletFilters: new Map(), outletNameKeys: new Map(), blockers: [], notCalculated: [], focus: [], fingerprint: '' };
   }
   const { catalogue } = input;
   const resolutionCache = new Map<string, FocusTokenResolution>();
@@ -254,6 +257,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
   // De-dupe identity of a key-less blocker (separator-only names: the name as written). Internal only — the blocker
   // payload stays exactly as before (no `key`).
   const dedupeKeyOf = new Map<FocusBlocker, string>();
+  const notCalculated: FocusNotCalculated[] = [];
 
   for (const def of [...tnDefs].sort((a, b) => cmp(a.kpiCode, b.kpiCode))) {
     const kpiCode = def.kpiCode;
@@ -429,7 +433,19 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
         message: `"${a.token}" in ${display} could mean more than one product: ${orList(a.candidates.map(describeDimMatch))}. Write it so only one product matches (${outletsText(n)}).`,
       });
     }
-    if (missing.length > 0) {
+    // FOCUS-NAMES-FROM-KPI (owner 2026-11-25): the source has NO focus name at all this month (e.g. no target file yet)
+    // → this KPI is NOT calculated (every outlet left empty — no value, not 0), the rest of the month still applies.
+    // Not a blocker: a loud red warning the admin must explicitly accept on apply / confirm on recalculate.
+    const noNamesThisMonth = nameKpi !== kpiCode && inScopeOutlets > 0 && namesWritten === 0;
+    if (noNamesThisMonth) {
+      notCalculated.push({
+        kpiCode,
+        namesFromKpi: nameKpi,
+        message: `No focus names in this month's target file — ${label} not calculated.`,
+      });
+      fpMissing.push([kpiCode, `\u0000NONAMES:${nameKpi}`]);
+    }
+    if (missing.length > 0 && !noNamesThisMonth) {
       const n = missing.length;
       defBlockers.push({
         code: 'FOCUS_MISSING_NAME',
@@ -455,18 +471,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
       dedupeKeyOf.set(blocker, `\u0000SEP:${written}`);
       defBlockers.push(blocker);
     }
-    // FOCUS-NAMES-FROM-KPI: the source carries NO name at all this month (e.g. no target file yet, or its name column
-    // left empty) → every outlet of the borrower would silently get no value. Block, loudly.
-    if (nameKpi !== kpiCode && inScopeOutlets > 0 && namesWritten === 0) {
-      defBlockers.push({
-        code: 'FOCUS_NO_NAMES',
-        kpiCode,
-        outlets: inScopeOutlets,
-        sampleOutletCodes: [],
-        message: `${label}: no ${focusKpiDisplay(nameKpi, input.labelOf)} focus names in this month's target file — every outlet would get no ${label} value. Upload the target file with the focus names first, or stop importing ${label} for now.`,
-      });
-      fpMissing.push([kpiCode, `\u0000NONAMES:${nameKpi}`]);
-    }
+
 
     const names: FocusNameSummary[] = [...groups.values()].map((g) => {
       const name = [...g.spellings.entries()].sort((a, b) => b[1] - a[1] || cmp(a[0], b[0]))[0][0];
@@ -543,7 +548,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
     )
     .digest('hex');
 
-  return { outletFilters, outletNameKeys, blockers, focus, fingerprint };
+  return { outletFilters, outletNameKeys, blockers, notCalculated, focus, fingerprint };
 }
 
 /**
@@ -639,5 +644,7 @@ export function buildMonthReconciliation(args: {
       salesNoTarget: { outlets: salesNoTarget.length, sampleOutletCodes: sample(salesNoTarget) },
     },
     focusFingerprint: resolution.fingerprint,
+    // FOCUS-NAMES-FROM-KPI: only when non-empty (every other reconciliation payload is unchanged).
+    ...(resolution.notCalculated.length > 0 ? { notCalculated: resolution.notCalculated.map((n) => ({ ...n })) } : {}),
   };
 }

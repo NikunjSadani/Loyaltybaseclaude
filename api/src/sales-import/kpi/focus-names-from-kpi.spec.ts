@@ -208,17 +208,22 @@ describe('audit round 2 — scope, no names, separator de-dupe', () => {
     expect([...res.outletFilters.get(FB1C)!.keys()].sort()).toEqual(['R1', 'R2']);
   });
 
-  it('the source has NO focus names at all this month → FOCUS_NO_NAMES blocker (never a silent empty month)', () => {
+  it('the source has NO focus names at all this month → NOT a blocker: the cases KPI is listed as not calculated (owner 2026-11-25)', () => {
+    // ₹-only rows (the borrower's own cases targets are kept here: they must NOT add a missing-name blocker either)
     const t = new Map([...input().targets].map(([k, r]) => [k, tr(r.values, {})]));
-    const res = resolveMonthFocus(input({ defs: [tnDef(FB), fb1Cases()], targets: t }));
-    const b = res.blockers.find((x) => x.kpiCode === FB1C && x.code === 'FOCUS_NO_NAMES')!;
-    expect(b).toEqual(expect.objectContaining({ code: 'FOCUS_NO_NAMES', outlets: 4 }));
-    expect(b.message).toBe(
-      "Focus Brand 1 Cases: no Focus Brand 1 (FOCUS BRAND) focus names in this month's target file — every outlet would get no Focus Brand 1 Cases value. Upload the target file with the focus names first, or stop importing Focus Brand 1 Cases for now.",
-    );
-    // no target file at all for the month → the same
+    const res = resolveMonthFocus(input({ defs: [fb1Cases(), tnDef(FB)], targets: t }));
+    expect(res.blockers.filter((x) => x.kpiCode === FB1C)).toEqual([]);
+    expect(res.notCalculated).toEqual([
+      { kpiCode: FB1C, namesFromKpi: FB, message: "No focus names in this month's target file — Focus Brand 1 Cases not calculated." },
+    ]);
+    expect(res.outletFilters.get(FB1C)!.size).toBe(0); // every outlet left EMPTY (no value, not 0)
+    // no target file at all for the month → the same, nothing blocks
     const none = resolveMonthFocus(input({ defs: [tnDef(FB), fb1Cases()], targets: new Map() }));
-    expect(none.blockers.map((x) => [x.code, x.kpiCode])).toEqual([['FOCUS_NO_NAMES', FB1C]]);
+    expect(none.blockers).toEqual([]);
+    expect(none.notCalculated.map((n) => n.kpiCode)).toEqual([FB1C]);
+    // names present → nothing listed; a tenant without a borrower never lists anything
+    expect(resolveMonthFocus(input({ defs: [tnDef(FB), fb1Cases()] })).notCalculated).toEqual([]);
+    expect(resolveMonthFocus(input({ targets: new Map() })).notCalculated).toEqual([]);
   });
 
   it('a separator-only name is reported once (on the source), payload unchanged (no key)', () => {

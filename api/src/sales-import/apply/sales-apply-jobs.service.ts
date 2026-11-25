@@ -136,6 +136,7 @@ export class SalesApplyJobsService {
       acknowledgePartialMonths: body.acknowledgePartialMonths ?? [],
       acknowledgeOlderThanLastApplied: body.acknowledgeOlderThanLastApplied === true,
       expectedFocusFingerprints: body.expectedFocusFingerprints ?? {},
+      ...(body.acknowledgeNotCalculatedMonths?.length ? { acknowledgeNotCalculatedMonths: body.acknowledgeNotCalculatedMonths } : {}),
     };
     return this.enqueued(await this.insert(user, 'APPLY', importId, requestId, request, months));
   }
@@ -152,6 +153,7 @@ export class SalesApplyJobsService {
       expectedDefinitionsHash: body.expectedDefinitionsHash,
       expectedHistoryAppliedAt: body.expectedHistoryAppliedAt,
       ...(body.expectedFocusFingerprint !== undefined ? { expectedFocusFingerprint: body.expectedFocusFingerprint } : {}),
+      ...(body.confirmNotCalculated === true ? { confirmNotCalculated: true } : {}),
     };
     return this.enqueued(await this.insert(user, 'RECALC', null, requestId, request, [month]));
   }

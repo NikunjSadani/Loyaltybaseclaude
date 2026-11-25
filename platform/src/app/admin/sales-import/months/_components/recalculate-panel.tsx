@@ -27,6 +27,7 @@ import {
 import {
   MonthReconciliationPanel, useDimensionLabels, useOutletTypeNames,
 } from '../../_components/month-reconciliation-panel';
+import { NotCalculatedAck } from '../../_components/not-calculated-ack';
 import { DayDataNotice } from '../../_components/day-data-notice';
 
 /** The pre-release synchronous recalculate answer (one ApplyMonthResult) — still accepted during a deploy. */
@@ -67,6 +68,8 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, 
   const focusOutcome = () => { setTimeout(() => outcomeRef.current?.focus(), 0); };
   /** The lookup says the click recorded nothing → Try again resends the SAME request (same requestId: harmless). */
   const [notRecorded, setNotRecorded] = useState(false);
+  /** FOCUS-NAMES-FROM-KPI: the admin accepted the not-calculated KPIs of this month (required to recalculate). */
+  const [ncAck, setNcAck] = useState(false);
   const lastSent = useRef<SalesMonthRecalcRequest | null>(null);
   /** The month's job this panel shows (this click's, or the one already running when it opened). */
   const [jobId, setJobId] = useState<string | null>(null);
@@ -126,9 +129,11 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, 
   const queuedTooLong = !!job && job.status === 'QUEUED' && job.attempts === 0 && Date.now() - Date.parse(job.createdAt) > JOB_QUEUED_TOO_LONG_MS;
   const progress = job ? job.months.map((m) => monthProgressText(job, m.month, monthLabel(m.month))).join('. ') : '';
   const problem = followProblem;
+  const ncItems = preview?.reconciliation?.notCalculated ?? [];
+  const ncNeedsAck = ncItems.length > 0 && !ncAck;
 
   async function apply() {
-    if (!preview || !preview.canApply || busy) return;
+    if (!preview || !preview.canApply || busy || ncNeedsAck) return;
     const names = preview.kpis.map((k) => k.label || k.kpiCode).join(', ');
     if (!window.confirm(
       `Recalculate ${label} from stored history?\n\nThe Sales Import KPIs${names ? ` (${names})` : ''} are rewritten for every ` +
@@ -139,6 +144,7 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, 
       expectedDefinitionsHash: preview.definitionsHash,
       expectedHistoryAppliedAt: preview.historyAppliedAt,
       ...(preview.reconciliation?.focusFingerprint ? { expectedFocusFingerprint: preview.reconciliation.focusFingerprint } : {}),
+      ...(ncItems.length > 0 ? { confirmNotCalculated: true } : {}),
       requestId: newRequestId(),
     });
   }
@@ -214,7 +220,8 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, 
   const recalcWhy = awaitingList ? 'Recalculate is held until the Months list shows the earlier recalculation has finished.'
     : unknown ? 'Recalculate is held until the page can confirm whether the last one was recorded.'
     : jobRunning ? `${label} is being ${job?.kind === 'APPLY' ? 'applied' : 'recalculated'} — wait for it to finish.`
-      : checking ? 'Checking what happened to the last recalculation.' : '';
+      : checking ? 'Checking what happened to the last recalculation.'
+        : ncNeedsAck ? 'Tick the red warning to accept the KPIs that are not calculated this month.' : '';
   // B-M6: the result is announced too (the visible result card has no live role of its own).
   const liveText = checking ? 'Checking what happened to the recalculation…' : jobRunning ? progress
     : result ? resultsSummary([result], monthLabel, 'recalculated') : notice ?? '';
@@ -315,6 +322,10 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, 
               canAct monthOpen={preview.monthState === 'OPEN'} onRefresh={load}
               refreshHint="close the recalculation and open it again before recalculating" />
           )}
+          {!staleAfterApply && !result && (
+            <NotCalculatedAck month={month} label={label} items={preview.reconciliation?.notCalculated}
+              checked={ncAck} onChange={setNcAck} canAct={preview.canApply} />
+          )}
           {!staleAfterApply && preview.warnings.length > 0 && (
             <ul className="space-y-1" data-testid="recalc-warnings">
               {preview.warnings.map((w) => (
@@ -376,7 +387,7 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, 
           ) : (
             <div className="flex flex-wrap items-center gap-3">
               <Button variant="primary" onClick={apply} loading={applying}
-                disabled={!preview.canApply || preview.kpis.length === 0 || busy}
+                disabled={!preview.canApply || preview.kpis.length === 0 || busy || ncNeedsAck}
                 aria-describedby={recalcWhy ? 'recalc-apply-why' : undefined}
                 data-testid="recalc-apply">
                 Recalculate {label}

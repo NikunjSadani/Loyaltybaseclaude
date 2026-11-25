@@ -419,6 +419,12 @@ export interface ApplyRequest {
   /** month -> MonthReconciliation.focusFingerprint reviewed; required for every month whose fingerprint is non-empty (409 on mismatch). */
   expectedFocusFingerprints?: Record<string, string>;
   /**
+   * FOCUS-NAMES-FROM-KPI (owner 2026-11-25): months whose reconciliation lists `notCalculated` KPIs (no focus names in
+   * the month's target file → those KPIs are left EMPTY). Required for every such month (400 / refused under the lock
+   * otherwise); recorded on the month's apply audit row.
+   */
+  acknowledgeNotCalculatedMonths?: string[];
+  /**
    * A random id the page makes per click (background jobs, 2026-11-18): resending the same request (no reply arrived)
    * returns the SAME job instead of queueing a second one. GET admin/sales-import/apply-jobs?requestId= finds it.
    */
@@ -618,6 +624,8 @@ export interface SalesMonthRecalcRequest {
   expectedHistoryAppliedAt: string;
   /** SalesMonthRecalcPreview.reconciliation.focusFingerprint (required when non-empty; 409 on mismatch). */
   expectedFocusFingerprint?: string;
+  /** FOCUS-NAMES-FROM-KPI: required (true) when the preview's reconciliation lists `notCalculated` KPIs; recorded. */
+  confirmNotCalculated?: boolean;
   /** As ApplyRequest.requestId: resending the same request returns the same job. */
   requestId?: string;
 }
@@ -701,9 +709,9 @@ export interface FocusNameSummary {
  * FOCUS_SOURCE_MISSING (FOCUS-NAMES-FROM-KPI): a definition reads another KPI's names, but that KPI has no enabled
  * 'from the target file' definition — its outlets get no value until the source is fixed.
  * FOCUS_SCOPE_MISMATCH: that definition and its source apply to different outlets (no value until they match).
- * FOCUS_NO_NAMES: the source has no focus name at all in the month's target file (every outlet would get no value).
+ * (A source with NO focus name at all in the month is not a blocker: see MonthReconciliation.notCalculated.)
  */
-export type FocusBlockerCode = 'FOCUS_UNMATCHED' | 'FOCUS_AMBIGUOUS' | 'FOCUS_MISSING_NAME' | 'FOCUS_SOURCE_MISSING' | 'FOCUS_SCOPE_MISMATCH' | 'FOCUS_NO_NAMES';
+export type FocusBlockerCode = 'FOCUS_UNMATCHED' | 'FOCUS_AMBIGUOUS' | 'FOCUS_MISSING_NAME' | 'FOCUS_SOURCE_MISSING' | 'FOCUS_SCOPE_MISMATCH';
 /** Anything here blocks applying the month (canApply false). */
 export interface FocusBlocker {
   code: FocusBlockerCode;
@@ -759,6 +767,21 @@ export interface MonthReconciliation {
    * a changed target file / acceptance / product list since the preview → 409 "refresh the preview".
    */
   focusFingerprint: string;
+  /**
+   * FOCUS-NAMES-FROM-KPI (owner 2026-11-25): KPIs that read another KPI's focus names, which has NO focus name at all in
+   * this month's target file. They are NOT calculated this month (left empty — no value, not 0); everything else is.
+   * Applying needs `acknowledgeNotCalculatedMonths` / recalculating needs `confirmNotCalculated`. Absent when none.
+   */
+  notCalculated?: FocusNotCalculated[];
+}
+
+/** One KPI left empty for the month (see MonthReconciliation.notCalculated). */
+export interface FocusNotCalculated {
+  kpiCode: string;
+  /** The KPI whose focus names it reads. */
+  namesFromKpi: string;
+  /** Red warning text, e.g. "No focus names in this month's target file — FB1 CASES not calculated". */
+  message: string;
 }
 
 /** POST admin/sales-months/:month/focus-acceptances (targets:upload; month OPEN): accept an UNMATCHED token as "not sold yet". */

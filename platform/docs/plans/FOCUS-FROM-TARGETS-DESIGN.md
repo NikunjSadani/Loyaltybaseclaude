@@ -171,8 +171,13 @@ in the same `resolveMonthFocus` pass, so e.g. `FB1 CASES` (QUANTITY) gets exactl
   `api/src/sales-import/kpi/focus-names-from-kpi.spec.ts`).
 - Audit round 2 (2026-11-25): a borrower must have the SAME EFFECTIVE outlet scope as its source (definition types /
   programmes ∩ KPI applies-to) — refused at save, and `FOCUS_SCOPE_MISMATCH` (no values) at run time if the KPI
-  applies-to changes later; a source with borrowers can't change its own types / programmes. `FOCUS_NO_NAMES` blocks a
-  month where the source has no focus name at all (no acknowledgement path: recalculate has none). Separator-only
+  applies-to changes later; a source with borrowers can't change its own types / programmes. A month where the source has no
+  focus name at all is NOT blocked (owner 2026-11-25): see the last bullet. Separator-only
   names de-dupe against the source internally (payload unchanged, still no `key`). A DISABLED borrower is editable
   whatever its source; the source check + borrower check run INSIDE the write transaction under a row lock
   (`SELECT … FOR UPDATE` on the source definition), so a concurrent source disable / borrower save serialise.
+- No focus names in the month (owner decision 2026-11-25): the month applies; each borrowing KPI is left EMPTY (no value,
+  not 0) and listed in `MonthReconciliation.notCalculated` (absent when none) with a red warning "No focus names in this
+  month's target file — <KPI> not calculated". Apply needs `acknowledgeNotCalculatedMonths` (400 before any write;
+  re-checked under the month lock), recalculate needs `confirmNotCalculated: true`; both are recorded on the month's
+  audit row (`notCalculated: { kpiCodes, acceptedById, messages }`). Uploading the targets and recalculating fills them.
