@@ -109,7 +109,7 @@ describe('K-9 — the §9 BSC rule through the real engine, on importer-written 
   const user: JwtPayload = { sub: 'u', role: 'CLIENT_ADMIN', clientId: 't1', phone: '', name: 'A' };
 
   it('PointsComputeService.simulate (the /v1/admin/points-compute/simulate service) gives the same answers', () => {
-    const svc = new PointsComputeService({} as never, {} as never, {} as never, {} as never);
+    const svc = new PointsComputeService({} as never, {} as never, {} as never, {} as never, {} as never);
     for (const c of CASES) {
       const row = ROWS.find((r) => r.outletCode === c.code)!;
       const res = svc.simulate(user, {
@@ -154,6 +154,7 @@ describe('K-9 — the §9 BSC rule through the real engine, on importer-written 
       { getActiveForAttachment: jest.fn(async () => rule) } as never,
       { getEffectiveSettings: jest.fn(async () => ({ pointsEngine: { enabled: true, directCreditEnabled: false } })) } as never,
       {} as never,
+      {} as never, // TenantService — only used when a rule reads a visibility input (none here)
     );
     const preview = await svc.previewCompute(user, { period: '2026-11' });
     const by = Object.fromEntries(preview.rows.map((r) => [r.outletCode, r]));
