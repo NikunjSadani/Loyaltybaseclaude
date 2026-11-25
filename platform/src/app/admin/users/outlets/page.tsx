@@ -34,7 +34,7 @@ import {
 } from '@/lib/outlet-upload';
 import DownloadErrorReportButton from '@/components/admin/DownloadErrorReportButton';
 import { useGifsySettings } from '@/lib/gifsy-settings';
-import { useTenantFeatures } from '@/lib/tenant-features';
+import { useTenantFeatures, ADMIN_FEATURES_URL } from '@/lib/tenant-features';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { useAuthClientId } from '@/lib/platform/use-auth-tenant';
 import { leafIdHeaderForTenant } from '@/lib/employee-hierarchy';
@@ -671,7 +671,7 @@ export default function OutletsPage() {
 
   // Per-tenant geo feature — gates the optional Latitude/Longitude columns in the outlet-master
   // upload template + validation (Bajaj-only; OFF for Deoleo and every other tenant by default).
-  const { features } = useTenantFeatures('/api/admin/settings/config');
+  const { features } = useTenantFeatures(ADMIN_FEATURES_URL);
   const geoEnabled = features.outletMasterGeo;
   // Tenant slug — drives the leaf hierarchy column header ("ISR Code" for Bajaj, "XSR ID" otherwise)
   // in the upload template, validation, guide, and error report. Prefer the AUTHENTICATED tenant

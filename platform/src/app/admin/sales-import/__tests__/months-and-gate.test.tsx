@@ -297,6 +297,22 @@ describe('SalesImportFeatureGate', () => {
     expect(await screen.findByText('inner')).toBeInTheDocument();
   });
 
+  it('GIFSY_STAFF without tenancy:read (/config → 403) still gets the page: the gate reads /features', async () => {
+    // Mirrors the backend for a "Project Manager" staff: /config is 403, the flags-only read is 200.
+    const f = vi.fn((url: string) =>
+      Promise.resolve(
+        url === '/api/admin/settings/features'
+          ? json({ success: true, data: { features: { salesImport: true } } })
+          : json({ success: false, error: 'Forbidden: missing permission tenancy:read' }, 403),
+      ),
+    );
+    vi.stubGlobal('fetch', f);
+    render(<SalesImportFeatureGate><p>inner</p></SalesImportFeatureGate>);
+    expect(await screen.findByText('inner')).toBeInTheDocument();
+    expect(screen.queryByTestId('sales-import-gate-error')).not.toBeInTheDocument();
+    expect(f).toHaveBeenCalledWith('/api/admin/settings/features', expect.anything());
+  });
+
   it('fetch failure is not "disabled" — it offers Retry', async () => {
     stubConfig(json({}, 500));
     render(<SalesImportFeatureGate><p>inner</p></SalesImportFeatureGate>);

@@ -239,9 +239,9 @@ describe('H — admin/settings page (visibility capture mode)', () => {
     expect(code).toMatch(/method.*PUT|PUT.*method/s);
   });
 
-  it('H5: reads mode from GET /api/admin/settings/config (features.visibilityCaptureMode)', () => {
+  it('H5: reads mode from GET /api/admin/settings/features (features.visibilityCaptureMode)', () => {
     const code = src('lib/visibility-capture-mode.ts');
-    expect(code).toMatch(/\/api\/admin\/settings\/config/);
+    expect(code).toMatch(/fetch\('\/api\/admin\/settings\/features'/);
     expect(code).toMatch(/visibilityCaptureMode/);
   });
 

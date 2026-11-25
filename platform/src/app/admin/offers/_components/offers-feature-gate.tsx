@@ -4,15 +4,16 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Spinner } from '@/components/ui/spinner';
 import { Button } from '@/components/ui/button';
 import { authHeader } from '@/lib/api-client';
-import { normalizeFeatures } from '@/lib/tenant-features';
+import { normalizeFeatures, ADMIN_FEATURES_URL } from '@/lib/tenant-features';
 
-const CONFIG_ENDPOINT = '/api/admin/settings/config';
+// Flags-only read (readable by an assumed GIFSY_STAFF without tenancy:read) — same `features` blob as /config.
+const CONFIG_ENDPOINT = ADMIN_FEATURES_URL;
 
 type GateState = 'loading' | 'on' | 'off' | 'error';
 
 /**
  * Renders the Offers admin only when the current tenant's `offerTiles` feature is ON (served by
- * the authenticated /admin/settings/config endpoint — the same source the admin nav reads). The
+ * the authenticated /admin/settings/features endpoint — the same source the admin nav reads). The
  * flag controls the WHOLE feature: this admin page AND the partner-dashboard tiles.
  *
  * An un-assumed GIFSY_ADMIN resolves to the platform tenant, whose flag is OFF, so they see the

@@ -1,7 +1,8 @@
 /* ─── Tenant features (authenticated, DB-backed) ──────────────────────────────
    §A-DOMAIN "P5": per-tenant runtime feature gating is served from the DB via the
    caller's AUTHENTICATED role endpoint — /partner/me, /sales/me,
-   /admin/settings/config — instead of the in-code CLIENT_REGISTRY. Each endpoint
+   /admin/settings/features (flags-only; /admin/settings/config carries the same blob)
+   — instead of the in-code CLIENT_REGISTRY. Each endpoint
    returns the raw `clients.features` blob under `data.features`.
 
    This module is the single FE seam for "the current tenant's features":
@@ -31,6 +32,15 @@ import { isLocationRequired } from '@/lib/location-required';
  * single definition of "safe defaults".
  */
 export const DEFAULT_FEATURES: FeatureFlags = DEFAULT_CLIENT_CONFIG.features;
+
+/**
+ * The admin shell's feature-switches read: GET /v1/admin/settings/features → `{ features }` (the same blob
+ * /admin/settings/config returns under `features`, and nothing else). Readable by GIFSY_ADMIN, CLIENT_ADMIN
+ * and an ASSUMED GIFSY_STAFF holding a grant for the tenant — WITHOUT tenancy:read (owner 2026-11-25), so a
+ * staff role like "Project Manager" sees the flag-gated nav. MIS_USER is refused (as /config refuses it) →
+ * defaults, unchanged. Use this for anything that only needs the flags; keep /config for the full config.
+ */
+export const ADMIN_FEATURES_URL = '/api/admin/settings/features';
 
 /** Coerce an unknown value to boolean with a typed fallback (default when absent). */
 function bool(v: unknown, fallback: boolean): boolean {
@@ -102,7 +112,7 @@ export interface TenantFeaturesState {
 
 /**
  * Fetch the current tenant's features from an authenticated role endpoint (one of
- * /api/partner/me, /api/sales/me, /api/admin/settings/config). Returns
+ * /api/partner/me, /api/sales/me, ADMIN_FEATURES_URL). Returns
  * DEFAULT_FEATURES while loading and on error (settles loading either way, so a
  * consumer that gates on the flags can resolve without hanging).
  */
@@ -124,7 +134,7 @@ export function serverSkewFromResponse(r: { headers?: { get?: (h: string) => str
 
 /**
  * Fetch the current tenant's features from an authenticated role endpoint (one of
- * /api/partner/me, /api/sales/me, /api/admin/settings/config). Returns
+ * /api/partner/me, /api/sales/me, ADMIN_FEATURES_URL). Returns
  * DEFAULT_FEATURES while loading and on error (settles loading either way, so a
  * consumer that gates on the flags can resolve without hanging).
  *

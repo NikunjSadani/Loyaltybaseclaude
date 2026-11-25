@@ -32,7 +32,7 @@ describe('OffersFeatureGate', () => {
     render(<OffersFeatureGate><p>PAGE</p></OffersFeatureGate>);
     expect(await screen.findByTestId('offers-disabled')).toBeInTheDocument();
     expect(screen.queryByText('PAGE')).not.toBeInTheDocument();
-    expect(f).toHaveBeenCalledWith('/api/admin/settings/config', expect.anything());
+    expect(f).toHaveBeenCalledWith('/api/admin/settings/features', expect.anything());
   });
 
   it('renders the page when offerTiles is ON', async () => {

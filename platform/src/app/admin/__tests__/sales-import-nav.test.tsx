@@ -1,7 +1,8 @@
 /// <reference types="vitest/globals" />
 /**
  * Admin nav — "Sales Import" (SALES-IMPORT-PIPELINE-PLAN §11 F-2). Shown ONLY when the tenant feature `salesImport`
- * is ON *and* the role is GIFSY_ADMIN or CLIENT_ADMIN. Default OFF ⇒ Deoleo's nav is unchanged.
+ * is ON *and* the role is GIFSY_ADMIN, GIFSY_STAFF (owner 2026-11-25) or CLIENT_ADMIN. Default OFF ⇒ Deoleo's nav is
+ * unchanged. The flags come from /api/admin/settings/features (readable by an assumed staff without tenancy:read).
  * Run: npx vitest run src/app/admin/__tests__/sales-import-nav.test.tsx
  */
 import React from 'react';
@@ -18,11 +19,15 @@ vi.mock('next/link', () => ({
 }));
 
 const featuresRef: { current: Record<string, unknown> } = { current: {} };
+const endpointRef: { current: string | null } = { current: null };
 vi.mock('@/lib/tenant-features', async (orig) => {
   const actual = await orig<typeof import('@/lib/tenant-features')>();
   return {
     ...actual,
-    useTenantFeatures: () => ({ features: actual.normalizeFeatures(featuresRef.current), loading: false }),
+    useTenantFeatures: (endpoint: string) => {
+      endpointRef.current = endpoint;
+      return { features: actual.normalizeFeatures(featuresRef.current), loading: false };
+    },
   };
 });
 
@@ -65,14 +70,27 @@ describe('Admin nav — Sales Import', () => {
     expect(link()).not.toBeInTheDocument();
   });
 
-  it.each([['CLIENT_ADMIN'], ['GIFSY_ADMIN']])('shown to %s when salesImport is ON', (role) => {
+  it('reads the flags from the flags-only endpoint (not /config)', () => {
+    roleRef.current = 'GIFSY_STAFF';
+    render(<AdminLayout><div /></AdminLayout>);
+    expect(endpointRef.current).toBe('/api/admin/settings/features');
+  });
+
+  it.each([['CLIENT_ADMIN'], ['GIFSY_ADMIN'], ['GIFSY_STAFF']])('shown to %s when salesImport is ON', (role) => {
     roleRef.current = role;
     featuresRef.current = { salesImport: true };
     render(<AdminLayout><div /></AdminLayout>);
     expect(link()).toHaveAttribute('href', '/admin/sales-import');
   });
 
-  it.each([['MIS_USER'], ['GIFSY_STAFF']])('hidden from %s even when salesImport is ON', (role) => {
+  it('hidden from GIFSY_STAFF when salesImport is OFF', () => {
+    roleRef.current = 'GIFSY_STAFF';
+    featuresRef.current = { salesImport: false };
+    render(<AdminLayout><div /></AdminLayout>);
+    expect(link()).not.toBeInTheDocument();
+  });
+
+  it.each([['MIS_USER']])('hidden from %s even when salesImport is ON', (role) => {
     roleRef.current = role;
     featuresRef.current = { salesImport: true };
     render(<AdminLayout><div /></AdminLayout>);

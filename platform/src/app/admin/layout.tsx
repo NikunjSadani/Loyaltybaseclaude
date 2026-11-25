@@ -43,7 +43,7 @@ import {
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { appDisplayName } from '@/lib/platform/app-display-name';
-import { useTenantFeatures } from '@/lib/tenant-features';
+import { useTenantFeatures, ADMIN_FEATURES_URL } from '@/lib/tenant-features';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useTodayLabel } from '@/lib/use-today-label';
 import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
@@ -199,8 +199,8 @@ const ALL_NAV_ITEMS = [
   // roles as the BE @Roles + the admin/offers/layout.tsx guard).
   { href: '/admin/offers', label: "This Month's Offers", icon: BadgePercent, featureFlag: 'offerTiles' as const, offersAdmin: true },
   // Sales Import (DMS invoice-line file → importer-owned KPI achievements). Tenant feature `salesImport` (default
-  // OFF → dormant everywhere, Deoleo unchanged) AND GIFSY_ADMIN (assumed) + CLIENT_ADMIN only — the same two roles
-  // as the BE @Roles + the admin/sales-import/layout.tsx guard. See SALES-IMPORT-PIPELINE-PLAN §11 F-2.
+  // OFF → dormant everywhere, Deoleo unchanged) AND GIFSY_ADMIN (assumed) / GIFSY_STAFF (assumed, targets:*) /
+  // CLIENT_ADMIN — matching the admin/sales-import/layout.tsx guard. See SALES-IMPORT-PIPELINE-PLAN §11 F-2.
   { href: '/admin/sales-import', label: 'Sales Import', icon: FileSpreadsheet, featureFlag: 'salesImport' as const, salesImportAdmin: true },
   { href: '/admin/reports',  label: 'Reports',          icon: FileBarChart2, featureFlag: null },
   // Downloads — the caller's background report files (DOWNLOADS-PAGE.md). Shown to every admin role:
@@ -237,7 +237,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const clientConfig = useClientConfig();
   // Feature gating is DB-sourced via the authenticated tenant-config endpoint
   // (§A-DOMAIN "P5"), NOT the in-code registry. Branding still comes from clientConfig.
-  const { features } = useTenantFeatures('/api/admin/settings/config');
+  // /admin/settings/features (flags only) — readable by an assumed GIFSY_STAFF without tenancy:read.
+  const { features } = useTenantFeatures(ADMIN_FEATURES_URL);
   const adminSession = useAdminSession();
   // Master Visibility switch (per-tenant, default OFF). Lives in GifsySettings, NOT ClientConfig
   // features — so it is gated here directly rather than via the featureFlag map below.

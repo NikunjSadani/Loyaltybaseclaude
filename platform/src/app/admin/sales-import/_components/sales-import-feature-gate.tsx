@@ -4,15 +4,16 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Spinner } from '@/components/ui/spinner';
 import { Button } from '@/components/ui/button';
 import { authHeader } from '@/lib/api-client';
-import { normalizeFeatures } from '@/lib/tenant-features';
+import { normalizeFeatures, ADMIN_FEATURES_URL } from '@/lib/tenant-features';
 
-const CONFIG_ENDPOINT = '/api/admin/settings/config';
+// Flags-only read (readable by an assumed GIFSY_STAFF without tenancy:read) — same `features` blob as /config.
+const CONFIG_ENDPOINT = ADMIN_FEATURES_URL;
 
 type GateState = 'loading' | 'on' | 'off' | 'error';
 
 /**
  * Renders Sales Import only when the current tenant's `salesImport` feature is ON (same source as the admin nav:
- * the authenticated /admin/settings/config endpoint). Copy of the Offers gate. An un-assumed GIFSY_ADMIN resolves
+ * the authenticated /admin/settings/features endpoint). Copy of the Offers gate. An un-assumed GIFSY_ADMIN resolves
  * to the platform tenant (flag OFF) → the "assume a tenant" hint. A FAILED fetch is NOT "not enabled": it shows
  * "Couldn't load settings" + Retry. The backend re-checks the flag (uncached) on every write anyway.
  */

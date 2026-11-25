@@ -4,6 +4,7 @@ import { AdminCoreService } from './admin-core.service';
 import { AdminUsersController } from './users.controller';
 import { AdminSalesUsersController } from './sales-users.controller';
 import { AdminSettingsController } from './settings.controller';
+import { AdminFeatureFlagsController } from './feature-flags.controller';
 import { AdminHierarchyConfigController } from './hierarchy-config.controller';
 import { AdminForceLogoutAllController } from './force-logout-all.controller';
 import { AdminDashboardController } from './dashboard.controller';
@@ -31,6 +32,7 @@ import { TdsModule } from '../tds/tds.module';
     AdminUsersController,
     AdminSalesUsersController,
     AdminSettingsController,
+    AdminFeatureFlagsController,
     AdminHierarchyConfigController,
     AdminForceLogoutAllController,
     AdminDashboardController,

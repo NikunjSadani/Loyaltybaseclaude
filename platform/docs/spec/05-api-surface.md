@@ -36,6 +36,7 @@ tenant-scoped via `clientId`.
 | POST | `/admin/users/bulk-edit` | Bulk user edits | admin |
 | POST | `/admin/force-logout-all` | Global kill switch — revoke every session (all tenants) | GIFSY_ADMIN only |
 | GET | `/admin/settings/config` | Read tenant config from DB (Client row) | admin |
+| GET | `/admin/settings/features` | Tenant feature switches ONLY (`{ features }`) — nav + feature gates | GIFSY_ADMIN · CLIENT_ADMIN (own) · GIFSY_STAFF (assumed + granted tenant; no `tenancy:read` needed) |
 
 ## 2 · Tenancy & Platform Config
 | Method | Endpoint | Purpose | Role |
