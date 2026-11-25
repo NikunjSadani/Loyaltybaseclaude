@@ -168,6 +168,17 @@ function compiledDefScope(def: ScopeDef): CompiledScope | null {
   return compiled;
 }
 
+/**
+ * FOCUS-NAMES-FROM-KPI: a canonical key of the definition's EFFECTIVE scope (own outletTypes / programs ∩ the KPI's
+ * applies-to; trimmed, UPPERCASED, sorted). Two definitions with the same key write exactly the same outlets.
+ */
+export function effectiveScopeKey(def: ScopeDef): string {
+  const c = compiledDefScope(def);
+  if (c === null) return 'DISJOINT';
+  const f = (x: ReadonlySet<string> | null) => (x === null ? null : [...x].sort());
+  return JSON.stringify([f(c.outletTypes), f(c.programs), f(c.subPrograms)]);
+}
+
 /** Same rule as common/applies-to `facetHasValue`: empty facet = all; D4 blank outlet value = out; trimmed + ci. */
 function facetAllows(set: ReadonlySet<string> | null, value: string | null | undefined): boolean {
   if (set === null) return true;

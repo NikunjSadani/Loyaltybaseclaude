@@ -700,8 +700,10 @@ export interface FocusNameSummary {
 /**
  * FOCUS_SOURCE_MISSING (FOCUS-NAMES-FROM-KPI): a definition reads another KPI's names, but that KPI has no enabled
  * 'from the target file' definition — its outlets get no value until the source is fixed.
+ * FOCUS_SCOPE_MISMATCH: that definition and its source apply to different outlets (no value until they match).
+ * FOCUS_NO_NAMES: the source has no focus name at all in the month's target file (every outlet would get no value).
  */
-export type FocusBlockerCode = 'FOCUS_UNMATCHED' | 'FOCUS_AMBIGUOUS' | 'FOCUS_MISSING_NAME' | 'FOCUS_SOURCE_MISSING';
+export type FocusBlockerCode = 'FOCUS_UNMATCHED' | 'FOCUS_AMBIGUOUS' | 'FOCUS_MISSING_NAME' | 'FOCUS_SOURCE_MISSING' | 'FOCUS_SCOPE_MISMATCH' | 'FOCUS_NO_NAMES';
 /** Anything here blocks applying the month (canApply false). */
 export interface FocusBlocker {
   code: FocusBlockerCode;

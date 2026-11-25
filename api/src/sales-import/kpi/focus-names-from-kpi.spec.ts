@@ -143,11 +143,12 @@ describe('resolveMonthFocus — focusNamesFromKpi', () => {
     expect(res.outletFilters.get(FB1C)!.has('R2')).toBe(false);
   });
 
-  it('a ₹ target without a name at an outlet OUTSIDE the ₹ KPI scope (but in the cases scope) is flagged on the cases KPI', () => {
+  it('a ₹ target without a name at an outlet OUTSIDE the ₹ KPI scope (but in the cases scope) → FOCUS_SCOPE_MISMATCH (scopes must match)', () => {
     const t = new Map(input().targets);
     t.set('W1', tr({ [FB]: 100 }, {}));
     const res = resolveMonthFocus(input({ defs: [tnDef(FB, 'AMOUNT', { outletTypes: ['SSS'] }), fb1Cases({ outletTypes: ['WS'] })], targets: t }));
-    expect(res.blockers.map((b) => [b.code, b.kpiCode, b.sampleOutletCodes])).toEqual([['FOCUS_MISSING_NAME', FB1C, ['W1']]]);
+    // audit round 2: different scopes are refused outright (the same names over different outlets ≠ the same products)
+    expect(res.blockers.map((b) => [b.code, b.kpiCode, b.sampleOutletCodes])).toEqual([['FOCUS_SCOPE_MISMATCH', FB1C, ['W1', 'W2']]]);
   });
 
   it('an UNMATCHED token is reported once (on the source); accepting it on the source clears both', () => {
@@ -164,13 +165,13 @@ describe('resolveMonthFocus — focusNamesFromKpi', () => {
     expect(tok.accepted).toEqual({ byName: 'Ops', at: '2026-11-25T00:00:00.000Z' });
   });
 
-  it('an outlet only in the cases KPI scope still reports its unmatched token (on the cases KPI)', () => {
+  it('an outlet only in the cases KPI scope → FOCUS_SCOPE_MISMATCH, not a per-token blocker', () => {
     const t = new Map(input().targets);
     t.set('W1', tr({ [FB1C]: 1 }, { [FB]: 'ZZZ' }));
     const res = resolveMonthFocus(
       input({ defs: [tnDef(FB, 'AMOUNT', { outletTypes: ['SSS'] }), fb1Cases({ outletTypes: ['WS'] })], targets: t }),
     );
-    expect(res.blockers.map((b) => [b.code, b.kpiCode, b.key])).toEqual([['FOCUS_UNMATCHED', FB1C, 'ZZZ']]);
+    expect(res.blockers.map((b) => [b.code, b.kpiCode])).toEqual([['FOCUS_SCOPE_MISMATCH', FB1C]]); // audit round 2
   });
 
   it('source not an enabled own-names TARGET_NAMES definition → FOCUS_SOURCE_MISSING, no outlet gets a value', () => {
@@ -189,6 +190,44 @@ describe('resolveMonthFocus — focusNamesFromKpi', () => {
     const a = resolveMonthFocus(input({ defs: [tnDef(FB), tnDef(FB2), fb1Cases()] }));
     const b = resolveMonthFocus(input({ defs: [tnDef(FB), tnDef(FB2), fb1Cases({ focusNamesFromKpi: FB2 })] }));
     expect(a.fingerprint).not.toBe(b.fingerprint);
+  });
+});
+
+describe('audit round 2 — scope, no names, separator de-dupe', () => {
+  it('scope mismatch at run time (e.g. the KPI applies-to changed later) → FOCUS_SCOPE_MISMATCH, no outlet gets a value', () => {
+    const res = resolveMonthFocus(input({ defs: [tnDef(FB), fb1Cases({ kpiScope: { outletTypes: ['WS'], programs: [], subPrograms: [] } })] }));
+    expect(res.blockers.map((b) => [b.code, b.kpiCode, b.outlets])).toEqual([['FOCUS_SCOPE_MISMATCH', FB1C, 2]]);
+    expect(res.outletFilters.get(FB1C)!.size).toBe(0);
+  });
+
+  it('the same EFFECTIVE scope written differently (definition types vs KPI applies-to) is not a mismatch', () => {
+    const res = resolveMonthFocus(input({
+      defs: [tnDef(FB, 'AMOUNT', { outletTypes: ['sss'] }), fb1Cases({ kpiScope: { outletTypes: ['SSS'], programs: [], subPrograms: [] } })],
+    }));
+    expect(res.blockers).toEqual([]);
+    expect([...res.outletFilters.get(FB1C)!.keys()].sort()).toEqual(['R1', 'R2']);
+  });
+
+  it('the source has NO focus names at all this month → FOCUS_NO_NAMES blocker (never a silent empty month)', () => {
+    const t = new Map([...input().targets].map(([k, r]) => [k, tr(r.values, {})]));
+    const res = resolveMonthFocus(input({ defs: [tnDef(FB), fb1Cases()], targets: t }));
+    const b = res.blockers.find((x) => x.kpiCode === FB1C && x.code === 'FOCUS_NO_NAMES')!;
+    expect(b).toEqual(expect.objectContaining({ code: 'FOCUS_NO_NAMES', outlets: 4 }));
+    expect(b.message).toBe(
+      "Focus Brand 1 Cases: no Focus Brand 1 (FOCUS BRAND) focus names in this month's target file — every outlet would get no Focus Brand 1 Cases value. Upload the target file with the focus names first, or stop importing Focus Brand 1 Cases for now.",
+    );
+    // no target file at all for the month → the same
+    const none = resolveMonthFocus(input({ defs: [tnDef(FB), fb1Cases()], targets: new Map() }));
+    expect(none.blockers.map((x) => [x.code, x.kpiCode])).toEqual([['FOCUS_NO_NAMES', FB1C]]);
+  });
+
+  it('a separator-only name is reported once (on the source), payload unchanged (no key)', () => {
+    const t = new Map(input().targets);
+    t.set('R1', tr({ [FB]: 10 }, { [FB]: '&' }));
+    const res = resolveMonthFocus(input({ defs: [tnDef(FB), fb1Cases()], targets: t }));
+    const sep = res.blockers.filter((b) => b.message.startsWith('"&"'));
+    expect(sep.map((b) => b.kpiCode)).toEqual([FB]);
+    expect(sep[0]).not.toHaveProperty('key');
   });
 });
 
@@ -291,6 +330,7 @@ function db(defsByCode: Record<string, ReturnType<typeof row>> = {}) {
     },
     auditLog: { create: jest.fn(async () => ({})) },
   };
+  d.$queryRaw = jest.fn(async () => []); // row locks (SELECT … FOR UPDATE)
   d.$transaction = jest.fn(async (cb: (tx: unknown) => unknown) => cb(d));
   return d;
 }
@@ -359,6 +399,56 @@ describe('SalesKpiDefService — focusNamesFromKpi', () => {
     // A harmless patch (order) is still allowed.
     await s.patch(user, 'd1', { order: 4 });
     expect(d.salesKpiDefinition.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('scope must equal the source\'s effective scope (definition types / programmes AND the KPI applies-to)', async () => {
+    const d = db({ [FB]: row({ outletTypes: ['RETAILER'] }) });
+    await expect(new SalesKpiDefService(d as never).create(user, casesDto())).rejects.toThrow(
+      /"FB1 CASES" must apply to exactly the same outlets as "FOCUS BRAND"/,
+    );
+    // same effective scope via the KPI's own applies-to → accepted
+    d.kpiDef.findMany.mockResolvedValue([{ code: FB1C, outletType: null, outletTypes: ['RETAILER'], programs: [], subPrograms: [] }]);
+    await new SalesKpiDefService(d as never).create(user, casesDto());
+    expect(d.salesKpiDefinition.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('editing a DISABLED borrower whose source is disabled is allowed; enabling it re-checks the source', async () => {
+    const d = db({ [FB]: row({ enabled: false }) });
+    d.salesKpiDefinition.findFirst.mockResolvedValue(row({ id: 'd9', kpiCode: FB1C, measure: 'QUANTITY', focusNamesFromKpi: FB, enabled: false }));
+    const s = new SalesKpiDefService(d as never);
+    await s.patch(user, 'd9', { order: 7 });
+    expect(d.salesKpiDefinition.update).toHaveBeenCalledTimes(1);
+    await expect(s.patch(user, 'd9', { enabled: true })).rejects.toThrow(/is not a Sales Import KPI whose products come from the target file/);
+  });
+
+  it('atomic: the source is locked and re-read INSIDE the write transaction, before the write', async () => {
+    const d = db({ [FB]: row() });
+    const order: string[] = [];
+    d.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => { order.push('tx'); return cb(d); });
+    d.$queryRaw.mockImplementation(async () => { order.push('lock'); return []; });
+    d.salesKpiDefinition.findUnique.mockImplementation(async ({ where }: { where: { clientId_kpiCode: { kpiCode: string } } }) => {
+      order.push(`read:${where.clientId_kpiCode.kpiCode}`);
+      return where.clientId_kpiCode.kpiCode === FB ? row() : null;
+    });
+    d.salesKpiDefinition.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => { order.push('write'); return { ...row(), ...data }; });
+    await new SalesKpiDefService(d as never).create(user, casesDto());
+    expect(order).toEqual(['tx', 'lock', `read:${FB}`, `read:${FB1C}`, 'write']);
+    // the source side locks its own row before looking for borrowers
+    const d2 = db();
+    const o2: string[] = [];
+    d2.salesKpiDefinition.findFirst.mockResolvedValue(row());
+    d2.$queryRaw.mockImplementation(async () => { o2.push('lock'); return []; });
+    d2.salesKpiDefinition.findMany.mockImplementation(async () => { o2.push('borrowers'); return []; });
+    d2.salesKpiDefinition.update.mockImplementation(async () => { o2.push('write'); return row({ enabled: false }); });
+    await new SalesKpiDefService(d2 as never).disable(user, 'd1');
+    expect(o2).toEqual(['lock', 'borrowers', 'write']);
+  });
+
+  it('a borrowed-from definition cannot change its outlet scope (409)', async () => {
+    const d = db();
+    d.salesKpiDefinition.findFirst.mockResolvedValue(row());
+    d.salesKpiDefinition.findMany.mockResolvedValue([{ kpiCode: FB1C }]);
+    await expect(new SalesKpiDefService(d as never).patch(user, 'd1', { outletTypes: ['RETAILER'] })).rejects.toBeInstanceOf(ConflictException);
   });
 
   it('clearing it (null / "") stores NULL and the definition reads its own names again', async () => {

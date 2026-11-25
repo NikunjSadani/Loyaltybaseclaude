@@ -204,7 +204,7 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
           ownedCodes={ownedBy(editing.id)}
           focusNameSources={(defs ?? [])
             .filter((d) => d.enabled && d.productSource === 'TARGET_NAMES' && !d.focusNamesFromKpi && d.id !== editing.id)
-            .map((d) => ({ kpiCode: d.kpiCode, label: kpiLabel(d.kpiCode) }))}
+            .map((d) => ({ kpiCode: d.kpiCode, label: kpiLabel(d.kpiCode), outletTypes: d.outletTypes, programs: d.programs }))}
           mapping={mapping}
           combos={combos}
           segments={segments}

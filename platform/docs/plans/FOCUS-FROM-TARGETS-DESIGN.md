@@ -169,3 +169,10 @@ in the same `resolveMonthFocus` pass, so e.g. `FB1 CASES` (QUANTITY) gets exactl
   gets a value, month blocked).
 - NULL (every existing row) = unchanged: same DTO, lite, `definitionsHash` and focus fingerprint (pinned in
   `api/src/sales-import/kpi/focus-names-from-kpi.spec.ts`).
+- Audit round 2 (2026-11-25): a borrower must have the SAME EFFECTIVE outlet scope as its source (definition types /
+  programmes ∩ KPI applies-to) — refused at save, and `FOCUS_SCOPE_MISMATCH` (no values) at run time if the KPI
+  applies-to changes later; a source with borrowers can't change its own types / programmes. `FOCUS_NO_NAMES` blocks a
+  month where the source has no focus name at all (no acknowledgement path: recalculate has none). Separator-only
+  names de-dupe against the source internally (payload unchanged, still no `key`). A DISABLED borrower is editable
+  whatever its source; the source check + borrower check run INSIDE the write transaction under a row lock
+  (`SELECT … FOR UPDATE` on the source definition), so a concurrent source disable / borrower save serialise.

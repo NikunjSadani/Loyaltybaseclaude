@@ -81,6 +81,23 @@ describe('KPI editor — focus names from another KPI', () => {
     expect(apiMock.patchKpi.mock.calls[0][1]).not.toHaveProperty('focusNamesFromKpi');
   });
 
+  it('a different outlet scope than the source shows a warning; the same scope does not', () => {
+    const src = [{ kpiCode: 'FOCUS BRAND', label: 'Focus Brand 1', outletTypes: ['RETAILER'], programs: [] }];
+    renderEditor({ ...NEW, id: 'k2', kpiCode: 'FB1 CASES', productSource: 'TARGET_NAMES', focusNamesFromKpi: 'FOCUS BRAND' }, src);
+    expect(screen.getByTestId('focus-names-from-scope')).toHaveTextContent('Use the same outlet types and programmes as FOCUS BRAND (types RETAILER, all programmes)');
+    cleanup();
+    renderEditor({ ...NEW, id: 'k2', kpiCode: 'FB1 CASES', productSource: 'TARGET_NAMES', focusNamesFromKpi: 'FOCUS BRAND', outletTypes: ['retailer'] }, src);
+    expect(screen.queryByTestId('focus-names-from-scope')).not.toBeInTheDocument();
+  });
+
+  it('"Duplicate as cases KPI" copies the outlet types / programmes too', () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const { onDuplicateAsCases } = renderEditor({ ...NEW, id: 'k1', kpiCode: 'FOCUS BRAND', measure: 'AMOUNT', productSource: 'TARGET_NAMES', outletTypes: ['RETAILER'], programs: ['Gold'] });
+    fireEvent.click(screen.getByRole('button', { name: 'Duplicate as cases KPI' }));
+    expect(onDuplicateAsCases).toHaveBeenCalledWith(expect.objectContaining({ outletTypes: ['RETAILER'], programs: ['Gold'], focusNamesFromKpi: 'FOCUS BRAND' }));
+    confirm.mockRestore();
+  });
+
   it('"Duplicate as cases KPI" of a from-the-target-file ₹ KPI starts a cases KPI using ITS focus names', () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     const { onDuplicateAsCases } = renderEditor({ ...NEW, id: 'k1', kpiCode: 'FOCUS BRAND', measure: 'AMOUNT', productSource: 'TARGET_NAMES' });

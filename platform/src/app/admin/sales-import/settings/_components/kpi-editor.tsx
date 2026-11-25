@@ -161,7 +161,7 @@ export function KpiEditor({
    * FOCUS-NAMES-FROM-KPI: the OTHER enabled "from the target file" definitions that read their own names — the KPIs
    * whose focus names this one may use.
    */
-  focusNameSources?: Array<{ kpiCode: string; label: string }>;
+  focusNameSources?: Array<{ kpiCode: string; label: string; outletTypes?: string[]; programs?: string[] }>;
   mapping: SalesColumnMapping;
   combos: SalesImportCombos | null;
   /** The tenant's outlet types / programmes; an empty (or unavailable) list falls back to free text. */
@@ -222,6 +222,25 @@ export function KpiEditor({
     blockers.push("A KPI can't use its own focus names as another KPI's. Pick a different KPI, or use this KPI's own name column.");
   } else if (fromTargets && namesFrom && !namesFromSource) {
     blockers.push(`${namesFrom} is not a 'from the target file' KPI with its own names. Pick another KPI, or use this KPI's own name column.`);
+  }
+  // FOCUS-NAMES-FROM-KPI: the same names only mean the same products per outlet over the same outlets. The server
+  // compares the EFFECTIVE scopes (definition ∩ KPI applies-to); here the visible parts are compared.
+  let namesFromScopeNote: string | null = null;
+  if (namesFrom && namesFromSource) {
+    const norm = (xs: readonly string[] | undefined) => JSON.stringify([...new Set((xs ?? []).map((x) => x.trim().toUpperCase()))].sort());
+    const srcKpi = tenantKpis.find((k) => k.code === namesFrom);
+    const kpiScopeKey = (k: TenantKpi | undefined) => {
+      const s = kpiScopeOf(k);
+      return JSON.stringify([norm(s.outletTypes), norm(s.programs), norm(s.subPrograms)]);
+    };
+    if (norm(def.outletTypes) !== norm(namesFromSource.outletTypes) || norm(def.programs) !== norm(namesFromSource.programs)) {
+      namesFromScopeNote = `Use the same outlet types and programmes as ${namesFrom} (${[
+        namesFromSource.outletTypes?.length ? `types ${namesFromSource.outletTypes.join(', ')}` : 'all types',
+        namesFromSource.programs?.length ? `programmes ${namesFromSource.programs.join(', ')}` : 'all programmes',
+      ].join(', ')}), so both count the same outlets.`;
+    } else if (selectedKpi && srcKpi && kpiScopeKey(selectedKpi) !== kpiScopeKey(srcKpi)) {
+      namesFromScopeNote = `The KPI ${def.kpiCode} applies to different outlets than ${namesFrom} (KPI settings → applies-to). Make them the same, so both count the same outlets.`;
+    }
   }
   if (fromTargets && !namesFrom && selectedKpi?.hasNameOverride === false) {
     blockers.push(`Turn on the per-outlet name column for ${selectedKpi.label || def.kpiCode} under Targets → KPI settings first, or pick the products here.`);
@@ -363,6 +382,12 @@ export function KpiEditor({
               <p className="text-[11px] text-gray-600" data-testid="focus-names-from-note">
                 Each outlet counts the products written for <strong>{namesFromSource.label || namesFrom}</strong> in that
                 month&apos;s target file — the same products as {namesFrom}, counted in {def.measure === 'QUANTITY' ? 'cases' : def.measure === 'AMOUNT' ? '₹' : 'products bought'}.
+              </p>
+            )}
+            {namesFromScopeNote && (
+              <p role="status" data-testid="focus-names-from-scope"
+                className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                {namesFromScopeNote} Saving is refused while the two cover different outlets.
               </p>
             )}
             {!namesFrom && selectedKpi?.hasNameOverride && selectedKpi.nameOverrideLabel && (
