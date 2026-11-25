@@ -66,15 +66,24 @@ export function simulate(body: {
 export function previewCompute(body: { period: string; program?: string | null; kpiCode?: string | null }): Promise<ApiResponse<ComputePreview>> {
   return api.post<ComputePreview>(`${COMPUTE}/preview`, body);
 }
-export function commitCompute(body: { period: string; program?: string | null; kpiCode?: string | null; expectedKey?: string | null }): Promise<ApiResponse<ComputeCommitResult>> {
+export function commitCompute(body: {
+  period: string;
+  program?: string | null;
+  kpiCode?: string | null;
+  expectedKey?: string | null;
+  /** §3a: the pending-visibility outlet count the admin accepted (server refuses a mismatch). */
+  acceptVisibilityPending?: number | null;
+}): Promise<ApiResponse<ComputeCommitResult>> {
   return api.post<ComputeCommitResult>(`${COMPUTE}/commit`, body);
 }
 
 // ── Binary downloads (export credit-upload xlsx / review report) ──────────────────────
-function computeQs(q: { period: string; program?: string | null; kpiCode?: string | null }): string {
+type ComputeQ = { period: string; program?: string | null; kpiCode?: string | null; acceptVisibilityPending?: number | null };
+function computeQs(q: ComputeQ): string {
   const params = new URLSearchParams({ period: q.period });
   if (q.program) params.set('program', q.program);
   if (q.kpiCode) params.set('kpiCode', q.kpiCode);
+  if (typeof q.acceptVisibilityPending === 'number') params.set('acceptVisibilityPending', String(q.acceptVisibilityPending));
   return params.toString();
 }
 /**
@@ -84,11 +93,11 @@ function computeQs(q: { period: string; program?: string | null; kpiCode?: strin
 function download(url: string, filename: string): Promise<DownloadOutcome> {
   return downloadOrQueue(url, { fallbackFileName: filename, init: { credentials: 'same-origin' } });
 }
-export const downloadExport = (q: { period: string; program?: string | null; kpiCode?: string | null }) =>
+export const downloadExport = (q: ComputeQ) =>
   download(`${COMPUTE}/export?${computeQs(q)}`, `points-credit-upload-${q.period}.xlsx`);
 export const downloadPreviewReport = (q: { period: string; program?: string | null; kpiCode?: string | null }) =>
   download(`${COMPUTE}/preview-report?${computeQs(q)}`, `points-preview-${q.period}.xlsx`);
-export const downloadPayoutReport = (q: { period: string; program?: string | null; kpiCode?: string | null }) =>
+export const downloadPayoutReport = (q: ComputeQ) =>
   download(`${COMPUTE}/payout-report?${computeQs(q)}`, `points-payout-report-${q.period}.xlsx`);
 
 // ── Settings ────────────────────────────────────────────────────────────────────────

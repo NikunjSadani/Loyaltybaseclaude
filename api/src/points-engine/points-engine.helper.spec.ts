@@ -954,7 +954,19 @@ describe('visibility inputs (§3a)', () => {
     expect(expectOk(evaluateRule(all, visCtx({ approvedWindows: 1, approved: 1, windows: 2 }))).points).toBe(0);
   });
 
-  it('validateRule accepts the three visibility sources and rejects an unknown key / a non-number type', () => {
+  it('inScope tells "not applicable" from "not approved"', () => {
+    const r = rule({
+      inputs: [
+        { ref: 'inScope', source: 'visibility:inScope', type: 'number', nullAs: 'reject' },
+        { ref: 'ok', source: 'visibility:approved', type: 'number', nullAs: 'reject' },
+      ],
+      pipeline: [{ type: 'formula', id: 'f', expr: 'if(inScope == 0, 100, if(ok == 1, 100, 0))', output: 'set' }],
+    });
+    expect(expectOk(evaluateRule(r, visCtx({ inScope: 0, approved: 0, approvedWindows: 0, windows: 0 }))).points).toBe(100);
+    expect(expectOk(evaluateRule(r, visCtx({ inScope: 1, approved: 0, approvedWindows: 0, windows: 1 }))).points).toBe(0);
+  });
+
+  it('validateRule accepts the four visibility sources and rejects an unknown key / a non-number type', () => {
     const mk = (source: string, type: 'number' | 'enum' = 'number') =>
       rule({
         inputs: [{ ref: 'v', source, type, nullAs: 'reject', ...(type === 'enum' ? { values: ['1'] } : {}) }],
@@ -963,6 +975,7 @@ describe('visibility inputs (§3a)', () => {
     expect(validateRule(mk('visibility:approved'))).toEqual([]);
     expect(validateRule(mk('visibility:approvedWindows'))).toEqual([]);
     expect(validateRule(mk('visibility:windows'))).toEqual([]);
+    expect(validateRule(mk('visibility:inScope'))).toEqual([]);
     expect(validateRule(mk('visibility:approvd')).join(' ')).toMatch(/unknown visibility source "visibility:approvd"/);
     expect(validateRule(mk('visibility:approved', 'enum')).join(' ')).toMatch(/visibility input must be type 'number'/);
   });

@@ -106,48 +106,69 @@ formula engine is the wrong *default*. Hence the hybrid.)
 ### 3a. Visibility (POSM) inputs — `visibility:*` (owner decision 2026-11-25, shared engine, owner-approved)
 
 A rule can read the outlet's **visibility result for the compute month** — to gate a payout on approved
-visibility (Bajaj SAMT) or to pay a visibility payout (Bajaj Unnati). Three NUMBER input sources:
+visibility (Bajaj SAMT) or to pay a visibility payout (Bajaj Unnati). Four NUMBER input sources:
 
 | Source | Builder label | Value |
 |---|---|---|
 | `visibility:approved` | Visibility approved this month (1/0) | 1 if ≥ 1 window of the month is approved, else 0 |
 | `visibility:approvedWindows` | Approved visibility windows this month | how many windows of the month are approved |
-| `visibility:windows` | Visibility windows in the month | windows at the tenant's capture frequency (1–4; 1 for AMOUNT_UPLOAD) — for "every window approved" rules |
+| `visibility:windows` | Visibility windows in the month | windows of the month THIS OUTLET was in scope for (≤ the frequency's 1–4; 1 for AMOUNT_UPLOAD with a record; 0 out of scope) — for "every window approved" rules (`approvedWindows >= windows && windows > 0`) |
+| `visibility:inScope` | Outlet in the visibility programme (1/0) | 1 when visibility applies to the outlet this month, else 0 — tells "not applicable" (e.g. a wholesaler) from "not approved" |
 
 `validateRule` rejects any other `visibility:<key>` and a non-`number` visibility input. Code:
 `api/src/points-engine/points-engine-visibility.loader.ts` (loader + the approval rule), `resolveRaw` in
-`points-engine.helper.ts` (binding), `PointsComputeService` (wiring).
+`points-engine.helper.ts` (binding), `PointsComputeService` (wiring + the pending gate).
 
-**"Approved" = the Visibility report's "Approved"** (no new rule). PHOTO_APPROVAL: a window counts when the capture's
-FINAL status is `APPROVED` **and** the outlet is in that window's universe (`visibilityWindowUniverseWhere` — a
-closed window uses the outlets live + KYC-approved during it, an open one today's in-scope outlets), exactly as
-`visibility-report.service` builds its slots. Consequences, decided:
+**"Approved" (fix round 2026-11-25).** PHOTO_APPROVAL: a window counts when the capture's FINAL status is `APPROVED`
+and EITHER (a) the outlet is in that window's dated universe (`visibilityWindowUniverseWhere` — the Visibility
+report's per-window rule: a closed window = outlets live + KYC-approved during it, an open one = today's in-scope),
+OR (b) the outlet's TYPE / PROGRAMME is in the visibility programme — an approved capture is proof of the visit, so it
+counts even when the outlet's created / KYC dates put it outside the dated universe (an outlet loaded late). (b) is a
+deliberate difference from the report (which drops such captures as "not counted"); every such capture is reported
+(`preview.visibility.countedOutsideDatedScope`). Decided:
 - **Per-photo review** rolls up server-side (all required photos approved → `APPROVED`), so a half-reviewed capture is not approved.
-- **Imported old-app captures** are stored `APPROVED` (the old app kept only approved visits) → they **count**.
+- **Imported old-app captures** are stored `APPROVED` (the old app kept only approved visits) → they **count**. A closed
+  window with no capture that was (partly) on the old app carries the report's marker in the row note
+  ("P1: No approved record — part of this window was on the old app" / "Not tracked for imported months"), not a plain 0.
 - `SUBMITTED` (waiting for review), `CHANGES_REQUESTED`, `REJECTED` — open **or** closed window — **do not count**.
-  The trace names waiting / re-take windows ("0 of 1 window approved (1 waiting for review)") so a pending review is never a silent 0.
-- Only the month's windows at the CURRENT frequency are read (the report ignores an older frequency's window key too).
+- **NOT counted, always reported** (`preview.visibility.excluded` + the outlet's row note / `row.visibility.excludedApprovals`):
+  an APPROVED capture of an outlet whose type / programme is NOT in the programme (`notInProgramme`); an APPROVED
+  capture under an OLDER frequency's window key (e.g. `-P2` after a move to once a month — its day range is unknown;
+  `olderFrequency`).
 - Read AS OF the compute: an approval landing later changes the next run (the POINTS commit TOCTOU key catches it).
 
-**AMOUNT_UPLOAD** tenants: the month's uploaded `OutletVisibilityRecord`; `APPROVED` → 1 of 1; `PENDING` /
-`UNDER_REVIEW` → 0; no record → 0 ("no visibility status uploaded"). Capture mode + master switch come from
-`TenantService` (switch read uncached).
+**Pending reviews / open windows — never silent (money gate).** Per outlet the loader counts windows still WAITING FOR
+REVIEW and in-scope windows STILL OPEN without an approval (AMOUNT_UPLOAD: a `PENDING` / `UNDER_REVIEW` record = waiting).
+Those outlets read "not approved" for those windows NOW. The preview shows `outletsWaitingReview`, `outletsOpenWindow`,
+`openWindowsInMonth` and `outletsPending` (counted over the run's own outlets — a program filter narrows it). While
+`outletsPending > 0` the **credit-upload export, the payout report and direct credit are REFUSED (409)** unless the
+request carries `acceptVisibilityPending = outletsPending` (the admin ticks "I accept N outlets will read visibility =
+not approved…" on the compute screen; a changed count = re-confirm). Enforced server-side in
+`PointsComputeService.assertVisibilityPendingAccepted` (commit) and the export kinds (at file build). Each accepted
+action writes an `AuditLog` row (`action APPROVE`, `entityType POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED`, entityId =
+the batch id for commit / `<clientId>:<period>` for a file; metadata = the counts, route, filter, sourceKey). The
+review report is not gated (it is the review).
 
-**Missing vs zero.** An outlet **outside the visibility scope** (wrong outlet type / programme, or not live during
-the month's windows) gets real **0**s, and its row says "not in visibility scope (…)" (`row.visibility.scope =
-NOT_IN_SCOPE`; `NO_RECORD` for AMOUNT_UPLOAD). When the **tenant has no usable visibility** (switched off, or no
-outlet types in the programme) the values are **absent** → the input's own `nullAs` applies (`reject` → SKIP), the
-SKIP reason names why, and the preview shows an amber "no visibility result" banner (`preview.visibility`).
+**AMOUNT_UPLOAD** tenants: the month's uploaded `OutletVisibilityRecord`; `APPROVED` → 1 of 1; `PENDING` /
+`UNDER_REVIEW` → 0 (pending); no record → 0, inScope 0 ("no visibility status uploaded"). Capture mode + master
+switch come from `TenantService` (switch read uncached).
+
+**Missing vs zero.** An outlet **outside the visibility scope** gets real **0**s (inScope 0), and its row says "not in
+visibility scope (…)" (`row.visibility.scope = NOT_IN_SCOPE`; `NO_RECORD` for AMOUNT_UPLOAD). When the **tenant has
+no usable visibility** (switched off — this also hides past approvals, owner-confirmed — or no outlet types in the
+programme) the values are **absent** → the input's own `nullAs` applies (`reject` → SKIP), the SKIP reason names why,
+and the preview shows an amber "no visibility result" banner.
 
 **Cost / isolation.** Loaded lazily, ONCE per compute, only when a resolved rule declares a `visibility:*` input —
 a run whose rules never read visibility (Deoleo; every existing rule) issues **no** visibility query and is
-unchanged. PHOTO_APPROVAL = 2 parallel tenant-scoped queries (counted captures with one `OR` branch per window +
-in-scope outlets); AMOUNT_UPLOAD = 1. Keyed by outletCode — no N+1.
+unchanged. PHOTO_APPROVAL = the month's captures (1) + one dated-universe outlet query per window (≤ 4) + the old-app
+go-live lookups (2, one cached) — all tenant-scoped, in parallel; AMOUNT_UPLOAD = 1. Keyed by outletCode — no N+1.
 
-**Output.** Each row of such a rule carries `row.visibility` {approvedWindows, approved, windows, scope,
-waitingWindows, note} and its explanation starts with the note (a formula trace does not echo its inputs);
-`preview.visibility` summarises the run. The simulator takes test values (`context.visibility`) and returns
-`visibilityUsed`.
+**Output.** Each row of such a rule carries `row.visibility` {approvedWindows, approved, windows, inScope, scope,
+waitingWindows, openWindows, excludedApprovals, note} and its explanation starts with the note (a formula trace does
+not echo its inputs); `preview.visibility` summarises the run. The simulator takes test values (`context.visibility`),
+rejects impossible ones (non-negative whole numbers; approved / inScope ∈ {0,1}; windows ≤ 4; approvedWindows ≤
+windows; approved = 1 exactly when approvedWindows ≥ 1; inScope 0 ⇒ nothing approved) and returns `visibilityUsed`.
 
 **Metro.** `Outlet.metro` is FREE TEXT read through `segment:metro`. Bajaj data uses **`Metro`** / **`Non Metro`**
 (RESUME 2026-11-16: Metro 1,657 / Non Metro 4,834). Declare the metro input as an enum with `values: ['Metro','Non Metro']`

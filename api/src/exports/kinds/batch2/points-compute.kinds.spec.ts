@@ -422,6 +422,32 @@ describe('points-* export kinds', () => {
     expect(ok.prisma.auditLog.create).toHaveBeenCalledTimes(1);
   }, XLSX_TIMEOUT);
 
+  it('§3a pending visibility: credit file + payout report refused until the count is accepted (then audited); review report never gated', async () => {
+    const pending = preview(10, {
+      visibility: {
+        month: '2026-07', mode: 'PHOTO_APPROVAL', available: true, windows: 1, openWindowsInMonth: 0,
+        outletsApproved: 5, outletsWithData: 8, outletsWaitingReview: 3, outletsOpenWindow: 0, outletsPending: 3,
+        countedOutsideDatedScope: 0, excluded: { olderFrequency: 0, notInProgramme: 0 },
+      },
+    });
+    const s = setup(pending);
+    await expect(renderKind(POINTS_CREDIT_UPLOAD_KIND, s.ctx, params())).rejects.toThrow(/3 outlets will read visibility = NOT approved/);
+    await expect(renderKind(POINTS_PAYOUT_REPORT_KIND, s.ctx, params({ period: '2026-07', acceptVisibilityPending: '2' }))).rejects.toThrow(
+      /accepted 2, but the count is now 3/,
+    );
+    await expect(renderKind(POINTS_PREVIEW_REPORT_KIND, s.ctx, params())).resolves.toBeDefined();
+
+    const ok = setup(pending);
+    await renderKind(POINTS_PAYOUT_REPORT_KIND, ok.ctx, params({ period: '2026-07', acceptVisibilityPending: '3' }));
+    expect(ok.prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'APPROVE',
+        entityType: 'POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED',
+        metadata: expect.objectContaining({ outletsPending: 3, route: 'payoutReport' }),
+      }),
+    });
+  }, XLSX_TIMEOUT);
+
   it('always heavy (whole-tenant compute in the worker); access, validation, names', () => {
     for (const k of [POINTS_CREDIT_UPLOAD_KIND, POINTS_PREVIEW_REPORT_KIND, POINTS_PAYOUT_REPORT_KIND]) {
       expect(k.isHeavy(params())).toBe(true);

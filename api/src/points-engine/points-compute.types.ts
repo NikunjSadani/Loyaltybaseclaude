@@ -63,8 +63,13 @@ export interface ComputePreviewRow {
     approvedWindows: number;
     approved: 0 | 1;
     windows: number;
+    inScope: 0 | 1;
     scope: 'IN_SCOPE' | 'NOT_IN_SCOPE' | 'NO_RECORD';
     waitingWindows: number;
+    /** In-scope windows still open with no approval (the rep can still capture). */
+    openWindows: number;
+    /** APPROVED captures of this outlet NOT counted, by reason (older frequency / outlet not in the programme). */
+    excludedApprovals: { olderFrequency: number; notInProgramme: number };
     note: string;
   };
 }

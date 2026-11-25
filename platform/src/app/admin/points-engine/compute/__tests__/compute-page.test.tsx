@@ -49,6 +49,16 @@ const exportMock = downloadExport as unknown as ReturnType<typeof vi.fn>;
 const reportMock = downloadPreviewReport as unknown as ReturnType<typeof vi.fn>;
 const payoutReportMock = downloadPayoutReport as unknown as ReturnType<typeof vi.fn>;
 
+/** A preview.visibility block (§3a) — defaults: available, nothing pending, no exceptions. */
+function vis(over: Partial<NonNullable<ComputePreview['visibility']>> = {}): NonNullable<ComputePreview['visibility']> {
+  return {
+    month: '2026-10', mode: 'PHOTO_APPROVAL', available: true, windows: 2, openWindowsInMonth: 0,
+    outletsApproved: 3, outletsWithData: 5, outletsWaitingReview: 0, outletsOpenWindow: 0, outletsPending: 0,
+    countedOutsideDatedScope: 0, excluded: { olderFrequency: 0, notInProgramme: 0 },
+    ...over,
+  };
+}
+
 function makePreview(over: Partial<ComputePreview> = {}): ComputePreview {
   return {
     clientId: 'deoleo',
@@ -196,28 +206,54 @@ describe('Points Engine compute page', () => {
     previewMock.mockResolvedValue({
       success: true,
       data: makePreview({
-        visibility: { month: '2026-10', mode: 'PHOTO_APPROVAL', available: true, windows: 2, outletsApproved: 3, outletsWithData: 5 },
+        visibility: vis({ countedOutsideDatedScope: 2, excluded: { olderFrequency: 1, notInProgramme: 0 } }),
       }),
     });
     render(<ComputePage />);
     await runPreview();
     expect((await screen.findByTestId('visibility-summary')).textContent).toMatch(/3 outlets with approved visibility/);
+    const exc = (await screen.findByTestId('visibility-exceptions')).textContent ?? '';
+    expect(exc).toMatch(/2 approved capture\(s\) counted for outlets added or KYC-approved after their window/);
+    expect(exc).toMatch(/1 approved capture\(s\) NOT counted — taken under an older capture frequency/);
+    expect(screen.queryByTestId('visibility-pending')).not.toBeInTheDocument();
   });
 
   it('PE-C2b2: amber banner + the reason when a rule reads visibility but there is no visibility result', async () => {
     previewMock.mockResolvedValue({
       success: true,
       data: makePreview({
-        visibility: {
-          month: '2026-10', mode: 'PHOTO_APPROVAL', available: false, windows: 0, outletsApproved: 0, outletsWithData: 0,
+        visibility: vis({
+          available: false, windows: 0, outletsApproved: 0, outletsWithData: 0,
           unavailableReason: 'Visibility is switched off for this tenant, so there is no visibility result to read.',
-        },
+        }),
       }),
     });
     render(<ComputePage />);
     await runPreview();
     expect(await screen.findByTestId('visibility-unavailable')).toBeInTheDocument();
     expect(screen.getByText(/Visibility is switched off for this tenant/)).toBeInTheDocument();
+  });
+
+  it('PE-C2d: pending visibility blocks Export / Credit until the admin ticks "I accept N", then sends N', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({ visibility: vis({ outletsWaitingReview: 2, outletsOpenWindow: 3, outletsPending: 4, openWindowsInMonth: 1 }) }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    const box = await screen.findByTestId('visibility-pending');
+    expect(box.textContent).toMatch(/4 outlets will read visibility = NOT approved/);
+    expect(box.textContent).toMatch(/2 with a capture still waiting for review · 3 with a window still open/);
+    const creditBtn = await screen.findByRole('button', { name: /credit in portal/i });
+    expect(creditBtn).toBeDisabled();
+    fireEvent.click(creditBtn);
+    expect(commitMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('visibility-accept'));
+    expect(creditBtn).not.toBeDisabled();
+    fireEvent.click(creditBtn);
+    await waitFor(() => expect(commitMock).toHaveBeenCalledTimes(1));
+    expect(commitMock).toHaveBeenCalledWith(expect.objectContaining({ acceptVisibilityPending: 4 }));
   });
 
   it('PE-C2c: no visibility block when no rule read visibility', async () => {

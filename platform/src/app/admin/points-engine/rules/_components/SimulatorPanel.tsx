@@ -207,6 +207,8 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
                       id={`sim-vis-${k}`}
                       type="number"
                       min={0}
+                      max={k === 'approved' || k === 'inScope' ? 1 : 4}
+                      step={1}
                       value={ctx.visibility[k] ?? ''}
                       placeholder={k === 'approved' ? '1 or 0 · blank = missing' : 'blank = missing'}
                       onChange={(e) => setVis(k, e.target.value)}

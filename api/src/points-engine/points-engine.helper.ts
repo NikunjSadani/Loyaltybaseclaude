@@ -58,9 +58,10 @@ const ROUNDING_MODES: ReadonlySet<string> = new Set(['half_up', 'half_even', 'fl
  * result for the compute month. All NUMBER inputs:
  *   approved        → 1 if ≥ 1 window of the month is APPROVED, else 0;
  *   approvedWindows → how many windows of the month are APPROVED;
- *   windows         → how many windows the month has at the tenant's capture frequency (for "every window" rules).
+ *   windows         → how many windows of the month the outlet was in scope for (for "every window" rules);
+ *   inScope         → 1 when the outlet is in the visibility programme for the month, else 0.
  */
-export const VISIBILITY_SOURCE_KEYS: ReadonlySet<string> = new Set(['approved', 'approvedWindows', 'windows']);
+export const VISIBILITY_SOURCE_KEYS: ReadonlySet<string> = new Set(['approved', 'approvedWindows', 'windows', 'inScope']);
 
 /** True when an input reads the visibility result (the compute service loads visibility data only then). */
 export function isVisibilityInput(input: { source?: string | null } | null | undefined): boolean {

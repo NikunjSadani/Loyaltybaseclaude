@@ -27,7 +27,7 @@ export interface RuleInput {
   /**
    * Alternate source, e.g. "target:CASES_SOLD" → `OutletTarget.targetValues["CASES_SOLD"]`. Kinds:
    * `target:<kpi>` · `achievement:<kpi>` · `pct:<kpi>` · `segment:<field>` ·
-   * `visibility:approved | approvedWindows | windows` (number inputs — see EvalContext.visibility).
+   * `visibility:approved | approvedWindows | windows | inScope` (number inputs — see EvalContext.visibility).
    */
   source?: string;
   type: 'number' | 'enum';
@@ -222,8 +222,10 @@ export interface EvalContext {
     approvedWindows?: number | null;
     /** 1 when approvedWindows ≥ 1, else 0 (numeric so gate/formula nodes can test it). */
     approved?: number | null;
-    /** Windows in the month at the tenant's capture frequency (1–4); 1 for AMOUNT_UPLOAD. */
+    /** Windows of the month the OUTLET was in scope for (≤ the frequency's 1–4); 1 for AMOUNT_UPLOAD with a record. */
     windows?: number | null;
+    /** 1 when the outlet is in the visibility programme for the month, else 0 ("not applicable" vs "not approved"). */
+    inScope?: number | null;
   };
   /** Optional identifiers for trace/debug (NOT read by rule logic). */
   meta?: { outletCode?: string; period?: string };

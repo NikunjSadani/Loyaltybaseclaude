@@ -63,6 +63,7 @@ describe('InputsCard — visibility source', () => {
       'Visibility approved this month (1/0)',
       'Approved visibility windows this month',
       'Visibility windows in the month',
+      'Outlet in the visibility programme (1/0)',
     ]);
     // Visibility values are always numbers → the type picker is locked.
     expect((screen.getByLabelText('Type') as HTMLSelectElement).disabled).toBe(true);
@@ -71,6 +72,8 @@ describe('InputsCard — visibility source', () => {
 
     fireEvent.change(which, { target: { value: 'approvedWindows' } });
     expect(latest[0].source).toBe('visibility:approvedWindows');
+    fireEvent.change(which, { target: { value: 'inScope' } });
+    expect(latest[0].source).toBe('visibility:inScope');
   });
 });
 

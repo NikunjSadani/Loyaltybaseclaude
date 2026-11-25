@@ -109,14 +109,15 @@ export interface EvalContext {
   targets: Record<string, number | null>;
   segment: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
   /** Test values for `visibility:*` inputs (a missing key = absent → the input's null policy). */
-  visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null };
+  visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null; inScope?: number | null };
 }
 
 /** The `visibility:<key>` input sources (design §3a) — keys + the plain labels the builder shows. */
-export const VISIBILITY_SOURCES: ReadonlyArray<{ key: 'approved' | 'approvedWindows' | 'windows'; label: string; hint: string }> = [
+export const VISIBILITY_SOURCES: ReadonlyArray<{ key: 'approved' | 'approvedWindows' | 'windows' | 'inScope'; label: string; hint: string }> = [
   { key: 'approved', label: 'Visibility approved this month (1/0)', hint: '1 when at least one visibility window of the month is approved, else 0.' },
   { key: 'approvedWindows', label: 'Approved visibility windows this month', hint: 'How many of the month’s visibility windows are approved.' },
-  { key: 'windows', label: 'Visibility windows in the month', hint: 'How many windows the month has at the capture frequency (for “every window approved” rules).' },
+  { key: 'windows', label: 'Visibility windows in the month', hint: 'How many of the month’s windows this outlet was in the visibility programme for (for “every window approved” rules).' },
+  { key: 'inScope', label: 'Outlet in the visibility programme (1/0)', hint: '1 when visibility applies to this outlet this month, 0 when it does not (e.g. a wholesaler) — tells “not applicable” apart from “not approved”.' },
 ];
 export interface TraceStep {
   nodeId: string;
@@ -165,8 +166,11 @@ export interface ComputePreviewRow {
     approvedWindows: number;
     approved: 0 | 1;
     windows: number;
+    inScope: 0 | 1;
     scope: 'IN_SCOPE' | 'NOT_IN_SCOPE' | 'NO_RECORD';
     waitingWindows: number;
+    openWindows: number;
+    excludedApprovals: { olderFrequency: number; notInProgramme: number };
     note: string;
   };
 }
@@ -192,8 +196,18 @@ export interface ComputePreview {
     available: boolean;
     unavailableReason?: string;
     windows: number;
+    /** Windows of the month still open at compute time. */
+    openWindowsInMonth: number;
     outletsApproved: number;
     outletsWithData: number;
+    outletsWaitingReview: number;
+    outletsOpenWindow: number;
+    /** Outlets reading "not approved" because a review is pending / a window is open — must be accepted to export / credit. */
+    outletsPending: number;
+    /** Approved captures counted although the outlet was outside the dated window scope (loaded late). */
+    countedOutsideDatedScope: number;
+    /** Approved captures NOT counted, by reason. */
+    excluded: { olderFrequency: number; notInProgramme: number };
   };
 }
 export interface ComputeCommitResult {

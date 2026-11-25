@@ -258,6 +258,8 @@ export class PointsComputeService {
     // Visibility (POSM) inputs (§3a): loaded lazily, ONCE, the first time a resolved rule declares a
     // `visibility:*` input — a run whose rules never read visibility issues no visibility query at all.
     let visibilityLoad: Promise<VisibilityInputData> | null = null;
+    /** Outlets of THIS run whose rule read visibility — the preview's visibility counts cover exactly these. */
+    const visibilityOutletCodes = new Set<string>();
     const getVisibility = () => (visibilityLoad ??= this.loadVisibility(clientId, period, (settings as { visibilityConfig?: unknown }).visibilityConfig));
 
     for (const outlet of outlets) {
@@ -333,6 +335,7 @@ export class PointsComputeService {
         if (usesVisibility) {
           visData = await getVisibility();
           visFacts = visibilityFactsFor(visData, outlet);
+          visibilityOutletCodes.add(outlet.outletCode);
         }
 
         const ctx: EvalContext = {
@@ -349,8 +352,11 @@ export class PointsComputeService {
                 approvedWindows: visFacts.approvedWindows,
                 approved: visFacts.approved,
                 windows: visFacts.windows,
+                inScope: visFacts.inScope,
                 scope: visFacts.scope,
                 waitingWindows: visFacts.waitingWindows,
+                openWindows: visFacts.openWindows,
+                excludedApprovals: visFacts.excludedApprovals,
                 note: visFacts.note,
               },
             }
@@ -529,7 +535,7 @@ export class PointsComputeService {
       sourceKey: '', // set below
       // Present ONLY when a rule read visibility — the month's visibility setup + counts, shown on the preview so
       // an unusable setup (switched off / no scope) is loud. Absent for every run that never touches visibility.
-      ...(visibilityLoad ? { visibility: summarizeVisibility(await visibilityLoad) } : {}),
+      ...(visibilityLoad ? { visibility: summarizeVisibility(await visibilityLoad, visibilityOutletCodes) } : {}),
     };
     // Deterministic key over the creditable (OK, amount>0) rows — the UI stores it and passes it back as
     // `expectedKey` on commit; commitCompute reuses this exact value so a run that changed since preview is
@@ -580,7 +586,14 @@ export class PointsComputeService {
    */
   async commitCompute(
     user: JwtPayload,
-    opts: { period: string; program?: string | null; kpiCode?: string | null; expectedKey?: string | null },
+    opts: {
+      period: string;
+      program?: string | null;
+      kpiCode?: string | null;
+      expectedKey?: string | null;
+      /** The pending-visibility outlet count the admin accepted (must equal the fresh run's — §3a). */
+      acceptVisibilityPending?: number | null;
+    },
   ): Promise<ComputeCommitResult> {
     // MONEY GATE read UNCACHED + fail-closed: a Gifsy "turn it off" must take effect immediately across
     // the fleet (the 5-min per-instance settings cache would leave a revoked capability live on stale
@@ -596,6 +609,8 @@ export class PointsComputeService {
     }
 
     const preview = await this.previewCompute(user, opts);
+    // Visibility still pending (waiting for review / open window) must be explicitly accepted — never silent (§3a).
+    PointsComputeService.assertVisibilityPendingAccepted(preview, opts.acceptVisibilityPending);
     const uploadRows = PointsComputeService.mapPreviewToUploadRows(preview); // OK rows only, whole points
     if (uploadRows.length === 0) {
       throw new BadRequestException(
@@ -651,6 +666,12 @@ export class PointsComputeService {
       { kind: POINTS_ENGINE_SOURCE, key: sourceKey },
     );
 
+    // Record the admin's acceptance of pending visibility against the batch (audit trail; §3a).
+    await PointsComputeService.recordVisibilityAcceptance(this.prisma, user, preview, {
+      route: 'commit',
+      entityId: batch.id,
+    });
+
     // Count OTHER credit batches for this period — ANY source (engine OR manual upload) — so the UI can
     // warn about possible double-crediting (Option A: cross-batch overlap is warned, not blocked).
     const priorBatchesThisPeriod = await this.prisma.creditBatch.count({
@@ -698,7 +719,7 @@ export class PointsComputeService {
         achievements?: Record<string, number | null>;
         targets?: Record<string, number | null>;
         segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
-        visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null };
+        visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null; inScope?: number | null };
       };
     },
   ): {
@@ -733,6 +754,7 @@ export class PointsComputeService {
             approvedWindows: toNumOrNull(rawVis.approvedWindows),
             approved: toNumOrNull(rawVis.approved),
             windows: toNumOrNull(rawVis.windows),
+            inScope: toNumOrNull(rawVis.inScope),
           }
         : undefined;
     const ctx: EvalContext = {
@@ -742,13 +764,67 @@ export class PointsComputeService {
       ...(visibility ? { visibility } : {}),
       meta: {},
     };
+    // Test values must be possible ones (§3a): non-negative whole numbers, approved / inScope in {0,1},
+    // approvedWindows <= windows <= 4, and approved consistent with approvedWindows.
+    if (visibility) {
+      const verrs = simulateVisibilityErrors(visibility);
+      if (verrs.length > 0) return { valid: false, errors: verrs };
+    }
     const outcome = evaluateRule(config, ctx);
     if (visInputs.length === 0) return { valid: true, errors: [], outcome };
     const visibilityUsed = visInputs.map((inp) => {
-      const key = (inp.source as string).slice('visibility:'.length) as 'approvedWindows' | 'approved' | 'windows';
+      const key = (inp.source as string).slice('visibility:'.length) as 'approvedWindows' | 'approved' | 'windows' | 'inScope';
       return { ref: inp.ref, source: inp.source as string, value: visibility ? visibility[key] ?? null : null };
     });
     return { valid: true, errors: [], outcome, visibilityUsed };
+  }
+
+  /**
+   * §3a money gate: when a rule read visibility and some of the run's outlets still have a window WAITING FOR REVIEW
+   * or STILL OPEN, those outlets read "not approved" for it now. Export (credit-upload + payout report) and direct
+   * credit are REFUSED unless the admin accepted exactly that outlet count (a changed count = re-confirm). Throws 409.
+   */
+  static assertVisibilityPendingAccepted(preview: ComputePreview, accepted: number | null | undefined): void {
+    const v = preview.visibility;
+    if (!v || !v.available || v.outletsPending <= 0) return;
+    if (accepted === v.outletsPending) return;
+    throw new ConflictException(
+      `${v.outletsPending} outlet${v.outletsPending === 1 ? '' : 's'} will read visibility = NOT approved for ${preview.period} ` +
+        `because a review is still pending (${v.outletsWaitingReview}) or a window is still open (${v.outletsOpenWindow}). ` +
+        (accepted == null
+          ? 'Tick "I accept" on the preview to continue, or wait until the reviews / windows are done.'
+          : `You accepted ${accepted}, but the count is now ${v.outletsPending} — re-preview and accept again.`),
+    );
+  }
+
+  /** Audit row for an accepted pending-visibility run (no-op when nothing was pending). */
+  static async recordVisibilityAcceptance(
+    prisma: Pick<PrismaService, 'auditLog'>,
+    user: JwtPayload,
+    preview: ComputePreview,
+    ctx: { route: string; entityId: string },
+  ): Promise<void> {
+    const v = preview.visibility;
+    if (!v || !v.available || v.outletsPending <= 0) return;
+    await prisma.auditLog.create({
+      data: {
+        action: 'APPROVE',
+        entityType: 'POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED',
+        entityId: ctx.entityId,
+        actorId: user.sub,
+        metadata: {
+          clientId: user.clientId,
+          period: preview.period,
+          route: ctx.route,
+          filter: { program: preview.filter?.program ?? null, kpiCode: preview.filter?.kpiCode ?? null },
+          outletsPending: v.outletsPending,
+          outletsWaitingReview: v.outletsWaitingReview,
+          outletsOpenWindow: v.outletsOpenWindow,
+          openWindowsInMonth: v.openWindowsInMonth,
+          sourceKey: preview.sourceKey,
+        },
+      },
+    });
   }
 
   /**
@@ -883,6 +959,39 @@ function computeSourceKey(
     rows,
   });
   return `pe_${createHash('sha256').update(payload).digest('hex')}`;
+}
+
+/** Impossible simulator visibility values (§3a) → plain errors. Blank (null) values are allowed (= missing). */
+function simulateVisibilityErrors(v: {
+  approvedWindows: number | null;
+  approved: number | null;
+  windows: number | null;
+  inScope: number | null;
+}): string[] {
+  const errs: string[] = [];
+  const label: Record<string, string> = {
+    approved: 'Visibility approved this month (1/0)',
+    approvedWindows: 'Approved visibility windows this month',
+    windows: 'Visibility windows in the month',
+    inScope: 'Outlet in the visibility programme (1/0)',
+  };
+  for (const [k, n] of Object.entries(v)) {
+    if (n === null) continue;
+    if (!Number.isInteger(n) || n < 0) errs.push(`${label[k]} must be a whole number of 0 or more (got ${n}).`);
+  }
+  if (v.approved !== null && v.approved !== 0 && v.approved !== 1) errs.push(`${label.approved} must be 0 or 1.`);
+  if (v.inScope !== null && v.inScope !== 0 && v.inScope !== 1) errs.push(`${label.inScope} must be 0 or 1.`);
+  if (v.windows !== null && v.windows > 4) errs.push(`${label.windows} can be at most 4.`);
+  if (v.approvedWindows !== null && v.windows !== null && v.approvedWindows > v.windows) {
+    errs.push(`${label.approvedWindows} (${v.approvedWindows}) cannot be more than ${label.windows} (${v.windows}).`);
+  }
+  if (v.approved !== null && v.approvedWindows !== null && v.approved !== (v.approvedWindows >= 1 ? 1 : 0)) {
+    errs.push(`${label.approved} must be 1 exactly when at least one window is approved.`);
+  }
+  if (v.inScope === 0 && ((v.approvedWindows ?? 0) > 0 || (v.windows ?? 0) > 0 || v.approved === 1)) {
+    errs.push('An outlet outside the visibility programme has 0 windows and nothing approved.');
+  }
+  return errs;
 }
 
 /** A finite number, else null (the evaluator's "absent" that triggers each input's nullAs). */

@@ -7,7 +7,8 @@
  * only — the rules themselves are deep-validated by validateRule() on load (see the service).
  */
 
-import { Allow, IsIn, IsOptional, IsString, Matches } from 'class-validator';
+import { Allow, IsIn, IsInt, IsOptional, IsString, Matches, Min } from 'class-validator';
+import { Type } from 'class-transformer';
 import type { AwardType, RoundingSpec, RuleAttachment } from '../points-engine.types';
 
 /** Strict YYYY-MM (01-12) — rejects 2026-13 etc. (mirrors achievements export). */
@@ -26,6 +27,17 @@ export class PreviewComputeDto {
   @IsOptional()
   @IsString()
   kpiCode?: string;
+
+  /**
+   * §3a: the number of outlets whose visibility is still pending (waiting for review / window open) that the admin
+   * ACCEPTED will read "not approved". Required (and must equal the fresh run's count) for the credit-upload export,
+   * the payout report and direct credit whenever that count is > 0; ignored by preview / the review report.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  acceptVisibilityPending?: number;
 }
 
 /**
@@ -83,6 +95,6 @@ export class SimulateComputeDto {
     targets?: Record<string, number | null>;
     segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
     /** Test visibility values for `visibility:*` inputs (design §3a); a missing key = absent → nullAs. */
-    visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null };
+    visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null; inScope?: number | null };
   };
 }

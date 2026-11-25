@@ -30,6 +30,8 @@ const mockPrisma = {
   // Visibility (POSM) inputs (§3a) — read ONLY when a rule declares a visibility:* input.
   visibilityCapture: { findMany: jest.fn() },
   outletVisibilityRecord: { findMany: jest.fn() },
+  $queryRaw: jest.fn(),
+  auditLog: { create: jest.fn() },
   $transaction: jest.fn(),
 };
 
@@ -719,17 +721,24 @@ describe('PointsComputeService — visibility (POSM) inputs (§3a)', () => {
     const computeOutlets = [
       outlet('M1', 'Metro'), outlet('N1', 'Non Metro'), outlet('L1', 'Metro'), outlet('P1', 'Metro'), outlet('W1', 'Metro', 'WS'),
     ];
-    // outlet.findMany serves BOTH the compute universe and the visibility in-scope query (the one with OR universes).
-    mockPrisma.outlet.findMany.mockImplementation((args: { where: { OR?: unknown[] } }) =>
+    // outlet.findMany serves BOTH the compute universe and the per-window visibility universe (filters on outletType).
+    mockPrisma.outlet.findMany.mockImplementation((args: { where: Record<string, unknown> }) =>
       Promise.resolve(
-        args.where.OR ? [{ outletCode: 'M1' }, { outletCode: 'N1' }, { outletCode: 'L1' }, { outletCode: 'P1' }] : computeOutlets,
+        'outletType' in args.where
+          ? [{ outletCode: 'M1' }, { outletCode: 'N1' }, { outletCode: 'L1' }, { outletCode: 'P1' }]
+          : computeOutlets,
       ),
     );
+    // Old-app go-live lookups: portal live long before the month, no imported captures.
+    mockPrisma.$queryRaw.mockImplementation((q: { strings?: string[] }) =>
+      Promise.resolve((q.strings ?? []).join('?').includes('MIN(') ? [{ goLive: new Date('2026-01-01T00:00:00.000Z') }] : []),
+    );
+    mockPrisma.auditLog.create.mockResolvedValue({});
     mockPrisma.visibilityCapture.findMany.mockResolvedValue([
-      { windowKey: '2026-10-P1', status: 'APPROVED', outlet: { outletCode: 'M1' } },
-      { windowKey: '2026-10-P1', status: 'APPROVED', outlet: { outletCode: 'N1' } },
-      { windowKey: '2026-10-P1', status: 'APPROVED', outlet: { outletCode: 'L1' } },
-      { windowKey: '2026-10-P1', status: 'SUBMITTED', outlet: { outletCode: 'P1' } }, // waiting for review
+      { windowKey: '2026-10-P1', status: 'APPROVED', outlet: { outletCode: 'M1', outletType: { code: 'SSS' } } },
+      { windowKey: '2026-10-P1', status: 'APPROVED', outlet: { outletCode: 'N1', outletType: { code: 'SSS' } } },
+      { windowKey: '2026-10-P1', status: 'APPROVED', outlet: { outletCode: 'L1', outletType: { code: 'SSS' } } },
+      { windowKey: '2026-10-P1', status: 'SUBMITTED', outlet: { outletCode: 'P1', outletType: { code: 'SSS' } } }, // waiting
     ]);
     mockEngine.getActiveForAttachment.mockResolvedValue(unnatiRule());
     service = new PointsComputeService(
@@ -751,11 +760,14 @@ describe('PointsComputeService — visibility (POSM) inputs (§3a)', () => {
     expect(by.get('P1')!.visibility).toMatchObject({ approved: 0, waitingWindows: 1, scope: 'IN_SCOPE' });
     expect(by.get('P1')!.explanation).toMatch(/0 of 1 window approved \(1 waiting for review\)/);
     expect(by.get('W1')).toMatchObject({ status: 'OK', payoutRupees: 0 });
-    expect(by.get('W1')!.visibility).toMatchObject({ approved: 0, scope: 'NOT_IN_SCOPE' });
+    expect(by.get('W1')!.visibility).toMatchObject({ approved: 0, inScope: 0, scope: 'NOT_IN_SCOPE' });
     expect(by.get('W1')!.explanation).toMatch(/not in visibility scope \(outlet type WS/);
     expect(by.get('M1')!.explanation).toMatch(/^Visibility 2026-10: 1 of 1 window approved → approved=1 · /);
     expect(preview.totalPayoutRupees).toBe(750);
-    expect(preview.visibility).toMatchObject({ month: '2026-10', mode: 'PHOTO_APPROVAL', available: true, outletsApproved: 3, outletsWithData: 4 });
+    expect(preview.visibility).toMatchObject({
+      month: '2026-10', mode: 'PHOTO_APPROVAL', available: true, outletsApproved: 3, outletsWithData: 4,
+      outletsWaitingReview: 1, outletsOpenWindow: 0, outletsPending: 1,
+    });
     // Loaded ONCE for the whole run (not per outlet) and tenant-scoped.
     expect(mockPrisma.visibilityCapture.findMany).toHaveBeenCalledTimes(1);
     expect(mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where.clientId).toBe('bajaj');
@@ -805,6 +817,74 @@ describe('PointsComputeService — visibility (POSM) inputs (§3a)', () => {
       select: { outletCode: true, status: true },
     });
     expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();
+  });
+
+  it('PENDING gate: commit is refused until the admin accepts the pending outlet count; the acceptance is audited', async () => {
+    // A POINTS rule gated on visibility so commit has creditable rows.
+    mockEngine.getActiveForAttachment.mockResolvedValue(
+      ruleRow({
+        clientId: 'bajaj',
+        kpiCode: 'TOTAL',
+        attachsTo: { scope: 'program_kpi', program: null, programCategory: null, kpiCode: 'TOTAL' } as never,
+        inputs: [
+          { ref: 'value', kpiCode: 'TOTAL', type: 'number', nullAs: 'zero' },
+          { ref: 'vis', source: 'visibility:approved', type: 'number', nullAs: 'reject' },
+        ] as never,
+        pipeline: [
+          { type: 'gate', id: 'g', when: { op: 'eq', left: { var: 'vis' }, right: { lit: 1 } }, onFail: 'zero' },
+          { type: 'rate', id: 'r', measure: { var: 'value' }, rate: 1 },
+        ] as never,
+      }),
+    );
+    mockPrisma.creditField.findMany.mockResolvedValue([
+      { id: 'cf1', name: 'Q1 Reward', isActive: true, outletTypeAwards: { SSS: 'POINTS', WS: 'POINTS' } },
+    ]);
+    mockSettings.getPointsEngineFlagsUncached.mockResolvedValue({ enabled: true, directCreditEnabled: true });
+    mockCredits.createBatch.mockResolvedValue({ id: 'b1', batchCode: 'CB-1', status: 'PENDING_CONFIRM', period: '2026-10', totalPoints: 1, totalOutlets: 1 });
+
+    await expect(service.commitCompute(bajajAdmin, { period: '2026-10' })).rejects.toThrow(/1 outlet will read visibility = NOT approved/);
+    await expect(service.commitCompute(bajajAdmin, { period: '2026-10', acceptVisibilityPending: 2 })).rejects.toThrow(/accepted 2, but the count is now 1/);
+    expect(mockCredits.createBatch).not.toHaveBeenCalled();
+
+    await service.commitCompute(bajajAdmin, { period: '2026-10', acceptVisibilityPending: 1 });
+    expect(mockCredits.createBatch).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'APPROVE',
+        entityType: 'POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED',
+        entityId: 'b1',
+        actorId: 'u_b',
+        metadata: expect.objectContaining({ outletsPending: 1, outletsWaitingReview: 1, route: 'commit', period: '2026-10' }),
+      }),
+    });
+  });
+
+  it('assertVisibilityPendingAccepted: nothing pending / no visibility → no gate', () => {
+    const base = { period: '2026-10', rows: [] } as never;
+    expect(() => PointsComputeService.assertVisibilityPendingAccepted(base, null)).not.toThrow();
+    expect(() =>
+      PointsComputeService.assertVisibilityPendingAccepted(
+        { period: '2026-10', visibility: { available: true, outletsPending: 0 } } as never,
+        null,
+      ),
+    ).not.toThrow();
+  });
+
+  it('simulate: rejects impossible visibility test values', () => {
+    const r = unnatiRule();
+    const sim = (visibility: Record<string, number>) =>
+      service.simulate(bajajAdmin, {
+        attachsTo: r.attachsTo as never, output: r.output as never, rounding: r.rounding as never,
+        inputs: r.inputs, pipeline: r.pipeline,
+        context: { achievements: { TOTAL: 4500 }, segment: { metro: 'Metro' }, visibility },
+      });
+    expect(sim({ approved: 2 }).errors.join(' ')).toMatch(/must be 0 or 1/);
+    expect(sim({ approved: 1, approvedWindows: 3, windows: 2 }).errors.join(' ')).toMatch(/cannot be more than/);
+    expect(sim({ approvedWindows: -1 }).errors.join(' ')).toMatch(/whole number/);
+    expect(sim({ approvedWindows: 1.5 }).errors.join(' ')).toMatch(/whole number/);
+    expect(sim({ approved: 0, approvedWindows: 1, windows: 1 }).errors.join(' ')).toMatch(/exactly when/);
+    expect(sim({ inScope: 0, approved: 1, approvedWindows: 1, windows: 1 }).errors.join(' ')).toMatch(/outside the visibility programme/);
+    expect(sim({ approved: 1, approvedWindows: 2, windows: 2, inScope: 1 }).valid).toBe(true);
   });
 
   it('simulate: accepts test visibility values and echoes the ones the rule read', () => {
