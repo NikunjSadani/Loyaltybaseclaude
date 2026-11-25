@@ -375,6 +375,8 @@ export class PointsComputeService {
             fieldId,
             status: 'OK',
             points: outcome.points,
+            // Why the rule paid 0 (opt-in gate failReason, or the missing skipRule input) — never a bare 0.
+            ...(outcome.reason ? { reason: outcome.reason } : {}),
             explanation: `${visPrefix}${explainTrace(outcome.trace, outcome.points)}${
               visUnavailable ? ` (visibility: ${visUnavailable})` : ''
             }`,

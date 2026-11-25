@@ -980,3 +980,112 @@ describe('visibility inputs (§3a)', () => {
     expect(validateRule(mk('visibility:approved', 'enum')).join(' ')).toMatch(/visibility input must be type 'number'/);
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// Gate failReason / failAs (opt-in, owner-approved 2026-11-25) + skipRule "No <KPI> target" reason
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('gate failReason / failAs + missing-input reason', () => {
+  // Archetype-style existing rule: gate value ≥ target (onFail zero) then a rate. NO opt-in fields.
+  const existing = rule({
+    inputs: [
+      { ref: 'value', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+      { ref: 'target', source: 'target:CASES_SOLD', type: 'number', nullAs: 'reject' },
+    ],
+    pipeline: [
+      { type: 'gate', id: 'g1', when: { op: 'gte', left: { var: 'value' }, right: { var: 'target' } }, onFail: 'zero' },
+      { type: 'rate', id: 'r1', measure: { var: 'value' }, rate: 2 },
+    ],
+  });
+
+  it('default unchanged: an existing rule without the opt-in fields yields the exact same outcome (snapshot)', () => {
+    expect(evaluateRule(existing, ctx({ achievements: { CASES_SOLD: 80 }, targets: { CASES_SOLD: 100 } }))).toEqual({
+      status: 'OK',
+      points: 0,
+      trace: [
+        {
+          nodeId: 'g1', type: 'gate', detail: "gate FAILED (value=80 ≥ target=100) → onFail 'zero', rule → 0",
+          pointsBefore: 0, delta: 0, pointsAfter: 0,
+        },
+      ],
+    });
+    expect(evaluateRule(existing, ctx({ achievements: { CASES_SOLD: 120 }, targets: { CASES_SOLD: 100 } }))).toEqual({
+      status: 'OK',
+      points: 240,
+      trace: [
+        { nodeId: 'g1', type: 'gate', detail: 'gate passed: value=120 ≥ target=100', pointsBefore: 0, delta: 0, pointsAfter: 0 },
+        { nodeId: 'r1', type: 'rate', detail: 'rate "r1": 120 × 2 → +240', pointsBefore: 0, delta: 240, pointsAfter: 240 },
+      ],
+    });
+  });
+
+  // Bajaj "target is 0": pay 0 and SAY so.
+  const zeroTarget = rule({
+    inputs: [
+      { ref: 'value', kpiCode: 'ADHO', type: 'number', nullAs: 'zero' },
+      { ref: 'target', source: 'target:ADHO', type: 'number', nullAs: 'skipRule' },
+    ],
+    pipeline: [
+      { type: 'gate', id: 'g0', when: { op: 'gt', left: { var: 'target' }, right: { lit: 0 } }, onFail: 'zero', failReason: 'Target is 0', failAs: 'zero' },
+      { type: 'rate', id: 'r1', measure: { var: 'value' }, rate: 1 },
+    ],
+  });
+
+  it('failAs zero: target 0 → amount 0 with the reason', () => {
+    const o = expectOk(evaluateRule(zeroTarget, ctx({ achievements: { ADHO: 50 }, targets: { ADHO: 0 } })));
+    expect(o.points).toBe(0);
+    expect(o.reason).toBe('Target is 0');
+    expect(o.trace[0].detail).toMatch(/failAs 'zero', rule → 0: Target is 0/);
+    // Passing → no reason.
+    const ok = expectOk(evaluateRule(zeroTarget, ctx({ achievements: { ADHO: 50 }, targets: { ADHO: 10 } })));
+    expect(ok.points).toBe(50);
+    expect(ok.reason).toBeUndefined();
+  });
+
+  it('missing target under nullAs skipRule → 0 with "No ADHO target" (not an empty explanation)', () => {
+    const o = expectOk(evaluateRule(zeroTarget, ctx({ achievements: { ADHO: 50 }, targets: {} })));
+    expect(o.points).toBe(0);
+    expect(o.reason).toBe('No ADHO target');
+  });
+
+  it('failAs skip: "NON ADHO below ₹400" → row SKIPPED (flagged) with that reason', () => {
+    const r = rule({
+      inputs: [{ ref: 'nonAdho', kpiCode: 'NON_ADHO', type: 'number', nullAs: 'zero' }],
+      pipeline: [
+        { type: 'gate', id: 'g', when: { op: 'gte', left: { var: 'nonAdho' }, right: { lit: 400 } }, onFail: 'zero', failReason: 'NON ADHO below ₹400', failAs: 'skip' },
+        { type: 'rate', id: 'r', measure: { var: 'nonAdho' }, rate: 1 },
+      ],
+    });
+    const s = expectSkip(evaluateRule(r, ctx({ achievements: { NON_ADHO: 399 } })));
+    expect(s.reason).toBe('NON ADHO below ₹400');
+    expect(expectOk(evaluateRule(r, ctx({ achievements: { NON_ADHO: 400 } }))).points).toBe(400);
+  });
+
+  it('failReason alone keeps onFail (zero → 0 + reason; skipNode → continues, no reason)', () => {
+    const mk = (onFail: 'zero' | 'skipNode') =>
+      rule({
+        inputs: [{ ref: 'v', kpiCode: 'V', type: 'number', nullAs: 'zero' }],
+        pipeline: [
+          { type: 'gate', id: 'g', when: { op: 'gte', left: { var: 'v' }, right: { lit: 10 } }, onFail, failReason: 'Below 10' },
+          { type: 'rate', id: 'r', measure: { var: 'v' }, rate: 1 },
+        ],
+      });
+    expect(expectOk(evaluateRule(mk('zero'), ctx({ achievements: { V: 5 } })))).toMatchObject({ points: 0, reason: 'Below 10' });
+    const cont = expectOk(evaluateRule(mk('skipNode'), ctx({ achievements: { V: 5 } })));
+    expect(cont.points).toBe(5);
+    expect(cont.reason).toBeUndefined();
+  });
+
+  it('validateRule: accepts the opt-in fields, rejects a bad failAs / an over-long failReason', () => {
+    expect(validateRule(zeroTarget)).toEqual([]);
+    const bad = rule({
+      inputs: [{ ref: 'v', kpiCode: 'V', type: 'number', nullAs: 'zero' }],
+      pipeline: [
+        { type: 'gate', id: 'g', when: { op: 'gte', left: { var: 'v' }, right: { lit: 1 } }, onFail: 'zero', failAs: 'nope' as never, failReason: 'x'.repeat(201) },
+      ],
+    });
+    const errs = validateRule(bad).join(' ');
+    expect(errs).toMatch(/failAs must be 'zero' or 'skip'/);
+    expect(errs).toMatch(/failReason must be text of at most 200 characters/);
+  });
+});

@@ -281,6 +281,11 @@ function OutcomeView({ result, awardType }: { result: SimulateResult; awardType?
           <p className="text-3xl font-extrabold text-green-700">
             {isPayout ? `₹${Math.round(outcome.points).toLocaleString('en-IN')}` : outcome.points.toLocaleString()}
           </p>
+          {outcome.reason && (
+            <p className="mt-1 text-[11px] font-semibold text-amber-700" data-testid="sim-reason">
+              Reason: {outcome.reason}
+            </p>
+          )}
         </div>
       )}
       {outcome.status === 'SKIP' && (

@@ -99,6 +99,16 @@ export interface GateNode {
   id: string;
   when: Predicate;
   onFail: OnFail;
+  /**
+   * OPT-IN (owner-approved 2026-11-25): the plain reason shown on the row when this gate fails, e.g. "Target is 0",
+   * "NON ADHO below ₹400". Absent → today's behaviour exactly (no reason).
+   */
+  failReason?: string;
+  /**
+   * OPT-IN: what a failure does, overriding `onFail` — 'zero' = the rule pays 0 and the row carries `failReason`;
+   * 'skip' = the row is SKIPPED (flagged for review) with `failReason`. Absent → `onFail` decides, as today.
+   */
+  failAs?: 'zero' | 'skip';
 }
 
 /** L3 — restrict to a segment (program/category/outletType/metro) value set. */
@@ -244,7 +254,9 @@ export interface TraceStep {
 
 /** The pure evaluator's outcome for one entity × period. */
 export type EvalOutcome =
-  | { status: 'OK'; points: number; trace: TraceStep[] } // points = whole, non-negative, rounded
+  // points = whole, non-negative, rounded. `reason` (opt-in) = why the rule paid 0: a failed gate's `failReason`, or
+  // the missing input(s) under nullAs 'skipRule' (e.g. "No ADHO target").
+  | { status: 'OK'; points: number; trace: TraceStep[]; reason?: string }
   | { status: 'SKIP'; reason: string; trace: TraceStep[] } // e.g. a `reject` input was null
   | { status: 'ERROR'; errors: string[]; trace: TraceStep[] }; // malformed rule reached runtime
 

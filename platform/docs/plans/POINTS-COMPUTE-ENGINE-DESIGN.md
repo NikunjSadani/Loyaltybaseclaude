@@ -193,6 +193,17 @@ Unnati worked example (PAYOUT, formula `set`): inputs `TOTAL` (kpi TOTAL, `zero`
 A flat ordered list (vs a nested tree) is diffable in a UI, maps 1:1 to trace steps, and makes
 floor/cap/rounding order a structural guarantee.
 
+**Row reasons (owner-approved 2026-11-25, platform-wide, OPT-IN).** A `gate` may carry `failReason` (≤ 200 chars)
+and `failAs: 'zero' | 'skip'`. Absent → today's behaviour exactly (pinned by a snapshot test of an existing rule).
+On failure: `failAs: 'skip'` → the row is SKIPPED (flagged for review) with `failReason`; `failAs: 'zero'`, or
+`onFail: 'zero'` with a `failReason`, → the rule pays 0 and the OK outcome carries `reason = failReason`
+(`skipNode` / `passthrough` are unchanged and carry no reason). A rule zeroed by a missing `nullAs: 'skipRule'` input
+now says why too: `reason = "No <KPI> target"` / "No <KPI> achievement" / "No visibility result" … (was an empty
+explanation). The reason is on `EvalOutcome.reason` → `row.reason` on OK rows, shown in the preview row, the simulator
+and the reports' "Reason / Explanation" column as "<reason> — <explanation>" (rows with only one of the two are
+unchanged; the credit-upload file is untouched). Bajaj uses: gate `target > 0` failReason "Target is 0"; gate
+`NON_ADHO ≥ 400` failReason "NON ADHO below ₹400"; ADHO target input `nullAs: skipRule` → "No ADHO target".
+
 ---
 
 ## 5. L4 safe formula evaluator (no `eval`)

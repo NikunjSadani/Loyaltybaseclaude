@@ -263,6 +263,16 @@ describe('buildPreviewReportXlsx — full human review report', () => {
     expect(String(o1['Reason / Explanation'])).toContain('1,300 pts');
   });
 
+  it('an OK row that paid 0 for a stated reason shows "<reason> — <explanation>"', async () => {
+    const p = samplePreview();
+    p.rows.push({
+      outletCode: 'O9', kpiCode: 'ADHO', status: 'OK', awardType: 'POINTS', points: 0,
+      reason: 'No ADHO target', explanation: '0 pts',
+    });
+    const rows = readSheet(await buildPreviewReportXlsx(p), 'Preview Rows');
+    expect(rows.find((r) => r['Outlet Code'] === 'O9')!['Reason / Explanation']).toBe('No ADHO target — 0 pts');
+  });
+
   it('renders a non-OK row with its reason and no points', async () => {
     const rows = readSheet(await buildPreviewReportXlsx(samplePreview()), 'Preview Rows');
     const o5 = rows.find((r) => r['Outlet Code'] === 'O5')!;

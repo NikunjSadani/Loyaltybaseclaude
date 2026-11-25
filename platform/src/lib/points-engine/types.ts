@@ -45,7 +45,16 @@ export interface SlabNode {
   apply: 'marginal' | 'whole';
   bands: SlabBand[];
 }
-export interface GateNode { type: 'gate'; id: string; when: Predicate; onFail: OnFail }
+export interface GateNode {
+  type: 'gate';
+  id: string;
+  when: Predicate;
+  onFail: OnFail;
+  /** Opt-in: the reason shown on the row when the gate fails (e.g. "Target is 0"). */
+  failReason?: string;
+  /** Opt-in: 'zero' = pay 0 with the reason; 'skip' = skip + flag the row. Absent = onFail decides (today). */
+  failAs?: 'zero' | 'skip';
+}
 export interface SegmentFilterNode { type: 'segmentFilter'; id: string; field: string; allow: string[]; onFail: OnFail }
 export interface MilestoneNode { type: 'milestone'; id: string; when: Predicate; flat: number }
 export interface FloorNode { type: 'floor'; id: string; min: number }
@@ -128,7 +137,7 @@ export interface TraceStep {
   pointsAfter: number;
 }
 export type EvalOutcome =
-  | { status: 'OK'; points: number; trace: TraceStep[] }
+  | { status: 'OK'; points: number; trace: TraceStep[]; reason?: string }
   | { status: 'SKIP'; reason: string; trace: TraceStep[] }
   | { status: 'ERROR'; errors: string[]; trace: TraceStep[] };
 

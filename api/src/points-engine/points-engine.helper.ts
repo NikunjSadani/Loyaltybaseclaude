@@ -127,7 +127,30 @@ type BoundValues = Record<string, number | string>;
 type BindResult =
   | { kind: 'ok'; values: BoundValues }
   | { kind: 'skip'; reason: string } //      reject → EvalOutcome SKIP
-  | { kind: 'ruleZero'; reason: string }; // skipRule → EvalOutcome OK / 0
+  | { kind: 'ruleZero'; reason: string; plain: string }; // skipRule → EvalOutcome OK / 0 (+ plain row reason)
+
+/** Plain words for a missing input ("no ADHO target") — the reason on a row a skipRule input zeroed. */
+function absentLabel(input: RuleInput): string {
+  if (input.kpiCode) return `no ${input.kpiCode} achievement`;
+  const src = input.source ?? '';
+  const idx = src.indexOf(':');
+  const kind = idx >= 0 ? src.slice(0, idx) : src;
+  const key = idx >= 0 ? src.slice(idx + 1) : '';
+  switch (kind) {
+    case 'target':
+      return `no ${key} target`;
+    case 'achievement':
+      return `no ${key} achievement`;
+    case 'pct':
+      return `no ${key} target or achievement (cannot work out % of target)`;
+    case 'segment':
+      return `no ${key} on the outlet`;
+    case 'visibility':
+      return 'no visibility result';
+    default:
+      return `no value for ${input.ref}`;
+  }
+}
 
 function sourceLabel(input: RuleInput): string {
   if (input.kpiCode) return `kpi:${input.kpiCode}`;
@@ -180,6 +203,7 @@ function bindInputs(inputs: RuleInput[], ctx: EvalContext): BindResult {
   const values: BoundValues = {};
   const rejects: string[] = [];
   const skips: string[] = [];
+  const skipPlain: string[] = [];
 
   for (const inp of inputs) {
     const raw = resolveRaw(inp, ctx);
@@ -187,7 +211,10 @@ function bindInputs(inputs: RuleInput[], ctx: EvalContext): BindResult {
 
     if (absent) {
       if (inp.nullAs === 'reject') rejects.push(`${inp.ref} (${sourceLabel(inp)})`);
-      else if (inp.nullAs === 'skipRule') skips.push(`${inp.ref} (${sourceLabel(inp)})`);
+      else if (inp.nullAs === 'skipRule') {
+        skips.push(`${inp.ref} (${sourceLabel(inp)})`);
+        skipPlain.push(absentLabel(inp));
+      }
       else values[inp.ref] = inp.type === 'enum' ? '' : 0; // 'zero'
       continue;
     }
@@ -214,7 +241,12 @@ function bindInputs(inputs: RuleInput[], ctx: EvalContext): BindResult {
     return { kind: 'skip', reason: `Missing/invalid input(s): ${rejects.join('; ')}` };
   }
   if (skips.length > 0) {
-    return { kind: 'ruleZero', reason: `Input(s) absent (skipRule → 0 points): ${skips.join('; ')}` };
+    const plain = [...new Set(skipPlain)].join('; ');
+    return {
+      kind: 'ruleZero',
+      reason: `Input(s) absent (skipRule → 0 points): ${skips.join('; ')}`,
+      plain: plain.charAt(0).toUpperCase() + plain.slice(1),
+    };
   }
   return { kind: 'ok', values };
 }
@@ -857,8 +889,8 @@ export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutc
     const bind = bindInputs(rule.inputs ?? [], ctx);
     if (bind.kind === 'skip') return { status: 'SKIP', reason: bind.reason, trace };
     if (bind.kind === 'ruleZero') {
-      // skipRule: the rule contributes 0 points — the row is NOT an error.
-      return { status: 'OK', points: roundNonNeg(0, rule.rounding), trace };
+      // skipRule: the rule contributes 0 points — the row is NOT an error, but it says WHY ("No ADHO target").
+      return { status: 'OK', points: roundNonNeg(0, rule.rounding), trace, reason: bind.plain };
     }
     const values = bind.values;
     const pipeline = rule.pipeline ?? [];
@@ -886,11 +918,19 @@ export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutc
         continue;
       }
 
-      // Failed → apply onFail.
-      if (node.onFail === 'zero') {
+      // Failed → apply the opt-in failAs (gate only), else onFail exactly as before.
+      const failReason = node.type === 'gate' && typeof node.failReason === 'string' && node.failReason.trim() ? node.failReason.trim() : undefined;
+      const failAs = node.type === 'gate' ? node.failAs : undefined;
+      if (failAs === 'skip') {
+        trace.push(step(node, points, points, `${node.type} FAILED (${desc}) → skip row${failReason ? `: ${failReason}` : ''}`));
+        return { status: 'SKIP', reason: failReason ?? `gate "${node.id}" failed (${desc})`, trace };
+      }
+      if (failAs === 'zero' || node.onFail === 'zero') {
         // Hard gate: short-circuit the WHOLE rule to 0 — before floor/cap, so a floor can't revive it.
-        trace.push(step(node, points, 0, `${node.type} FAILED (${desc}) → onFail 'zero', rule → 0`));
-        return { status: 'OK', points: roundNonNeg(0, rule.rounding), trace };
+        trace.push(
+          step(node, points, 0, `${node.type} FAILED (${desc}) → ${failAs === 'zero' ? "failAs 'zero'" : "onFail 'zero'"}, rule → 0${failReason ? `: ${failReason}` : ''}`),
+        );
+        return { status: 'OK', points: roundNonNeg(0, rule.rounding), trace, ...(failReason ? { reason: failReason } : {}) };
       }
       // skipNode / passthrough → no points change, continue.
       trace.push(step(node, points, points, `${node.type} failed (${desc}) → onFail '${node.onFail}', continue`));
@@ -1253,6 +1293,12 @@ export function validateRule(rule: PointsRuleConfig): string[] {
       case 'gate':
         validatePredicate(n.when, declared, `${w}.when`, errs);
         if (!ON_FAIL.has(n.onFail)) errs.push(`${w}: onFail must be one of ${[...ON_FAIL].join(', ')}.`);
+        if (n.failReason !== undefined && (typeof n.failReason !== 'string' || n.failReason.length > 200)) {
+          errs.push(`${w}: failReason must be text of at most 200 characters.`);
+        }
+        if (n.failAs !== undefined && n.failAs !== 'zero' && n.failAs !== 'skip') {
+          errs.push(`${w}: failAs must be 'zero' or 'skip'.`);
+        }
         break;
       case 'segmentFilter':
         if (typeof n.field !== 'string' || n.field === '') errs.push(`${w}: field must be a non-empty string.`);

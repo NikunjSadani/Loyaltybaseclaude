@@ -256,6 +256,18 @@ describe('Points Engine compute page', () => {
     expect(commitMock).toHaveBeenCalledWith(expect.objectContaining({ acceptVisibilityPending: 4 }));
   });
 
+  it('PE-C2e: an OK row that paid 0 shows its reason', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        rows: [{ outletCode: 'OUT-009', kpiCode: 'ADHO', status: 'OK', points: 0, reason: 'Target is 0', explanation: '0 pts' }],
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    expect((await screen.findByTestId('row-reason')).textContent).toMatch(/Target is 0/);
+  });
+
   it('PE-C2c: no visibility block when no rule read visibility', async () => {
     previewMock.mockResolvedValue({ success: true, data: makePreview() });
     render(<ComputePage />);

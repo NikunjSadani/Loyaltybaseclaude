@@ -50,7 +50,10 @@ export interface ComputePreviewRow {
   /** Raw inputs echoed for the preview report (achievement + target for the primary KPI). */
   achievement?: number | null;
   target?: number | null;
-  /** Why a row did not produce points (SKIP reason / ERROR messages / 'no active rule'). */
+  /**
+   * Why a row did not produce points (SKIP reason / ERROR messages / 'no active rule'), or — on an OK row that paid 0
+   * — why it paid 0 (an opt-in gate `failReason`, or "No <KPI> target" for a missing skipRule input).
+   */
   reason?: string;
   /** One-line human explanation of the math (from the evaluator trace) for the preview report. */
   explanation?: string;

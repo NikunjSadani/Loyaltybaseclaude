@@ -201,7 +201,10 @@ function OkGroup({ rows, engineDisabled }: { rows: ComputePreviewRow[]; engineDi
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.achievement)}</td>
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.target)}</td>
                 <td className="px-2 py-2.5 text-right font-semibold text-gray-900">{num(r.points)}</td>
-                <td className="px-4 py-2.5 text-xs text-gray-500">{r.explanation ?? '—'}</td>
+                <td className="px-4 py-2.5 text-xs text-gray-500">
+                  {r.reason && <span className="mr-1 font-semibold text-amber-700" data-testid="row-reason">{r.reason} —</span>}
+                  {r.explanation ?? '—'}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -252,7 +255,10 @@ function PayoutOkGroup({ rows }: { rows: ComputePreviewRow[] }) {
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.achievement)}</td>
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.target)}</td>
                 <td className="px-2 py-2.5 text-right font-semibold text-indigo-700">₹{num(r.payoutRupees)}</td>
-                <td className="px-4 py-2.5 text-xs text-gray-500">{r.explanation ?? '—'}</td>
+                <td className="px-4 py-2.5 text-xs text-gray-500">
+                  {r.reason && <span className="mr-1 font-semibold text-amber-700" data-testid="row-reason">{r.reason} —</span>}
+                  {r.explanation ?? '—'}
+                </td>
               </tr>
             ))}
           </tbody>

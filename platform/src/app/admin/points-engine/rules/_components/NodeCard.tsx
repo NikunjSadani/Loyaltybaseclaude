@@ -238,7 +238,38 @@ function NodeEditor({
             <PredicateBuilder value={node.when} vars={vars} disabled={disabled} onChange={(when) => onChange({ ...node, when })} />
           </Field>
           <Field label="If the check fails">
-            <SelectField value={node.onFail} disabled={disabled} onChange={(onFail) => onChange({ ...node, onFail })} options={onFailOptions(node.onFail)} />
+            <SelectField<string>
+              value={node.failAs === 'skip' ? 'skip' : node.onFail}
+              disabled={disabled}
+              onChange={(v) => {
+                // 'skip' is the opt-in failAs (row flagged for review); every other choice is today's onFail.
+                if (v === 'skip') onChange({ ...node, onFail: 'zero', failAs: 'skip' });
+                else {
+                  const { failAs: _drop, ...rest } = node;
+                  void _drop;
+                  onChange({ ...rest, onFail: v as OnFail });
+                }
+              }}
+              options={[
+                ...onFailOptions(node.onFail),
+                { value: 'skip', label: 'Skip the row and flag it for review' },
+              ]}
+            />
+          </Field>
+          <Field
+            label="Reason shown when it fails (optional)"
+            hint="Shown on the row, the simulator and the reports — e.g. “Target is 0”, “NON ADHO below ₹400”."
+          >
+            <TextField
+              value={node.failReason ?? ''}
+              disabled={disabled}
+              placeholder="e.g. Target is 0"
+              onChange={(v) => {
+                const { failReason: _old, ...rest } = node;
+                void _old;
+                onChange(v.trim() === '' ? rest : { ...rest, failReason: v.slice(0, 200) });
+              }}
+            />
           </Field>
         </div>
       );

@@ -156,6 +156,31 @@ describe('PointsComputeService (Wave 1 — read-only preview)', () => {
     });
   });
 
+  it('REASON: a rule that paid 0 says why on the row (missing skipRule target; opt-in gate failReason)', async () => {
+    mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1'), outletRow('O2')]);
+    mockPrisma.outletSalesRecord.findMany.mockResolvedValue([
+      { outletCode: 'O1', kpiValues: { CASES_SOLD: 100 } },
+      { outletCode: 'O2', kpiValues: { CASES_SOLD: 100 } },
+    ]);
+    mockPrisma.outletTarget.findMany.mockResolvedValue([{ outletCode: 'O2', targetValues: { CASES_SOLD: 0 } }]);
+    mockEngine.getActiveForAttachment.mockResolvedValue(
+      ruleRow({
+        inputs: [
+          { ref: 'value', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+          { ref: 'target', source: 'target:CASES_SOLD', type: 'number', nullAs: 'skipRule' },
+        ] as never,
+        pipeline: [
+          { type: 'gate', id: 'g', when: { op: 'gt', left: { var: 'target' }, right: { lit: 0 } }, onFail: 'zero', failReason: 'Target is 0', failAs: 'zero' },
+          { type: 'rate', id: 'n1', measure: { var: 'value' }, rate: 2 },
+        ] as never,
+      }),
+    );
+    const preview = await service.previewCompute(clientAdmin, { period: '2026-02' });
+    const by = new Map(preview.rows.map((r) => [r.outletCode, r]));
+    expect(by.get('O1')).toMatchObject({ status: 'OK', points: 0, reason: 'No CASES_SOLD target' });
+    expect(by.get('O2')).toMatchObject({ status: 'OK', points: 0, reason: 'Target is 0' });
+  });
+
   it('DEMOTE→ERROR: output field is PAYOUT-classified for the outlet type (would be ×100 on upload)', async () => {
     mockPrisma.outlet.findMany.mockResolvedValue([outletRow('O1')]);
     mockPrisma.outletSalesRecord.findMany.mockResolvedValue([{ outletCode: 'O1', kpiValues: { CASES_SOLD: 100 } }]);
