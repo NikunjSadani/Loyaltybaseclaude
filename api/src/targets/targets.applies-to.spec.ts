@@ -238,6 +238,13 @@ function makeService() {
       { code: 'WHOLESALER', name: 'Wholesaler', displayName: 'WS', label: 'WS' },
     ]),
   };
+  // The target-upload apply runs in ONE interactive transaction: give its tx the same target-write mocks.
+  Object.assign(tx, {
+    outletTarget: prisma.outletTarget,
+    targetUploadBatch: { update: jest.fn().mockResolvedValue({}) },
+    $executeRaw: prisma.$executeRaw,
+    auditLog: { create: tx.auditLog.create, findFirst: jest.fn().mockResolvedValue(null) },
+  });
   const notifications = { targetsUploaded: jest.fn() };
   const service = new TargetsService(prisma as never, notifications as never, settings as never);
   return { service, prisma, tx, settings };
@@ -308,7 +315,11 @@ describe('Template export kinds — APPLIES-TO templates (D2 golden + scoped)', 
 });
 
 describe('TargetsService — APPLIES-TO uploads (D1)', () => {
-  const upload = (rows: unknown[][], scoped: boolean) => {
+  // Parse / write rules via the DIRECT apply of a tenant outside TargetsService.confirmRequired (the preview →
+  // confirm gate itself is covered in targets.service.spec.ts).
+  beforeEach(() => jest.spyOn(TargetsService, 'confirmRequired').mockReturnValue(false));
+  afterEach(() => jest.restoreAllMocks());
+  const upload =(rows: unknown[][], scoped: boolean) => {
     const row1 = scoped
       ? ['', '', '', '', '', `${NEXT_LABEL()}`, '']
       : ['', '', '', `${NEXT_LABEL()}`, ''];
@@ -409,7 +420,7 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
       prisma.outlet.findMany.mockResolvedValue(silverO2());
       await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', 'Silver', '', 3, 99]], true));
       expect(prisma.outletTarget.upsert).not.toHaveBeenCalled();
-      const [call] = prisma.$executeRaw.mock.calls;
+      const [call] = insertCalls(prisma);
       const sql = sqlText(call);
       expect(sql).toContain('ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET');
       // stored subset (jsonb_each over the EXISTING row, keys = carry list) || EXCLUDED (the upload)
@@ -433,7 +444,7 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
       prisma.kpiDef.findMany.mockResolvedValue(scopedKpis());
       prisma.outlet.findMany.mockResolvedValue(silverO2());
       await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', 'Silver', '', 3, 99]], true));
-      const [call] = prisma.$executeRaw.mock.calls;
+      const [call] = insertCalls(prisma);
       const sql = sqlText(call);
       expect(sql).toMatch(/jsonb_each\("outlet_sales_records"\."kpiValues"\)[\s\S]*\|\| EXCLUDED\."kpiValues"/);
       expect(sql).not.toContain('__names');
@@ -449,7 +460,7 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
       expect(r.ignoredOutOfScope).toBe(1);
       expect(a.ignoredOutOfScope).toBe(1);
       expect(r.savedCount).toBe(0);
-      expect(prisma.$executeRaw).not.toHaveBeenCalled();
+      expect(insertCalls(prisma)).toHaveLength(0);
       expect(prisma.outletTarget.upsert).not.toHaveBeenCalled();
       expect(prisma.outletSalesRecord.upsert).not.toHaveBeenCalled();
     });
@@ -476,8 +487,12 @@ function sqlValues(call: unknown[]): unknown[] {
   return (call[0] as { values?: unknown[] }).values ?? [];
 }
 /** Each raw carry-over write → { table, outletCode, uploaded values, carry list }. */
+/** The raw INSERT statements only (the target apply also takes a pg_advisory_xact_lock via $executeRaw). */
+function insertCalls(prisma: { $executeRaw: jest.Mock }): unknown[][] {
+  return prisma.$executeRaw.mock.calls.filter((call: unknown[]) => /INSERT INTO/.test(sqlText(call)));
+}
 function rawWrites(prisma: { $executeRaw: jest.Mock }) {
-  return prisma.$executeRaw.mock.calls.map((call: unknown[]) => {
+  return insertCalls(prisma).map((call: unknown[]) => {
     const sql = sqlText(call);
     const values = sqlValues(call);
     const json = values.find((v) => typeof v === 'string' && v.startsWith('{')) as string;

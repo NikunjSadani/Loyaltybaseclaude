@@ -16,9 +16,14 @@
 import {
   BadRequestException,
   ConflictException,
+  GoneException,
+  HttpException,
   Injectable,
+  InternalServerErrorException,
+  Logger,
   NotFoundException,
   Optional,
+  PreconditionFailedException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
@@ -26,7 +31,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService, type StoredObjectStream } from '../storage/storage.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   SALES_IMPORT_BATCH_STATUS,
   achievementHeaderLabels,
@@ -92,8 +97,51 @@ export const TARGET_UPLOAD_ACK_CATEGORIES = {
 } as const;
 export type TargetUploadAckCategory = keyof typeof TARGET_UPLOAD_ACK_CATEGORIES;
 
-/** AuditLog.entityType of a confirmed target upload (entityId = the TargetUploadBatch id). */
+/**
+ * AuditLog.entityType of an apply ATTEMPT that got as far as a batch (entityId = the TargetUploadBatch id), written once
+ * with its outcome: metadata.status 'APPLIED' (in the same transaction as the targets) or 'FAILED' (nothing written).
+ */
 export const TARGET_UPLOAD_AUDIT_ENTITY = 'TARGET_UPLOAD';
+/** AuditLog.entityType of a REFUSED apply (nothing written; entityId = the preview token nonce, else 'no-preview'). */
+export const TARGET_UPLOAD_REFUSED_AUDIT_ENTITY = 'TARGET_UPLOAD_REFUSED';
+
+/** Why an apply was refused (recorded on the TARGET_UPLOAD_REFUSED audit row). */
+export type TargetUploadRefusal =
+  | 'NO_PREVIEW'
+  | 'INVALID_TOKEN'
+  | 'EXPIRED'
+  | 'DIFFERENT_FILE'
+  | 'STORAGE_UNAVAILABLE'
+  | 'ALREADY_APPLIED'
+  | 'ACK_MISSING'
+  | 'ACK_CHANGED';
+
+/** One acknowledged not-applied category as sent with "Confirm & apply" (bound to the count + the exact items). */
+export interface TargetUploadAck {
+  category: string;
+  count: number;
+  fingerprint: string;
+}
+
+/** One category NOT applied as typed (preview + apply responses). */
+export interface TargetUploadNotApplied {
+  category: TargetUploadAckCategory;
+  count: number;
+  /** sha256 (16 hex) over the category, count and sorted item keys — what an acknowledgement binds to. */
+  fingerprint: string;
+  /** The first few item keys ("Row 7 — OUT123", "OUT123 · 2026-12"), for the screen. */
+  sample: string[];
+}
+
+/** Thrown inside the apply transaction to roll it back with a specific (refusal-type) outcome. */
+class TargetUploadAbort extends Error {
+  constructor(readonly reason: 'ALREADY_APPLIED' | 'ACK_CHANGED', readonly error: HttpException) {
+    super(error.message);
+  }
+}
+
+/** The real current instant (UTC, Prisma DateTime-comparable) — unlike now(), NOT frozen at the transaction start. */
+const SQL_CLOCK_UTC = Prisma.sql`(clock_timestamp() AT TIME ZONE 'UTC')`;
 /** Private-bucket folder of the kept upload files: `target-uploads/<clientId>/<batchId>/…`. */
 export const TARGET_UPLOAD_FILE_PREFIX = 'target-uploads/';
 
@@ -211,6 +259,8 @@ export class TargetsService {
   /** Batch size for chunked upload persistence — keeps each $transaction([...]) well
    *  under the 5s interactive-transaction timeout even for thousands of outlet rows. */
   private static readonly UPLOAD_CHUNK = 100;
+
+  private readonly logger = new Logger(TargetsService.name);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -599,22 +649,149 @@ export class TargetsService {
 
   // ─── Target upload ──────────────────────────────────────────────────────────
   //
-  // OWNER DECISION 2026-11-25 (all tenants): the admin screen PREVIEWS first, then applies on "Confirm & apply".
-  //   1. POST /admin/targets/upload?preview=1  → previewTargetUpload: parse + validate + classify, NOTHING written.
-  //      Returns `previewToken` = "<sha256 of the file bytes>.<random nonce>".
-  //   2. POST /admin/targets/upload?confirmToken=<token> with the SAME file → uploadTargets: the bytes must hash to the
-  //      token's hash (else 409 — a different/edited file), the file is re-validated against the CURRENT roster/KPIs
-  //      (the response is the ground truth of what was written), and the batch row is created with the deterministic
-  //      id `tgtup_<nonce>` BEFORE any target is written — a second apply of the same preview (double-click, retry)
-  //      hits the primary key and is refused with 409, so one preview can be applied at most once.
-  // Both paths share prepareTargetUpload — the parsing / validation / past-month lock rules exist ONCE.
-  // A POST without either param applies directly, exactly as before (scripts / e2e harness keep working).
+  // OWNER DECISION 2026-11-25 — APPROVED FOR ALL CLIENTS incl. Deoleo (scope decided ONLY in confirmRequired below):
+  // an upload is PREVIEWED first and applied only on "Confirm & apply".
+  //   1. POST ?preview=1 → previewTargetUpload: parse + validate + classify, NOTHING written. Returns a SERVER-SIGNED
+  //      previewToken — HMAC-SHA256 keyed by the API's existing JWT_SECRET (no new env var), bound to tenant + user +
+  //      sha256(file bytes) + expiry (PREVIEW_TTL_MS) — and, per not-applied category, its count + a fingerprint of the
+  //      exact items + a few sample keys.
+  //   2. POST ?confirmToken=…&ack=CATEGORY:count:fingerprint,… with the SAME file → uploadTargets. REFUSED (and audited
+  //      as TARGET_UPLOAD_REFUSED with the reason) on: no preview, an invalid / other user's token, an expired preview, a
+  //      different file, file storage unavailable, a preview already applied, a missing acknowledgement (400), or an
+  //      acknowledgement whose count / items no longer match what the server recomputes now (412 → re-preview).
+  //   3. Apply: a PENDING batch row (server-generated id) → the file is kept → ONE transaction writes every target, flips
+  //      the batch to APPLIED and writes the TARGET_UPLOAD audit row with the counts ACTUALLY written. Any failure rolls
+  //      the whole write back → batch FAILED + a FAILED audit row (nothing written) → the same preview can be retried
+  //      (a fresh batch each attempt). "Already applied" is only ever said of a preview whose apply really committed.
+  // Both preview and apply share prepareTargetUpload — the parsing / validation / past-month lock rules exist ONCE.
 
-  /** previewToken / confirmToken: "<sha256 hex of the file bytes>.<32-hex nonce>". */
-  private static readonly TOKEN_RE = /^([a-f0-9]{64})\.([a-f0-9]{32})$/;
+  /**
+   * THE scope decision of "preview → confirm is required" (owner 2026-11-25: ALL tenants, incl. Deoleo). To limit it to
+   * some tenants, change this ONE line (e.g. `return ['<clientId>', …].includes(clientId)`); a tenant outside the scope
+   * then applies an upload directly (same validation, same all-or-nothing write, audited as 'target-upload-direct').
+   */
+  static confirmRequired(_clientId: string): boolean {
+    return true;
+  }
+
+  /** How long a preview can be confirmed (then: pick the file again). */
+  static readonly PREVIEW_TTL_MS = 30 * 60 * 1000;
+  /** The single apply transaction's ceiling (thousands of outlets × months write in one go). */
+  private static readonly APPLY_TX_TIMEOUT_MS = 5 * 60 * 1000;
+  /** A PENDING batch older than this did not finish (its transaction was rolled back — nothing from it was saved). */
+  private static readonly PENDING_STALE_MS = 15 * 60 * 1000;
+  /** previewToken: "<sha256 hex of the file>.<32-hex nonce>.<expiry epoch ms>.<HMAC-SHA256 hex>". */
+  private static readonly TOKEN_RE = /^([a-f0-9]{64})\.([a-f0-9]{32})\.(\d{13})\.([a-f0-9]{64})$/;
   /** How many overwritten outlet-months are read back to find "old → new" examples (cheap, bounded). */
   private static readonly OVERWRITE_SAMPLE = 50;
   private static readonly OVERWRITE_EXAMPLES_MAX = 5;
+  /** Sample keys shown per not-applied category (the full set is bound by the fingerprint). */
+  private static readonly NOT_APPLIED_SAMPLE = 5;
+
+  private static sha256(buf: Buffer): string {
+    return createHash('sha256').update(buf).digest('hex');
+  }
+
+  private static tokenSig(clientId: string, userId: string, fileSha: string, nonce: string, exp: string): string {
+    const secret = process.env.JWT_SECRET; // the app refuses to boot without it (jwt.strategy)
+    if (!secret) throw new Error('JWT_SECRET is not set — cannot sign the target-upload preview.');
+    return createHmac('sha256', secret)
+      .update(`target-upload-confirm:v1\n${JSON.stringify([clientId, userId, fileSha, nonce, exp])}`)
+      .digest('hex');
+  }
+
+  private static issuePreviewToken(user: JwtPayload, fileSha: string): { token: string; expiresAt: string } {
+    const nonce = randomBytes(16).toString('hex');
+    const exp = String(Date.now() + TargetsService.PREVIEW_TTL_MS);
+    const sig = TargetsService.tokenSig(user.clientId, user.sub, fileSha, nonce, exp);
+    return { token: `${fileSha}.${nonce}.${exp}.${sig}`, expiresAt: new Date(Number(exp)).toISOString() };
+  }
+
+  /** Verify a confirm token against THIS caller (tenant + user) and THIS file. */
+  private static checkPreviewToken(
+    user: JwtPayload,
+    token: string,
+    fileSha: string,
+  ): { ok: true; nonce: string } | { ok: false; reason: 'INVALID_TOKEN' | 'EXPIRED' | 'DIFFERENT_FILE'; nonce?: string } {
+    const m = TargetsService.TOKEN_RE.exec(token);
+    if (!m) return { ok: false, reason: 'INVALID_TOKEN' };
+    const [, tokSha, nonce, exp, sig] = m;
+    const expected = Buffer.from(TargetsService.tokenSig(user.clientId, user.sub, tokSha, nonce, exp), 'hex');
+    if (!timingSafeEqual(expected, Buffer.from(sig, 'hex'))) return { ok: false, reason: 'INVALID_TOKEN' };
+    if (Number(exp) < Date.now()) return { ok: false, reason: 'EXPIRED', nonce };
+    if (tokSha !== fileSha) return { ok: false, reason: 'DIFFERENT_FILE', nonce };
+    return { ok: true, nonce };
+  }
+
+  /** `ack` query param → acknowledgements: "CATEGORY:count:fingerprint" comma-separated (anything else never matches). */
+  static parseAckParam(ack: string | undefined): TargetUploadAck[] {
+    return (ack ?? '')
+      .split(',')
+      .filter(Boolean)
+      .map((part) => {
+        const [category, count, fingerprint] = part.split(':');
+        return { category, count: count === undefined || count === '' ? NaN : Number(count), fingerprint: fingerprint ?? '' };
+      });
+  }
+
+  /**
+   * Record a REFUSED apply attempt (owner rule: nothing refused is silent — it is shown AND recorded), then throw the
+   * refusal. A failure to write the record is logged; it never replaces the refusal the admin sees.
+   */
+  private async refuseUpload(
+    user: JwtPayload,
+    reason: TargetUploadRefusal,
+    error: HttpException,
+    details: Record<string, unknown> = {},
+  ): Promise<never> {
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'REJECT',
+          entityType: TARGET_UPLOAD_REFUSED_AUDIT_ENTITY,
+          entityId: typeof details.tokenNonce === 'string' ? details.tokenNonce : 'no-preview',
+          actorId: user.sub,
+          metadata: {
+            clientId: user.clientId,
+            change: 'target-upload-refused',
+            reason,
+            status: error.getStatus(),
+            message: error.message,
+            ...details,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+    } catch (e) {
+      this.logger.error(`Could not record the refused target upload (${reason}): ${(e as Error)?.message ?? e}`);
+    }
+    throw error;
+  }
+
+  /** The APPLIED batch of a preview token (its audit row says APPLIED), or null — the double-apply guard. */
+  private async appliedBatchForToken(
+    db: Pick<Prisma.TransactionClient, 'auditLog'>,
+    clientId: string,
+    tokenNonce: string,
+  ): Promise<{ entityId: string; createdAt: Date } | null> {
+    const row = await db.auditLog.findFirst({
+      where: {
+        entityType: TARGET_UPLOAD_AUDIT_ENTITY,
+        AND: [
+          { metadata: { path: ['tokenNonce'], equals: tokenNonce } },
+          { metadata: { path: ['status'], equals: 'APPLIED' } },
+          { metadata: { path: ['clientId'], equals: clientId } },
+        ],
+      },
+      select: { entityId: true, createdAt: true },
+    });
+    return row ?? null;
+  }
+
+  private static alreadyAppliedMessage(prior: { entityId: string; createdAt: Date }): string {
+    const when = prior.createdAt.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
+    return `This preview was already applied on ${when} IST (upload ${prior.entityId.slice(-8)}) — it was not applied again. ` +
+      'Check the targets with Download Final Targets or in Upload history. To upload this file again, pick it again for a new preview.';
+  }
 
   /**
    * The shared parse + validate step of a target upload (preview AND apply). Reads only; writes nothing.
@@ -698,13 +875,14 @@ export class TargetsService {
 
     // One write per (outletCode, writable month) with ≥1 non-blank value — exactly the rows apply upserts.
     const writes: TargetUploadWrite[] = [];
-    let lockedOutletMonths = 0; // accepted outlet-months with values in a LOCKED (past) month — not written
+    // Accepted outlet-months with values in a LOCKED (past) month — not written ("<outlet> · <month>").
+    const lockedKeys: string[] = [];
     for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
       const locked = isMonthLocked(month, currentMonth); // past month — not editable
       for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
         if (Object.keys(kpiMap).length === 0) continue; // safety: skip fully-blank
         if (locked) {
-          lockedOutletMonths++;
+          lockedKeys.push(`${outletCode} · ${month}`);
           continue;
         }
         writes.push({
@@ -727,30 +905,96 @@ export class TargetsService {
       writableMonths,
       batchMonth,
       writes,
-      lockedOutletMonths,
+      lockedKeys,
       kpiLabels: new Map(kpiRows.map((k) => [k.code, k.label])),
     };
   }
 
   /**
-   * NO SILENT FAILURE (owner rule 2026-11-25): every category of the file that will NOT be applied as typed, with
-   * its count — only categories that are present (count > 0). The preview shows one required "I understand…"
-   * checkbox per entry; a confirmed apply must acknowledge every entry present AT APPLY TIME (else 400).
+   * NO SILENT FAILURE (owner rule 2026-11-25): every category of the file that will NOT be applied as typed — only the
+   * present ones — with its count, a FINGERPRINT of exactly which items (sha256 over the sorted keys) and a few sample
+   * keys. The preview shows one required "I understand…" box per entry; a confirmed apply must send back every entry's
+   * category + count + fingerprint, and the server recomputes them at apply time (a mismatch → 412, re-preview).
    */
   private static notApplied(
     p: Awaited<ReturnType<TargetsService['prepareTargetUpload']>>,
-    overwriteCount: number,
-  ): Array<{ category: TargetUploadAckCategory; count: number }> {
-    let blank = 0;
-    for (const r of p.parseResult.rows) if (r.status === 'skipped_blank') blank++;
-    const all: Array<{ category: TargetUploadAckCategory; count: number }> = [
-      { category: 'REJECTED_ROWS',  count: p.parseResult.summary.rejected },
-      { category: 'OVERWRITE',      count: overwriteCount },
-      { category: 'LOCKED_MONTHS',  count: p.lockedOutletMonths },
-      { category: 'BLANK_ROWS',     count: blank },
-      { category: 'IGNORED_VALUES', count: p.scopeEnforced ? p.parseResult.summary.ignoredOutOfScope : 0 },
+    overwriteKeys: readonly string[],
+  ): TargetUploadNotApplied[] {
+    const rows = p.parseResult.rows;
+    const rowKey = (r: { rowIndex: number; outletCode?: string }) =>
+      `Row ${r.rowIndex}${r.outletCode ? ` — ${r.outletCode}` : ''}`;
+    const rejected = rows.filter((r) => r.status === 'rejected_outlet' || r.status === 'rejected_kpi').map(rowKey);
+    const blank = rows.filter((r) => r.status === 'skipped_blank').map(rowKey);
+    const ignored = p.scopeEnforced
+      ? rows.filter((r) => /Ignored value\(s\)/.test(r.remarks ?? '')).map((r) => `${rowKey(r)} (${r.remarks})`)
+      : [];
+    const item = (category: TargetUploadAckCategory, count: number, keys: readonly string[]): TargetUploadNotApplied => ({
+      category,
+      count,
+      fingerprint: createHash('sha256')
+        .update(`${category}\n${count}\n${[...keys].sort().join('\n')}`)
+        .digest('hex')
+        .slice(0, 16),
+      sample: keys.slice(0, TargetsService.NOT_APPLIED_SAMPLE),
+    });
+    const all = [
+      item('REJECTED_ROWS',  p.parseResult.summary.rejected, rejected),
+      item('OVERWRITE',      overwriteKeys.length, overwriteKeys),
+      item('LOCKED_MONTHS',  p.lockedKeys.length, p.lockedKeys),
+      item('BLANK_ROWS',     blank.length, blank),
+      item('IGNORED_VALUES', p.scopeEnforced ? p.parseResult.summary.ignoredOutOfScope : 0, ignored),
     ];
     return all.filter((c) => c.count > 0);
+  }
+
+  /**
+   * Compare the acknowledgements sent with the not-applied categories recomputed NOW. Exact match required:
+   * a category's count or items changed, or one appeared / disappeared → 412 (the screen re-previews and re-shows the
+   * boxes); a present category simply not ticked → 400 naming it. null = all acknowledged.
+   */
+  private static checkAcks(
+    current: readonly TargetUploadNotApplied[],
+    acks: readonly TargetUploadAck[],
+  ): { reason: 'ACK_MISSING' | 'ACK_CHANGED'; error: HttpException } | null {
+    const ackBy = new Map(acks.map((a) => [a.category, a]));
+    const curBy = new Map(current.map((c) => [c.category as string, c]));
+    const label = (c: string) => TARGET_UPLOAD_ACK_CATEGORIES[c as TargetUploadAckCategory] ?? c;
+    const fmt = (n: number) => (Number.isFinite(n) ? n.toLocaleString('en-IN') : '?');
+    const changed: string[] = [];
+    for (const c of current) {
+      const a = ackBy.get(c.category);
+      if (a && (a.count !== c.count || a.fingerprint !== c.fingerprint)) {
+        changed.push(
+          a.count === c.count
+            ? `${label(c.category)}: still ${fmt(c.count)}, but not the same ones you confirmed`
+            : `${label(c.category)}: now ${fmt(c.count)} (you confirmed ${fmt(a.count)})`,
+        );
+      }
+    }
+    for (const a of acks) {
+      if (!curBy.has(a.category)) changed.push(`${label(a.category)}: now none (you confirmed ${fmt(a.count)})`);
+    }
+    if (changed.length > 0) {
+      return {
+        reason: 'ACK_CHANGED',
+        error: new PreconditionFailedException(
+          `What will not be applied has changed since the preview — ${changed.join('; ')}. Nothing was saved. ` +
+            'Check the up-to-date preview and confirm again.',
+        ),
+      };
+    }
+    const missing = current.filter((c) => !ackBy.has(c.category));
+    if (missing.length > 0) {
+      return {
+        reason: 'ACK_MISSING',
+        error: new BadRequestException(
+          `Please confirm what will not be applied before applying: ${missing
+            .map((c) => `${c.count.toLocaleString('en-IN')} ${TARGET_UPLOAD_ACK_CATEGORIES[c.category]} (${c.category})`)
+            .join('; ')}. Nothing was saved.`,
+        ),
+      };
+    }
+    return null;
   }
 
   /** The response fields shared by preview and apply (same shape the screen already renders). */
@@ -771,10 +1015,15 @@ export class TargetsService {
   }
 
   /**
-   * NEW vs OVERWRITTEN split of the upload's writes, against the targets stored NOW. One key-only read per month
-   * (outlet codes only, no values). `overwritten` keeps the first OVERWRITE_SAMPLE keys for the example read.
+   * NEW vs OVERWRITTEN split of the upload's writes, against the targets stored NOW (read through `db` — the apply reads
+   * it INSIDE its transaction). One key-only read per month (outlet codes only, no values). `overwriteKeys` lists every
+   * overwritten "<outlet> · <month>"; `sample` keeps the first OVERWRITE_SAMPLE writes for the example read.
    */
-  private async classifyTargetWrites(clientId: string, writes: readonly TargetUploadWrite[]) {
+  private async classifyTargetWrites(
+    db: Pick<Prisma.TransactionClient, 'outletTarget'>,
+    clientId: string,
+    writes: readonly TargetUploadWrite[],
+  ) {
     const byMonth = new Map<string, TargetUploadWrite[]>();
     for (const w of writes) {
       const list = byMonth.get(w.month) ?? [];
@@ -783,10 +1032,11 @@ export class TargetsService {
     }
     const perMonth: Array<{ month: string; newCount: number; overwriteCount: number }> = [];
     const sample: TargetUploadWrite[] = [];
+    const overwriteKeys: string[] = [];
     let newCount = 0;
     let overwriteCount = 0;
     for (const month of [...byMonth.keys()].sort()) {
-      const stored = await this.prisma.outletTarget.findMany({
+      const stored = await db.outletTarget.findMany({
         where: { clientId, month },
         select: { outletCode: true },
       });
@@ -796,6 +1046,7 @@ export class TargetsService {
       for (const w of byMonth.get(month)!) {
         if (existing.has(w.outletCode)) {
           o++;
+          overwriteKeys.push(`${w.outletCode} · ${month}`);
           if (sample.length < TargetsService.OVERWRITE_SAMPLE) sample.push(w);
         } else n++;
       }
@@ -803,7 +1054,7 @@ export class TargetsService {
       newCount += n;
       overwriteCount += o;
     }
-    return { newCount, overwriteCount, perMonth, sample };
+    return { newCount, overwriteCount, perMonth, sample, overwriteKeys };
   }
 
   /**
@@ -850,11 +1101,12 @@ export class TargetsService {
   /**
    * PREVIEW a target upload: the same parse + validation as apply, plus how many outlet-months would be NEWLY created
    * vs OVERWRITTEN (per month) and a few old → new examples. Writes NOTHING (no batch row, no targets, no
-   * notifications). The returned `previewToken` is what "Confirm & apply" sends back with the same file.
+   * notifications). The returned `previewToken` (server-signed, expires at `previewExpiresAt`) is what
+   * "Confirm & apply" sends back with the same file.
    */
   async previewTargetUpload(user: JwtPayload, file: Express.Multer.File) {
     const p = await this.prepareTargetUpload(user, file);
-    const cls = await this.classifyTargetWrites(user.clientId, p.writes);
+    const cls = await this.classifyTargetWrites(this.prisma, user.clientId, p.writes);
     const overwriteExamples = await this.overwriteExamples(user.clientId, cls.sample, p.kpiLabels);
     const focusCheck = await targetUploadFocusCheck(
       this.prisma,
@@ -862,9 +1114,11 @@ export class TargetsService {
       p.parseResult.acceptedTargets,
       p.writableMonths,
     );
+    const { token, expiresAt } = TargetsService.issuePreviewToken(user, TargetsService.sha256(file.buffer));
     return {
       preview: true as const,
-      previewToken: `${createHash('sha256').update(file.buffer).digest('hex')}.${randomBytes(16).toString('hex')}`,
+      previewToken: token,
+      previewExpiresAt: expiresAt,
       ...TargetsService.uploadSummary(p),
       // What apply WOULD write if confirmed now (one upsert per outlet × writable month with ≥1 value).
       willSaveCount:  p.writes.length,
@@ -875,222 +1129,229 @@ export class TargetsService {
       // How many overwritten outlet-months were compared to find the examples (the examples are a sample).
       overwriteExamplesSampled: cls.sample.length,
       // Every category NOT applied as typed — each must be acknowledged on confirm (absent categories omitted).
-      notApplied: TargetsService.notApplied(p, cls.overwriteCount),
+      notApplied: TargetsService.notApplied(p, cls.overwriteKeys),
       ...targetUploadRowsEcho(p.parseResult.rows),
       focusCheck,
     };
   }
 
   /**
-   * Parse and store targets from an uploaded .xlsx file.
+   * APPLY a previewed target upload (the only way targets are written from a file for a confirmRequired tenant).
    *
-   * Blank cell → omitted key (not stored as 0). Numbers are stored verbatim.
-   * Uses upsert on (clientId, outletCode, month) so re-uploads are idempotent.
-   * Tracks totals on a TargetUploadBatch row.
-   *
-   * `opts.confirmToken` (from previewTargetUpload): the file must be the previewed one, and a token applies ONCE.
-   * `opts.acknowledged` (required with a token): every not-applied category present at apply time must be in it,
-   * else 400 naming the missing ones and NOTHING is written. Recorded on an AuditLog row with the batch.
+   * Blank cell → omitted key (not stored as 0). Numbers are stored verbatim. Upsert on (clientId, outletCode, month).
+   * `opts.confirmToken` (from previewTargetUpload) must be this caller's, unexpired, for these exact bytes, and not
+   * already applied. `opts.acknowledged` must match every not-applied category recomputed now (count + fingerprint).
+   * Every refusal is audited (TARGET_UPLOAD_REFUSED) and writes nothing.
    */
   async uploadTargets(
     user: JwtPayload,
     file: Express.Multer.File,
-    opts?: { confirmToken?: string; acknowledged?: readonly string[] },
+    opts?: { confirmToken?: string; acknowledged?: readonly TargetUploadAck[] },
   ) {
     if (!file) throw new BadRequestException('No file uploaded');
+    const fileSha256 = TargetsService.sha256(file.buffer);
+    const fileFacts = { fileName: file.originalname ?? null, fileSize: file.buffer.length, fileSha256 };
 
-    let batchId: string | undefined;
-    let fileSha256: string | undefined;
-    if (opts?.confirmToken !== undefined) {
-      const m = TargetsService.TOKEN_RE.exec(opts.confirmToken);
-      if (!m) throw new BadRequestException('Invalid confirmation token. Pick the file again to preview it.');
-      fileSha256 = createHash('sha256').update(file.buffer).digest('hex');
-      if (fileSha256 !== m[1]) {
-        throw new ConflictException(
-          'This file is not the one you previewed (it was changed or replaced). Nothing was saved. Pick the file again to preview it.',
+    let tokenNonce: string | undefined;
+    if (opts?.confirmToken === undefined) {
+      if (TargetsService.confirmRequired(user.clientId)) {
+        return this.refuseUpload(
+          user,
+          'NO_PREVIEW',
+          new BadRequestException(
+            'Preview the file first: pick it on the Targets upload page, read the preview, then press Confirm & apply. Nothing was saved.',
+          ),
+          fileFacts,
         );
       }
-      batchId = `tgtup_${m[2]}`;
+    } else {
+      const t = TargetsService.checkPreviewToken(user, opts.confirmToken, fileSha256);
+      if (!t.ok) {
+        const details = { ...fileFacts, ...(t.nonce ? { tokenNonce: t.nonce } : {}) };
+        if (t.reason === 'EXPIRED') {
+          return this.refuseUpload(user, 'EXPIRED', new GoneException(
+            `This preview has expired (a preview can be confirmed for ${TargetsService.PREVIEW_TTL_MS / 60000} minutes). Nothing was saved. Check the file again to get a fresh preview.`,
+          ), details);
+        }
+        if (t.reason === 'DIFFERENT_FILE') {
+          return this.refuseUpload(user, 'DIFFERENT_FILE', new ConflictException(
+            'This file is not the one you previewed (it was changed or replaced). Nothing was saved. Pick the file again to preview it.',
+          ), details);
+        }
+        return this.refuseUpload(user, 'INVALID_TOKEN', new BadRequestException(
+          'This confirmation is not valid for your account (it was not issued to you, or it was altered). Nothing was saved. Pick the file again to preview it.',
+        ), details);
+      }
+      tokenNonce = t.nonce;
       if (!this.storage) {
-        throw new ServiceUnavailableException('File storage is not available, so the upload cannot be kept on record. Nothing was saved.');
+        return this.refuseUpload(user, 'STORAGE_UNAVAILABLE', new ServiceUnavailableException(
+          'File storage is not available, so the upload cannot be kept on record. Nothing was saved. Try again later.',
+        ), { ...fileFacts, tokenNonce });
+      }
+      const prior = await this.appliedBatchForToken(this.prisma, user.clientId, tokenNonce);
+      if (prior) {
+        return this.refuseUpload(user, 'ALREADY_APPLIED', new ConflictException(TargetsService.alreadyAppliedMessage(prior)), {
+          ...fileFacts,
+          tokenNonce,
+          appliedBatchId: prior.entityId,
+        });
       }
     }
 
     const p = await this.prepareTargetUpload(user, file);
-    // Classified against the stored targets just before the write (the final, real split — the preview may differ
-    // if targets were changed in between).
-    const cls = await this.classifyTargetWrites(user.clientId, p.writes);
-    const notApplied = TargetsService.notApplied(p, cls.overwriteCount);
+    // Classified against the stored targets now (re-done inside the apply transaction for the final split).
+    const cls = await this.classifyTargetWrites(this.prisma, user.clientId, p.writes);
+    const notApplied = TargetsService.notApplied(p, cls.overwriteKeys);
+    const acknowledged = [...(opts?.acknowledged ?? [])];
 
-    // NO SILENT FAILURE: a confirmed apply must acknowledge everything that will not be applied as typed — checked
-    // against the state NOW (a category that appeared since the preview is missing → re-preview).
-    const acknowledged = [...new Set(opts?.acknowledged ?? [])];
-    if (batchId) {
-      const missing = notApplied.filter((c) => !acknowledged.includes(c.category));
-      if (missing.length > 0) {
-        throw new BadRequestException(
-          `Please confirm what will not be applied before applying: ${missing
-            .map((c) => `${c.count.toLocaleString('en-IN')} ${TARGET_UPLOAD_ACK_CATEGORIES[c.category]} (${c.category})`)
-            .join('; ')}. Nothing was saved. Pick the file again to see the up-to-date preview.`,
-        );
+    // NO SILENT FAILURE: a confirmed apply must acknowledge exactly what will not be applied as typed, NOW.
+    if (tokenNonce) {
+      const bad = TargetsService.checkAcks(notApplied, acknowledged);
+      if (bad) {
+        return this.refuseUpload(user, bad.reason, bad.error, {
+          ...fileFacts,
+          tokenNonce,
+          acknowledged,
+          notApplied: notApplied.map(({ category, count, fingerprint }) => ({ category, count, fingerprint })),
+        });
       }
     }
 
-    // ── Persist ────────────────────────────────────────────────────────────────
-    // The outlet roster is now EVERY non-deleted outlet (not just active), so an
-    // upload can carry thousands of rows. A single interactive $transaction with one
-    // awaited upsert per row blows the 5s interactive-transaction timeout at that
-    // scale (Prisma: "query cannot be executed on an expired transaction"). Instead
-    // create the batch row, then run the per-row upserts in CHUNKED batched
-    // transactions ($transaction([...])) so each round-trip stays well under the
-    // timeout and the write scales to thousands of outlets. Re-upload stays
-    // idempotent (upsert semantics preserved).
-    // Where the confirmed file is kept (private bucket, tenant + batch scoped). The key lives in the audit metadata
-    // (TargetUploadBatch has no column for it — no schema change).
-    const fileKey = batchId
-      ? this.storage!.generateKey(`${TARGET_UPLOAD_FILE_PREFIX}${user.clientId}/${batchId}`, file.originalname || 'targets.xlsx')
-      : undefined;
-    let batch: { id: string };
-    try {
-      const createBatch = this.prisma.targetUploadBatch.create({
-        data: {
-          ...(batchId ? { id: batchId } : {}),
-          clientId:     user.clientId,
-          uploadedById: user.sub,
-          month:        p.batchMonth,
-          totalRows:    p.parseResult.summary.total,
-          acceptedCount: p.parseResult.summary.accepted,
-          rejectedCount: p.parseResult.summary.rejected,
-          status: 'COMPLETED',
-        },
-      });
-      if (batchId) {
-        // A confirmed apply is AUDITED atomically with the batch row: who, what file (name/size/hash + where it is
-        // kept), which months, the row counts, new vs overwritten, and what the admin acknowledged as not applied.
-        const [created] = await this.prisma.$transaction([
-          createBatch,
-          this.prisma.auditLog.create({
-            data: {
-              action: 'CREATE',
-              entityType: TARGET_UPLOAD_AUDIT_ENTITY,
-              entityId: batchId,
-              actorId: user.sub,
-              metadata: {
-                clientId:       user.clientId,
-                change:         'target-upload-confirm',
-                months:         p.writableMonths,
-                skippedLockedMonths: p.lockedMonths,
-                fileName:       file.originalname ?? null,
-                fileSize:       file.buffer.length,
-                fileSha256:     fileSha256 ?? null,
-                fileKey:        fileKey ?? null,
-                totalRows:      p.parseResult.summary.total,
-                acceptedCount:  p.parseResult.summary.accepted,
-                rejectedCount:  p.parseResult.summary.rejected,
-                savedCount:     p.writes.length,
-                newCount:       cls.newCount,
-                overwriteCount: cls.overwriteCount,
-                acknowledged,
-                notApplied,
-              } as unknown as Prisma.InputJsonValue,
-            },
-          }),
-        ]);
-        batch = created;
-      } else {
-        batch = await createBatch;
-      }
-    } catch (e) {
-      // Double-apply guard: the deterministic batch id of a preview token already exists → this preview was applied.
-      if (batchId && e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-        throw new ConflictException(
-          'These targets were already applied from this preview — nothing was saved twice. Use Download Final Targets to check them.',
-        );
-      }
-      throw e;
-    }
+    return this.applyTargetUpload(user, file, p, notApplied, acknowledged, tokenNonce, fileFacts);
+  }
 
-    // Keep the confirmed file BEFORE any target is written: if it cannot be stored, nothing is applied (loud 503) —
-    // an applied upload always has its file on record.
-    if (fileKey) {
+  /**
+   * The write: PENDING batch → keep the file → ONE transaction (tenant upload lock, double-apply re-check, final
+   * new/overwrite split, every target, batch APPLIED, TARGET_UPLOAD audit with the counts written). On any failure the
+   * transaction rolls back (nothing written) → batch FAILED + FAILED audit row → a truthful, retryable error.
+   */
+  private async applyTargetUpload(
+    user: JwtPayload,
+    file: Express.Multer.File,
+    p: Awaited<ReturnType<TargetsService['prepareTargetUpload']>>,
+    notApplied: TargetUploadNotApplied[],
+    acknowledged: TargetUploadAck[],
+    tokenNonce: string | undefined,
+    fileFacts: { fileName: string | null; fileSize: number; fileSha256: string },
+  ) {
+    const batch = await this.prisma.targetUploadBatch.create({
+      data: {
+        clientId:      user.clientId,
+        uploadedById:  user.sub,
+        month:         p.batchMonth,
+        totalRows:     p.parseResult.summary.total,
+        acceptedCount: p.parseResult.summary.accepted,
+        rejectedCount: p.parseResult.summary.rejected,
+        status:        'PENDING',
+      },
+    });
+
+    const baseMeta: Record<string, unknown> = {
+      clientId:            user.clientId,
+      change:              tokenNonce ? 'target-upload-confirm' : 'target-upload-direct',
+      tokenNonce:          tokenNonce ?? null,
+      months:              p.writableMonths,
+      skippedLockedMonths: p.lockedMonths,
+      ...fileFacts,
+      fileKey:             null,
+      totalRows:           p.parseResult.summary.total,
+      acceptedCount:       p.parseResult.summary.accepted,
+      rejectedCount:       p.parseResult.summary.rejected,
+      acknowledged,
+      notApplied,
+    };
+
+    // Keep the confirmed file FIRST (private bucket, tenant + batch scoped): if it cannot be stored nothing is written.
+    let fileKey: string | undefined;
+    if (tokenNonce) {
+      fileKey = this.storage!.generateKey(
+        `${TARGET_UPLOAD_FILE_PREFIX}${user.clientId}/${batch.id}`,
+        file.originalname || 'targets.xlsx',
+      );
       try {
         await this.storage!.uploadFile(
           file.buffer,
           fileKey,
           file.mimetype || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         );
-      } catch {
-        await this.prisma.targetUploadBatch
-          .update({ where: { id: batch.id }, data: { status: 'FAILED' } })
-          .catch(() => undefined);
+      } catch (e) {
+        await this.recordFailedApply(user, batch.id, baseMeta, 'STORAGE_FAILED', e);
         throw new ServiceUnavailableException(
-          'The file could not be stored, so nothing was applied. Pick the file again to preview it and retry.',
+          'The file could not be stored, so nothing was saved. Press Confirm & apply again to retry.',
         );
       }
+      baseMeta.fileKey = fileKey;
     }
 
-    // Build one OutletTarget upsert per (outletCode, month) with non-blank values. Each op is a THUNK built when its
-    // chunk runs, so every row's updatedAt is stamped at its chunk's write time (not when the list was built): Sales
-    // Import's "targets changed since the last apply" reads MAX(updatedAt) of the month's rows (FOCUS-FROM-TARGETS).
-    const targetOps: Array<() => Prisma.PrismaPromise<unknown>> = [];
-    for (const { month, outletCode, outletName, kpiMap, carry } of p.writes) {
-      // Carry over the out-of-scope stored codes inside the statement (scope-enforced tenants only).
-      if (carry.length > 0) {
-        const col = Prisma.sql`"outlet_targets"."targetValues"`;
-        targetOps.push(() =>
-          this.prisma.$executeRaw(Prisma.sql`
-            INSERT INTO "outlet_targets"
-              ("id","clientId","outletCode","outletName","month","targetValues","batchId","createdAt","updatedAt")
-            VALUES (${randomUUID()}, ${user.clientId}, ${outletCode}, ${outletName}, ${month},
-                    ${JSON.stringify(kpiMap)}::jsonb, ${batch.id}, ${SQL_NOW_UTC}, ${SQL_NOW_UTC})
-            ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET
-              "targetValues" = ${TargetsService.carryOverSql(col, Prisma.sql`EXCLUDED."targetValues"`, carry, true)},
-              "outletName"   = EXCLUDED."outletName",
-              "batchId"      = EXCLUDED."batchId",
-              "updatedAt"    = ${SQL_NOW_UTC}`),
-        );
-        continue;
-      }
-
-      targetOps.push(() =>
-        this.prisma.outletTarget.upsert({
-          where: {
-            clientId_outletCode_month: { clientId: user.clientId, outletCode, month },
-          },
-          create: {
-            clientId:     user.clientId,
-            outletCode,
-            outletName,
-            month,
-            targetValues: kpiMap as unknown as Prisma.InputJsonValue,
-            batchId:      batch.id,
-          },
-          update: {
-            targetValues: kpiMap as unknown as Prisma.InputJsonValue,
-            outletName,
-            batchId:      batch.id,
-            updatedAt:    new Date(),
-          },
-        }),
-      );
-    }
-
+    const ops = this.targetWriteOps(user.clientId, batch.id, p.writes);
+    const overwriteAcked = notApplied.find((c) => c.category === 'OVERWRITE');
+    let final: { newCount: number; overwriteCount: number; perMonth: Array<{ month: string; newCount: number; overwriteCount: number }> };
     try {
-      for (let i = 0; i < targetOps.length; i += TargetsService.UPLOAD_CHUNK) {
-        await this.prisma.$transaction(targetOps.slice(i, i + TargetsService.UPLOAD_CHUNK).map((op) => op()));
-      }
+      final = await this.prisma.$transaction(
+        async (tx) => {
+          // Serialise target uploads of a tenant: the double-apply re-check and the new/overwrite split below are exact.
+          await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`target-upload:${user.clientId}`}, 0))`);
+          if (tokenNonce) {
+            const prior = await this.appliedBatchForToken(tx, user.clientId, tokenNonce);
+            if (prior) throw new TargetUploadAbort('ALREADY_APPLIED', new ConflictException(TargetsService.alreadyAppliedMessage(prior)));
+          }
+          const cls = await this.classifyTargetWrites(tx, user.clientId, p.writes);
+          if (tokenNonce) {
+            const nowOverwrite = TargetsService.notApplied(p, cls.overwriteKeys).find((c) => c.category === 'OVERWRITE');
+            if ((nowOverwrite?.fingerprint ?? null) !== (overwriteAcked?.fingerprint ?? null)) {
+              throw new TargetUploadAbort('ACK_CHANGED', new PreconditionFailedException(
+                `Existing targets changed while applying (now ${cls.overwriteCount.toLocaleString('en-IN')} would be replaced, you confirmed ` +
+                  `${(overwriteAcked?.count ?? 0).toLocaleString('en-IN')}). Nothing was saved. Check the up-to-date preview and confirm again.`,
+              ));
+            }
+          }
+          for (const op of ops) await op(tx);
+          await tx.targetUploadBatch.update({ where: { id: batch.id }, data: { status: 'APPLIED' } });
+          await tx.auditLog.create({
+            data: {
+              action: 'CREATE',
+              entityType: TARGET_UPLOAD_AUDIT_ENTITY,
+              entityId: batch.id,
+              actorId: user.sub,
+              metadata: {
+                ...baseMeta,
+                status:         'APPLIED',
+                savedCount:     ops.length,
+                newCount:       cls.newCount,
+                overwriteCount: cls.overwriteCount,
+                perMonth:       cls.perMonth,
+              } as unknown as Prisma.InputJsonValue,
+            },
+          });
+          return { newCount: cls.newCount, overwriteCount: cls.overwriteCount, perMonth: cls.perMonth };
+        },
+        { maxWait: 10_000, timeout: TargetsService.APPLY_TX_TIMEOUT_MS },
+      );
     } catch (e) {
-      // Earlier chunks may already be saved — never leave the batch claiming COMPLETED (best-effort; rethrow the cause).
-      await this.prisma.targetUploadBatch
-        .update({ where: { id: batch.id }, data: { status: 'FAILED' } })
-        .catch(() => undefined);
-      throw e;
+      // The commit may have landed with its reply lost — the DB is the truth.
+      const committed = await this.committedApply(batch.id);
+      if (committed) {
+        final = committed;
+      } else {
+        const reason = e instanceof TargetUploadAbort ? e.reason : 'WRITE_FAILED';
+        await this.recordFailedApply(user, batch.id, baseMeta, reason, e);
+        if (e instanceof TargetUploadAbort) throw e.error;
+        throw new InternalServerErrorException(
+          'Saving the targets failed, so NOTHING from this file was saved (the whole file is saved together or not at all). ' +
+            `Press Confirm & apply again to retry. If it keeps failing, contact Gifsy support (reference ${batch.id.slice(-8)}).`,
+        );
+      }
     }
 
-    // Notify the assigned rep (XSR) + their manager (SO) for every outlet that got a
-    // target this upload. Fire-and-forget + tenant-scoped; never blocks the upload.
-    const notifiedCodes = new Set(p.writes.map((w) => w.outletCode));
-    await this.salesNotifications.targetsUploaded(user.clientId, [...notifiedCodes]);
+    // Notify the assigned rep (XSR) + their manager (SO) for every outlet that got a target. Tenant-scoped; the targets
+    // are already saved, so a notification failure never turns this into an error — it is reported on the response.
+    let notificationWarning: string | undefined;
+    try {
+      await this.salesNotifications.targetsUploaded(user.clientId, [...new Set(p.writes.map((w) => w.outletCode))]);
+    } catch (e) {
+      this.logger.error(`targetsUploaded notification failed for batch ${batch.id}: ${(e as Error)?.message ?? e}`);
+      notificationWarning = 'The targets were saved, but the sales team could not be notified about them.';
+    }
 
     // FOCUS-FROM-TARGETS §7: early, NON-blocking check of the focus product names this upload wrote (never throws;
     // `checked: false` for a tenant without a "from the target file" Sales Import KPI). The month preview re-checks.
@@ -1103,24 +1364,137 @@ export class TargetsService {
 
     return {
       batchId:       batch.id,
+      status:        'APPLIED' as const,
       ...TargetsService.uploadSummary(p),
-      // The GROUND TRUTH of what was actually persisted this upload: one OutletTarget
-      // upsert per (outlet, writable-month) with ≥1 non-blank KPI. This is the number
-      // the confirmation message reports — `acceptedCount` can be higher because it
-      // counts parse-valid rows for LOCKED past months too, which are not written.
-      savedCount:    targetOps.length,
-      // Of savedCount: outlet-months created vs existing ones replaced (split read just before the write).
-      newCount:       cls.newCount,
-      overwriteCount: cls.overwriteCount,
-      perMonth:       cls.perMonth,
+      // The GROUND TRUTH of what was persisted (in ONE transaction): one OutletTarget upsert per (outlet,
+      // writable-month) with ≥1 non-blank KPI. `acceptedCount` can be higher (it counts LOCKED past-month rows too).
+      savedCount:     ops.length,
+      // Of savedCount: outlet-months created vs existing ones replaced (split read inside the write transaction).
+      newCount:       final.newCount,
+      overwriteCount: final.overwriteCount,
+      perMonth:       final.perMonth,
       // What was NOT applied as typed (the done screen lists it), + what the admin acknowledged (confirm path).
       notApplied,
-      ...(batchId ? { acknowledged } : {}),
+      ...(tokenNonce ? { acknowledged } : {}),
+      ...(notificationWarning ? { notificationWarning } : {}),
       // Memory-safety (2026-11-13): only the rejected rows + the ignored-value warning rows come back
       // (each capped at 500, slimmed to row/outlet/status/remarks) — not every parsed row with its values.
       ...targetUploadRowsEcho(p.parseResult.rows),
       focusCheck,
     };
+  }
+
+  /** After a failed transaction: did it in fact commit (APPLIED + its audit row)? Returns the written split, else null. */
+  private async committedApply(batchId: string) {
+    try {
+      const b = await this.prisma.targetUploadBatch.findFirst({ where: { id: batchId }, select: { status: true } });
+      if (b?.status !== 'APPLIED') return null;
+      const a = await this.prisma.auditLog.findFirst({
+        where: { entityType: TARGET_UPLOAD_AUDIT_ENTITY, entityId: batchId },
+        select: { metadata: true },
+      });
+      const m = (a?.metadata ?? {}) as Record<string, unknown>;
+      return {
+        newCount: Number(m.newCount ?? 0),
+        overwriteCount: Number(m.overwriteCount ?? 0),
+        perMonth: (m.perMonth as Array<{ month: string; newCount: number; overwriteCount: number }>) ?? [],
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Batch → FAILED + a FAILED TARGET_UPLOAD audit row (nothing was written). Best-effort; never masks the error. */
+  private async recordFailedApply(
+    user: JwtPayload,
+    batchId: string,
+    baseMeta: Record<string, unknown>,
+    reason: string,
+    cause: unknown,
+  ) {
+    const err = cause as { code?: unknown; message?: unknown; name?: unknown };
+    try {
+      await this.prisma.targetUploadBatch.update({ where: { id: batchId }, data: { status: 'FAILED' } });
+    } catch (e) {
+      this.logger.error(`Could not mark target upload ${batchId} FAILED: ${(e as Error)?.message ?? e}`);
+    }
+    try {
+      await this.prisma.auditLog.create({
+        data: {
+          action: 'CREATE',
+          entityType: TARGET_UPLOAD_AUDIT_ENTITY,
+          entityId: batchId,
+          actorId: user.sub,
+          metadata: {
+            ...baseMeta,
+            status:        'FAILED',
+            failureReason: reason,
+            error:         `${typeof err?.code === 'string' ? `${err.code}: ` : ''}${String(err?.message ?? err?.name ?? cause).slice(0, 300)}`,
+            savedCount:    0,
+            newCount:      0,
+            overwriteCount: 0,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+    } catch (e) {
+      this.logger.error(`Could not record the failed target upload ${batchId}: ${(e as Error)?.message ?? e}`);
+    }
+  }
+
+  /**
+   * One OutletTarget write per (outletCode, month) with non-blank values, as THUNKS run inside the apply transaction
+   * (each row's updatedAt is stamped when it is written: Sales Import's "targets changed since the last apply" reads
+   * MAX(updatedAt) of the month's rows — FOCUS-FROM-TARGETS). The raw carry-over path stamps clock_timestamp(), not
+   * now(): inside one long transaction now() is frozen at the transaction's START.
+   */
+  private targetWriteOps(
+    clientId: string,
+    batchId: string,
+    writes: readonly TargetUploadWrite[],
+  ): Array<(db: Prisma.TransactionClient) => Promise<unknown>> {
+    const ops: Array<(db: Prisma.TransactionClient) => Promise<unknown>> = [];
+    for (const { month, outletCode, outletName, kpiMap, carry } of writes) {
+      // Carry over the out-of-scope stored codes inside the statement (scope-enforced tenants only).
+      if (carry.length > 0) {
+        const col = Prisma.sql`"outlet_targets"."targetValues"`;
+        ops.push((db) =>
+          db.$executeRaw(Prisma.sql`
+            INSERT INTO "outlet_targets"
+              ("id","clientId","outletCode","outletName","month","targetValues","batchId","createdAt","updatedAt")
+            VALUES (${randomUUID()}, ${clientId}, ${outletCode}, ${outletName}, ${month},
+                    ${JSON.stringify(kpiMap)}::jsonb, ${batchId}, ${SQL_CLOCK_UTC}, ${SQL_CLOCK_UTC})
+            ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET
+              "targetValues" = ${TargetsService.carryOverSql(col, Prisma.sql`EXCLUDED."targetValues"`, carry, true)},
+              "outletName"   = EXCLUDED."outletName",
+              "batchId"      = EXCLUDED."batchId",
+              "updatedAt"    = ${SQL_CLOCK_UTC}`),
+        );
+        continue;
+      }
+
+      ops.push((db) =>
+        db.outletTarget.upsert({
+          where: {
+            clientId_outletCode_month: { clientId, outletCode, month },
+          },
+          create: {
+            clientId,
+            outletCode,
+            outletName,
+            month,
+            targetValues: kpiMap as unknown as Prisma.InputJsonValue,
+            batchId,
+          },
+          update: {
+            targetValues: kpiMap as unknown as Prisma.InputJsonValue,
+            outletName,
+            batchId,
+            updatedAt:    new Date(),
+          },
+        }),
+      );
+    }
+    return ops;
   }
 
   /** D1 parser hook: outletCode × KPI code → in the KPI's scope (by the outlet's CURRENT facets). */
@@ -1773,15 +2147,35 @@ export class TargetsService {
    * before the confirm step — or applied directly by a script — have no audit row: `fileKept: false`.
    */
   async listBatches(user: JwtPayload, q: ListBatchesQueryDto) {
-    const batches = await this.prisma.targetUploadBatch.findMany({
+    // Keyset paging (newest first): `before` = the id of the last row of the previous page (this tenant's only).
+    let cursor: { createdAt: Date; id: string } | null = null;
+    if (q.before) {
+      cursor = await this.prisma.targetUploadBatch.findFirst({
+        where: { id: q.before, clientId: user.clientId },
+        select: { createdAt: true, id: true },
+      });
+      if (!cursor) throw new BadRequestException('That page of the upload history is no longer available — reload the page.');
+    }
+    const page = await this.prisma.targetUploadBatch.findMany({
       where: {
         clientId: user.clientId,
         ...(q.month ? { month: q.month } : {}),
+        ...(cursor
+          ? { OR: [{ createdAt: { lt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { lt: cursor.id } }] }
+          : {}),
       },
-      orderBy: { createdAt: 'desc' },
-      take: TargetsService.HISTORY_LIMIT,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: TargetsService.HISTORY_LIMIT + 1,
     });
-    if (batches.length === 0) return [];
+    const hasMore = page.length > TargetsService.HISTORY_LIMIT;
+    const batches = hasMore ? page.slice(0, TargetsService.HISTORY_LIMIT) : page;
+    const envelope = (items: unknown[]) => ({
+      items,
+      pageSize: TargetsService.HISTORY_LIMIT,
+      hasMore,
+      nextCursor: hasMore ? batches[batches.length - 1].id : null,
+    });
+    if (batches.length === 0) return envelope([]);
     const [audits, users] = await Promise.all([
       this.prisma.auditLog.findMany({
         where: { entityType: TARGET_UPLOAD_AUDIT_ENTITY, entityId: { in: batches.map((b) => b.id) } },
@@ -1800,10 +2194,14 @@ export class TargetsService {
     );
     // A tenant user's own name; an operator from another tenant (Gifsy staff working in this tenant) is not named.
     const nameBy = new Map((users ?? []).map((u) => [u.id, u.clientId === user.clientId ? u.name : 'Gifsy team']));
-    return batches.map((b) => {
+    const now = Date.now();
+    return envelope(batches.map((b) => {
       const m = auditBy.get(b.id);
+      const outcome = TargetsService.batchOutcome(b.status, (m?.status as string | undefined) ?? null, b.createdAt, now);
       return {
         ...b,
+        outcome,
+        failureReason:  outcome === 'FAILED' ? ((m?.failureReason as string | undefined) ?? null) : null,
         uploadedByName: nameBy.get(b.uploadedById) ?? null,
         months:         (m?.months as string[] | undefined) ?? null,
         fileName:       (m?.fileName as string | undefined) ?? null,
@@ -1813,9 +2211,30 @@ export class TargetsService {
         overwriteCount: (m?.overwriteCount as number | undefined) ?? null,
         acknowledged:   (m?.acknowledged as string[] | undefined) ?? null,
         notApplied:     (m?.notApplied as unknown[] | undefined) ?? null,
-        fileKept:       typeof m?.fileKey === 'string' && b.status === 'COMPLETED',
+        fileKept:       typeof m?.fileKey === 'string' && outcome === 'APPLIED',
       };
-    });
+    }));
+  }
+
+  /**
+   * What an upload-history row truthfully says happened:
+   *   APPLIED          — saved (status APPLIED; 'COMPLETED' = uploads from before the confirm step).
+   *   FAILED           — this attempt saved NOTHING (one all-or-nothing transaction; its audit row says FAILED).
+   *   LEGACY_FAILED    — an older upload (chunked writes, no audit row) that stopped part-way: may be partly saved.
+   *   IN_PROGRESS      — PENDING and recent: being saved now.
+   *   ABANDONED        — PENDING and stale: it never finished, so its transaction was rolled back — nothing saved.
+   */
+  static batchOutcome(
+    status: string,
+    auditStatus: string | null,
+    createdAt: Date,
+    now: number,
+  ): 'APPLIED' | 'FAILED' | 'LEGACY_FAILED' | 'IN_PROGRESS' | 'ABANDONED' {
+    if (status === 'APPLIED' || status === 'COMPLETED') return 'APPLIED';
+    if (status === 'PENDING') {
+      return now - new Date(createdAt).getTime() > TargetsService.PENDING_STALE_MS ? 'ABANDONED' : 'IN_PROGRESS';
+    }
+    return auditStatus === 'FAILED' ? 'FAILED' : 'LEGACY_FAILED';
   }
 
   /**

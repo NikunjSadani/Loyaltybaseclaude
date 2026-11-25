@@ -6,14 +6,14 @@ import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import { TargetsController } from './targets.controller';
 import { UploadTargetsQueryDto } from './dto/targets.dto';
-import type { TargetsService } from './targets.service';
+import { TargetsService } from './targets.service';
 import type { ExportsService } from '../exports/exports.service';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const user = { sub: 'u1', clientId: 'c1', role: 'CLIENT_ADMIN', phone: '', name: '' } as JwtPayload;
 const file = { buffer: Buffer.from('x'), originalname: 't.xlsx' } as Express.Multer.File;
-const TOKEN = `${'a'.repeat(64)}.${'b'.repeat(32)}`;
+const TOKEN = `${'a'.repeat(64)}.${'b'.repeat(32)}.${'1'.repeat(13)}.${'c'.repeat(64)}`;
 
 function make() {
   const targets = {
@@ -42,11 +42,15 @@ describe('POST /admin/targets/upload dispatch', () => {
     expect(targets.uploadTargets).not.toHaveBeenCalled();
   });
 
-  it('?confirmToken=&ack= → apply with that token and the acknowledged categories', async () => {
+  it('?confirmToken=&ack= → apply with that token and the acknowledgements bound to count + fingerprint', async () => {
     const { ctrl, targets } = make();
-    await ctrl.uploadTargets(user, file, { confirmToken: TOKEN, ack: 'REJECTED_ROWS,OVERWRITE' });
+    await ctrl.uploadTargets(user, file, { confirmToken: TOKEN, ack: 'REJECTED_ROWS:1:0123456789abcdef,OVERWRITE:12:fedcba9876543210' });
     expect(targets.uploadTargets).toHaveBeenCalledWith(user, file, {
-      confirmToken: TOKEN, acknowledged: ['REJECTED_ROWS', 'OVERWRITE'],
+      confirmToken: TOKEN,
+      acknowledged: [
+        { category: 'REJECTED_ROWS', count: 1, fingerprint: '0123456789abcdef' },
+        { category: 'OVERWRITE', count: 12, fingerprint: 'fedcba9876543210' },
+      ],
     });
     expect(targets.previewTargetUpload).not.toHaveBeenCalled();
   });
@@ -57,10 +61,11 @@ describe('POST /admin/targets/upload dispatch', () => {
     expect(targets.uploadTargets).toHaveBeenCalledWith(user, file, { confirmToken: TOKEN, acknowledged: [] });
   });
 
-  it('no params → direct apply, exactly as before (scripts / e2e harness)', async () => {
+  it('no params → handed to the service WITHOUT a token, which refuses it ("Preview the file first") for every tenant', async () => {
     const { ctrl, targets } = make();
     await ctrl.uploadTargets(user, file, {});
     expect(targets.uploadTargets).toHaveBeenCalledWith(user, file, undefined);
+    expect(TargetsService.confirmRequired(user.clientId)).toBe(true);
   });
 });
 
@@ -93,12 +98,15 @@ describe('UploadTargetsQueryDto', () => {
     expect(errs({ confirmToken: TOKEN })).toHaveLength(0);
     expect(errs({})).toHaveLength(0);
     expect(errs({ confirmToken: TOKEN, ack: '' })).toHaveLength(0);
-    expect(errs({ confirmToken: TOKEN, ack: 'REJECTED_ROWS,OVERWRITE,LOCKED_MONTHS,BLANK_ROWS,IGNORED_VALUES' })).toHaveLength(0);
+    expect(errs({ confirmToken: TOKEN, ack: 'REJECTED_ROWS:1:0123456789abcdef,OVERWRITE:12:fedcba9876543210' })).toHaveLength(0);
+    // a well-shaped but forged token passes validation ON PURPOSE: the service refuses AND audits it
+    expect(errs({ confirmToken: 'abc' })).toHaveLength(0);
   });
 
-  it('rejects a malformed token, an unknown preview value and an unknown ack category', () => {
-    expect(errs({ confirmToken: 'abc' })).not.toHaveLength(0);
+  it('rejects garbage characters / lengths and an unknown preview value', () => {
+    expect(errs({ confirmToken: 'not a token!' })).not.toHaveLength(0);
+    expect(errs({ confirmToken: 'a'.repeat(301) })).not.toHaveLength(0);
     expect(errs({ preview: 'yes' })).not.toHaveLength(0);
-    expect(errs({ ack: 'OVERWRITE,EVERYTHING' })).not.toHaveLength(0);
+    expect(errs({ ack: 'OVERWRITE;DROP' })).not.toHaveLength(0);
   });
 });

@@ -11,8 +11,8 @@
  *
  *   Targets:
  *     GET    /v1/admin/targets/template        download .xlsx template (query: months=YYYY-MM,…)
- *     POST   /v1/admin/targets/upload          multipart xlsx upload: ?preview=1 (nothing written) → ?confirmToken=&ack= (verbatim write)
- *     GET    /v1/admin/targets/batches         upload history (newest 100 + audit details)
+ *     POST   /v1/admin/targets/upload          multipart xlsx upload: ?preview=1 (nothing written) → ?confirmToken=&ack= (verbatim write; no token = refused)
+ *     GET    /v1/admin/targets/batches         upload history, pages of 100 newest first (?before=<nextCursor>) + audit details
  *     GET    /v1/admin/targets/batches/:id/file  the kept file of a confirmed upload
  *     GET    /v1/admin/targets                 list target rows (query: month=YYYY-MM)
  *
@@ -200,11 +200,14 @@ export class TargetsController {
    * Parses the xlsx, validates against KpiDefs + outlet roster, and writes
    * OutletTarget rows inside a TargetUploadBatch. Blank cell = omitted key.
    *
-   * Preview → confirm (owner decision 2026-11-25, the admin screen):
-   *   ?preview=1            → same validation, NOTHING written; returns counts (new vs overwritten) + previewToken.
-   *   ?confirmToken=<token>&ack=<categories> → applies the SAME file (409 if the bytes differ, 409 if this preview
-   *                           was already applied, 400 naming any not-applied category that was not acknowledged).
-   *   neither               → applies directly (unchanged behaviour for scripts / the e2e harness).
+   * Preview → confirm (owner decision 2026-11-25, approved for ALL clients incl. Deoleo):
+   *   ?preview=1            → same validation, NOTHING written; returns counts (new vs overwritten), the not-applied
+   *                           categories (count + fingerprint + samples) and a server-signed previewToken (30 min).
+   *   ?confirmToken=<token>&ack=CAT:count:fingerprint,… → applies the SAME file in ONE transaction. Refused (and
+   *                           audited): invalid / other user's token 400, expired 410, different file 409, already
+   *                           applied 409, missing acknowledgement 400, changed counts/items 412, no storage 503.
+   *   neither               → REFUSED 400 "Preview the file first" (audited) for every tenant in
+   *                           TargetsService.confirmRequired — there is no direct-apply route.
    */
   @Post('upload')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
@@ -224,10 +227,11 @@ export class TargetsController {
     @Query() q: UploadTargetsQueryDto,
   ) {
     if (q?.preview === '1' || q?.preview === 'true') return this.targets.previewTargetUpload(user, file);
+    // No token → the service refuses + audits ("Preview the file first") for every confirmRequired tenant.
     if (q?.confirmToken === undefined) return this.targets.uploadTargets(user, file, undefined);
     return this.targets.uploadTargets(user, file, {
       confirmToken: q.confirmToken,
-      acknowledged: (q.ack ?? '').split(',').filter(Boolean),
+      acknowledged: TargetsService.parseAckParam(q.ack),
     });
   }
 

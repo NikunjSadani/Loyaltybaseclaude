@@ -137,21 +137,23 @@ export class UploadTargetsQueryDto {
   @IsIn(['1', 'true', '0', 'false'])
   preview?: string;
 
-  /** The previewToken of the preview being confirmed — the same file must be posted again. */
-  @IsOptional()
-  @IsString()
-  @Matches(/^[a-f0-9]{64}\.[a-f0-9]{32}$/, { message: 'confirmToken is not a valid preview token' })
-  confirmToken?: string;
-
   /**
-   * With confirmToken: the not-applied categories the admin acknowledged, comma-separated
-   * (REJECTED_ROWS,OVERWRITE,LOCKED_MONTHS,BLANK_ROWS,IGNORED_VALUES). '' = none.
+   * The server-signed previewToken of the preview being confirmed — the same file must be posted again. Only the
+   * charset / length is checked here: the SERVICE verifies it (signature, caller, file, expiry) so that a forged,
+   * foreign or expired token is refused AND audited, not just bounced by validation.
    */
   @IsOptional()
   @IsString()
-  @Matches(/^$|^(REJECTED_ROWS|OVERWRITE|LOCKED_MONTHS|BLANK_ROWS|IGNORED_VALUES)(,(REJECTED_ROWS|OVERWRITE|LOCKED_MONTHS|BLANK_ROWS|IGNORED_VALUES))*$/, {
-    message: 'ack must be a comma-separated list of REJECTED_ROWS, OVERWRITE, LOCKED_MONTHS, BLANK_ROWS, IGNORED_VALUES',
-  })
+  @Matches(/^[a-f0-9.]{1,300}$/, { message: 'confirmToken is not a valid preview token' })
+  confirmToken?: string;
+
+  /**
+   * With confirmToken: the acknowledged not-applied categories, each bound to what the preview showed —
+   * "CATEGORY:count:fingerprint", comma-separated ('' = none). Verified by the service against the state at apply.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Za-z0-9_:,]{0,1000}$/, { message: 'ack must be a comma-separated list of CATEGORY:count:fingerprint' })
   ack?: string;
 }
 
@@ -162,6 +164,12 @@ export class ListBatchesQueryDto {
   @IsOptional()
   @Matches(/^\d{4}-\d{2}$/, { message: 'month must be YYYY-MM' })
   month?: string;
+
+  /** Upload history paging: the `nextCursor` of the previous page (a batch id of this tenant). */
+  @IsString()
+  @IsOptional()
+  @Matches(/^[A-Za-z0-9_-]{1,64}$/, { message: 'before must be an upload id' })
+  before?: string;
 }
 
 // ─── List target rows ─────────────────────────────────────────────────────────
