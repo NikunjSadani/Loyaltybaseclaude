@@ -11,10 +11,11 @@
  *  - UND5: a clean credit-only file: preview asked (every tenant), no section, confirms with acknowledged []
  *  - UND6: done screen appends deductions; a skipped deduction reads "NOT deducted"
  *  - UND7: deductionsEnabled false on the server → hard block
- *  - UND8: the file had deductions but the confirm applied none → loud alert
  *  - UND9: two outlets on ONE wallet → one below-zero line incl. the held opening balance
  *  - UND10: repeat-deduction warning
- *  - UND11: the server refuses an unacknowledged category → its message is shown, nothing credited
+ *  - UND11: (U1) the server refuses an unacknowledged category → the check re-runs, the batch stays pending, the missing
+ *           box appears; tick + Retry confirm re-sends the acknowledgements — never "upload again"
+ *  - UND13: a category outside the server's ackCategories is information only (no box)
  */
 import React from 'react';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
@@ -90,13 +91,18 @@ let previewBodies: string[] = [];
 let previewReplies: Reply[] = [];
 let confirmBodies: string[] = [];
 let confirmReply: { status: number; body: unknown };
+/** Optional queue of confirm replies (consumed in order; then confirmReply). */
+let confirmQueue: Array<{ status: number; body: unknown }> = [];
 
 const outletOk = (outletCode: string, balance: number, over: Record<string, unknown> = {}) => ({
   outletCode, found: true, linked: true, walletId: `W-${outletCode}`, partnerId: `P-${outletCode}`, balance,
   heldOpeningBalance: null, ready: true, reason: null, code: null, ...over,
 });
 const previewOk = (outlets: unknown[], over: Record<string, unknown> = {}): Reply =>
-  ({ status: 200, body: { success: true, data: { deductionsEnabled: true, outlets, priorDeductions: [], ...over } } });
+  ({ status: 200, body: { success: true, data: {
+    deductionsEnabled: true, outlets, priorDeductions: [],
+    ackCategories: ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'], ...over,
+  } } });
 
 function installFetch() {
   previewBodies = [];
@@ -118,7 +124,8 @@ function installFetch() {
     }
     if (url.endsWith('/confirm')) {
       confirmBodies.push(String(init?.body));
-      return ok(confirmReply.body, confirmReply.status);
+      const c = confirmQueue.length ? confirmQueue.shift()! : confirmReply;
+      return ok(c.body, c.status);
     }
     return ok({ success: false, error: `unmocked ${url}` }, 404);
   }) as unknown as typeof fetch;
@@ -149,6 +156,7 @@ describe('UND — upload with deductions + Before you confirm', () => {
     flags.negativeDeductions = true;
     previewReplies = [previewOk([outletOk('BJ1', 100), outletOk('BJ2', 5000)])];
     confirmReply = { status: 200, body: { success: true, data: { pointsCredited: 1, pointsCreditedTotal: 30, payoutEntriesCreated: 0, skipped: [] } } };
+    confirmQueue = [];
     installFetch();
   });
 
@@ -162,7 +170,7 @@ describe('UND — upload with deductions + Before you confirm', () => {
     expect(screen.getByText('550 pts')).toBeInTheDocument();
     expect(screen.getByTestId('credits-ok-split')).toHaveTextContent('1 to credit or pay · 2 to deduct');
 
-    expect(await screen.findByText('BJ1 · Balance will go below zero: 100 → −220')).toBeInTheDocument();
+    expect(await screen.findByText('BJ1 · Balance will go below zero: 100 → −220 pts')).toBeInTheDocument();
     expect(JSON.parse(previewBodies[0])).toEqual({
       outletCodes: ['BJ1', 'BJ2'], period: expectedPeriod(),
       lines: [{ outletCode: 'BJ1', fieldId: 'f1' }, { outletCode: 'BJ2', fieldId: 'f1' }],
@@ -179,7 +187,8 @@ describe('UND — upload with deductions + Before you confirm', () => {
     expect(confirmBtn()).toBeEnabled();
 
     fireEvent.click(confirmBtn());
-    await screen.findByText('Credits confirmed successfully');
+    await screen.findByText('Upload confirmed'); // U8: the file has deductions — not "Credits confirmed"
+    expect(screen.queryByText(/Credits confirmed/)).toBeNull();
     expect(JSON.parse(confirmBodies[0])).toEqual({ acknowledged: ['SKIPPED', 'ROUNDED', 'BELOW_ZERO'], skippedRows: 1 });
     const accepted = screen.getByTestId('credits-accepted');
     expect(accepted).toHaveTextContent('You accepted:');
@@ -212,7 +221,7 @@ describe('UND — upload with deductions + Before you confirm', () => {
     expect(screen.getByTestId('credits-confirm-blocked')).toHaveTextContent("Couldn't check wallet balances — use Check again.");
 
     fireEvent.click(screen.getByRole('button', { name: /Check again/ }));
-    expect(await screen.findByText('BJ1 · Balance will go below zero: 100 → −220')).toBeInTheDocument();
+    expect(await screen.findByText('BJ1 · Balance will go below zero: 100 → −220 pts')).toBeInTheDocument();
     expect(previewBodies).toHaveLength(2);
   });
 
@@ -271,21 +280,15 @@ describe('UND — upload with deductions + Before you confirm', () => {
     expect(confirmBtn()).toBeDisabled();
   });
 
-  it('UND8: the file had deductions but the confirm applied none → loud "NOT deducted" alert', async () => {
-    await upload(MIXED);
-    await tickAll(3);
-    fireEvent.click(confirmBtn());
-    expect(await screen.findByTestId('credits-deductions-ignored')).toHaveTextContent('2 deduction rows were NOT deducted');
-  });
-
   it('UND9: two outlets sharing one wallet → ONE line with both codes, held opening balance included', async () => {
     previewReplies = [previewOk([
+      // Partner-level held opening balance repeated on both outlets → counted ONCE (U4).
       outletOk('BJ1', 100, { walletId: 'W', heldOpeningBalance: 50 }),
-      outletOk('BJ2', 100, { walletId: 'W' }),
+      outletOk('BJ2', 100, { walletId: 'W', heldOpeningBalance: 50 }),
     ])];
     await upload(MIXED);
     // current = 100 + 50 held; after = 150 + 30 − 350 − 200 = −370
-    expect(await screen.findByText('BJ1, BJ2 · Balance will go below zero: 150 → −370')).toBeInTheDocument();
+    expect(await screen.findByText('BJ1, BJ2 · Balance will go below zero: 150 → −370 pts')).toBeInTheDocument();
     expect(screen.getByText('(includes a held opening balance of 50 that posts first)')).toBeInTheDocument();
     expect(screen.getByLabelText('I understand 1 wallet will go below zero')).toBeInTheDocument();
   });
@@ -295,23 +298,59 @@ describe('UND — upload with deductions + Before you confirm', () => {
       priorDeductions: [{ outletCode: 'BJ1', fieldId: 'f1', batchId: 'b0', batchCode: 'CB-OLD', confirmedAt: '2026-11-03T06:00:00.000Z', points: 350 }],
     })];
     await upload(MIXED);
-    expect(await screen.findByText("Already deducted on 3 Nov 2026 in batch CB-OLD — check this isn't a repeat.")).toBeInTheDocument();
+    expect(await screen.findByText("Already deducted on 3 Nov 2026 in batch CB-OLD (350 pts still deducted) — check this isn't a repeat.")).toBeInTheDocument();
     await tickAll(3); // SKIPPED, ROUNDED, REPEAT_DEDUCTION
     fireEvent.click(confirmBtn());
-    await screen.findByText(/Credits confirmed/);
+    await screen.findByText(/Upload confirmed/);
     expect(JSON.parse(confirmBodies[0]).acknowledged).toEqual(['SKIPPED', 'ROUNDED', 'REPEAT_DEDUCTION']);
   });
 
-  it('UND11: the server refuses an unacknowledged category → its message shown; nothing credited', async () => {
-    confirmReply = { status: 400, body: {
-      success: false, missingAcknowledgements: ['NOT_APPLIED'],
-      error: 'Before confirming, please review and tick: rows not applied. Nothing was credited or deducted.',
-    } };
+  it('UND11 (U1): a refused acknowledgement → the check re-runs, the batch stays pending, tick + Retry confirm', async () => {
+    // The first check sees BJ1 at 5,000 (no below-zero); by confirm time the server finds it below zero.
+    previewReplies = [
+      previewOk([outletOk('BJ1', 5000), outletOk('BJ2', 5000)]),
+      previewOk([outletOk('BJ1', 100), outletOk('BJ2', 5000)]),
+    ];
+    confirmQueue = [{ status: 400, body: {
+      success: false,
+      error: 'Before confirming, reload the page and tick: wallets going below zero. Nothing was credited or deducted.',
+      details: { missingAcknowledgements: ['BELOW_ZERO'] },
+    } }];
     await upload(MIXED);
-    await tickAll(3);
+    await tickAll(2); // SKIPPED, ROUNDED
     fireEvent.click(confirmBtn());
-    expect(await screen.findByRole('alert')).toHaveTextContent('Before confirming, please review and tick: rows not applied');
-    expect(screen.queryByText(/Credits confirmed/)).toBeNull();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Batch CB-1 is saved but not confirmed yet');
+    expect(alert).toHaveTextContent('tick the boxes, then press Retry confirm');
+    expect(alert.textContent).not.toMatch(/upload (it )?again|re-upload|reload the page/i);
+    // The check re-ran and now shows the below-zero wallet with its own (unticked) box; the batch stays pending.
+    expect(await screen.findByText('BJ1 · Balance will go below zero: 100 → −220 pts')).toBeInTheDocument();
+    expect(previewBodies).toHaveLength(2);
+    const retry = screen.getByRole('button', { name: 'Retry confirm for CB-1' });
+    expect(retry).toBeDisabled();
+    expect(screen.queryByRole('button', { name: /Confirm & Credit/ })).toBeNull();
+
+    fireEvent.click(screen.getByLabelText('I understand 1 wallet will go below zero'));
+    await waitFor(() => expect(retry).toBeEnabled());
+    fireEvent.click(retry);
+    await screen.findByText('Upload confirmed');
+    expect(confirmBodies).toHaveLength(2);
+    expect(JSON.parse(confirmBodies[1])).toEqual({ acknowledged: ['SKIPPED', 'ROUNDED', 'BELOW_ZERO'], skippedRows: 1 });
+    // One batch only — never a second save.
+    expect(vi.mocked(global.fetch).mock.calls.filter(([u, i]) => String(u).endsWith('/credits/batches') && (i as RequestInit)?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('UND13: a category outside the server\'s ackCategories is listed for information only (no box)', async () => {
+    previewReplies = [previewOk([outletOk('BJ1', 100), outletOk('BJ2', 5000)], { ackCategories: ['BELOW_ZERO'] })];
+    await upload(MIXED);
+    await tickAll(1); // only BELOW_ZERO needs a tick
+    expect(screen.getByTestId('ack-info-SKIPPED')).toBeInTheDocument();
+    expect(screen.getByTestId('ack-info-ROUNDED')).toBeInTheDocument();
+    expect(confirmBtn()).toBeEnabled();
+    fireEvent.click(confirmBtn());
+    await screen.findByText('Upload confirmed');
+    expect(JSON.parse(confirmBodies[0])).toEqual({ acknowledged: ['BELOW_ZERO'], skippedRows: 1 });
   });
 
   it('UND12: Upload Again + a new file resets the ticks', async () => {
@@ -321,7 +360,7 @@ describe('UND — upload with deductions + Before you confirm', () => {
     fireEvent.click(screen.getByRole('button', { name: /Upload Again/ }));
     await waitFor(() => expect(container.querySelector('input[type="file"]')).not.toBeNull());
     fireEvent.change(container.querySelector('input[type="file"]') as HTMLInputElement, { target: { files: [MIXED] } });
-    await screen.findByText('BJ1 · Balance will go below zero: 100 → −220');
+    await screen.findByText('BJ1 · Balance will go below zero: 100 → −220 pts');
     within(screen.getByTestId('before-you-confirm')).getAllByRole('checkbox').forEach((b) => expect(b).not.toBeChecked());
     expect(confirmBtn()).toBeDisabled();
   });

@@ -103,12 +103,12 @@ export function mapApiTransaction(t: ApiWalletTransaction): WalletTransaction {
   // upload narration as a small gray sub-line below (only when non-empty). Non-credit
   // rows keep their own description (narration, else the per-type default such as
   // "Points redeemed" / "Points expired") as the header and carry no sub-line.
-  // An UPLOAD DEDUCTION (DEBIT_ADJUSTMENT with a field name): the server text already names the field
+  // An UPLOAD DEDUCTION (DEBIT_ADJUSTMENT written by a credit batch): its own server text already names the field
   // ("320 points deducted — Target, November 2026 · <note>") — shown as-is, never with the field name again.
   const isUploadDeduction = isUploadDeductionRow(t);
   const hasFieldName = !!t.fieldName && !isUploadDeduction;
   const header    = isUploadDeduction
-    ? (t.narration || t.description)
+    ? t.description
     : hasFieldName ? (t.fieldName as string) : t.description;
   const narration = hasFieldName && t.narration ? t.narration : undefined;
 

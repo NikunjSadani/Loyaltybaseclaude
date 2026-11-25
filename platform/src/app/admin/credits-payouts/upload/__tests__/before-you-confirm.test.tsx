@@ -13,6 +13,8 @@ import {
   previewRequestBody,
   repeatDeductionRows,
   walletLines,
+  withServerRequired,
+  ACK_ORDER,
   type UploadPreviewData,
   type UploadPreviewOutlet,
 } from '../_components/before-you-confirm';
@@ -26,7 +28,7 @@ const outlet = (outletCode: string, over: Partial<UploadPreviewOutlet> = {}): Up
   balance: 0, heldOpeningBalance: null, ready: true, reason: null, code: null, ...over,
 });
 const data = (outlets: UploadPreviewOutlet[], over: Partial<UploadPreviewData> = {}): UploadPreviewData => ({
-  deductionsEnabled: true, outlets, priorDeductions: [], ...over,
+  deductionsEnabled: true, outlets, priorDeductions: [], ackCategories: [...ACK_ORDER], ...over,
 });
 const parse = (rows: CreditUploadRow[]): CreditParseResult => ({
   headerError: null, rows, hasErrors: false, canProceed: true,
@@ -60,16 +62,37 @@ describe('BYC — derivations', () => {
       row({ outletId: 'B', amount: -100, fieldId: 'f2' }),
       row({ outletId: 'C', amount: -10, fieldId: 'f2' }),
     ];
+    // U4: the held opening balance is PARTNER-level and repeated on each outlet → counted ONCE per wallet.
     const d = data([
       outlet('A', { walletId: 'W1', balance: 200, heldOpeningBalance: 150 }),
-      outlet('B', { walletId: 'W1', balance: 200 }),
-      outlet('C', { walletId: null, balance: null }),
+      outlet('B', { walletId: 'W1', balance: 200, heldOpeningBalance: 150 }),
+      outlet('C', { walletId: null, partnerId: null, balance: null }),
     ]);
     expect(walletLines(rows, d)).toEqual([
-      // current = 200 + 150 held; after = 350 + 30 − 500 − 100
-      { key: 'W1', outletCodes: ['A', 'B'], current: 350, held: 150, after: -220 },
-      { key: 'outlet:C', outletCodes: ['C'], current: 0, held: null, after: -10 },
+      // current = 200 + 150 held (once); after = 350 + 30 − 500 − 100
+      { key: 'W1', outletCodes: ['A', 'B'], current: 350, held: 150, dueExpiry: 0, after: -220 },
+      { key: 'outlet:C', outletCodes: ['C'], current: 0, held: null, dueExpiry: 0, after: -10 },
     ]);
+  });
+
+  it('BYC2b (U3): outlets without a wallet group by PARTNER — one line for the wallet confirm will create', () => {
+    const rows = [row({ outletId: 'A', amount: -40 }), row({ outletId: 'B', amount: -60, fieldId: 'f2' })];
+    const d = data([
+      outlet('A', { walletId: null, partnerId: 'P1', balance: null }),
+      outlet('B', { walletId: null, partnerId: 'P1', balance: null }),
+    ]);
+    expect(walletLines(rows, d)).toEqual([
+      { key: 'partner:P1', outletCodes: ['A', 'B'], current: 0, held: null, dueExpiry: 0, after: -100 },
+    ]);
+  });
+
+  it('BYC2c: points expiring now come off the current balance (once per wallet) and are named', () => {
+    const rows = [row({ outletId: 'A', amount: -300 }), row({ outletId: 'B', amount: 0, status: 'SKIP' })];
+    const d = data([outlet('A', { walletId: 'W', balance: 500, dueExpiry: 250 })]);
+    expect(walletLines(rows, d)).toEqual([{ key: 'W', outletCodes: ['A'], current: 250, held: null, dueExpiry: 250, after: -50 }]);
+    const below = presentCategories(parse(rows), d).find((c) => c.category === 'BELOW_ZERO')!;
+    expect(below.items[0].text).toBe('A · Balance will go below zero: 250 → −50 pts');
+    expect(below.items[0].detail).toBe('(includes 250 points expiring now)');
   });
 
   it('BYC3: a wallet the file only credits is never a below-zero line', () => {
@@ -120,9 +143,11 @@ describe('BYC — derivations', () => {
       ['REPEAT_DEDUCTION', 'I understand 1 deduction may be a repeat'],
     ]);
     const below = cats.find((c) => c.category === 'BELOW_ZERO')!;
-    expect(below.items[0].text).toBe('BJ1 · Balance will go below zero: 50 → −50'); // 50 + 200 credit − 300
+    expect(below.items[0].text).toBe('BJ1 · Balance will go below zero: 50 → −50 pts'); // 50 + 200 credit − 300
     const repeat = cats.find((c) => c.category === 'REPEAT_DEDUCTION')!;
-    expect(repeat.items[0].detail).toBe('Already deducted on 3 Nov 2026 in batch CB-OLD — check this isn\'t a repeat.');
+    // U5: the server's points are net of give-backs.
+    expect(repeat.items[0].detail).toBe('Already deducted on 3 Nov 2026 in batch CB-OLD (300 pts still deducted) — check this isn\'t a repeat.');
+    expect(cats.every((c) => c.required)).toBe(true);
   });
 
   it('BYC7: counts are en-IN formatted in labels (1,164 rows)', () => {
@@ -154,5 +179,25 @@ describe('BYC — UI', () => {
     expect(screen.getByRole('alert')).toHaveTextContent("If a wallet isn't prepared for deductions, the whole confirm is refused.");
     fireEvent.click(screen.getByRole('button', { name: /Check again/ }));
     expect(onRetry).toHaveBeenCalled();
+  });
+});
+
+describe('BYC — server-decided acknowledgements', () => {
+  it('BYC10: a present category outside ackCategories is listed for information only (no box)', () => {
+    const rows = [row({ rowNum: 3, status: 'SKIP', amount: 0 }), row({ rowNum: 4, amount: 200, originalAmount: 199.5 })];
+    const cats = presentCategories(parse(rows), data([outlet('BJ1')], { ackCategories: ['ROUNDED'] }));
+    expect(cats.map((c) => [c.category, c.required])).toEqual([['SKIPPED', false], ['ROUNDED', true]]);
+    render(<BeforeYouConfirm categories={cats} acked={new Set()} onToggle={vi.fn()} />);
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.getByTestId('ack-info-SKIPPED')).toHaveTextContent('For your information — no tick needed.');
+  });
+
+  it('BYC11: withServerRequired — a refused category becomes required; one this screen cannot list gets its own box', () => {
+    const rows = [row({ rowNum: 3, status: 'SKIP', amount: 0 })];
+    const cats = presentCategories(parse(rows), data([outlet('BJ1')], { ackCategories: [] }));
+    const out = withServerRequired(cats, ['SKIPPED', 'BELOW_ZERO']);
+    expect(out.map((c) => [c.category, c.required])).toEqual([['SKIPPED', true], ['BELOW_ZERO', true]]);
+    expect(out[1].label).toBe('I understand some wallets will go below zero');
+    expect(withServerRequired(cats, [])).toBe(cats);
   });
 });

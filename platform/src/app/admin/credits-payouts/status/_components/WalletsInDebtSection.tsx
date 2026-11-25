@@ -270,7 +270,7 @@ export default function WalletsInDebtSection() {
           {data.total} wallet{data.total === 1 ? '' : 's'} below zero{scope} · {totalOwed.toLocaleString('en-IN')} pts owed
           {cut ? ` (first ${data.wallets.length} listed)` : ''}
         </p>
-        <span className="text-xs text-orange-800">Repaid from their future earnings; they can&apos;t redeem until back above zero.</span>
+        <span className="text-xs text-orange-800">Repaid from their future earnings; they can&apos;t redeem until their balance is 0 or more.</span>
         <div className="ml-auto flex items-center gap-2">
           {programs.length > 1 && (
             <label className="text-xs text-orange-900 flex items-center gap-1">

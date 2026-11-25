@@ -27,8 +27,13 @@ export interface UploadPreviewOutlet {
   walletId:           string | null;
   partnerId:          string | null;
   balance:            number | null;
-  /** A PENDING held opening balance that posts first at confirm; null if none. */
+  /**
+   * PARTNER-level held opening balance (summed over the partner's outlets) — non-null only when it will actually post
+   * first at confirm (wallet missing or empty). Counted ONCE per wallet.
+   */
   heldOpeningBalance: number | null;
+  /** Points that will expire (due, not yet swept) before the deduction — the preview's current = balance − dueExpiry. */
+  dueExpiry?:         number;
   /** Deductions only: the wallet is prepared. Ignored for credits. */
   ready:              boolean;
   reason:             string | null;
@@ -41,11 +46,18 @@ export interface PriorDeduction {
   batchId:     string;
   batchCode:   string;
   confirmedAt: string;
+  /** Points STILL deducted (net of give-backs; fully undone deductions are omitted by the server). */
   points:      number;
+  givenBack?:  number;
 }
 
 export interface UploadPreviewData {
   deductionsEnabled: boolean;
+  /**
+   * The categories THIS client must acknowledge (decided by the server in one place). A present category outside the
+   * list is shown for information only, without a box.
+   */
+  ackCategories:     AckCategory[];
   outlets:           UploadPreviewOutlet[];
   priorDeductions:   PriorDeduction[];
 }
@@ -93,33 +105,41 @@ const applies = (o: UploadPreviewOutlet | undefined): o is UploadPreviewOutlet =
 export interface WalletLine {
   key:         string;
   outletCodes: string[];
-  /** balance + held opening balance (what the wallet holds when the rows apply). */
+  /** balance − points expiring now + held opening balance (what the wallet holds when the rows apply). */
   current:     number;
   held:        number | null;
+  /** Points expiring now (due, not yet swept) — already taken off `current`. */
+  dueExpiry:   number;
   after:       number;
 }
 
+/** The wallet a row lands in, as the server groups it: the wallet, else the partner (the wallet confirm creates). */
+const walletKey = (o: UploadPreviewOutlet) =>
+  o.walletId ? o.walletId : o.partnerId ? `partner:${o.partnerId}` : `outlet:${o.outletCode}`;
+
 /**
- * One line per WALLET that this file deducts from (outlets of one partner share a wallet; an outlet without a
- * wallet yet stands alone at 0). after = current + the file's credits − its deductions for that wallet.
+ * One line per WALLET that this file deducts from (outlets of one partner share a wallet; outlets without a wallet yet
+ * group by partner — the wallet confirm will create — at 0). current = balance − points expiring now + the held opening
+ * balance (partner-level, counted ONCE); after = current + the file's credits − its deductions for that wallet.
  */
 export function walletLines(rows: CreditUploadRow[], d: UploadPreviewData): WalletLine[] {
   const byCode = outletMap(d);
-  const groups = new Map<string, { codes: string[]; balance: number; held: number | null; net: number; deducts: boolean }>();
-  const seenOutlet = new Set<string>();
+  type G = { codes: string[]; balance: number; held: number | null; dueExpiry: number; net: number; deducts: boolean };
+  const groups = new Map<string, G>();
   for (const r of rows.filter(isOkPointsRow)) {
     const o = byCode.get(r.outletId);
     if (!applies(o)) continue;
-    const key = o.walletId ?? `outlet:${o.outletCode}`;
+    const key = walletKey(o);
     let g = groups.get(key);
     if (!g) {
-      g = { codes: [], balance: o.balance ?? 0, held: null, net: 0, deducts: false };
+      g = { codes: [], balance: o.balance ?? 0, held: null, dueExpiry: 0, net: 0, deducts: false };
       groups.set(key, g);
     }
-    if (!seenOutlet.has(o.outletCode)) {
-      seenOutlet.add(o.outletCode);
+    if (!g.codes.includes(o.outletCode)) {
       g.codes.push(o.outletCode);
-      if (o.heldOpeningBalance != null) g.held = (g.held ?? 0) + o.heldOpeningBalance;
+      // Wallet / partner-level figures repeated on each outlet → taken once, never summed.
+      if (g.held == null && o.heldOpeningBalance != null) g.held = o.heldOpeningBalance;
+      g.dueExpiry = Math.max(g.dueExpiry, Math.max(0, o.dueExpiry ?? 0));
     }
     g.net += r.amount;
     if (r.amount < 0) g.deducts = true;
@@ -127,8 +147,8 @@ export function walletLines(rows: CreditUploadRow[], d: UploadPreviewData): Wall
   const out: WalletLine[] = [];
   for (const [key, g] of groups) {
     if (!g.deducts) continue;
-    const current = g.balance + (g.held ?? 0);
-    out.push({ key, outletCodes: g.codes, current, held: g.held, after: current + g.net });
+    const current = g.balance - g.dueExpiry + (g.held ?? 0);
+    out.push({ key, outletCodes: g.codes, current, held: g.held, dueExpiry: g.dueExpiry, after: current + g.net });
   }
   return out;
 }
@@ -165,15 +185,22 @@ export interface CategoryInfo {
   description?: string;
   /** The checkbox text ("I understand …"). */
   label:        string;
+  /** This client must tick it (server `ackCategories`); false = listed for information only, no box. */
+  required:     boolean;
   items:        CategoryItem[];
 }
 
-/** Every PRESENT category, in a fixed order. Preview-based ones only once the preview answered. */
+/**
+ * Every PRESENT category, in a fixed order. Preview-based ones only once the preview answered. `required` comes from
+ * the server's ackCategories; without a preview answer (a PAYOUT-only file needs none) every category is required.
+ */
 export function presentCategories(pr: CreditParseResult, preview: UploadPreviewData | null): CategoryInfo[] {
+  const ack = new Set<AckCategory>(preview ? preview.ackCategories : ACK_ORDER);
   const out: CategoryInfo[] = [];
+  const push = (c: Omit<CategoryInfo, 'required'>) => out.push({ ...c, required: ack.has(c.category) });
   const skipped = pr.rows.filter((r) => r.status === 'SKIP');
   if (skipped.length > 0) {
-    out.push({
+    push({
       category: 'SKIPPED', count: skipped.length,
       title: `${plural(skipped.length, 'row', 'rows')} will not be credited`,
       label: `I understand ${plural(skipped.length, 'row', 'rows')} will not be credited (blank, zero or not applicable)`,
@@ -182,7 +209,7 @@ export function presentCategories(pr: CreditParseResult, preview: UploadPreviewD
   }
   const rounded = roundedRows(pr.rows);
   if (rounded.length > 0) {
-    out.push({
+    push({
       category: 'ROUNDED', count: rounded.length,
       title: `${plural(rounded.length, 'row', 'rows')} rounded to whole units`,
       description: ROUNDING_COPY,
@@ -194,7 +221,7 @@ export function presentCategories(pr: CreditParseResult, preview: UploadPreviewD
 
   const na = notAppliedRows(pr.rows, preview);
   if (na.length > 0) {
-    out.push({
+    push({
       category: 'NOT_APPLIED', count: na.length,
       title: `${plural(na.length, 'row', 'rows')} won't be credited or deducted`,
       label: `I understand ${plural(na.length, 'row', 'rows')} won't be applied (outlet not found or not linked)`,
@@ -203,32 +230,62 @@ export function presentCategories(pr: CreditParseResult, preview: UploadPreviewD
   }
   const below = walletLines(pr.rows, preview).filter((w) => w.after < 0);
   if (below.length > 0) {
-    out.push({
+    push({
       category: 'BELOW_ZERO', count: below.length,
       title: `${plural(below.length, 'wallet', 'wallets')} will go below zero`,
-      description: "A wallet below zero is repaid from the outlet's future earnings; the outlet can't redeem until it is back to zero or more.",
+      description: "A wallet below zero is repaid from the outlet's future earnings; the outlet can't redeem until its balance is 0 or more.",
       label: `I understand ${plural(below.length, 'wallet', 'wallets')} will go below zero`,
       items: below.map((w) => ({
         key: `z|${w.key}`,
-        text: `${w.outletCodes.join(', ')} · Balance will go below zero: ${fmtSignedPts(w.current)} → ${fmtSignedPts(w.after)}`,
-        detail: w.held != null ? `(includes a held opening balance of ${fmtSignedPts(w.held)} that posts first)` : undefined,
+        text: `${w.outletCodes.join(', ')} · Balance will go below zero: ${fmtSignedPts(w.current)} → ${fmtSignedPts(w.after)} pts`,
+        detail: [
+          w.held != null ? `(includes a held opening balance of ${fmtSignedPts(w.held)} that posts first)` : '',
+          w.dueExpiry > 0 ? `(includes ${n(w.dueExpiry)} points expiring now)` : '',
+        ].filter(Boolean).join(' ') || undefined,
       })),
     });
   }
   const repeats = repeatDeductionRows(pr.rows, preview);
   if (repeats.length > 0) {
-    out.push({
+    push({
       category: 'REPEAT_DEDUCTION', count: repeats.length,
       title: `${plural(repeats.length, 'deduction', 'deductions')} may be a repeat`,
       label: `I understand ${plural(repeats.length, 'deduction', 'deductions')} may be a repeat`,
       items: repeats.map(({ row, prior }) => ({
         key: `p|${row.rowNum}|${row.fieldId}`,
         text: `${rowRef(row)} · ${deductionAmountText(row)}`,
-        detail: `Already deducted on ${day(prior.confirmedAt)} in batch ${prior.batchCode} — check this isn't a repeat.`,
+        detail: `Already deducted on ${day(prior.confirmedAt)} in batch ${prior.batchCode} (${n(Math.abs(prior.points))} pts still deducted) — check this isn't a repeat.`,
       })),
     });
   }
   return out;
+}
+
+const SERVER_ONLY_TEXT: Record<AckCategory, string> = {
+  SKIPPED:          'some rows will not be credited',
+  ROUNDED:          'some rows were rounded to whole units',
+  NOT_APPLIED:      "some rows won't be applied (outlet not found or not linked)",
+  BELOW_ZERO:       'some wallets will go below zero',
+  REPEAT_DEDUCTION: 'some deductions may be a repeat',
+};
+
+/**
+ * U1: after a refused confirm the server's `missingAcknowledgements` must each get a box — a present category is made
+ * required; one this screen can't list (e.g. the server's balance moved) gets its own box with the server's finding.
+ */
+export function withServerRequired(categories: CategoryInfo[], serverRequired: AckCategory[]): CategoryInfo[] {
+  if (serverRequired.length === 0) return categories;
+  const out = categories.map((c) => (serverRequired.includes(c.category) ? { ...c, required: true } : c));
+  for (const cat of ACK_ORDER) {
+    if (!serverRequired.includes(cat) || out.some((c) => c.category === cat)) continue;
+    out.push({
+      category: cat, count: 0, required: true, items: [],
+      title: `The server found that ${SERVER_ONLY_TEXT[cat]}`,
+      description: 'The confirm found this after the check above was made — see Payout Status after confirming for the rows.',
+      label: `I understand ${SERVER_ONLY_TEXT[cat]}`,
+    });
+  }
+  return out.sort((a, b) => ACK_ORDER.indexOf(a.category) - ACK_ORDER.indexOf(b.category));
 }
 
 // ─── UI ──────────────────────────────────────────────────────────────────────
@@ -312,8 +369,8 @@ export function BeforeYouConfirm({
           Before you confirm
         </h3>
         <p className="text-xs text-amber-800 mt-0.5">
-          Some rows won&apos;t be applied exactly as typed. Review each list and tick its box — Confirm &amp; Credit
-          switches on when every box is ticked.
+          Some rows won&apos;t be applied exactly as typed. Review each list and tick its box — Confirm switches on when
+          every box is ticked.
         </p>
       </div>
       <div className="divide-y divide-amber-100">
@@ -323,6 +380,7 @@ export function BeforeYouConfirm({
             <div key={c.category} className="px-4 py-3 space-y-2" data-testid={`ack-block-${c.category}`}>
               <p className="text-xs font-semibold text-gray-900">{c.title}</p>
               {c.description && <p className="text-xs text-gray-600">{c.description}</p>}
+              {c.items.length > 0 && (
               <ul className="divide-y divide-gray-100 border border-gray-100 rounded-lg max-h-52 overflow-y-auto">
                 {c.items.slice(0, PANEL_LIMIT).map((it) => (
                   <li key={it.key} className="px-3 py-2" data-testid={`ack-item-${c.category}`}>
@@ -336,17 +394,22 @@ export function BeforeYouConfirm({
                   </li>
                 )}
               </ul>
-              <label htmlFor={id} className="flex items-start gap-2 text-xs text-gray-900 cursor-pointer">
-                <input
-                  id={id}
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={acked.has(c.category)}
-                  disabled={disabled}
-                  onChange={() => onToggle(c.category)}
-                />
-                <span>{c.label}</span>
-              </label>
+              )}
+              {c.required ? (
+                <label htmlFor={id} className="flex items-start gap-2 text-xs text-gray-900 cursor-pointer">
+                  <input
+                    id={id}
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={acked.has(c.category)}
+                    disabled={disabled}
+                    onChange={() => onToggle(c.category)}
+                  />
+                  <span>{c.label}</span>
+                </label>
+              ) : (
+                <p className="text-xs text-gray-600" data-testid={`ack-info-${c.category}`}>For your information — no tick needed.</p>
+              )}
             </div>
           );
         })}

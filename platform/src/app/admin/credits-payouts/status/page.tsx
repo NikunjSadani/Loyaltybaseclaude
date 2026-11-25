@@ -191,6 +191,8 @@ export default function PayoutStatusPage() {
   const [batches,      setBatches]      = useState<BatchSummary[]>([]);
   const [batchDetails, setBatchDetails] = useState<Record<string, BatchDetail>>({});
   const [expanded,     setExpanded]     = useState<string | null>(null);
+  /** U9: batches whose expanded table shows ONLY the deduction rows — all of them, so each is reachable for Undo. */
+  const [deductionsOnly, setDeductionsOnly] = useState<Set<string>>(() => new Set());
   const [filterPeriod, setFilterPeriod] = useState('');
   const [page,         setPage]         = useState(1);
   const [pagination,   setPagination]   = useState<Pagination | null>(null);
@@ -719,9 +721,31 @@ export default function PayoutStatusPage() {
                       </div>
                     )}
 
+                    {detail && detail.rows.some(isDeductionRow) && (
+                      <div className="px-5 py-2 border-b border-gray-100">
+                        <label className="inline-flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={deductionsOnly.has(batch.id)}
+                            onChange={() => setDeductionsOnly((cur) => {
+                              const next = new Set(cur);
+                              if (next.has(batch.id)) next.delete(batch.id); else next.add(batch.id);
+                              return next;
+                            })}
+                          />
+                          Deductions only (shows every deduction row)
+                        </label>
+                      </div>
+                    )}
+
                     {!detail ? (
                       <p className="px-5 py-4 text-xs text-gray-400 animate-pulse">Loading rows…</p>
-                    ) : (
+                    ) : (() => {
+                      const onlyDed = deductionsOnly.has(batch.id) && detail.rows.some(isDeductionRow);
+                      const okRows = detail.rows.filter((r) => r.status === 'OK');
+                      // Deductions only: EVERY deduction row (no 20-row cut) so each one can be undone from here.
+                      const shown = onlyDed ? okRows.filter(isDeductionRow) : okRows.slice(0, 20);
+                      return (
                       <div className="overflow-x-auto max-h-72">
                         <table className="w-full text-xs">
                           <thead className="bg-gray-50 border-b border-gray-100 sticky top-0">
@@ -732,9 +756,7 @@ export default function PayoutStatusPage() {
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-50">
-                            {detail.rows
-                              .filter((r) => r.status === 'OK')
-                              .slice(0, 20)
+                            {shown
                               .map((r, i) => {
                                 const dState = isDeductionRow(r) ? deductionState(detail, r, isConfirmed) : null;
                                 const dLine = dState === 'DEDUCTED' ? deductionLineFor(detail, r) : undefined;
@@ -805,13 +827,15 @@ export default function PayoutStatusPage() {
                               })}
                           </tbody>
                         </table>
-                        {detail.rows.filter((r) => r.status === 'OK').length > 20 && (
+                        {!onlyDed && okRows.length > 20 && (
                           <p className="px-4 py-2 text-xs text-gray-400 text-center">
-                            Showing first 20 rows. Download report for full list.
+                            Showing first 20 rows. Download report for full list
+                            {detail.rows.some(isDeductionRow) ? ', or tick "Deductions only" to see every deduction row' : ''}.
                           </p>
                         )}
                       </div>
-                    )}
+                      );
+                    })()}
 
                     <BatchEvidencePanel
                       batchId={batch.id}

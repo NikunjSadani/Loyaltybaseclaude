@@ -83,24 +83,25 @@ function istMonthStart(key: string): Date {
 }
 
 /**
- * A DEBIT_ADJUSTMENT row that carries a field name is an UPLOAD DEDUCTION (negative points in a credits upload).
- * A manual debit has no field name and keeps "Debit adjustment".
+ * An UPLOAD DEDUCTION (negative points in a credits upload): a DEBIT_ADJUSTMENT written by a credit batch
+ * (referenceType 'CREDIT_BATCH') — independent of whether its field name could be resolved. A manual debit (any
+ * other reference) keeps "Debit adjustment".
  */
-export function isUploadDeductionRow(r: { transactionType: string; fieldName?: string | null }): boolean {
-  return r.transactionType === 'DEBIT_ADJUSTMENT' && !!r.fieldName;
+export function isUploadDeductionRow(r: { transactionType: string; referenceType?: string | null }): boolean {
+  return r.transactionType === 'DEBIT_ADJUSTMENT' && r.referenceType === 'CREDIT_BATCH';
 }
 
 /** Type label for a statement / passbook row ("Deducted" for an upload deduction). */
-export function statementTypeLabel(r: { transactionType: string; fieldName?: string | null }): string {
+export function statementTypeLabel(r: { transactionType: string; referenceType?: string | null }): string {
   if (isUploadDeductionRow(r)) return 'Deducted';
   return TYPE_LABEL[r.transactionType] ?? r.transactionType;
 }
 
 function pointsLine(r: StatementApiRow): StatementLine {
-  // An upload deduction's server text already names the field ("320 points deducted — Target, November 2026 ·
-  // <narration>") — never prefix the field name again.
+  // An upload deduction's own server text already names the field ("320 points deducted — Target, November 2026 ·
+  // <narration>") — shown as-is, the field name is never prefixed again.
   const description = isUploadDeductionRow(r)
-    ? (r.narration ?? r.description)
+    ? r.description
     : r.fieldName
     ? r.narration
       ? `${r.fieldName} · ${r.narration}`

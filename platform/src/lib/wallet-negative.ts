@@ -47,6 +47,6 @@ export function negativeBalanceNote(
   }
   const why = balance.owedFromReversal ? ' from a reversed credit' : '';
   return audience === 'staff'
-    ? `This outlet owes ${owed} pts${why} — repaid from its next earnings; it can't redeem until its balance is back above zero.`
+    ? `This outlet owes ${owed} pts${why} — repaid from its next earnings; it can't redeem until its balance is 0 or more.`
     : `You owe ${owed} pts${why} — it's repaid from your next earnings.`;
 }

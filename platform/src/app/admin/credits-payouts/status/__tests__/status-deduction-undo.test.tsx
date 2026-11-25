@@ -188,3 +188,34 @@ describe('Payout status — undo only on ACTUAL deductions (deductionLines) + no
     expect(box).toHaveTextContent('O8 · Volume · 70 pts · NOT credited — Outlet ID not found in this tenant');
   });
 });
+
+describe('Payout status — U9: every deduction row is reachable for Undo', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useAdminSession).mockReturnValue({
+      role: 'CLIENT_ADMIN', clientId: 'bajaj', name: 'Test Admin', userId: '', canManageSchemes: true,
+    } as ReturnType<typeof useAdminSession>);
+  });
+
+  it('25 credits then a deduction (row 26): hidden by the 20-row cut; "Deductions only" shows it with Undo', async () => {
+    const credits = Array.from({ length: 25 }, (_, i) => ({ ...creditRow, rowNum: i + 1, outletId: `C${i}`, fieldId: `fc${i}` }));
+    mockApi([...credits, { ...deductionRow, rowNum: 26 }]);
+    render(<PayoutStatusPage />);
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    await screen.findAllByRole('button', { name: /^Reverse$/ });
+    expect(screen.queryByRole('button', { name: /Undo deduction/ })).toBeNull();
+    expect(screen.getByText(/tick "Deductions only" to see every deduction row/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Deductions only (shows every deduction row)'));
+    expect(await screen.findByRole('button', { name: /Undo deduction/ })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /^Reverse$/ })).toBeNull();
+  });
+
+  it('a credit-only batch has no "Deductions only" filter', async () => {
+    mockApi([creditRow]);
+    render(<PayoutStatusPage />);
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    await screen.findByRole('button', { name: /^Reverse$/ });
+    expect(screen.queryByLabelText(/Deductions only/)).toBeNull();
+  });
+});

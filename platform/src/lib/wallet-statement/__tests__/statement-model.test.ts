@@ -220,24 +220,28 @@ describe('periodLabel', () => {
   });
 });
 
-describe('U1: an upload deduction (DEBIT_ADJUSTMENT with a field name)', () => {
+describe('U1/U7: an upload deduction (DEBIT_ADJUSTMENT from a credit batch — referenceType CREDIT_BATCH)', () => {
   const text = '320 points deducted — Target Achievement, November 2026 · returns beat sales';
-  it('reads "Deducted" and the server text as-is (the field name is never prefixed twice)', () => {
-    const doc = buildStatementDoc(
-      api([row({ id: 'u', date: '2026-05-02T00:00:00.000Z', points: -320, after: -220, transactionType: 'DEBIT_ADJUSTMENT', fieldName: 'Target Achievement', narration: text, description: text })]),
-      [],
-      meta,
-    );
+  const ded = (over: Partial<StatementApiRow> = {}) => row({
+    id: 'u', date: '2026-05-02T00:00:00.000Z', points: -320, after: -220, transactionType: 'DEBIT_ADJUSTMENT',
+    referenceType: 'CREDIT_BATCH', referenceId: 'b1', fieldName: 'Target Achievement', narration: 'returns beat sales',
+    description: text, ...over,
+  });
+
+  it('reads "Deducted" and its own text as-is (the field name is never prefixed)', () => {
+    const doc = buildStatementDoc(api([ded()]), [], meta);
     expect(doc.lines[0].type).toBe('Deducted');
     expect(doc.lines[0].description).toBe(text);
   });
 
-  it('a manual debit (no field name) keeps "Debit adjustment" and its description', () => {
-    const doc = buildStatementDoc(
-      api([row({ id: 'm', date: '2026-05-02T00:00:00.000Z', points: -5, after: 5, transactionType: 'DEBIT_ADJUSTMENT', description: 'Manual correction' })]),
-      [],
-      meta,
-    );
+  it('the label does not depend on the field-name match (field name unresolved → still "Deducted")', () => {
+    const doc = buildStatementDoc(api([ded({ fieldName: null })]), [], meta);
+    expect(doc.lines[0].type).toBe('Deducted');
+    expect(doc.lines[0].description).toBe(text);
+  });
+
+  it('a manual debit (not from a credit batch) keeps "Debit adjustment" and its description', () => {
+    const doc = buildStatementDoc(api([ded({ referenceType: 'ADMIN_ADJUSTMENT', fieldName: null, description: 'Manual correction' })]), [], meta);
     expect(doc.lines[0].type).toBe('Debit adjustment');
     expect(doc.lines[0].description).toBe('Manual correction');
   });

@@ -12,7 +12,7 @@ describe('wallet-negative — shared wording (owner decisions 2, D1, D2 — 2026
       "You owe 2,986 pts from a reversed credit — it's repaid from your next earnings.",
     );
     expect(negativeBalanceNote({ redeemable: -841 }, 'staff')).toBe(
-      "This outlet owes 841 pts — repaid from its next earnings; it can't redeem until its balance is back above zero.",
+      "This outlet owes 841 pts — repaid from its next earnings; it can't redeem until its balance is 0 or more.",
     );
     expect(negativeBalanceNote({ redeemable: 0 })).toBeNull();
   });

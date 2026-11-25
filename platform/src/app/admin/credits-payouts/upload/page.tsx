@@ -29,6 +29,7 @@ import {
   notReadyOutlets,
   presentCategories,
   previewRequestBody,
+  withServerRequired,
   type AckCategory,
   type UploadPreviewData,
   type UploadPreviewState,
@@ -110,6 +111,13 @@ function confirmRejectedMsg(batchCode: string, serverError: string): string {
     'Do not upload this file again.';
 }
 
+/** Confirm refused because a "Before you confirm" category wasn't acknowledged — the checks are refreshed in place. */
+function missingAcksMsg(batchCode: string): string {
+  return `Batch ${batchCode} is saved but not confirmed yet — something changed since the check, so it was refreshed ` +
+    'below. Review the lists under "Before you confirm", tick the boxes, then press Retry confirm. ' +
+    'Nothing has been credited or deducted.';
+}
+
 /** Confirm says the batch is already CONFIRMED — e.g. an earlier attempt went through. */
 function alreadyConfirmedMsg(batchCode: string): string {
   return `Batch ${batchCode} is already confirmed — its credits were applied when it was first confirmed. ` +
@@ -181,8 +189,6 @@ interface SavedBatch {
   pointsDeductedRows:  number;
   /** Sum (positive magnitude) of the points actually deducted. */
   pointsDeductedTotal: number;
-  /** Deduction rows in the file that the server did NOT apply at all (switch off) — 0 normally. */
-  deductionsIgnored:   number;
   /** Rows the server could NOT credit, with a reason. */
   skipped: SkippedRow[];
   /** The "Before you confirm" boxes ticked for this confirm (their checkbox text), shown on the done screen. */
@@ -253,19 +259,31 @@ export default function CreditsPayoutsUploadPage() {
   const [previewRun, setPreviewRun] = useState(0);
   /** Ignore a stale preview reply after a newer file / re-check replaced it. */
   const previewSeqRef = useRef(0);
-  /** "Before you confirm" boxes ticked (reset whenever the parse or the preview answer changes). */
-  const [acked, setAcked] = useState<Set<AckCategory>>(() => new Set());
+  /**
+   * "Before you confirm" ticks: category → the exact box text that was ticked. A tick only counts while its text is
+   * unchanged, so a re-check that changes a list (e.g. a new below-zero wallet) needs a fresh tick; a new file resets all.
+   */
+  const [ackLabels, setAckLabels] = useState<Map<AckCategory, string>>(() => new Map());
   const hasDeductions = (parseResult?.summary.deducted ?? 0) > 0;
   const previewData: UploadPreviewData | null = preview?.status === 'ok' ? preview.data : null;
+  /** Categories a refused confirm said were missing (U1) — they need a box even if this screen can't list their rows. */
+  const [serverRequired, setServerRequired] = useState<AckCategory[]>([]);
   const categories = useMemo(
-    () => (parseResult && !parseResult.headerError ? presentCategories(parseResult, previewData) : []),
-    [parseResult, previewData],
+    () => (parseResult && !parseResult.headerError
+      ? withServerRequired(presentCategories(parseResult, previewData), serverRequired)
+      : []),
+    [parseResult, previewData, serverRequired],
   );
   const notReady = useMemo(
     () => (parseResult && previewData ? notReadyOutlets(parseResult.rows, previewData) : []),
     [parseResult, previewData],
   );
-  const unticked = categories.filter((c) => !acked.has(c.category));
+  const acked = useMemo(
+    () => new Set(categories.filter((c) => c.required && ackLabels.get(c.category) === c.label).map((c) => c.category)),
+    [categories, ackLabels],
+  );
+  // Only the categories THIS client must acknowledge (server ackCategories) need a tick.
+  const unticked = categories.filter((c) => c.required && !acked.has(c.category));
   // HARD blocks (no tick overrides them) first, then the unticked boxes. null = Confirm may run.
   const confirmBlockReason: string | null =
     preview?.status === 'loading'
@@ -331,6 +349,8 @@ export default function CreditsPayoutsUploadPage() {
               deductionsEnabled: d.deductionsEnabled === true,
               outlets:           d.outlets,
               priorDeductions:   Array.isArray(d.priorDeductions) ? d.priorDeductions : [],
+              // Absent (older server) → every category must be acknowledged (the safe side).
+              ackCategories:     Array.isArray(d.ackCategories) ? d.ackCategories : [...ACK_ORDER],
             },
           };
         } else {
@@ -343,15 +363,17 @@ export default function CreditsPayoutsUploadPage() {
     })();
   }, [parseResult, period, previewRun]);
 
-  // New file / Upload Again / a fresh preview answer → every box must be ticked again.
+  // New file / Upload Again → every box must be ticked again.
   useEffect(() => {
-    setAcked(new Set());
-  }, [parseResult, preview]);
+    setAckLabels(new Map());
+    setServerRequired([]);
+  }, [parseResult]);
 
   function toggleAck(c: AckCategory) {
-    setAcked((cur) => {
-      const next = new Set(cur);
-      if (next.has(c)) next.delete(c); else next.add(c);
+    const label = categories.find((x) => x.category === c)?.label;
+    setAckLabels((cur) => {
+      const next = new Map(cur);
+      if (acked.has(c) || !label) next.delete(c); else next.set(c, label);
       return next;
     });
   }
@@ -409,7 +431,8 @@ export default function CreditsPayoutsUploadPage() {
   async function handleConfirm() {
     if (!parseResult?.canProceed || inFlightRef.current) return;
     // Hard blocks + unticked "Before you confirm" boxes (the button is disabled too; this guards keyboard / races).
-    if (!pendingBatch && confirmBlockReason) return;
+    // Also for "Retry confirm": after a refused acknowledgement the refreshed boxes must be ticked first.
+    if (confirmBlockReason) return;
     inFlightRef.current = true;
     setConfirming(true);
     setConfirmError('');
@@ -481,7 +504,8 @@ export default function CreditsPayoutsUploadPage() {
   /** POST /confirm for an already-saved batch (first attempt or a retry). Never saves a batch. */
   async function confirmSavedBatch(batch: PendingBatch) {
     // Only the ticked categories that are present; the server refuses a confirm missing one it finds.
-    const acknowledged = ACK_ORDER.filter((c) => acked.has(c) && categories.some((x) => x.category === c));
+    // Exactly the required categories, ticked (Confirm is disabled until each one is).
+    const acknowledged = ACK_ORDER.filter((c) => acked.has(c));
     const acceptedLabels = categories.filter((c) => acknowledged.includes(c.category)).map((c) => c.label);
     let reply: Awaited<ReturnType<typeof readReply>>;
     try {
@@ -506,7 +530,20 @@ export default function CreditsPayoutsUploadPage() {
       const err = serverErrorOf(body) ?? 'Failed to confirm batch';
       // confirmBatch: `Batch is already ${batch.status}` for any non-PENDING_CONFIRM batch.
       const already = /^Batch is already (\w+)/.exec(err)?.[1];
-      if (already === 'CONFIRMED') {
+      const missing = (body as { details?: { missingAcknowledgements?: unknown } }).details?.missingAcknowledgements;
+      if (Array.isArray(missing) && missing.length > 0) {
+        // U1: the server found a category this screen hadn't acknowledged (e.g. a wallet's balance changed since the
+        // check). Never a re-upload: refresh the check, keep this batch pending, let the admin tick and Retry confirm.
+        const cats = missing.filter((c): c is AckCategory => (ACK_ORDER as string[]).includes(String(c)));
+        setServerRequired(cats);
+        setAckLabels((cur) => {
+          const next = new Map(cur);
+          cats.forEach((c) => next.delete(c)); // the refused categories must be ticked again
+          return next;
+        });
+        setPreviewRun((n) => n + 1);
+        showConfirmError(missingAcksMsg(batch.batchCode));
+      } else if (already === 'CONFIRMED') {
         setAlreadyConfirmed(true);
         showConfirmError(alreadyConfirmedMsg(batch.batchCode));
       } else if (already) {
@@ -528,10 +565,6 @@ export default function CreditsPayoutsUploadPage() {
       payoutEntriesCreated: Number(cd.payoutEntriesCreated ?? 0),
       // Present only when the batch had deduction rows (absent → 0, a credit-only reply is unchanged).
       pointsDeductedRows:   Number(cd.pointsDeducted ?? 0),
-      // The file had deduction rows but the server applied none of them (no `pointsDeducted` in the reply — the
-      // program's switch was turned off meanwhile). Said loudly on the done screen, never silently.
-      deductionsIgnored:    (parseResult?.summary.deducted ?? 0) > 0 && cd.pointsDeducted === undefined
-        ? (parseResult?.summary.deducted ?? 0) : 0,
       pointsDeductedTotal:  Math.abs(Number(cd.pointsDeductedTotal ?? 0)),
       skipped:             Array.isArray(cd.skipped) ? (cd.skipped as SkippedRow[]) : [],
       acceptedLabels,
@@ -844,7 +877,7 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
-          {parseResult.canProceed && !saved && !pendingBatch && confirmBlockReason && (
+          {parseResult.canProceed && !saved && !alreadyConfirmed && confirmBlockReason && (
             <p
               id="confirm-block-reason"
               className={`text-xs ${isHardBlock ? 'text-red-700' : 'text-amber-800'}`}
@@ -870,7 +903,8 @@ export default function CreditsPayoutsUploadPage() {
             {pendingBatch && !saved && !alreadyConfirmed && (
               <button
                 onClick={handleConfirm}
-                disabled={confirming}
+                aria-describedby={confirmBlockReason ? 'confirm-block-reason' : undefined}
+                disabled={confirming || !!confirmBlockReason}
                 className="flex items-center gap-2 px-4 py-2.5 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <RotateCcw className="w-4 h-4" />
@@ -912,9 +946,12 @@ export default function CreditsPayoutsUploadPage() {
             : <CheckCircle className="w-10 h-10 text-emerald-500 mx-auto" />}
           <div>
             <p className="font-semibold text-gray-900">
-              {savedBatch.skipped.length > 0
-                ? 'Credits confirmed — some rows were skipped'
-                : 'Credits confirmed successfully'}
+              {/* A file with deductions isn't only "credits" (U8); credit-only files keep the old title. */}
+              {hasDeductions
+                ? (savedBatch.skipped.length > 0 ? 'Upload confirmed — some rows were skipped' : 'Upload confirmed')
+                : savedBatch.skipped.length > 0
+                  ? 'Credits confirmed — some rows were skipped'
+                  : 'Credits confirmed successfully'}
             </p>
             <p className="text-xs text-gray-500 mt-1">
               Batch: <code className="font-mono bg-gray-100 px-1 rounded">{savedBatch.batchCode}</code>
@@ -939,18 +976,6 @@ export default function CreditsPayoutsUploadPage() {
                   <li key={l} className="text-xs text-gray-700">{l.replace(/^I understand /, '')}</li>
                 ))}
               </ul>
-            </div>
-          )}
-
-          {savedBatch.deductionsIgnored > 0 && (
-            <div role="alert" data-testid="credits-deductions-ignored" className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-left">
-              <p className="text-xs font-semibold text-red-800">
-                {savedBatch.deductionsIgnored} deduction row{savedBatch.deductionsIgnored !== 1 ? 's were' : ' was'} NOT deducted
-              </p>
-              <p className="text-xs text-red-700 mt-0.5">
-                Negative points are not turned on for this program on the server, so the negative values in this file were
-                ignored — only the credits were applied. Ask Gifsy before deducting these points another way.
-              </p>
             </div>
           )}
 

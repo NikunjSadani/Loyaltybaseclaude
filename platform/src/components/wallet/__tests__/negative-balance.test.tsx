@@ -36,7 +36,7 @@ describe('BalanceCard — negative balance', () => {
   it('B6: staff (sales outlet view / admin) read "This outlet owes …", never the retailer wording "You owe …"', () => {
     render(<BalanceCard balance={bal(-2986, { owedPoints: 2986, owedFromReversal: true })} audience="staff" />);
     expect(screen.getByTestId('negative-balance-note').textContent).toBe(
-      "This outlet owes 2,986 pts from a reversed credit — repaid from its next earnings; it can't redeem until its balance is back above zero.",
+      "This outlet owes 2,986 pts from a reversed credit — repaid from its next earnings; it can't redeem until its balance is 0 or more.",
     );
   });
 
@@ -98,15 +98,17 @@ describe('upload deductions (U1 / F4)', () => {
   it('U1: an upload deduction row shows the server text as its header, no field-name prefix / sub-line', () => {
     const text = '320 points deducted — Target Achievement, November 2026 · returns';
     const t = {
-      id: 'u', transactionType: 'DEBIT_ADJUSTMENT', description: text, narration: text, fieldName: 'Target Achievement',
+      id: 'u', transactionType: 'DEBIT_ADJUSTMENT', description: text, narration: 'returns', fieldName: 'Target Achievement',
       points: -320, date: '2026-11-19T00:00:00Z', balanceAfter: -220, referenceType: 'CREDIT_BATCH', referenceId: 'b1',
     };
     const m = mapApiTransaction(t);
     expect(m.description).toBe(text);
     expect(m.narration).toBeUndefined();
     expect(m.kpiLabel).toBe('Target Achievement'); // the KPI filter still finds it
-    // A manual debit (no field name) keeps its own description.
-    expect(mapApiTransaction({ ...t, fieldName: null, narration: null, description: 'Manual correction' }).description).toBe('Manual correction');
+    // The rule keys on the credit-batch reference, not the field-name match: unresolved field name → same text.
+    expect(mapApiTransaction({ ...t, fieldName: null }).description).toBe(text);
+    // A manual debit (not from a credit batch) keeps its own description.
+    expect(mapApiTransaction({ ...t, referenceType: 'ADMIN_ADJUSTMENT', fieldName: null, narration: null, description: 'Manual correction' }).description).toBe('Manual correction');
     // A credit keeps field name header + narration sub-line.
     const c = mapApiTransaction({ ...t, transactionType: 'CREDIT_POINTS_EARNED', narration: 'Scheme', points: 50 });
     expect([c.description, c.narration]).toEqual(['Target Achievement', 'Scheme']);
