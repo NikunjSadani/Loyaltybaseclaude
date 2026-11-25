@@ -17,17 +17,37 @@ const result = (extra: Record<string, unknown> = {}) => ({
   savedCount: 2, rows: [{ rowIndex: 3, outletCode: 'O1', status: 'accepted' }], ...extra,
 });
 
-function stub(upload: unknown) {
+const TOKEN = `${'a'.repeat(64)}.${'b'.repeat(32)}.${'1'.repeat(13)}.${'c'.repeat(64)}`;
+
+/**
+ * The API refuses an upload without a preview (owner 2026-11-25, all tenants): ?preview=1 returns the same summary as a
+ * preview (nothing written), ?confirmToken=… returns `upload` as the applied result.
+ */
+function stub(upload: Record<string, unknown>) {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     if (url.startsWith('/api/admin/kpis')) return json({ success: true, data: [] });
-    if (url.startsWith('/api/admin/targets/upload')) return json({ success: true, data: upload });
+    if (url.startsWith('/api/admin/targets/batches')) {
+      return json({ success: true, data: { items: [], pageSize: 100, hasMore: false, nextCursor: null } });
+    }
+    if (url.startsWith('/api/admin/targets/upload?preview=1')) {
+      return json({ success: true, data: {
+        ...upload, batchId: undefined, preview: true, previewToken: TOKEN,
+        willSaveCount: (upload.savedCount ?? upload.acceptedCount ?? 0) as number,
+        notApplied: (upload.notApplied ?? []) as unknown[],
+      } });
+    }
+    if (url.startsWith('/api/admin/targets/upload?confirmToken=')) return json({ success: true, data: upload });
     return json({ success: false, error: 'unexpected' }, 404);
   }));
 }
 
+/** Pick the file → preview → tick every box → Confirm & apply. */
 async function upload() {
   const input = document.querySelector('input[type="file"]') as HTMLInputElement;
   await act(async () => { fireEvent.change(input, { target: { files: [new File(['x'], 't.xlsx')] } }); });
+  await screen.findByTestId('target-upload-preview');
+  for (const box of screen.queryAllByRole('checkbox')) await act(async () => { fireEvent.click(box); });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Confirm & apply/ })); });
 }
 
 beforeEach(() => vi.unstubAllGlobals());

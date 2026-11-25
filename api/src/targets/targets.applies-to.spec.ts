@@ -238,6 +238,13 @@ function makeService() {
       { code: 'WHOLESALER', name: 'Wholesaler', displayName: 'WS', label: 'WS' },
     ]),
   };
+  // The target-upload apply runs in ONE interactive transaction: give its tx the same target-write mocks.
+  Object.assign(tx, {
+    outletTarget: prisma.outletTarget,
+    targetUploadBatch: { update: jest.fn().mockResolvedValue({}) },
+    $executeRaw: prisma.$executeRaw,
+    auditLog: { create: tx.auditLog.create, findFirst: jest.fn().mockResolvedValue(null) },
+  });
   const notifications = { targetsUploaded: jest.fn() };
   const service = new TargetsService(prisma as never, notifications as never, settings as never);
   return { service, prisma, tx, settings };
@@ -308,7 +315,11 @@ describe('Template export kinds — APPLIES-TO templates (D2 golden + scoped)', 
 });
 
 describe('TargetsService — APPLIES-TO uploads (D1)', () => {
-  const upload = (rows: unknown[][], scoped: boolean) => {
+  // Parse / write rules via the DIRECT apply of a tenant outside TargetsService.confirmRequired (the preview →
+  // confirm gate itself is covered in targets.service.spec.ts).
+  beforeEach(() => jest.spyOn(TargetsService, 'confirmRequired').mockReturnValue(false));
+  afterEach(() => jest.restoreAllMocks());
+  const upload =(rows: unknown[][], scoped: boolean) => {
     const row1 = scoped
       ? ['', '', '', '', '', `${NEXT_LABEL()}`, '']
       : ['', '', '', `${NEXT_LABEL()}`, ''];
@@ -331,7 +342,8 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
     const r = await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', 5, 6]], false));
     expect(prisma.outlet.findMany.mock.calls[0][0].select).toEqual({ outletCode: true, name: true, outletType: { select: { code: true } } });
     expect('ignoredOutOfScope' in r).toBe(false);
-    expect(prisma.outletTarget.upsert.mock.calls[0][0].create.targetValues).toEqual({ MONTH_TGT: 5, CONSISTENCY: 6 });
+    expect(rawWrites(prisma)).toEqual([{ table: 'outlet_targets', outletCode: 'O2', values: { MONTH_TGT: 5, CONSISTENCY: 6 }, carry: undefined }]);
+    prisma.$executeRaw.mockClear();
     const a = await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', 5, 6]], false));
     expect('ignoredOutOfScope' in a).toBe(false);
   });
@@ -379,13 +391,13 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
     // The ignored-value remark comes back as a WARNING row (memory-safety: accepted rows are not echoed).
     expect(r.warningRows.find((x) => x.outletCode === 'O2')!.remarks).toMatch(/CONSISTENCY/);
     expect(r.warningRows.find((x) => x.outletCode === 'O1')).toBeUndefined();
-    // O1 (everything in scope) → the plain upsert, unchanged.
-    const writes = Object.fromEntries(
-      prisma.outletTarget.upsert.mock.calls.map((c: [{ create: { outletCode: string; targetValues: unknown } }]) => [c[0].create.outletCode, c[0].create.targetValues]),
-    );
-    expect(writes).toEqual({ O1: { MONTH_TGT: 1, CONSISTENCY: 2 } });
-    // O2 (CONSISTENCY out of scope) → in-scope value written, stored CONSISTENCY carried over.
-    expect(rawWrites(prisma)).toEqual([{ table: 'outlet_targets', outletCode: 'O2', values: { MONTH_TGT: 3 }, carry: ['CONSISTENCY'] }]);
+    // O1 (everything in scope) → the plain replace statement; O2 (CONSISTENCY out of scope) → its own statement that
+    // writes the in-scope value and carries the stored CONSISTENCY over.
+    expect(prisma.outletTarget.upsert).not.toHaveBeenCalled();
+    expect(rawWrites(prisma)).toEqual([
+      { table: 'outlet_targets', outletCode: 'O1', values: { MONTH_TGT: 1, CONSISTENCY: 2 }, carry: undefined },
+      { table: 'outlet_targets', outletCode: 'O2', values: { MONTH_TGT: 3 }, carry: ['CONSISTENCY'] },
+    ]);
   });
 
   it('SCOPED tenant achievements: same rule + ignoredOutOfScope on the response', async () => {
@@ -409,7 +421,7 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
       prisma.outlet.findMany.mockResolvedValue(silverO2());
       await service.uploadTargets(admin, upload([['O2', 'Beta', 'WHOLESALER', 'Silver', '', 3, 99]], true));
       expect(prisma.outletTarget.upsert).not.toHaveBeenCalled();
-      const [call] = prisma.$executeRaw.mock.calls;
+      const [call] = insertCalls(prisma);
       const sql = sqlText(call);
       expect(sql).toContain('ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET');
       // stored subset (jsonb_each over the EXISTING row, keys = carry list) || EXCLUDED (the upload)
@@ -433,7 +445,7 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
       prisma.kpiDef.findMany.mockResolvedValue(scopedKpis());
       prisma.outlet.findMany.mockResolvedValue(silverO2());
       await service.uploadAchievements(admin, upload([['O2', 'Beta', 'WHOLESALER', 'Silver', '', 3, 99]], true));
-      const [call] = prisma.$executeRaw.mock.calls;
+      const [call] = insertCalls(prisma);
       const sql = sqlText(call);
       expect(sql).toMatch(/jsonb_each\("outlet_sales_records"\."kpiValues"\)[\s\S]*\|\| EXCLUDED\."kpiValues"/);
       expect(sql).not.toContain('__names');
@@ -449,7 +461,7 @@ describe('TargetsService — APPLIES-TO uploads (D1)', () => {
       expect(r.ignoredOutOfScope).toBe(1);
       expect(a.ignoredOutOfScope).toBe(1);
       expect(r.savedCount).toBe(0);
-      expect(prisma.$executeRaw).not.toHaveBeenCalled();
+      expect(insertCalls(prisma)).toHaveLength(0);
       expect(prisma.outletTarget.upsert).not.toHaveBeenCalled();
       expect(prisma.outletSalesRecord.upsert).not.toHaveBeenCalled();
     });
@@ -475,19 +487,29 @@ function sqlText(call: unknown[]): string {
 function sqlValues(call: unknown[]): unknown[] {
   return (call[0] as { values?: unknown[] }).values ?? [];
 }
-/** Each raw carry-over write → { table, outletCode, uploaded values, carry list }. */
+/** The raw INSERT statements only (the target apply also takes a pg_advisory_xact_lock via $executeRaw). */
+function insertCalls(prisma: { $executeRaw: jest.Mock }): unknown[][] {
+  return prisma.$executeRaw.mock.calls.filter((call: unknown[]) => /INSERT INTO/.test(sqlText(call)));
+}
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/**
+ * Each written ROW → { table, outletCode, uploaded values, carry list (absent = plain replace) }. Target uploads write
+ * MULTI-ROW statements (one per carry set); each row tuple is (uuid, clientId, outletCode, outletName, month, json, …).
+ */
 function rawWrites(prisma: { $executeRaw: jest.Mock }) {
-  return prisma.$executeRaw.mock.calls.map((call: unknown[]) => {
-    const sql = sqlText(call);
+  return insertCalls(prisma).flatMap((call: unknown[]) => {
+    const table = /INSERT INTO "(\w+)"/.exec(sqlText(call))![1];
     const values = sqlValues(call);
-    const json = values.find((v) => typeof v === 'string' && v.startsWith('{')) as string;
-    const carry = values.find((v) => Array.isArray(v)) as string[];
-    return {
-      table: /INSERT INTO "(\w+)"/.exec(sql)![1],
-      outletCode: values[2],
-      values: JSON.parse(json),
-      carry,
-    };
+    const carry = values.find((v) => Array.isArray(v)) as string[] | undefined;
+    const rows: Array<{ table: string; outletCode: unknown; values: unknown; carry: string[] | undefined }> = [];
+    for (let i = 0; i + 5 < values.length; i++) {
+      const v = values[i + 5];
+      if (typeof values[i] === 'string' && UUID_RE.test(values[i] as string) && typeof v === 'string' && v.startsWith('{')) {
+        rows.push({ table, outletCode: values[i + 2], values: JSON.parse(v), carry });
+        i += 5;
+      }
+    }
+    return rows;
   });
 }
 

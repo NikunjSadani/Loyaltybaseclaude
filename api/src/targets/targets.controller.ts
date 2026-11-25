@@ -11,8 +11,11 @@
  *
  *   Targets:
  *     GET    /v1/admin/targets/template        download .xlsx template (query: months=YYYY-MM,…)
- *     POST   /v1/admin/targets/upload          multipart xlsx upload → verbatim write
- *     GET    /v1/admin/targets/batches         list upload batches
+ *     POST   /v1/admin/targets/upload          multipart xlsx upload: ?preview=1 (nothing written) → ?confirmToken=&ack= (verbatim write; no token = refused)
+ *     GET    /v1/admin/targets/batches         upload history, pages of 100 newest first (?before=<nextCursor>) + audit details
+ *     GET    /v1/admin/targets/batches/:id/file  the kept file of a confirmed upload
+ *     GET    /v1/admin/targets/history         one outlet's target change history (?outletCode=&month=&kpiCode=&before=)
+ *     GET    /v1/admin/targets/history/export  target change history report (xlsx; filters month / outlet / KPI)
  *     GET    /v1/admin/targets                 list target rows (query: month=YYYY-MM)
  *
  *   Achievements:
@@ -35,9 +38,11 @@ import {
   Body,
   Query,
   Res,
+  StreamableFile,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import { streamObjectResponse } from '../common/stream-object';
 import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
 import { TargetsService } from './targets.service';
@@ -62,6 +67,9 @@ import {
   PaceQueryDto,
   AchievementTemplateQueryDto,
   KpiScopeCountQueryDto,
+  UploadTargetsQueryDto,
+  TargetHistoryQueryDto,
+  TargetHistoryExportQueryDto,
 } from './dto/targets.dto';
 import { HeavyOp } from '../common/heavy-op-limiter';
 
@@ -195,6 +203,15 @@ export class TargetsController {
    * POST /v1/admin/targets/upload  (multipart/form-data, field: "file")
    * Parses the xlsx, validates against KpiDefs + outlet roster, and writes
    * OutletTarget rows inside a TargetUploadBatch. Blank cell = omitted key.
+   *
+   * Preview → confirm (owner decision 2026-11-25, approved for ALL clients incl. Deoleo):
+   *   ?preview=1            → same validation, NOTHING written; returns counts (new vs overwritten), the not-applied
+   *                           categories (count + fingerprint + samples) and a server-signed previewToken (30 min).
+   *   ?confirmToken=<token>&ack=CAT:count:fingerprint,… → applies the SAME file in ONE transaction. Refused (and
+   *                           audited): invalid / other user's token 400, expired 410, different file 409, already
+   *                           applied 409, missing acknowledgement 400, changed counts/items 412, no storage 503.
+   *   neither               → REFUSED 400 "Preview the file first" (audited) for every tenant in
+   *                           TargetsService.confirmRequired — there is no direct-apply route.
    */
   @Post('upload')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
@@ -211,8 +228,16 @@ export class TargetsController {
   uploadTargets(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
+    @Query() q: UploadTargetsQueryDto,
   ) {
-    return this.targets.uploadTargets(user, file);
+    if (q?.preview === '1' || q?.preview === 'true') return this.targets.previewTargetUpload(user, file);
+    // No token → the service refuses + audits ("Preview the file first") for every confirmRequired tenant.
+    if (q?.confirmToken === undefined) return this.targets.uploadTargets(user, file, undefined);
+    // A non-string token (e.g. a repeated param) is passed as '' → the service refuses + audits it as malformed.
+    return this.targets.uploadTargets(user, file, {
+      confirmToken: typeof q.confirmToken === 'string' ? q.confirmToken : '',
+      acknowledged: TargetsService.parseAckParam(q.ack),
+    });
   }
 
   /** GET /v1/admin/targets/batches — list upload batches (optionally filter by month). */
@@ -221,6 +246,50 @@ export class TargetsController {
   @RequirePermission('targets:read')
   listBatches(@CurrentUser() user: JwtPayload, @Query() q: ListBatchesQueryDto) {
     return this.targets.listBatches(user, q);
+  }
+
+  /** GET /v1/admin/targets/batches/:id/file — the kept file of a confirmed upload (tenant-scoped; 404 if not kept). */
+  @Get('batches/:id/file')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  async downloadBatchFile(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { stream, size, contentType, fileName } = await this.targets.openBatchFile(user, id);
+    res.setHeader('Cache-Control', 'no-store');
+    const safeName = fileName.replace(/[^\w.\- ]+/g, '_').slice(0, 120) || 'targets.xlsx';
+    return streamObjectResponse(res, { stream, size }, {
+      type: contentType,
+      disposition: `attachment; filename="${safeName}"`,
+    });
+  }
+
+  /**
+   * GET /v1/admin/targets/history?outletCode=&month=&kpiCode=&before= — one outlet's target change history (newest
+   * first, pages of 100, tenant-scoped) + `trackingSince` (changes before it predate history tracking).
+   */
+  @Get('history')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  listTargetHistory(@CurrentUser() user: JwtPayload, @Query() q: TargetHistoryQueryDto) {
+    return this.targets.listTargetHistory(user, q);
+  }
+
+  /**
+   * GET /v1/admin/targets/history/export?outletCode=&month=&kpiCode= — the change-history report (xlsx, streamed via
+   * the 'target-history' export kind: one outlet → now (200); a whole program → Downloads page (202)).
+   */
+  @Get('history/export')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  exportTargetHistory(
+    @CurrentUser() user: JwtPayload,
+    @Query() q: TargetHistoryExportQueryDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.exports.respond(res, user, 'target-history', q);
   }
 
   /** GET /v1/admin/targets?month=YYYY-MM — list stored target rows. */

@@ -29,6 +29,7 @@ import { UpiCaptureMethodBadge, effectiveUpiCaptureMethod } from '@/components/k
 import type { UpiCaptureMethod } from '@/components/bank-or-upi-section';
 import { REMOVED_RAIL_NOTICE, asPayoutRail, isRemovalConsistent, type PayoutRail } from '@/lib/payout-rail';
 import { FAST_TRACK_HEADLINE, fastTrackPreviousText, parseFastTrack, type KycFastTrack } from '@/lib/kyc-fast-track';
+import { usePermissions } from '@/lib/use-permissions';
 
 // ─── 7-field verification types (shared with approvals page) ─────────────────
 
@@ -825,8 +826,16 @@ function KycFieldVerificationPanel({
 
 // ─── Main detail page ─────────────────────────────────────────────────────────
 
+/** Roles whose route guard admits GET /admin/targets/history (the backend still enforces targets:read). */
+const TARGET_HISTORY_ROLES = ['CLIENT_ADMIN', 'GIFSY_ADMIN', 'GIFSY_STAFF'];
+
 export default function KYCDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  // "Target history" link: only for roles that can open it (GET /admin/targets/history = CLIENT_ADMIN / GIFSY_ADMIN,
+  // + GIFSY_STAFF admitted by RBAC, all needing targets:read).
+  const perms = usePermissions();
+  const canSeeTargetHistory =
+    perms.ready && TARGET_HISTORY_ROLES.includes(perms.role ?? '') && perms.has('targets:read');
   const [kyc, setKyc] = useState<KycDetailShape | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
@@ -1008,7 +1017,20 @@ export default function KYCDetailPage({ params }: { params: Promise<{ id: string
           </Link>
           <div>
             <h1 className="text-lg font-bold text-gray-900">{kyc.outletName}</h1>
-            <p className="text-xs text-gray-500">Outlet ID: <span className="font-mono">{kyc.outletCode || '—'}</span> · Submitted: {kyc.submittedDate}</p>
+            <p className="text-xs text-gray-500">
+              Outlet ID: <span className="font-mono">{kyc.outletCode || '—'}</span> · Submitted: {kyc.submittedDate}
+              {kyc.outletCode && canSeeTargetHistory && (
+                <>
+                  {' '}·{' '}
+                  <Link
+                    href={`/admin/targets/history?outletCode=${encodeURIComponent(kyc.outletCode)}`}
+                    className="font-semibold text-[var(--brand-primary)] hover:underline"
+                  >
+                    Target history
+                  </Link>
+                </>
+              )}
+            </p>
             {kyc.addressNameMismatch && (
               <span
                 data-testid="address-name-mismatch-badge"

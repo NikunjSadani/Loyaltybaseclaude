@@ -53,13 +53,39 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('target upload — error labels', () => {
-  it('fetch rejects → readable network error with the may-have-been-saved note', async () => {
+  it('PREVIEW fetch rejects → readable network error that says NOTHING was saved (the preview never writes)', async () => {
     stubFetch(() => Promise.reject(new TypeError('Failed to fetch')));
     render(<TargetUploadPage />);
     await upload();
     const msg = await screen.findByText(/Couldn't reach the server \(network error\)/);
-    expect(msg.textContent).toMatch(/may have been saved — refresh and check before trying again/);
+    expect(msg.textContent).toMatch(/Nothing was saved/);
+    expect(msg.textContent).not.toMatch(/may have been saved/);
     expect(screen.queryByText(/Failed to fetch/)).not.toBeInTheDocument();
+  });
+
+  it('CONFIRM fetch rejects → the may-have-been-saved note, and Confirm can be retried safely', async () => {
+    let call = 0;
+    stubFetch(async () => {
+      call++;
+      if (call === 1) {
+        return json({ success: true, data: {
+          preview: true, previewToken: `${'a'.repeat(64)}.${'b'.repeat(32)}.${'1'.repeat(13)}.${'c'.repeat(64)}`, month: '2026-12', monthsInBatch: ['2026-12'],
+          writableMonths: ['2026-12'], totalRows: 1, acceptedCount: 1, rejectedCount: 0, willSaveCount: 1,
+          newCount: 1, overwriteCount: 0, notApplied: [],
+          problemRows: [], problemRowCount: 0, problemRowsTruncated: false,
+          warningRows: [], warningRowCount: 0, warningRowsTruncated: false, skippedBlankCount: 0,
+        } });
+      }
+      throw new TypeError('Failed to fetch');
+    });
+    render(<TargetUploadPage />);
+    await upload();
+    const confirm = await screen.findByRole('button', { name: /Confirm & apply/ });
+    await act(async () => { fireEvent.click(confirm); });
+    const msg = await screen.findByText(/Couldn't reach the server \(network error\)/);
+    expect(msg.textContent).toMatch(/may have been saved — refresh and check before trying again/);
+    // the preview stays and Confirm is re-armed (a second apply of the same preview is refused by the server)
+    expect(screen.getByRole('button', { name: /Confirm & apply/ })).toBeEnabled();
   });
 
   it('a throw after the server answered → neutral message, not the raw exception', async () => {

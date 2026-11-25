@@ -32,6 +32,7 @@ import { useOutletTypeLabels, type OutletTypeOption } from '@/lib/platform/use-o
 import type { AppliesTo } from '@/lib/applies-to';
 import { kpiScopeOf, scopeChipText, scopeDescription, scopeKey } from '@/lib/kpi-scope-core';
 import { KpiAppliesToFields } from '@/components/admin/applies-to-fields';
+import { TargetHistoryCard } from '@/components/admin/target-history';
 
 /* ─── Types (mirror backend KpiDef) ─────────────────────────────────────────── */
 
@@ -500,6 +501,8 @@ export default function AdminTargetsPage() {
         </div>
         <ArrowRight className="h-5 w-5 text-[var(--brand-primary)] shrink-0 group-hover:translate-x-1 transition-transform" />
       </Link>
+
+      <TargetHistoryCard />
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="flex items-start justify-between gap-4 flex-wrap">

@@ -3352,6 +3352,36 @@ model TargetUploadBatch {
   @@map("target_upload_batches")
 }
 
+enum TargetChangeType {
+  CREATED
+  UPDATED
+  DELETED
+}
+
+/// Append-only per-outlet target change log (owner 2026-11-25, all clients). Written inside a target upload's apply
+/// transaction, one row per (outlet, month, KPI, field) whose value actually changed. field: 'VALUE' | 'NAME' (the
+/// per-outlet custom KPI name). No FKs on purpose (rows outlive outlets / batches). History starts at deploy.
+model TargetChangeHistory {
+  id          String           @id
+  clientId    String
+  outletCode  String
+  month       String
+  kpiCode     String
+  field       String           @default("VALUE")
+  oldValue    Json?
+  newValue    Json?
+  changeType  TargetChangeType
+  batchId     String?
+  changedById String?
+  changedAt   DateTime         @default(now())
+
+  @@index([clientId, outletCode, changedAt])
+  @@index([clientId, month])
+  @@index([clientId, changedAt])
+  @@index([batchId])
+  @@map("target_change_history")
+}
+
 model OutletTarget {
   id           String @id @default(cuid())
   clientId     String
