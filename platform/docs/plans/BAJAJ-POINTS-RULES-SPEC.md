@@ -60,7 +60,7 @@ computed by us. ✅Q3: rate comes from the outlet's sub-programme (Elite → 5%,
 | Focus Brand 1 (ADHO) | **+25 pts / case** — ✅Q5 needs TOTAL ≥ 100% AND FB1 ach ≥ FB1 target |
 | Focus Brand 2 (Non ADHO / ADHO SKU) | **+25 pts / case** — ✅Q5 needs TOTAL ≥ 100% AND FB2 ach ≥ FB2 target |
 | Cap | ✅Q6: when ₹ achievement > 120% of ₹ target, scale points down: `pts × (1.2 × target ÷ achieved)` — base on TOTAL, each FB on its own target (same method as Bajaj's old "Capped @125% Achv" column) |
-| Consistency bonus | 5 pts / case on quarter's total cases if ≥ 100% of quarter target — **NOT BUILT** (decide later) |
+| Consistency bonus | 5 pts / case on quarter's total cases if ≥ 100% of quarter target — **NOT BUILT. ⚠️ OWNER 2026-11-25: MUST also be closed (delivered) for BSC — open item, not optional.** ✅ Approach: **quarterly run in the engine** (being built). ✅ Definition: FY quarters; pays **5 pts × the quarter's total BSC cases** only if **TOTAL ₹ achieved ≥ TOTAL ₹ target in EACH of the 3 months** (target present and > 0 every month); wholesalers only; cases ≤ 0 → 0 with reason; half-up whole points. ✅ Cap: **120% at MONTHLY level** — bonus = 5 × Σ months (cases_m × min(1, 1.2 × target_m ÷ achieved_m)). |
 | Telangana | no target ⇒ no points (G6) |
 
 Data: cases come from the sales file column **QTY (CASES)** (already imported). Needs case-based measures in
