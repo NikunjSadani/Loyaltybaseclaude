@@ -7,7 +7,7 @@ import {
   batchLineAmount,
   creditUnmappedMessage,
   deductionWalletNotReadyMessage,
-  DEDUCTION_REPAID_MESSAGE,
+  deductionUndoBlockedMessage,
   ReversalAttentionException,
   unresolvedBlockingLine,
   WALLET_NOT_YET_BACKFILLED_REASON,
@@ -31,7 +31,7 @@ import {
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { resolveCreditFieldNames } from '../common/credit-field-name.helper';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
-import { istMonthBounds, monthYearIST } from '../common/ist-date';
+import { formatDateIST, istMonthBounds, monthYearIST } from '../common/ist-date';
 import { normOutletCode } from './held-opening-balances/held-balance-facts';
 import { AdjustType, AdjustWalletDto, ListTransactionsQueryDto, StatementQueryDto } from './dto/wallet.dto';
 import { buildStatementResponse, defaultTxDescription, EMPTY_STATEMENT } from '../common/points-statement.helper';
@@ -268,6 +268,17 @@ const fmtPts = (n: number) => new Intl.NumberFormat('en-IN').format(n);
 export const UPLOAD_DEDUCTION_KIND = 'UPLOAD_DEDUCTION';
 export const UPLOAD_DEDUCTION_UNDO_KIND = 'UPLOAD_DEDUCTION_UNDO';
 
+/**
+ * One part of a deduction to give back, in GIVE-BACK order = the reverse of consumption (the deduction drew FIFO lots
+ * first and booked the rest as debt, so the debt part comes back first, then the lots last-consumed-first). `expiresAt`:
+ * 'NEW' = the tenant's normal expiry for a new credit (the debt part / a part whose lot is unknown); null = never expires;
+ * else the consumed lot's own expiry (money audit #1, owner 2026-11-25).
+ */
+export interface GiveBackSegment {
+  points: number;
+  expiresAt: string | null | 'NEW';
+}
+
 /** One upload deduction of a (batch, outlet, field) line (findUploadDeductions). */
 export interface UploadDeductionLine {
   id: string;
@@ -276,20 +287,55 @@ export interface UploadDeductionLine {
   givenBack: number;
   createdAt: Date;
   seq: number | null;
-  /** the part of the deduction that became wallet debt (beyond what the wallet held) */
+  /** the part of the deduction that became wallet debt = the ACTUAL change of the wallet's debt (audit #7) */
   debtCreated: number;
-  consumedLotPoints: number;
-  earliestLotExpiresAt: Date | null;
+  segments: GiveBackSegment[];
 }
 
 /**
- * D2: a deduction's debt counts as REPAID by later points when the wallet's current debt is below what is still owed for
- * it: a give-back repays its own debt first, so what is still owed = debtCreated − givenBack (floor 0). A deduction that
- * created no debt can always be undone.
+ * The give-back segments of a deduction (reverse of consumption): the debt part ('NEW' expiry), then any points whose
+ * lot could not be found (lot mirror drift — 'NEW'), then each consumed lot last-consumed-first with its own expiry;
+ * consecutive parts with the same expiry are merged. Σ points = the deduction.
  */
-export function deductionRepaid(d: Pick<UploadDeductionLine, 'debtCreated' | 'givenBack'>, walletDebtNow: number): boolean {
-  const stillOwed = Math.max(0, d.debtCreated - d.givenBack);
-  return stillOwed > 0 && walletDebtNow < stillOwed;
+export function giveBackSegmentsOf(
+  points: number,
+  debtCreated: number,
+  draws: Array<{ points: number; expiresAt: Date | null }>,
+): GiveBackSegment[] {
+  const lotPoints = draws.reduce((n, d) => n + d.points, 0);
+  const out: GiveBackSegment[] = [];
+  const push = (pts: number, exp: string | null | 'NEW') => {
+    if (pts <= 0) return;
+    const last = out[out.length - 1];
+    if (last && last.expiresAt === exp) last.points += pts;
+    else out.push({ points: pts, expiresAt: exp });
+  };
+  push(debtCreated, 'NEW');
+  push(points - debtCreated - lotPoints, 'NEW');
+  for (const d of [...draws].reverse()) push(d.points, d.expiresAt ? d.expiresAt.toISOString() : null);
+  return out;
+}
+
+/** Cut `give` points out of the segments after the first `skip` points (already given back) — the parts to post. */
+export function takeGiveBack(segments: GiveBackSegment[], skip: number, give: number): GiveBackSegment[] {
+  const out: GiveBackSegment[] = [];
+  let s = skip;
+  let g = give;
+  for (const seg of segments) {
+    if (g <= 0) break;
+    let avail = seg.points;
+    if (s > 0) {
+      const used = Math.min(s, avail);
+      s -= used;
+      avail -= used;
+    }
+    if (avail <= 0) continue;
+    const take = Math.min(avail, g);
+    out.push({ points: take, expiresAt: seg.expiresAt });
+    g -= take;
+  }
+  if (g > 0) out.push({ points: g, expiresAt: 'NEW' }); // more than recorded (pre-segment row) → normal expiry
+  return out;
 }
 
 /** One outlet of the upload-deduction preview / pre-confirm readiness read. */
@@ -306,8 +352,13 @@ export interface UploadDeductionReadiness {
   /** F5: the wallet the outlet's movements land on (outlets of one partner share it) — null when none exists yet */
   walletId: string | null;
   partnerId: string | null;
-  /** F6: a PENDING held opening balance that posts FIRST at confirm (null = none) */
+  /**
+   * F6 / U4: the partner's PENDING held opening balance (all its outlets) — only when it would actually post first at
+   * confirm (no wallet, or an empty one); null otherwise. Count it ONCE per wallet.
+   */
   heldOpeningBalance: number | null;
+  /** U2: points that will expire before the deduction (due, not yet swept) — current = balance − dueExpiry */
+  dueExpiry: number;
 }
 
 /**
@@ -2496,8 +2547,10 @@ export class WalletService {
 
   /**
    * Preview / pre-confirm read for upload deductions: per outlet code (tenant-scoped, soft-deleted outlets excluded),
-   * whether it is linked to a partner, its current balance (null = no wallet yet → 0) and whether a deduction can land
-   * on it (deductionReadinessOf). Outlet codes that don't resolve come back `found: false`.
+   * whether it is linked to a partner, its wallet (F5), current balance (null = no wallet yet → 0), the points due to
+   * expire first (U2), the partner's held opening balance when it would post first (U4) and whether a deduction can land
+   * on it (deductionReadinessOf). Outlet codes that don't resolve come back `found: false`. Reads through `db` (the
+   * confirm passes its transaction).
    */
   async uploadDeductionReadiness(
     clientId: string,
@@ -2514,18 +2567,43 @@ export class WalletService {
     const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter((p): p is string => !!p))];
     const wallets = partnerIds.length ? await db.wallet.findMany({ where: { partnerId: { in: partnerIds } } }) : [];
     const walletBy = new Map(wallets.map((w) => [w.partnerId, w]));
-    // F6: PENDING held opening balances (they post first at confirm) — normalised outlet code, like the held matcher.
-    const held =
-      (await db.heldOpeningBalance?.findMany?.({
-        where: { clientId, status: 'PENDING', outletCode: { in: codes.map(normOutletCode) } },
+    // U2: due-but-unswept lots (the deduction expires them first — expireLotInTx clamps each at max(0, B)).
+    const due = wallets.length
+      ? ((await db.pointsLedger.findMany({
+          where: {
+            walletId: { in: wallets.map((w) => w.id) },
+            transactionType: { in: [PointsLedgerType.EARN, PointsLedgerType.REVERSE, PointsLedgerType.ADJUST] },
+            isExpired: false,
+            points: { gt: 0 },
+            remainingPoints: { gt: 0 },
+            expiresAt: { lte: new Date() },
+          },
+          select: { walletId: true, remainingPoints: true },
+        })) ?? [])
+      : [];
+    const dueBy = new Map<string, number>();
+    for (const l of due) dueBy.set(l.walletId, (dueBy.get(l.walletId) ?? 0) + l.remainingPoints);
+    // U4: the partner's PENDING held opening balances (every outlet of the partner, normalised code) — they post first
+    // at confirm only when the wallet is missing or empty (prepareHeldBeforeCredit).
+    const heldByPartner = new Map<string, number>();
+    if (partnerIds.length > 0 && db.heldOpeningBalance?.findMany) {
+      const partnerOutlets = (await db.outlet.findMany({
+        where: { clientId, partnerId: { in: partnerIds }, deletedAt: null },
+        select: { outletCode: true, partnerId: true },
+      })) ?? [];
+      const partnerOfNorm = new Map(partnerOutlets.map((o) => [normOutletCode(o.outletCode), o.partnerId]));
+      const held = (await db.heldOpeningBalance.findMany({
+        where: { clientId, status: 'PENDING', outletCode: { in: [...partnerOfNorm.keys()] } },
         select: { outletCode: true, closingPoints: true },
       })) ?? [];
-    const heldBy = new Map<string, number>();
-    for (const h of held) heldBy.set(h.outletCode, (heldBy.get(h.outletCode) ?? 0) + h.closingPoints);
+      for (const h of held) {
+        const pid = partnerOfNorm.get(h.outletCode);
+        if (pid) heldByPartner.set(pid, (heldByPartner.get(pid) ?? 0) + h.closingPoints);
+      }
+    }
     const out: UploadDeductionReadiness[] = [];
     for (const code of codes) {
-      const heldOpeningBalance = heldBy.has(normOutletCode(code)) ? heldBy.get(normOutletCode(code))! : null;
-      const base = { outletCode: code, walletId: null as string | null, partnerId: null as string | null, heldOpeningBalance };
+      const base = { outletCode: code, walletId: null as string | null, partnerId: null as string | null, heldOpeningBalance: null as number | null, dueExpiry: 0 };
       if (!byCode.has(code)) {
         out.push({ ...base, found: false, linked: false, balance: null, ready: false, reason: 'Outlet ID not found in this program (or deleted) — this row will not be credited or deducted', code: 'OUTLET_NOT_FOUND' });
         continue;
@@ -2536,12 +2614,26 @@ export class WalletService {
         continue;
       }
       const w = walletBy.get(partnerId);
+      const held = heldByPartner.has(partnerId) ? heldByPartner.get(partnerId)! : null;
       if (!w) {
-        out.push({ ...base, partnerId, found: true, linked: true, balance: null, ready: true, reason: null, code: null });
+        out.push({ ...base, partnerId, heldOpeningBalance: held, found: true, linked: true, balance: null, ready: true, reason: null, code: null });
         continue;
       }
+      const pristine = await this.isWalletPristine(db, w);
       const r = await this.deductionReadinessOf(db, w);
-      out.push({ ...base, partnerId, walletId: w.id, found: true, linked: true, balance: w.redeemablePoints, ready: r.ready, reason: r.reason, code: r.code });
+      out.push({
+        ...base,
+        partnerId,
+        walletId: w.id,
+        heldOpeningBalance: pristine ? held : null,
+        dueExpiry: Math.min(dueBy.get(w.id) ?? 0, Math.max(0, w.redeemablePoints)),
+        found: true,
+        linked: true,
+        balance: w.redeemablePoints,
+        ready: r.ready,
+        reason: r.reason,
+        code: r.code,
+      });
     }
     return out;
   }
@@ -2549,8 +2641,8 @@ export class WalletService {
   /**
    * One upload deduction (credit-batch confirm, in the caller's transaction): debit `points` (> 0) from the partner's
    * wallet through the single write path with allowDebt — the balance may go below zero (owner rule: negative wallets
-   * repay from future earnings). The passbook row reads "320 points deducted — <field>, <period>" (+ narration) and is
-   * linked to the batch row (referenceType CREDIT_BATCH / referenceId batch, metadata kind UPLOAD_DEDUCTION + outlet,
+   * repay from future earnings). The passbook row reads "320 points deducted — <field>, <Month YYYY>" (+ narration) and
+   * is linked to the batch row (referenceType CREDIT_BATCH / referenceId batch, metadata kind UPLOAD_DEDUCTION + outlet,
    * field, row) for audit and undo. Refuses (409) an un-sequenced wallet — see MovementParams.allowDebt.
    */
   async debitUploadDeduction(
@@ -2586,12 +2678,19 @@ export class WalletService {
     });
     for (const lot of due ?? []) await this.expireLotInTx(tx, lot);
     const wallet = await this.lockWallet(tx, first.id); // fresh read after the expiries
-    const holdings = Math.max(0, wallet.redeemablePoints + (wallet.debtPoints ?? 0));
-    const debtCreated = Math.max(0, a.points - holdings);
     const narration = a.narration?.trim();
-    // U1: "320 points deducted — Target Achievement, November 2026 · <narration>"
+    // "320 points deducted — Target Achievement, November 2026 · <narration>"
     const description = `${fmtPts(a.points)} points deducted — ${a.fieldName}, ${monthYearIST(a.period)}${narration ? ` · ${narration}` : ''}`;
     const draws: Array<{ lotId: string; points: number; expiresAt: Date | null }> = [];
+    const meta = {
+      kind: UPLOAD_DEDUCTION_KIND,
+      fieldId: a.fieldId,
+      fieldName: a.fieldName,
+      outletCode: a.outletCode,
+      period: a.period,
+      rowNum: a.rowNum,
+      narration: narration ?? null,
+    };
     const res = await this.applyMovement(tx, {
       wallet,
       lotDrawsOut: draws,
@@ -2605,55 +2704,57 @@ export class WalletService {
       sourceType: 'CREDIT_FIELD',
       sourceId: a.fieldId,
       description,
-      metadata: {
-        kind: UPLOAD_DEDUCTION_KIND,
-        fieldId: a.fieldId,
-        fieldName: a.fieldName,
-        outletCode: a.outletCode,
-        period: a.period,
-        rowNum: a.rowNum,
-        narration: narration ?? null,
-      },
+      metadata: meta,
     });
-    // L1: record the lots the deduction consumed (their earliest expiry is restored by an undo) + the debt it created
-    // (D2: an undo is refused once later points repaid it). Same row, same transaction.
-    const consumedLotPoints = draws.reduce((n, d) => n + d.points, 0);
-    const expiries = draws.map((d) => d.expiresAt);
-    const earliest = expiries.some((e) => e === null)
-      ? null
-      : expiries.length
-        ? new Date(Math.min(...expiries.map((e) => (e as Date).getTime())))
-        : null;
+    // Audit #7: the debt it created = the ACTUAL change of the wallet's debt (what the model wrote), never re-derived.
+    const after = await tx.wallet.findFirst({ where: { id: wallet.id }, select: { debtPoints: true } });
+    const debtCreated = Math.max(0, (after?.debtPoints ?? 0) - (wallet.debtPoints ?? 0));
+    // Money audit #1 / L1: each consumed lot's points come back with ITS OWN expiry on an undo; the debt part with the
+    // normal expiry of a new credit. Recorded on the same row, same transaction.
+    const segments = giveBackSegmentsOf(a.points, debtCreated, draws);
     await tx.walletTransaction.update({
       where: { id: res.transactionId },
       data: {
         metadata: {
-          kind: UPLOAD_DEDUCTION_KIND,
-          fieldId: a.fieldId,
-          fieldName: a.fieldName,
-          outletCode: a.outletCode,
-          period: a.period,
-          rowNum: a.rowNum,
-          narration: narration ?? null,
+          ...meta,
           debtCreated,
-          consumedLotPoints,
-          // null = a consumed lot never expires (or none consumed — see consumedLotPoints)
-          earliestLotExpiresAt: earliest ? earliest.toISOString() : null,
+          consumedLotPoints: draws.reduce((n, d) => n + d.points, 0),
+          giveBackSegments: segments as unknown as Prisma.InputJsonValue,
           consumedLots: draws.slice(0, 50).map((d) => ({ lotId: d.lotId, points: d.points, expiresAt: d.expiresAt ? d.expiresAt.toISOString() : null })),
-        },
+        } as Prisma.InputJsonValue,
       },
     });
     return { transactionId: res.transactionId, balanceBefore: res.newRedeemable + a.points, balanceAfter: res.newRedeemable };
+  }
+
+  /** The give-backs (undo credits) of these deductions, Σ per deduction id. */
+  private async givenBackOf(db: Prisma.TransactionClient, ids: string[]): Promise<Map<string, number>> {
+    const back = new Map<string, number>();
+    if (ids.length === 0) return back;
+    const undo =
+      (await db.walletTransaction.findMany({
+        where: { reversedCreditTxId: { in: ids }, transactionType: 'CREDIT_REVERSAL' },
+        select: { reversedCreditTxId: true, points: true },
+      })) ?? [];
+    for (const u of undo) if (u.reversedCreditTxId) back.set(u.reversedCreditTxId, (back.get(u.reversedCreditTxId) ?? 0) + u.points);
+    return back;
+  }
+
+  private lineOf(r: { id: string; walletId: string; points: number; createdAt: Date; seq: number | null; metadata: Prisma.JsonValue; balanceAfter?: number | null }, givenBack: number): UploadDeductionLine {
+    const m = (r.metadata ?? {}) as Record<string, unknown>;
+    const points = Math.abs(r.points);
+    const debtCreated = typeof m.debtCreated === 'number' ? m.debtCreated : Math.max(0, Math.min(points, -(r.balanceAfter ?? 0)));
+    const segments = Array.isArray(m.giveBackSegments)
+      ? (m.giveBackSegments as GiveBackSegment[])
+      : [{ points, expiresAt: 'NEW' as const }]; // a row from before the segments (none in prod) → normal expiry
+    return { id: r.id, walletId: r.walletId, points, givenBack, createdAt: r.createdAt, seq: r.seq, debtCreated, segments };
   }
 
   /**
    * The upload deductions of one (batch, outlet, field) line, oldest first, with how much of each was already given
    * back (Σ of the undo credits that name it in reversedCreditTxId). Empty ⇔ the line is not a deduction line.
    */
-  async findUploadDeductions(
-    tx: Prisma.TransactionClient,
-    key: CreditKey,
-  ): Promise<UploadDeductionLine[]> {
+  async findUploadDeductions(tx: Prisma.TransactionClient, key: CreditKey): Promise<UploadDeductionLine[]> {
     const rows =
       (await tx.walletTransaction.findMany({
         where: {
@@ -2669,36 +2770,34 @@ export class WalletService {
       return !!m && m.kind === UPLOAD_DEDUCTION_KIND && m.outletCode === key.outletCode && m.fieldId === key.fieldId;
     });
     if (line.length === 0) return [];
-    const undo =
-      (await tx.walletTransaction.findMany({
-        where: { reversedCreditTxId: { in: line.map((r) => r.id) }, transactionType: 'CREDIT_REVERSAL' },
-        select: { reversedCreditTxId: true, points: true },
-      })) ?? [];
-    const back = new Map<string, number>();
-    for (const u of undo) if (u.reversedCreditTxId) back.set(u.reversedCreditTxId, (back.get(u.reversedCreditTxId) ?? 0) + u.points);
+    const back = await this.givenBackOf(tx, line.map((r) => r.id));
     return line
-      .map((r) => {
-        const m = r.metadata as Record<string, unknown>;
-        return {
-          id: r.id,
-          walletId: r.walletId,
-          points: Math.abs(r.points),
-          givenBack: back.get(r.id) ?? 0,
-          createdAt: r.createdAt,
-          seq: r.seq,
-          // Pre-L1 rows (none in prod): debt from the recorded balances; consumed lots unknown → normal expiry.
-          debtCreated: typeof m.debtCreated === 'number' ? m.debtCreated : Math.max(0, Math.min(Math.abs(r.points), -(r.balanceAfter ?? 0))),
-          consumedLotPoints: typeof m.consumedLotPoints === 'number' ? m.consumedLotPoints : 0,
-          earliestLotExpiresAt: typeof m.earliestLotExpiresAt === 'string' ? new Date(m.earliestLotExpiresAt) : null,
-        };
-      })
+      .map((r) => this.lineOf(r, back.get(r.id) ?? 0))
       .sort((x, y) => x.createdAt.getTime() - y.createdAt.getTime() || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  }
+
+  /**
+   * D2 = STRICT BLOCK (owner 2026-11-25): an undo of a deduction is refused when ANY points were added to that wallet
+   * after the deduction — any positive movement after it (by the wallet's movement seq; by time on an un-sequenced row),
+   * except give-backs of THIS deduction. Returns the refusal text, or null.
+   */
+  private async undoBlockedFor(db: Prisma.TransactionClient, d: Pick<UploadDeductionLine, 'id' | 'walletId' | 'seq' | 'createdAt'>): Promise<string | null> {
+    const later = await db.walletTransaction.findFirst({
+      where: {
+        walletId: d.walletId,
+        points: { gt: 0 },
+        ...(d.seq != null ? { seq: { gt: d.seq } } : { createdAt: { gt: d.createdAt } }),
+        OR: [{ reversedCreditTxId: null }, { reversedCreditTxId: { not: d.id } }],
+      },
+      select: { id: true },
+    });
+    return later ? deductionUndoBlockedMessage(formatDateIST(d.createdAt)) : null;
   }
 
   /**
    * F3: the ACTUAL upload deductions of a batch, one entry per (outlet, field) line — Payout Status labels deduction rows
    * and offers "Undo deduction" from these (never from the batch rows: a row skipped at confirm was not deducted). Each
-   * line carries what is still to give back and, D2, why an undo is refused. Three indexed reads for the whole batch.
+   * line carries what is still to give back and, D2 (strict), why an undo is refused — the same rule as create / approve.
    */
   async uploadDeductionLinesOfBatch(
     db: Prisma.TransactionClient,
@@ -2712,45 +2811,46 @@ export class WalletService {
           referenceId: batchId,
           metadata: { path: ['kind'], equals: UPLOAD_DEDUCTION_KIND },
         },
-        select: { id: true, walletId: true, points: true, balanceAfter: true, metadata: true },
+        select: { id: true, walletId: true, points: true, createdAt: true, seq: true, balanceAfter: true, metadata: true },
       })) ?? [];
     if (rows.length === 0) return [];
-    const undo =
+    const back = await this.givenBackOf(db, rows.map((r) => r.id));
+    // One read for the whole batch: every positive movement on these wallets since the batch's first deduction.
+    const since = new Date(Math.min(...rows.map((r) => r.createdAt.getTime())));
+    const credits =
       (await db.walletTransaction.findMany({
-        where: { reversedCreditTxId: { in: rows.map((r) => r.id) }, transactionType: 'CREDIT_REVERSAL' },
-        select: { reversedCreditTxId: true, points: true },
+        where: { walletId: { in: [...new Set(rows.map((r) => r.walletId))] }, points: { gt: 0 }, createdAt: { gte: since } },
+        select: { walletId: true, seq: true, createdAt: true, reversedCreditTxId: true },
       })) ?? [];
-    const back = new Map<string, number>();
-    for (const u of undo) if (u.reversedCreditTxId) back.set(u.reversedCreditTxId, (back.get(u.reversedCreditTxId) ?? 0) + u.points);
-    const wallets = (await db.wallet.findMany({ where: { id: { in: [...new Set(rows.map((r) => r.walletId))] } }, select: { id: true, debtPoints: true } })) ?? [];
-    const debtOf = new Map(wallets.map((w) => [w.id, w.debtPoints ?? 0]));
     const lines = new Map<string, { outletId: string; fieldId: string; points: number; givenBack: number; undoBlockedReason: string | null }>();
     for (const r of rows) {
       const m = r.metadata as Record<string, unknown>;
       if (m?.kind !== UPLOAD_DEDUCTION_KIND) continue;
       const k = `${m.outletCode}|${m.fieldId}`;
-      const points = Math.abs(r.points);
-      const givenBack = back.get(r.id) ?? 0;
-      const debtCreated = typeof m.debtCreated === 'number' ? m.debtCreated : Math.max(0, Math.min(points, -(r.balanceAfter ?? 0)));
-      const repaid = deductionRepaid({ debtCreated, givenBack }, debtOf.get(r.walletId) ?? 0);
+      const blocked = credits.some(
+        (c) =>
+          c.walletId === r.walletId &&
+          c.reversedCreditTxId !== r.id &&
+          (r.seq != null && c.seq != null ? c.seq > r.seq : c.createdAt.getTime() > r.createdAt.getTime()),
+      );
       const cur = lines.get(k) ?? { outletId: String(m.outletCode), fieldId: String(m.fieldId), points: 0, givenBack: 0, undoBlockedReason: null };
-      cur.points += points;
-      cur.givenBack += givenBack;
-      if (repaid) cur.undoBlockedReason = DEDUCTION_REPAID_MESSAGE;
+      cur.points += Math.abs(r.points);
+      cur.givenBack += back.get(r.id) ?? 0;
+      if (blocked && Math.abs(r.points) - (back.get(r.id) ?? 0) > 0) cur.undoBlockedReason = deductionUndoBlockedMessage(formatDateIST(r.createdAt));
       lines.set(k, cur);
     }
     return [...lines.values()];
   }
 
   /**
-   * D2 (owner 2026-11-25) — read-only, for the undo CREATE and the Payout Status button: the reason an undo of this line
-   * is refused (its debt was repaid by later points), or null. Re-checked under the wallet lock at approve.
+   * D2 (strict) — read-only, for the undo CREATE: the reason an undo of this line is refused (points were added to the
+   * wallet after the deduction), or null. Re-checked under the wallet lock at approve (undoUploadDeduction).
    */
   async uploadDeductionUndoBlocked(tx: Prisma.TransactionClient, key: CreditKey): Promise<string | null> {
-    const lines = await this.findUploadDeductions(tx, key);
-    for (const d of lines) {
-      const w = await tx.wallet.findFirst({ where: { id: d.walletId }, select: { debtPoints: true } });
-      if (deductionRepaid(d, w?.debtPoints ?? 0)) return DEDUCTION_REPAID_MESSAGE;
+    for (const d of await this.findUploadDeductions(tx, key)) {
+      if (d.points - d.givenBack <= 0) continue;
+      const why = await this.undoBlockedFor(tx, d);
+      if (why) return why;
     }
     return null;
   }
@@ -2758,10 +2858,11 @@ export class WalletService {
   /**
    * Undo (part of) a line's upload deduction — an APPROVED POINTS reversal of a deduction line. The CALLER holds the
    * credit_batches lock and has flipped the CreditReversal (guarded — never twice). Locks the charged wallet(s) in
-   * ascending id (§5 lock order), re-reads what is still undoable under the locks, then gives the points back to the
-   * SAME wallet that was charged, oldest deduction first, as a credit movement (CREDIT_REVERSAL / ledger REVERSE — not
-   * new earning; a spendable lot with the tenant's normal expiry, like a refund). The credit repays the debt the
-   * deduction created first (WP0 credit), so a full undo restores the balance and the debt exactly.
+   * ascending id (§5 lock order), re-checks D2 and what is still undoable under the locks, then gives the points back to
+   * the SAME wallet that was charged, oldest deduction first, as credit movements (CREDIT_REVERSAL / ledger REVERSE — not
+   * new earning). Money audit #1: in give-back order (the reverse of consumption — the debt part first with the normal
+   * expiry of a new credit, then each consumed lot last-consumed-first with ITS OWN expiry; null = never expires), one
+   * movement per segment. A partial undo takes the next segments in that order.
    */
   async undoUploadDeduction(
     tx: Prisma.TransactionClient,
@@ -2773,14 +2874,10 @@ export class WalletService {
     const walletIds = [...new Set(pre.map((d) => d.walletId))].sort();
     for (const id of walletIds) await this.lockWallet(tx, id);
     const deductions = await this.findUploadDeductions(tx, a); // re-read under the wallet locks
-    // D2 (owner 2026-11-25): re-checked under the wallet lock — refused once later points repaid the deduction's debt.
-    const debtNow = new Map<string, number>();
-    for (const id of walletIds) {
-      const w = await tx.wallet.findFirst({ where: { id }, select: { debtPoints: true } });
-      debtNow.set(id, w?.debtPoints ?? 0);
-    }
-    if (deductions.some((d) => deductionRepaid(d, debtNow.get(d.walletId) ?? 0))) {
-      throw new BadRequestException(DEDUCTION_REPAID_MESSAGE);
+    for (const d of deductions) {
+      if (d.points - d.givenBack <= 0) continue;
+      const why = await this.undoBlockedFor(tx, d); // D2 strict, under the lock
+      if (why) throw new BadRequestException(why);
     }
     const room = deductions.reduce((n, d) => n + Math.max(0, d.points - d.givenBack), 0);
     if (a.points > room) {
@@ -2797,28 +2894,28 @@ export class WalletService {
       if (remaining <= 0) break;
       const give = Math.min(remaining, d.points - d.givenBack);
       if (give <= 0) continue;
-      const w = await this.lockWallet(tx, d.walletId); // fresh read (an earlier step may have moved this wallet)
-      if (!firstBefore.has(w.id)) firstBefore.set(w.id, w.redeemablePoints);
-      // L1: the points come back with the EARLIEST expiry of the lots the deduction consumed (never a fresh window);
-      // a deduction that consumed no lot (pure debt) gets the tenant's normal expiry.
-      const expiresAt = d.consumedLotPoints > 0 ? d.earliestLotExpiresAt : normalExpiry;
-      const res = await this.applyMovement(tx, {
-        wallet: w,
-        walletTxType: 'CREDIT_REVERSAL',
-        ledgerType: PointsLedgerType.REVERSE,
-        points: give,
-        expiresAt,
-        referenceType: 'CREDIT_REVERSAL',
-        referenceId: a.creditReversalId,
-        sourceType: 'CREDIT_FIELD',
-        sourceId: a.fieldId,
-        description: `${fmtPts(give)} points given back — deduction undone (${a.passbookLabel})`,
-        metadata: { kind: UPLOAD_DEDUCTION_UNDO_KIND, undoneDeductionTxId: d.id },
-        reversedCreditTxId: d.id,
-        creditReversalId: a.creditReversalId,
-      });
-      lastAfter.set(w.id, res.newRedeemable);
-      transactionIds.push(res.transactionId);
+      for (const part of takeGiveBack(d.segments, d.givenBack, give)) {
+        const w = await this.lockWallet(tx, d.walletId); // fresh read (an earlier part may have moved this wallet)
+        if (!firstBefore.has(w.id)) firstBefore.set(w.id, w.redeemablePoints);
+        const expiresAt = part.expiresAt === 'NEW' ? normalExpiry : part.expiresAt === null ? null : new Date(part.expiresAt);
+        const res = await this.applyMovement(tx, {
+          wallet: w,
+          walletTxType: 'CREDIT_REVERSAL',
+          ledgerType: PointsLedgerType.REVERSE,
+          points: part.points,
+          expiresAt,
+          referenceType: 'CREDIT_REVERSAL',
+          referenceId: a.creditReversalId,
+          sourceType: 'CREDIT_FIELD',
+          sourceId: a.fieldId,
+          description: `${fmtPts(part.points)} points given back — deduction undone (${a.passbookLabel})`,
+          metadata: { kind: UPLOAD_DEDUCTION_UNDO_KIND, undoneDeductionTxId: d.id },
+          reversedCreditTxId: d.id,
+          creditReversalId: a.creditReversalId,
+        });
+        lastAfter.set(w.id, res.newRedeemable);
+        transactionIds.push(res.transactionId);
+      }
       remaining -= give;
     }
     if (remaining !== 0) throw new Error('undoUploadDeduction: room check passed but the give-back did not cover the request');

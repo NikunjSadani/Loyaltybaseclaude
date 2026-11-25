@@ -55,9 +55,10 @@ export function deductionWalletNotReadyMessage(outletCodes: string[]): string {
   );
 }
 
-/** D2 (owner 2026-11-25): an undo of an upload deduction whose debt later points already repaid. */
-export const DEDUCTION_REPAID_MESSAGE =
-  'This deduction has already been repaid by later points — correct it with a manual wallet adjustment.';
+/** D2 = strict block (owner 2026-11-25): points were added to the wallet after the deduction → no undo. */
+export function deductionUndoBlockedMessage(deductedOn: string): string {
+  return `Can't undo: points were added to this wallet after the deduction on ${deductedOn}. Give the points back with a manual credit instead.`;
+}
 
 /** Reason text for a wallet the backfill has never processed (status NULL, history present). */
 export const WALLET_NOT_YET_BACKFILLED_REASON = 'not yet prepared by the wallet backfill';

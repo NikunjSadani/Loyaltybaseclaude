@@ -262,7 +262,11 @@ describe('CreditsService', () => {
       },
     );
     // FIX-8: tx-scoped plan reads default to empty (TDS-engine tests override per case).
-    mockTx.outlet.findMany.mockResolvedValue([]);
+    // The confirm's acknowledgement check (computed inside the tx, audit #5) resolves the batch's POINTS outlets: by
+    // default every asked-for code is a linked outlet (nothing to acknowledge); other outlet reads get [] as before.
+    mockTx.outlet.findMany.mockImplementation(async (a?: { where?: { outletCode?: { in?: string[] } } }) =>
+      (a?.where?.outletCode?.in ?? []).map((outletCode) => ({ outletCode, partnerId: 'p1' })),
+    );
     mockTx.channelPartner.findMany.mockResolvedValue([]);
     mockTx.tdsDeductionEntry.findMany.mockResolvedValue([]);
     mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]);
@@ -522,7 +526,7 @@ describe('CreditsService', () => {
       const outlets = [{ outletCode: 'O1', found: true, linked: true, walletId: 'w1', partnerId: 'p1', balance: 100, heldOpeningBalance: null, ready: true, reason: null, code: null }];
       mockWalletService.uploadDeductionReadiness.mockResolvedValueOnce(outlets);
       await expect(service.uploadPreview(admin, { outletCodes: ['O1'], period: '2026-05', lines: [] })).resolves.toEqual({
-        deductionsEnabled: false, outlets, priorDeductions: [],
+        deductionsEnabled: false, ackCategories: ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'], outlets, priorDeductions: [],
       });
       expect(mockWalletService.uploadDeductionReadiness).toHaveBeenCalledWith('deoleo', ['O1']);
     });
@@ -707,8 +711,11 @@ describe('CreditsService', () => {
       });
       // Outlet resolves but has no partnerId → cannot own a wallet.
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: null });
+      mockTx.outlet.findMany.mockImplementation(async () => [{ outletCode: 'O1', partnerId: null }]);
 
-      const res = await service.confirmBatch(admin, 'b1');
+      // owner rule (no silent failure): the row that won't be applied must be acknowledged first
+      await expect(service.confirmBatch(admin, 'b1')).rejects.toThrow(/reload the page and tick: rows that will not be applied/);
+      const res = await service.confirmBatch(admin, 'b1', { acknowledged: ['NOT_APPLIED'] });
 
       expect(res.pointsCredited).toBe(0);
       expect(res.skipped).toEqual([
@@ -943,8 +950,6 @@ describe('CreditsService', () => {
       mockTx.outlet.findFirst.mockResolvedValue({ partnerId: 'p1' });
       mockPrisma.channelPartner.findFirst.mockResolvedValue({ userId: 'u1', ownerName: 'Ravi', phone: '9900000041' });
       mockNotifications.notifyUserWithChannels.mockRejectedValueOnce(new Error('MSG91 down'));
-      // the outlet resolves and is linked (nothing for the admin to acknowledge)
-      mockPrisma.outlet.findMany.mockResolvedValueOnce([{ outletCode: 'O1', partnerId: 'p1' }]);
 
       const res = await service.confirmBatch(admin, 'b1');
       expect(res.pointsCredited).toBe(1);

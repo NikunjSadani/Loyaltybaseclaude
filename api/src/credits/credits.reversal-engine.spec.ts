@@ -33,6 +33,10 @@ const num = (x: any) => (x instanceof Date ? x.getTime() : x);
 function matchWhere(row: Row, where: Row): boolean {
   for (const [k, v] of Object.entries(where ?? {})) {
     if (v === undefined) continue;
+    if (k === 'OR' && Array.isArray(v)) {
+      if (!v.some((w: Row) => matchWhere(row, w))) return false;
+      continue;
+    }
     if (v === null) {
       if (row[k] !== null && row[k] !== undefined) return false;
       continue;
@@ -1317,8 +1321,8 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     push(h, 'B2', [{ outletId: 'O1', amount: 500 }]);
     await confirm(h, 'B2');
     expect(h.w('cp1')).toMatchObject({ redeemablePoints: 200, debtPoints: 0 });
-    expect(await errorOf(undo(h, 'B1', 'O1', 300))).toBe(
-      'BadRequestException: This deduction has already been repaid by later points — correct it with a manual wallet adjustment.',
+    expect(await errorOf(undo(h, 'B1', 'O1', 300))).toMatch(
+      /^BadRequestException: Can't undo: points were added to this wallet after the deduction on \d{2} \w{3} \d{4}\. Give the points back with a manual credit instead\.$/,
     );
     // no credit after O2's deduction → its undo works
     const r = (await undo(h, 'B1', 'O2', 200)) as Row;
@@ -1327,7 +1331,7 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     // Payout Status reads the same rule from the actual wallet rows
     const detail = (await h.credits.getBatch(adminUser, 'B1')) as Row;
     expect(detail.deductionLines).toEqual([
-      { outletId: 'O1', fieldId: 'F', points: 300, givenBack: 0, undoBlockedReason: 'This deduction has already been repaid by later points — correct it with a manual wallet adjustment.' },
+      { outletId: 'O1', fieldId: 'F', points: 300, givenBack: 0, undoBlockedReason: expect.stringMatching(/^Can't undo: points were added to this wallet after the deduction on /) },
       { outletId: 'O2', fieldId: 'F', points: 200, givenBack: 200, undoBlockedReason: null },
     ]);
   });
@@ -1340,7 +1344,7 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     const r = (await undo(h, 'B1', 'O1', 300)) as Row;
     push(h, 'B2', [{ outletId: 'O1', amount: 500 }]);
     await confirm(h, 'B2');
-    expect(await errorOf(h.approve(r.id))).toMatch(/already been repaid by later points/);
+    expect(await errorOf(h.approve(r.id))).toMatch(/Can't undo: points were added to this wallet after the deduction/);
     expect(h.w('cp1').redeemablePoints).toBe(200);
     expect(h.T.reversals.find((x) => x.id === r.id)!.status).toBe('PENDING_GIFSY');
   });
@@ -1362,7 +1366,7 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     ]);
     expect(h.w('cp1')).toMatchObject({ redeemablePoints: 20, debtPoints: 0, expiredPoints: 100 });
     const d = h.T.walletTxns.find((t) => t.transactionType === 'DEBIT_ADJUSTMENT')!;
-    expect(d.metadata).toMatchObject({ debtCreated: 0, consumedLotPoints: 30, earliestLotExpiresAt: later2.toISOString() });
+    expect(d.metadata).toMatchObject({ debtCreated: 0, consumedLotPoints: 30, giveBackSegments: [{ points: 30, expiresAt: later2.toISOString() }] });
     const r = (await undo(h, 'B1', 'O1', 30)) as Row;
     await h.approve(r.id);
     const back = h.T.walletTxns.find((t) => t.transactionType === 'CREDIT_REVERSAL')!;
@@ -1379,9 +1383,13 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     ]);
     const err = await errorOf(confirm(h, 'B1', ['ROUNDED']));
     expect(err).toBe(
-      'BadRequestException: Before confirming, please review and tick: rows that will not be applied (outlet not found or not linked) (1); wallets that will go below zero (1). Nothing was credited or deducted.',
+      'BadRequestException: Before confirming, reload the page and tick: rows that will not be applied (outlet not found or not linked) (1); wallets that will go below zero (1). Nothing was credited or deducted — the batch is still waiting.',
     );
     expect(h.T.walletTxns).toHaveLength(0);
+    // audit #5: the refused confirm is recorded too, with what was missing
+    expect(h.T.auditLogs.filter((a) => a.entityType === 'CREDIT_BATCH').map((a) => [a.action, a.entityId, a.metadata.event, a.metadata.missingAcknowledgements])).toEqual([
+      ['REJECT', 'B1', 'CREDIT_BATCH_CONFIRM_REFUSED', ['NOT_APPLIED', 'BELOW_ZERO']],
+    ]);
     await confirm(h, 'B1', ['ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'SKIPPED']);
     const row = h.T.auditLogs.find((a) => a.entityType === 'CREDIT_BATCH_CONFIRM')!;
     expect(row).toMatchObject({
@@ -1398,6 +1406,93 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     expect(detail).toMatchObject({ acknowledged: ['ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'SKIPPED'], notApplied: [{ outletId: 'O2' }] });
   });
 
+  it('D2 strict: deductA → credit → deductB → undo A refused, undo B ok; partial undo → credit → undo the rest refused', async () => {
+    const h = world();
+    ON(h);
+    push(h, 'BA', [{ outletId: 'O1', amount: -100 }]);
+    await confirm(h, 'BA');
+    push(h, 'BC', [{ outletId: 'O1', amount: 500 }]);
+    await confirm(h, 'BC');
+    push(h, 'BB', [{ outletId: 'O1', amount: -80 }]);
+    await confirm(h, 'BB');
+    expect(await errorOf(undo(h, 'BA', 'O1', 100))).toMatch(/Can't undo: points were added to this wallet after the deduction/);
+    const rb = (await undo(h, 'BB', 'O1', 30)) as Row; // partial undo of B (no credit after B)
+    await h.approve(rb.id);
+    // the give-back of B itself never blocks B's own rest…
+    const rb2 = (await undo(h, 'BB', 'O1', 20)) as Row;
+    await h.approve(rb2.id);
+    // …but any other credit after B does
+    push(h, 'BD', [{ outletId: 'O1', amount: 5 }]);
+    await confirm(h, 'BD');
+    expect(await errorOf(undo(h, 'BB', 'O1', 30))).toMatch(/Can't undo: points were added to this wallet after the deduction/);
+    expect(h.w('cp1').redeemablePoints).toBe(-100 + 500 - 80 + 30 + 20 + 5);
+  });
+
+  it('money audit #1: an undo returns each consumed lot with ITS OWN expiry (reverse of consumption), the debt part with the normal expiry', async () => {
+    const h = world();
+    ON(h);
+    await h.confirm('B0', [{ outlet: 'O1', amount: 50 }]);
+    await h.confirm('B00', [{ outlet: 'O1', field: 'H', amount: 50 }]);
+    const [l1, l2] = h.T.ledger.filter((l) => l.points > 0);
+    const e1 = new Date(Date.now() + 5 * 86_400_000);
+    l1.expiresAt = e1; // l2 never expires
+    push(h, 'B1', [{ outletId: 'O1', amount: -150 }]); // consumes l1 50, l2 50, then 50 becomes debt
+    await confirm(h, 'B1');
+    const d = h.T.walletTxns.find((t) => t.transactionType === 'DEBIT_ADJUSTMENT')!;
+    expect(d.metadata).toMatchObject({
+      debtCreated: 50,
+      giveBackSegments: [{ points: 50, expiresAt: 'NEW' }, { points: 50, expiresAt: null }, { points: 50, expiresAt: e1.toISOString() }],
+    });
+    const r = (await undo(h, 'B1', 'O1', 120)) as Row; // partial: debt 50, l2 50, l1 20
+    await h.approve(r.id);
+    const backs = h.T.walletTxns.filter((t) => t.transactionType === 'CREDIT_REVERSAL');
+    expect(backs.map((b) => [b.points, h.T.ledger.find((l) => l.id === b.pointsLedgerId)!.expiresAt ?? null])).toEqual([
+      [50, null], // normal expiry for a new credit (no expiry config in this world → null)
+      [50, null], // l2 never expires
+      [20, e1],
+    ]);
+    expect(h.w('cp1')).toMatchObject({ redeemablePoints: 70, debtPoints: 0 });
+    const r2 = (await undo(h, 'B1', 'O1', 30)) as Row; // the rest: l1's remaining 30
+    await h.approve(r2.id);
+    const last = h.T.walletTxns.filter((t) => t.transactionType === 'CREDIT_REVERSAL').at(-1)!;
+    expect([last.points, h.T.ledger.find((l) => l.id === last.pointsLedgerId)!.expiresAt]).toEqual([30, e1]);
+  });
+
+  it('audit #7: debtCreated is the wallet\'s ACTUAL debt change (a wallet already in debt); a B + D < 0 wallet is refused as inconsistent', async () => {
+    const h = world({ outlets: { O1: 'cp1', O2: 'cp2' }, wallets: [blankWallet('w-cp2', 'cp2', { redeemablePoints: -100, debtPoints: 0, movementSeq: 5 })] });
+    ON(h);
+    push(h, 'B1', [{ outletId: 'O1', amount: -300 }]);
+    await confirm(h, 'B1');
+    push(h, 'B2', [{ outletId: 'O1', amount: -50 }]);
+    await confirm(h, 'B2');
+    const rows = h.T.walletTxns.filter((t) => t.transactionType === 'DEBIT_ADJUSTMENT');
+    expect(rows.map((t) => t.metadata.debtCreated)).toEqual([300, 50]);
+    expect(h.w('cp1')).toMatchObject({ redeemablePoints: -350, debtPoints: 350 });
+    push(h, 'B3', [{ outletId: 'O2', amount: -10 }]);
+    expect(await errorOf(confirm(h, 'B3'))).toMatch(/points state is inconsistent/);
+    expect(h.w('cp2')).toMatchObject({ redeemablePoints: -100, debtPoints: 0 });
+  });
+
+  it('audit #5: a D1 refusal at confirm is recorded (CREDIT_BATCH_CONFIRM_REFUSED) with its reason', async () => {
+    const h = world();
+    push(h, 'B1', [{ outletId: 'O1', amount: -5 }]); // switch OFF
+    expect(await errorOf(confirm(h, 'B1'))).toMatch(/Deductions are switched off/);
+    const row = h.T.auditLogs.find((a) => a.entityType === 'CREDIT_BATCH')!;
+    expect(row).toMatchObject({ action: 'REJECT', entityId: 'B1', metadata: { event: 'CREDIT_BATCH_CONFIRM_REFUSED', status: 400, reason: expect.stringMatching(/^Deductions are switched off/) } });
+  });
+
+  it('U2 / U4: the tick check subtracts points due to expire first and counts a held opening balance only when it would post', async () => {
+    const h = world();
+    ON(h);
+    await h.confirm('B0', [{ outlet: 'O1', amount: 100 }]);
+    h.T.ledger.find((l) => l.points > 0)!.expiresAt = new Date(Date.now() - 1000); // all 100 due
+    const preview = await h.credits.uploadPreview(adminUser, { outletCodes: ['O1'], period: '2026-05', lines: [] });
+    expect(preview.outlets[0]).toMatchObject({ balance: 100, dueExpiry: 100, heldOpeningBalance: null });
+    // −60 looks covered by the 100 balance, but those 100 expire first → the wallet goes below zero → tick required
+    push(h, 'B1', [{ outletId: 'O1', amount: -60 }]);
+    expect(await errorOf(confirm(h, 'B1', []))).toMatch(/wallets that will go below zero \(1\)/);
+  });
+
   it('a clean batch needs no acknowledgement (confirms exactly as before) and a repeat deduction must be acknowledged', async () => {
     const h = world();
     ON(h);
@@ -1409,8 +1504,9 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     const preview = await h.credits.uploadPreview(adminUser, { outletCodes: ['O1'], period: '2026-05', lines: [{ outletCode: 'O1', fieldId: 'F' }] });
     expect(preview).toMatchObject({
       deductionsEnabled: true,
-      outlets: [{ outletCode: 'O1', found: true, linked: true, walletId: 'w-cp1', partnerId: 'cp1', balance: 900, heldOpeningBalance: null, ready: true }],
-      priorDeductions: [{ outletCode: 'O1', fieldId: 'F', batchId: 'B1', points: 100 }],
+      ackCategories: ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'],
+      outlets: [{ outletCode: 'O1', found: true, linked: true, walletId: 'w-cp1', partnerId: 'cp1', balance: 900, heldOpeningBalance: null, dueExpiry: 0, ready: true }],
+      priorDeductions: [{ outletCode: 'O1', fieldId: 'F', batchId: 'B1', points: 100, givenBack: 0 }],
     });
   });
 });

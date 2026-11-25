@@ -28,6 +28,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let error = 'Internal server error';
+    // Opt-in machine-readable extras: ONLY an exception thrown with `{ message, details: {...} }` carries them
+    // (e.g. the credits confirm's missingAcknowledgements). Every other exception's envelope is unchanged.
+    let details: Record<string, unknown> | undefined;
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -38,12 +41,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
         // Nest/class-validator shape: { statusCode, message, error }
         const msg = (body as { message?: string | string[]; error?: string }).message;
         error = Array.isArray(msg) ? msg.join(', ') : (msg ?? (body as { error?: string }).error ?? 'Error');
+        const d = (body as { details?: unknown }).details;
+        if (d && typeof d === 'object' && !Array.isArray(d)) details = d as Record<string, unknown>;
       }
     } else {
       // Unexpected error — log the real thing, return a safe generic message.
       this.logger.error(exception instanceof Error ? exception.stack : String(exception));
     }
 
-    res.status(status).json({ success: false, error });
+    res.status(status).json(details ? { success: false, error, details } : { success: false, error });
   }
 }
