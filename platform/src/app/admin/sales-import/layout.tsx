@@ -10,7 +10,9 @@ import { SalesImportTabs } from './_components/sales-import-tabs';
  */
 export default function SalesImportLayout({ children }: { children: React.ReactNode }) {
   return (
-    <RequireAuth allowedRoles={['GIFSY_ADMIN', 'CLIENT_ADMIN']}>
+    // GIFSY_STAFF (owner 2026-11-25 — e.g. Project Manager): admitted here; AdminRouteGuard checks its
+    // targets:read via route-permissions, and the backend re-checks every action + the tenant grant.
+    <RequireAuth allowedRoles={['GIFSY_ADMIN', 'GIFSY_STAFF', 'CLIENT_ADMIN']}>
       <SalesImportFeatureGate>
         <SalesImportTabs />
         {children}

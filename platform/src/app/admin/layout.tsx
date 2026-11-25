@@ -297,9 +297,12 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         if ((item as { fundAdmin?: boolean }).fundAdmin
           && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'GIFSY_STAFF'
           && adminSession.role !== 'CLIENT_ADMIN') return false;
-        // salesImportAdmin items (Sales Import) — same two roles; also gated on featureFlag below.
+        // salesImportAdmin items (Sales Import) — GIFSY_ADMIN, GIFSY_STAFF (owner 2026-11-25: Project Manager uploads +
+        // applies; AdminRouteGuard checks targets:read, the backend re-checks each action) and CLIENT_ADMIN; also gated
+        // on the tenant featureFlag below.
         if ((item as { salesImportAdmin?: boolean }).salesImportAdmin
-          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
+          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'GIFSY_STAFF'
+          && adminSession.role !== 'CLIENT_ADMIN') return false;
         // tenantReportOnly items (Scheme Reports) are hidden from GIFSY_ADMIN, who
         // gets the full management + report surface under Scheme Management instead.
         if ((item as { tenantReportOnly?: boolean }).tenantReportOnly && adminSession.canManageSchemes) return false;

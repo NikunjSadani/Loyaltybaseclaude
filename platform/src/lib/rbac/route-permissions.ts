@@ -66,6 +66,9 @@ export const ROUTE_PERMISSIONS: Record<string, string> = {
 
   // Targets & achievements
   '/admin/targets':                  'targets:read',
+  // Sales Import (DMS file → KPI achievements) — Gifsy staff with Targets view (owner 2026-11-25: Project Manager can
+  // upload + apply). Upload / apply / settings are re-checked per action by the backend (targets:upload / manage_config).
+  '/admin/sales-import':             'targets:read',
 
   // Awards & credits → payouts (upload / status / payout / fields)
   '/admin/credits-payouts':          'credits:read',
