@@ -161,7 +161,9 @@ in the same `resolveMonthFocus` pass, so e.g. `FB1 CASES` (QUANTITY) gets exactl
 - Save-time: TARGET_NAMES only; not itself; the source must be an ENABLED TARGET_NAMES definition of the same tenant that
   reads its OWN names (one level → no chains / cycles). The borrower needs no name column of its own. A source with
   enabled borrowers cannot be disabled, renamed, switched to FILTER or made to borrow (409 naming the borrowers).
-- Month: `FOCUS_MISSING_NAME` when the borrower has its own numeric target but the source name is blank (outlet omitted);
+- Month: values need NO target of the borrower's own (Bajaj: cases achieved only) — every outlet with a source name gets
+  one. `FOCUS_MISSING_NAME` when the borrower's own OR the source's target exists but the source name is blank (outlet
+  omitted); an outlet the source already flags is not flagged twice;
   UNMATCHED / AMBIGUOUS tokens already reported on the source are not repeated (one fix / acceptance on the source clears
   both; an acceptance on the borrower also counts); source not available at run time → `FOCUS_SOURCE_MISSING` (no outlet
   gets a value, month blocked).

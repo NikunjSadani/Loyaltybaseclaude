@@ -288,6 +288,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
       }
       return null;
     };
+    const sourceDef = nameKpi === kpiCode ? undefined : tnDefs.find((d) => d.kpiCode === nameKpi);
     const filters = new Map<string, SalesKpiFilter>();
     const nameKeys = new Map<string, string>();
     const groups = new Map<string, NameGroup>();
@@ -302,7 +303,15 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
       const rawName = row?.names?.[nameKpi];
       const name = typeof rawName === 'string' ? rawName.trim() : '';
       const t = row?.values?.[kpiCode];
-      const hasTarget = typeof t === 'number' && Number.isFinite(t);
+      let hasTarget = typeof t === 'number' && Number.isFinite(t);
+      if (sourceDef && !hasTarget) {
+        // FOCUS-NAMES-FROM-KPI: a borrower usually has NO target of its own (cases achieved only, e.g. Bajaj FB1 CASES).
+        // An outlet with a SOURCE target but no name gets no cases value either → flag it on the borrower too, unless
+        // the source already flags that same outlet (in the source's scope) — one blocker per outlet, fixed once.
+        const st = row?.values?.[nameKpi];
+        const srcHasTarget = typeof st === 'number' && Number.isFinite(st);
+        hasTarget = srcHasTarget && !outletInScope(sourceDef, meta);
+      }
       const tokens = name === '' ? [] : splitFocusName(name);
       if (tokens.length === 0 && name !== '') {
         // Audit follow-up: a written name made only of separators ("&", ",", " & ") is NOT "no name" — the operator
@@ -405,7 +414,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
         message:
           nameKpi === kpiCode
             ? `${outletsText(n)} ${plural(n, 'has', 'have')} a ${label} target but no product name in the target file.`
-            : `${outletsText(n)} ${plural(n, 'has', 'have')} a ${label} target but no ${focusKpiDisplay(nameKpi, input.labelOf)} product name in the target file (${label} uses those names).`,
+            : `${outletsText(n)} ${plural(n, 'has', 'have')} a target but no ${focusKpiDisplay(nameKpi, input.labelOf)} product name in the target file, so ${label} (which uses those names) gets no value for ${plural(n, 'it', 'them')}.`,
       });
     }
     // Same code (FOCUS_MISSING_NAME — cleared only by fixing the target file), its own message per name as written.

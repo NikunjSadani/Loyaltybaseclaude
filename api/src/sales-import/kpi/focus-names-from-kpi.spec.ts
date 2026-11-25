@@ -127,12 +127,27 @@ describe('resolveMonthFocus — focusNamesFromKpi', () => {
         code: 'FOCUS_MISSING_NAME',
         outlets: 1,
         sampleOutletCodes: ['R2'],
-        message: '1 outlet has a Focus Brand 1 Cases target but no Focus Brand 1 (FOCUS BRAND) product name in the target file (Focus Brand 1 Cases uses those names).',
+        message: '1 outlet has a target but no Focus Brand 1 (FOCUS BRAND) product name in the target file, so Focus Brand 1 Cases (which uses those names) gets no value for it.',
       }),
     ]);
     expect(res.outletFilters.get(FB1C)!.has('R2')).toBe(false);
     // the ₹ measure has no ₹ target at R2 → no blocker of its own (unchanged rule)
     expect(res.blockers.filter((x) => x.kpiCode === FB)).toEqual([]);
+  });
+
+  it('Bajaj shape (NO cases targets): a FOCUS BRAND ₹ target without a name is flagged once (on FOCUS BRAND), not twice', () => {
+    const t = new Map(input().targets);
+    t.set('R2', tr({ [FB]: 800 }, {})); // ₹ target, no name, no cases target
+    const res = resolveMonthFocus(input({ defs: [tnDef(FB), fb1Cases()], targets: t }));
+    expect(res.blockers.map((b) => [b.code, b.kpiCode, b.sampleOutletCodes])).toEqual([['FOCUS_MISSING_NAME', FB, ['R2']]]);
+    expect(res.outletFilters.get(FB1C)!.has('R2')).toBe(false);
+  });
+
+  it('a ₹ target without a name at an outlet OUTSIDE the ₹ KPI scope (but in the cases scope) is flagged on the cases KPI', () => {
+    const t = new Map(input().targets);
+    t.set('W1', tr({ [FB]: 100 }, {}));
+    const res = resolveMonthFocus(input({ defs: [tnDef(FB, 'AMOUNT', { outletTypes: ['SSS'] }), fb1Cases({ outletTypes: ['WS'] })], targets: t }));
+    expect(res.blockers.map((b) => [b.code, b.kpiCode, b.sampleOutletCodes])).toEqual([['FOCUS_MISSING_NAME', FB1C, ['W1']]]);
   });
 
   it('an UNMATCHED token is reported once (on the source); accepting it on the source clears both', () => {
@@ -207,6 +222,32 @@ describe('end to end: cases over the ₹ measure\'s products (computeMonthRows +
     const fc = rec.focus.find((f) => f.kpiCode === FB1C)!;
     expect(fc.names.find((n) => n.key === 'ADHO500&CNO')!.achieved).toEqual({ total: 9, outletsZero: 1 }); // R2 no sales
     expect(rec.blockers).toEqual([]);
+  });
+
+  it('Bajaj shape: NO cases target anywhere — every outlet with a FOCUS BRAND name still gets FB1 CASES achieved; BSC CASES (FILTER) for every in-scope outlet', async () => {
+    // Target file = ₹ only (TOTAL / FOCUS BRAND), no FB1 CASES / BSC CASES columns at all.
+    const targets = new Map<string, MonthTargetRow>([
+      ['R1', tr({ TOTAL: 5000, [FB]: 1000 }, { [FB]: 'CNO & ADHO500' })],
+      ['W1', tr({ [FB]: 100 }, { [FB]: 'ADHO50' })],
+      ['R2', tr({ TOTAL: 4000 }, { [FB]: 'CNO' })], // a name but no ₹ FB target either
+      // W2: no target row at all
+    ]);
+    const bscCases: KpiDefLite = { kpiCode: 'BSC CASES', measure: 'QUANTITY', filter: {}, outletTypes: [], programs: [] };
+    const inp = input({ defs: [totalDef, bscCases, tnDef(FB), fb1Cases()], targets });
+    const res = resolveMonthFocus(inp);
+    expect(res.blockers).toEqual([]);
+    const defs = attachOutletFilters(inp.defs, res);
+    const rows = (code: string) => [
+      line(code, 'CNO', '50', 10000n, 2n * CASE),
+      line(code, 'ADHO', '500', 40000n, 4n * CASE),
+      line(code, 'ADHO', '50', 80000n, 7n * CASE),
+    ];
+    const comp = await computeMonthRows(pager([...rows('R1'), ...rows('R2'), ...rows('W1'), ...rows('W2')]), defs, inp.roster as Map<string, RosterOutlet>);
+    const v = Object.fromEntries(comp.rows.map((r) => [r.outletCode, r.values]));
+    expect(v.R1).toEqual({ TOTAL: 1300, 'BSC CASES': 13, [FB]: 500, [FB1C]: 6 });
+    expect(v.R2).toEqual({ TOTAL: 1300, 'BSC CASES': 13, [FB]: 100, [FB1C]: 2 });
+    expect(v.W1).toEqual({ TOTAL: 1300, 'BSC CASES': 13, [FB]: 800, [FB1C]: 7 });
+    expect(v.W2).toEqual({ TOTAL: 1300, 'BSC CASES': 13 }); // no name → focus keys omitted, no target → no blocker
   });
 });
 
