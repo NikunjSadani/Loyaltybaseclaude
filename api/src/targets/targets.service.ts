@@ -24,7 +24,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   SALES_IMPORT_BATCH_STATUS,
   achievementHeaderLabels,
@@ -75,6 +75,15 @@ import { appliesToOutletWhere } from '../common/applies-to/applies-to.prisma';
  */
 export function kpiScopeEnforced(kpis: ReadonlyArray<KpiScopeLike>): boolean {
   return kpis.some((k) => !isUnscoped(kpiAppliesTo(k)));
+}
+
+/** One outlet-month a target upload writes: the uploaded KPI map + the stored KPI codes it must carry over. */
+interface TargetUploadWrite {
+  month: string;
+  outletCode: string;
+  outletName: string;
+  kpiMap: Record<string, unknown>;
+  carry: string[];
 }
 
 /** One scope-option value: settings-list entry or a live-only outlet value (APPLIES-TO §6). */
@@ -566,15 +575,28 @@ export class TargetsService {
   // streamed in pages or prepared on the Downloads page — see the Downloads page design.
 
   // ─── Target upload ──────────────────────────────────────────────────────────
+  //
+  // OWNER DECISION 2026-11-25 (all tenants): the admin screen PREVIEWS first, then applies on "Confirm & apply".
+  //   1. POST /admin/targets/upload?preview=1  → previewTargetUpload: parse + validate + classify, NOTHING written.
+  //      Returns `previewToken` = "<sha256 of the file bytes>.<random nonce>".
+  //   2. POST /admin/targets/upload?confirmToken=<token> with the SAME file → uploadTargets: the bytes must hash to the
+  //      token's hash (else 409 — a different/edited file), the file is re-validated against the CURRENT roster/KPIs
+  //      (the response is the ground truth of what was written), and the batch row is created with the deterministic
+  //      id `tgtup_<nonce>` BEFORE any target is written — a second apply of the same preview (double-click, retry)
+  //      hits the primary key and is refused with 409, so one preview can be applied at most once.
+  // Both paths share prepareTargetUpload — the parsing / validation / past-month lock rules exist ONCE.
+  // A POST without either param applies directly, exactly as before (scripts / e2e harness keep working).
+
+  /** previewToken / confirmToken: "<sha256 hex of the file bytes>.<32-hex nonce>". */
+  private static readonly TOKEN_RE = /^([a-f0-9]{64})\.([a-f0-9]{32})$/;
+  /** How many overwritten outlet-months are read back to find "old → new" examples (cheap, bounded). */
+  private static readonly OVERWRITE_SAMPLE = 50;
+  private static readonly OVERWRITE_EXAMPLES_MAX = 5;
 
   /**
-   * Parse and store targets from an uploaded .xlsx file.
-   *
-   * Blank cell → omitted key (not stored as 0). Numbers are stored verbatim.
-   * Uses upsert on (clientId, outletCode, month) so re-uploads are idempotent.
-   * Tracks totals on a TargetUploadBatch row.
+   * The shared parse + validate step of a target upload (preview AND apply). Reads only; writes nothing.
    */
-  async uploadTargets(user: JwtPayload, file: Express.Multer.File) {
+  private async prepareTargetUpload(user: JwtPayload, file: Express.Multer.File) {
     if (!file) throw new BadRequestException('No file uploaded');
 
     // ── Fetch KPIs ────────────────────────────────────────────────────────────
@@ -651,9 +673,190 @@ export class TargetsService {
     // Batch is labelled by the earliest WRITABLE month (else the earliest present).
     const batchMonth = writableMonths[0] ?? sortedMonths[0] ?? 'unknown';
 
-    const totalRows      = parseResult.summary.total;
-    const acceptedCount  = parseResult.summary.accepted;
-    const rejectedCount  = parseResult.summary.rejected;
+    // One write per (outletCode, writable month) with ≥1 non-blank value — exactly the rows apply upserts.
+    const writes: TargetUploadWrite[] = [];
+    for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
+      if (isMonthLocked(month, currentMonth)) continue; // past month — not editable
+      for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
+        if (Object.keys(kpiMap).length === 0) continue; // safety: skip fully-blank
+        writes.push({
+          month,
+          outletCode,
+          outletName: outletMeta.get(outletCode)?.name ?? outletCode,
+          kpiMap: kpiMap as Record<string, unknown>,
+          // Owner decision (audit #3): a re-upload NEVER deletes stored values of KPIs that are out of scope
+          // for this outlet (their cells were ignored by the parser). Only a scope-enforced tenant has any.
+          carry: parseScope ? parseScope.outOfScopeCodes(outletCode) : [],
+        });
+      }
+    }
+
+    return {
+      scopeEnforced,
+      parseResult,
+      sortedMonths,
+      lockedMonths,
+      writableMonths,
+      batchMonth,
+      writes,
+      kpiLabels: new Map(kpiRows.map((k) => [k.code, k.label])),
+    };
+  }
+
+  /** The response fields shared by preview and apply (same shape the screen already renders). */
+  private static uploadSummary(p: Awaited<ReturnType<TargetsService['prepareTargetUpload']>>) {
+    return {
+      month:         p.batchMonth,
+      monthsInBatch: p.sortedMonths,
+      writableMonths: p.writableMonths,
+      // Past months present in the file that are skipped (locked, not editable).
+      skippedLockedMonths: p.lockedMonths,
+      totalRows:     p.parseResult.summary.total,
+      acceptedCount: p.parseResult.summary.accepted,
+      rejectedCount: p.parseResult.summary.rejected,
+      // APPLIES-TO D1: numeric values dropped as out of the KPI's scope — present ONLY for a tenant
+      // with a scoped KPI (an all-unscoped tenant's response stays byte-identical).
+      ...(p.scopeEnforced ? { ignoredOutOfScope: p.parseResult.summary.ignoredOutOfScope } : {}),
+    };
+  }
+
+  /**
+   * NEW vs OVERWRITTEN split of the upload's writes, against the targets stored NOW. One key-only read per month
+   * (outlet codes only, no values). `overwritten` keeps the first OVERWRITE_SAMPLE keys for the example read.
+   */
+  private async classifyTargetWrites(clientId: string, writes: readonly TargetUploadWrite[]) {
+    const byMonth = new Map<string, TargetUploadWrite[]>();
+    for (const w of writes) {
+      const list = byMonth.get(w.month) ?? [];
+      list.push(w);
+      byMonth.set(w.month, list);
+    }
+    const perMonth: Array<{ month: string; newCount: number; overwriteCount: number }> = [];
+    const sample: TargetUploadWrite[] = [];
+    let newCount = 0;
+    let overwriteCount = 0;
+    for (const month of [...byMonth.keys()].sort()) {
+      const stored = await this.prisma.outletTarget.findMany({
+        where: { clientId, month },
+        select: { outletCode: true },
+      });
+      const existing = new Set((stored ?? []).map((r) => r.outletCode));
+      let n = 0;
+      let o = 0;
+      for (const w of byMonth.get(month)!) {
+        if (existing.has(w.outletCode)) {
+          o++;
+          if (sample.length < TargetsService.OVERWRITE_SAMPLE) sample.push(w);
+        } else n++;
+      }
+      perMonth.push({ month, newCount: n, overwriteCount: o });
+      newCount += n;
+      overwriteCount += o;
+    }
+    return { newCount, overwriteCount, perMonth, sample };
+  }
+
+  /**
+   * Up to OVERWRITE_EXAMPLES_MAX "old → new" examples among the sampled overwritten outlet-months. The new value is
+   * what apply would store: the uploaded map, plus the carried-over (out-of-scope) stored codes. A KPI stored today
+   * but absent from the file shows as "→ removed" (the upload replaces the outlet-month's values).
+   */
+  private async overwriteExamples(
+    clientId: string,
+    sample: readonly TargetUploadWrite[],
+    kpiLabels: ReadonlyMap<string, string>,
+  ) {
+    const byMonth = new Map<string, TargetUploadWrite[]>();
+    for (const w of sample) byMonth.set(w.month, [...(byMonth.get(w.month) ?? []), w]);
+    const examples: Array<{
+      outletCode: string;
+      outletName: string;
+      month: string;
+      changes: Array<{ kpiCode: string; label: string; from: unknown; to: unknown }>;
+    }> = [];
+    for (const month of [...byMonth.keys()].sort()) {
+      const ws = byMonth.get(month)!;
+      const rows = await this.prisma.outletTarget.findMany({
+        where: { clientId, month, outletCode: { in: ws.map((w) => w.outletCode) } },
+        select: { outletCode: true, targetValues: true },
+      });
+      const storedBy = new Map((rows ?? []).map((r) => [r.outletCode, (r.targetValues ?? {}) as Record<string, unknown>]));
+      for (const w of ws) {
+        if (examples.length >= TargetsService.OVERWRITE_EXAMPLES_MAX) return examples;
+        const old = storedBy.get(w.outletCode);
+        if (!old) continue;
+        const next: Record<string, unknown> = { ...w.kpiMap };
+        for (const c of w.carry) if (c in old) next[c] = old[c];
+        const codes = [...new Set([...kpiCodeKeys(old), ...kpiCodeKeys(next)])];
+        const changes = codes
+          .filter((c) => old[c] !== next[c])
+          .map((c) => ({ kpiCode: c, label: kpiLabels.get(c) ?? c, from: old[c] ?? null, to: next[c] ?? null }));
+        if (changes.length > 0) examples.push({ outletCode: w.outletCode, outletName: w.outletName, month, changes });
+      }
+    }
+    return examples;
+  }
+
+  /**
+   * PREVIEW a target upload: the same parse + validation as apply, plus how many outlet-months would be NEWLY created
+   * vs OVERWRITTEN (per month) and a few old → new examples. Writes NOTHING (no batch row, no targets, no
+   * notifications). The returned `previewToken` is what "Confirm & apply" sends back with the same file.
+   */
+  async previewTargetUpload(user: JwtPayload, file: Express.Multer.File) {
+    const p = await this.prepareTargetUpload(user, file);
+    const cls = await this.classifyTargetWrites(user.clientId, p.writes);
+    const overwriteExamples = await this.overwriteExamples(user.clientId, cls.sample, p.kpiLabels);
+    const focusCheck = await targetUploadFocusCheck(
+      this.prisma,
+      user.clientId,
+      p.parseResult.acceptedTargets as Record<string, Record<string, unknown>>,
+      p.writableMonths,
+    );
+    return {
+      preview: true as const,
+      previewToken: `${createHash('sha256').update(file.buffer).digest('hex')}.${randomBytes(16).toString('hex')}`,
+      ...TargetsService.uploadSummary(p),
+      // What apply WOULD write if confirmed now (one upsert per outlet × writable month with ≥1 value).
+      willSaveCount:  p.writes.length,
+      newCount:       cls.newCount,
+      overwriteCount: cls.overwriteCount,
+      perMonth:       cls.perMonth,
+      overwriteExamples,
+      // How many overwritten outlet-months were compared to find the examples (the examples are a sample).
+      overwriteExamplesSampled: cls.sample.length,
+      ...targetUploadRowsEcho(p.parseResult.rows),
+      focusCheck,
+    };
+  }
+
+  /**
+   * Parse and store targets from an uploaded .xlsx file.
+   *
+   * Blank cell → omitted key (not stored as 0). Numbers are stored verbatim.
+   * Uses upsert on (clientId, outletCode, month) so re-uploads are idempotent.
+   * Tracks totals on a TargetUploadBatch row.
+   *
+   * `opts.confirmToken` (from previewTargetUpload): the file must be the previewed one, and a token applies ONCE.
+   */
+  async uploadTargets(user: JwtPayload, file: Express.Multer.File, opts?: { confirmToken?: string }) {
+    if (!file) throw new BadRequestException('No file uploaded');
+
+    let batchId: string | undefined;
+    if (opts?.confirmToken !== undefined) {
+      const m = TargetsService.TOKEN_RE.exec(opts.confirmToken);
+      if (!m) throw new BadRequestException('Invalid confirmation token. Pick the file again to preview it.');
+      if (createHash('sha256').update(file.buffer).digest('hex') !== m[1]) {
+        throw new ConflictException(
+          'This file is not the one you previewed (it was changed or replaced). Nothing was saved. Pick the file again to preview it.',
+        );
+      }
+      batchId = `tgtup_${m[2]}`;
+    }
+
+    const p = await this.prepareTargetUpload(user, file);
+    // Classified against the stored targets just before the write (the final, real split — the preview may differ
+    // if targets were changed in between).
+    const cls = await this.classifyTargetWrites(user.clientId, p.writes);
 
     // ── Persist ────────────────────────────────────────────────────────────────
     // The outlet roster is now EVERY non-deleted outlet (not just active), so an
@@ -664,88 +867,91 @@ export class TargetsService {
     // transactions ($transaction([...])) so each round-trip stays well under the
     // timeout and the write scales to thousands of outlets. Re-upload stays
     // idempotent (upsert semantics preserved).
-    const batch = await this.prisma.targetUploadBatch.create({
-      data: {
-        clientId:     user.clientId,
-        uploadedById: user.sub,
-        month:        batchMonth,
-        totalRows,
-        acceptedCount,
-        rejectedCount,
-        status: 'COMPLETED',
-      },
-    });
+    let batch: { id: string };
+    try {
+      batch = await this.prisma.targetUploadBatch.create({
+        data: {
+          ...(batchId ? { id: batchId } : {}),
+          clientId:     user.clientId,
+          uploadedById: user.sub,
+          month:        p.batchMonth,
+          totalRows:    p.parseResult.summary.total,
+          acceptedCount: p.parseResult.summary.accepted,
+          rejectedCount: p.parseResult.summary.rejected,
+          status: 'COMPLETED',
+        },
+      });
+    } catch (e) {
+      // Double-apply guard: the deterministic batch id of a preview token already exists → this preview was applied.
+      if (batchId && e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
+        throw new ConflictException(
+          'These targets were already applied from this preview — nothing was saved twice. Use Download Final Targets to check them.',
+        );
+      }
+      throw e;
+    }
 
     // Build one OutletTarget upsert per (outletCode, month) with non-blank values. Each op is a THUNK built when its
     // chunk runs, so every row's updatedAt is stamped at its chunk's write time (not when the list was built): Sales
     // Import's "targets changed since the last apply" reads MAX(updatedAt) of the month's rows (FOCUS-FROM-TARGETS).
     const targetOps: Array<() => Prisma.PrismaPromise<unknown>> = [];
-    for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
-      if (isMonthLocked(month, currentMonth)) continue; // past month — not editable
-      for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
-        if (Object.keys(kpiMap).length === 0) continue; // safety: skip fully-blank
-
-        const meta = outletMeta.get(outletCode);
-
-        // Owner decision (audit #3): a re-upload NEVER deletes stored values of KPIs that are out of scope
-        // for this outlet (their cells were ignored by the parser). Carry them over inside the statement.
-        // Only a scope-enforced tenant can have such codes → unscoped tenants (Deoleo) keep the plain upsert.
-        const carry = parseScope ? parseScope.outOfScopeCodes(outletCode) : [];
-        if (carry.length > 0) {
-          const col = Prisma.sql`"outlet_targets"."targetValues"`;
-          targetOps.push(() =>
-            this.prisma.$executeRaw(Prisma.sql`
-              INSERT INTO "outlet_targets"
-                ("id","clientId","outletCode","outletName","month","targetValues","batchId","createdAt","updatedAt")
-              VALUES (${randomUUID()}, ${user.clientId}, ${outletCode}, ${meta?.name ?? outletCode}, ${month},
-                      ${JSON.stringify(kpiMap)}::jsonb, ${batch.id}, ${SQL_NOW_UTC}, ${SQL_NOW_UTC})
-              ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET
-                "targetValues" = ${TargetsService.carryOverSql(col, Prisma.sql`EXCLUDED."targetValues"`, carry, true)},
-                "outletName"   = EXCLUDED."outletName",
-                "batchId"      = EXCLUDED."batchId",
-                "updatedAt"    = ${SQL_NOW_UTC}`),
-          );
-          continue;
-        }
-
+    for (const { month, outletCode, outletName, kpiMap, carry } of p.writes) {
+      // Carry over the out-of-scope stored codes inside the statement (scope-enforced tenants only).
+      if (carry.length > 0) {
+        const col = Prisma.sql`"outlet_targets"."targetValues"`;
         targetOps.push(() =>
-          this.prisma.outletTarget.upsert({
-            where: {
-              clientId_outletCode_month: { clientId: user.clientId, outletCode, month },
-            },
-            create: {
-              clientId:     user.clientId,
-              outletCode,
-              outletName:   meta?.name ?? outletCode,
-              month,
-              targetValues: kpiMap as unknown as Prisma.InputJsonValue,
-              batchId:      batch.id,
-            },
-            update: {
-              targetValues: kpiMap as unknown as Prisma.InputJsonValue,
-              outletName:   meta?.name ?? outletCode,
-              batchId:      batch.id,
-              updatedAt:    new Date(),
-            },
-          }),
+          this.prisma.$executeRaw(Prisma.sql`
+            INSERT INTO "outlet_targets"
+              ("id","clientId","outletCode","outletName","month","targetValues","batchId","createdAt","updatedAt")
+            VALUES (${randomUUID()}, ${user.clientId}, ${outletCode}, ${outletName}, ${month},
+                    ${JSON.stringify(kpiMap)}::jsonb, ${batch.id}, ${SQL_NOW_UTC}, ${SQL_NOW_UTC})
+            ON CONFLICT ("clientId","outletCode","month") DO UPDATE SET
+              "targetValues" = ${TargetsService.carryOverSql(col, Prisma.sql`EXCLUDED."targetValues"`, carry, true)},
+              "outletName"   = EXCLUDED."outletName",
+              "batchId"      = EXCLUDED."batchId",
+              "updatedAt"    = ${SQL_NOW_UTC}`),
         );
+        continue;
       }
+
+      targetOps.push(() =>
+        this.prisma.outletTarget.upsert({
+          where: {
+            clientId_outletCode_month: { clientId: user.clientId, outletCode, month },
+          },
+          create: {
+            clientId:     user.clientId,
+            outletCode,
+            outletName,
+            month,
+            targetValues: kpiMap as unknown as Prisma.InputJsonValue,
+            batchId:      batch.id,
+          },
+          update: {
+            targetValues: kpiMap as unknown as Prisma.InputJsonValue,
+            outletName,
+            batchId:      batch.id,
+            updatedAt:    new Date(),
+          },
+        }),
+      );
     }
 
-    for (let i = 0; i < targetOps.length; i += TargetsService.UPLOAD_CHUNK) {
-      await this.prisma.$transaction(targetOps.slice(i, i + TargetsService.UPLOAD_CHUNK).map((op) => op()));
+    try {
+      for (let i = 0; i < targetOps.length; i += TargetsService.UPLOAD_CHUNK) {
+        await this.prisma.$transaction(targetOps.slice(i, i + TargetsService.UPLOAD_CHUNK).map((op) => op()));
+      }
+    } catch (e) {
+      // Earlier chunks may already be saved — never leave the batch claiming COMPLETED (best-effort; rethrow the cause).
+      await this.prisma.targetUploadBatch
+        .update({ where: { id: batch.id }, data: { status: 'FAILED' } })
+        .catch(() => undefined);
+      throw e;
     }
 
     // Notify the assigned rep (XSR) + their manager (SO) for every outlet that got a
     // target this upload. Fire-and-forget + tenant-scoped; never blocks the upload.
-    const notifiedCodes = new Set<string>();
-    for (const [month, outletMap] of Object.entries(parseResult.acceptedTargets)) {
-      if (isMonthLocked(month, currentMonth)) continue;
-      for (const [outletCode, kpiMap] of Object.entries(outletMap)) {
-        if (Object.keys(kpiMap).length === 0) continue;
-        notifiedCodes.add(outletCode);
-      }
-    }
+    const notifiedCodes = new Set(p.writes.map((w) => w.outletCode));
     await this.salesNotifications.targetsUploaded(user.clientId, [...notifiedCodes]);
 
     // FOCUS-FROM-TARGETS §7: early, NON-blocking check of the focus product names this upload wrote (never throws;
@@ -753,31 +959,25 @@ export class TargetsService {
     const focusCheck = await targetUploadFocusCheck(
       this.prisma,
       user.clientId,
-      parseResult.acceptedTargets as Record<string, Record<string, unknown>>,
-      writableMonths,
+      p.parseResult.acceptedTargets as Record<string, Record<string, unknown>>,
+      p.writableMonths,
     );
 
     return {
       batchId:       batch.id,
-      month:         batchMonth,
-      monthsInBatch: sortedMonths,
-      writableMonths,
-      // Past months present in the file that were skipped (locked, not editable).
-      skippedLockedMonths: lockedMonths,
-      totalRows,
-      acceptedCount,
-      rejectedCount,
-      // APPLIES-TO D1: numeric values dropped as out of the KPI's scope — present ONLY for a tenant
-      // with a scoped KPI (an all-unscoped tenant's response stays byte-identical).
-      ...(scopeEnforced ? { ignoredOutOfScope: parseResult.summary.ignoredOutOfScope } : {}),
+      ...TargetsService.uploadSummary(p),
       // The GROUND TRUTH of what was actually persisted this upload: one OutletTarget
       // upsert per (outlet, writable-month) with ≥1 non-blank KPI. This is the number
       // the confirmation message reports — `acceptedCount` can be higher because it
       // counts parse-valid rows for LOCKED past months too, which are not written.
       savedCount:    targetOps.length,
+      // Of savedCount: outlet-months created vs existing ones replaced (split read just before the write).
+      newCount:       cls.newCount,
+      overwriteCount: cls.overwriteCount,
+      perMonth:       cls.perMonth,
       // Memory-safety (2026-11-13): only the rejected rows + the ignored-value warning rows come back
       // (each capped at 500, slimmed to row/outlet/status/remarks) — not every parsed row with its values.
-      ...targetUploadRowsEcho(parseResult.rows),
+      ...targetUploadRowsEcho(p.parseResult.rows),
       focusCheck,
     };
   }

@@ -131,6 +131,17 @@ export class UploadTargetsQueryDto {
   @IsString()
   @IsOptional()
   verbose?: string;
+
+  /** '1' / 'true' → validate + preview only; NOTHING is written (the admin screen's first step). */
+  @IsOptional()
+  @IsIn(['1', 'true', '0', 'false'])
+  preview?: string;
+
+  /** The previewToken of the preview being confirmed — the same file must be posted again. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-f0-9]{64}\.[a-f0-9]{32}$/, { message: 'confirmToken is not a valid preview token' })
+  confirmToken?: string;
 }
 
 // ─── List target batches ──────────────────────────────────────────────────────

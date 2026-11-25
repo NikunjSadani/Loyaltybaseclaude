@@ -62,6 +62,7 @@ import {
   PaceQueryDto,
   AchievementTemplateQueryDto,
   KpiScopeCountQueryDto,
+  UploadTargetsQueryDto,
 } from './dto/targets.dto';
 import { HeavyOp } from '../common/heavy-op-limiter';
 
@@ -195,6 +196,11 @@ export class TargetsController {
    * POST /v1/admin/targets/upload  (multipart/form-data, field: "file")
    * Parses the xlsx, validates against KpiDefs + outlet roster, and writes
    * OutletTarget rows inside a TargetUploadBatch. Blank cell = omitted key.
+   *
+   * Preview → confirm (owner decision 2026-11-25, the admin screen):
+   *   ?preview=1            → same validation, NOTHING written; returns counts (new vs overwritten) + previewToken.
+   *   ?confirmToken=<token> → applies the SAME file (409 if the bytes differ, 409 if this preview was already applied).
+   *   neither               → applies directly (unchanged behaviour for scripts / the e2e harness).
    */
   @Post('upload')
   @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
@@ -211,8 +217,10 @@ export class TargetsController {
   uploadTargets(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
+    @Query() q: UploadTargetsQueryDto,
   ) {
-    return this.targets.uploadTargets(user, file);
+    if (q?.preview === '1' || q?.preview === 'true') return this.targets.previewTargetUpload(user, file);
+    return this.targets.uploadTargets(user, file, q?.confirmToken !== undefined ? { confirmToken: q.confirmToken } : undefined);
   }
 
   /** GET /v1/admin/targets/batches — list upload batches (optionally filter by month). */
