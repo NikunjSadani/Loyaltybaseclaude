@@ -154,6 +154,26 @@ describe('SalesMonthsService (K-4)', () => {
     await expect(s.reopen({ ...gifsyAssumed, assumed: false }, OLD)).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('reopen: staff with targets:upload passes BOTH guards (real route metadata) yet the service refuses → 403, nothing written', async () => {
+    const { Reflector } = await import('@nestjs/core');
+    const { PermissionGuard } = await import('../../common/guards/permission.guard');
+    const reflector = new Reflector();
+    const staff: JwtPayload = { ...gifsyAssumed, sub: 'st', role: 'GIFSY_STAFF', gifsyRoleId: 'pm' };
+    const ctx = {
+      switchToHttp: () => ({ getRequest: () => ({ user: staff }) }),
+      getHandler: () => SalesMonthsController.prototype.reopen,
+      getClass: () => SalesMonthsController,
+    } as unknown as ExecutionContext;
+    // The guards do NOT keep this staff member out — which is why the service role check is the real gate.
+    expect(new RolesGuard(reflector).canActivate(ctx)).toBe(true);
+    const gifsyRoles = { getPermissions: jest.fn().mockResolvedValue(new Set(['targets:read', 'targets:upload'])) };
+    expect(await new PermissionGuard(reflector, {} as never, gifsyRoles as never).canActivate(ctx)).toBe(true);
+    const d = db([{ month: OLD, state: 'CLOSED', closedAt: AT }]);
+    await expect(new SalesMonthsService(d as never).reopen(staff, OLD)).rejects.toThrow(ForbiddenException);
+    expect(d.$transaction).not.toHaveBeenCalled();
+    expect(d.auditLog.create).not.toHaveBeenCalled();
+  });
+
   it('reopen: an assumed GIFSY_STAFF (whose RolesGuard check DEFERS to targets:upload) is still refused → 403', async () => {
     await expect(new SalesMonthsService(db() as never).reopen({ ...gifsyAssumed, role: 'GIFSY_STAFF' }, OLD)).rejects.toBeInstanceOf(ForbiddenException);
   });

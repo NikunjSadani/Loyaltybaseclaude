@@ -3,11 +3,12 @@
 /**
  * /admin/sales-import/months — month close / reopen (SALES-IMPORT-PIPELINE-PLAN §7.3, §11 F-5).
  *
- * Close = targets:upload (CLIENT_ADMIN or assumed GIFSY_ADMIN). Reopen = GIFSY_ADMIN only (the button is shown only
- * to GIFSY_ADMIN; the backend enforces the role + assumed tenant). The current month can never be closed.
+ * Close = targets:upload (CLIENT_ADMIN, assumed GIFSY_ADMIN, or assumed GIFSY_STAFF holding targets:upload). Reopen =
+ * GIFSY_ADMIN only (the button is shown only to GIFSY_ADMIN; the backend enforces the role + assumed tenant — staff
+ * get 403 even with targets:upload). The current month can never be closed.
  * "Recalculate from stored history" (targets:upload): an OPEN month with stored history (hasHistory) can be rewritten
  * from the final figures saved at its last apply, with today's KPI definitions — preview → confirm → apply. A CLOSED
- * month shows the action disabled ("Gifsy must reopen this month first").
+ * month shows the action disabled ("A Gifsy admin must reopen this month first").
  * "Rebuild product list" (targets:upload, §10c): a month with stored history whose product list (the KPI picker's
  * "Stored month(s)" source) is not current (productListCurrent false) — OPEN or CLOSED; it changes no figures.
  * `?from=YYYY-MM[&to=YYYY-MM]` (link from the KPI picker) lists that range so every month it names is shown (read after
@@ -120,7 +121,7 @@ export default function SalesMonthsPage() {
     const neverImported = row.lastAppliedAt
       ? ''
       : `\n\nNo sales file has ever been applied to ${label}. Close it anyway?`;
-    if (!window.confirm(`Closing locks ${label}. Sales files can no longer change it, and points can then be computed. Only Gifsy can reopen it.${neverImported}`)) return;
+    if (!window.confirm(`Closing locks ${label}. Sales files can no longer change it, and points can then be computed. Only a Gifsy admin can reopen it.${neverImported}`)) return;
     setBusyMonth(row.month);
     setActionMsg(null);
     const r = await salesImportApi.closeMonth(row.month);
@@ -353,7 +354,7 @@ export default function SalesMonthsPage() {
                               aria-label={`Recalculate ${label} from stored history`}>
                               <Calculator className="w-3.5 h-3.5" /> Recalculate
                             </Button>
-                            <span id={`recalc-closed-${row.month}`} className="text-[11px] text-gray-500">Gifsy must reopen this month first</span>
+                            <span id={`recalc-closed-${row.month}`} className="text-[11px] text-gray-500">A Gifsy admin must reopen this month first</span>
                           </span>
                         )
                       )}
@@ -379,7 +380,7 @@ export default function SalesMonthsPage() {
         </div>
       )}
       {!isGifsyAdmin && (
-        <p className="text-xs text-gray-500">Need to change a closed month? Ask Gifsy to reopen it.</p>
+        <p className="text-xs text-gray-500">Need to change a closed month? Ask a Gifsy admin to reopen it.</p>
       )}
     </div>
   );

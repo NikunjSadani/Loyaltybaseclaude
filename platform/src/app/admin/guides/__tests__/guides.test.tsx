@@ -119,7 +119,7 @@ describe('Sales Import guide quotes the real screen labels', () => {
     'Column settings changed',
     'Accept — not sold yet',
     'Targets changed — recalculate',
-    'Gifsy must reopen this month first',
+    'A Gifsy admin must reopen this month first',
     'Rebuild product list',
     'Repeat file',
     'Daily figures not stored for <Month>',

@@ -102,6 +102,16 @@ export interface TenantFeaturesState {
   /** True when the features could NOT be read (non-2xx / network) — `features` are then the conservative defaults. */
   error?: boolean;
   /**
+   * WHY the read failed (unset while loading / on success):
+   *   'forbidden'   — HTTP 403: this role may not read the flags (e.g. MIS_USER on the admin read). A definite answer;
+   *                   the defaults are expected, so callers stay quiet.
+   *   'unavailable' — network error, 5xx, any other non-2xx, or an unreadable body: the flags are UNKNOWN and the
+   *                   defaults are a guess — callers must say so visibly (owner rule: no silent fallback) and offer retry().
+   */
+  failure?: 'forbidden' | 'unavailable';
+  /** Read the flags again (e.g. a "Retry" next to the 'unavailable' notice). */
+  retry?: () => void;
+  /**
    * Phone clock minus the server clock (ms), from the response's `Date` header (null when absent). Used ONLY by the
    * location gate to notice a phone whose date/time is wrong (LOCATION-GATE.md). Same single request as before.
    */
@@ -149,10 +159,13 @@ export function useTenantFeatures(endpoint: string, opts: { clock?: boolean } = 
     features: DEFAULT_FEATURES,
     loading: true,
   });
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((a) => a + 1), []);
 
   useEffect(() => {
     let cancelled = false;
     let serverSkewMs: number | null = null;
+    let status: number | null = null; // HTTP status of a direct fetch (null for the cached /sales/me read)
     // /api/sales/me without the clock read is session-cached (lib/cached-reads.ts; shared with the sales layout).
     // The location-gate pages (`clock`) still make their own request: they need THIS response's Date header.
     const load: Promise<{ data?: { features?: unknown } } | null> =
@@ -160,20 +173,23 @@ export function useTenantFeatures(endpoint: string, opts: { clock?: boolean } = 
         ? (getSalesMe<{ features?: unknown }>() as Promise<{ data?: { features?: unknown } } | null>)
         : fetch(endpoint, { headers: { ...authHeader() } }).then((r) => {
             serverSkewMs = clock ? serverSkewFromResponse(r) : null;
+            status = r.status;
             return r.ok ? r.json() : null;
           });
     load
       .then((res) => {
         if (cancelled) return;
-        setState({ features: normalizeFeatures(res?.data?.features), loading: false, error: !res, serverSkewMs });
+        const failure: TenantFeaturesState['failure'] = res ? undefined : status === 403 ? 'forbidden' : 'unavailable';
+        setState({ features: normalizeFeatures(res?.data?.features), loading: false, error: !res, failure, serverSkewMs });
       })
       .catch(() => {
-        if (!cancelled) setState((prev) => ({ ...prev, loading: false, error: true }));
+        // Network error / unreadable body — the flags are unknown (never a quiet default).
+        if (!cancelled) setState((prev) => ({ ...prev, loading: false, error: true, failure: 'unavailable' }));
       });
     return () => {
       cancelled = true;
     };
-  }, [endpoint, clock]);
+  }, [endpoint, clock, attempt]);
 
   /**
    * Confirmation read of the server clock (`cache: 'no-store'`); updates `serverSkewMs`. A failed / header-less
@@ -192,5 +208,5 @@ export function useTenantFeatures(endpoint: string, opts: { clock?: boolean } = 
     return skew;
   }, [endpoint]);
 
-  return { ...state, refetchClock };
+  return { ...state, refetchClock, retry };
 }

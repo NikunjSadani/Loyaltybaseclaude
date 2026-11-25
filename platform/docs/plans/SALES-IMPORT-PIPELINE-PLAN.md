@@ -1330,8 +1330,10 @@ export async function uploadInParts(file: File, opts: { onProgress(p: number): v
 `postPart` uses `fetch` with `FormData` + `authHeader()` (`api-client.ts:24`), like `admin/targets/upload/page.tsx:226`.
 Tests: slicing math (exact last part), retry then success, abort stops, `complete` error is surfaced.
 
-**F-2 Shell:** `app/admin/sales-import/layout.tsx` (`RequireAuth allowedRoles={['GIFSY_ADMIN','CLIENT_ADMIN']}` + feature gate on
-`salesImport`); nav item in `app/admin/layout.tsx` near `:189`:
+**F-2 Shell:** `app/admin/sales-import/layout.tsx` (`RequireAuth allowedRoles={['GIFSY_ADMIN','GIFSY_STAFF','CLIENT_ADMIN']}` +
+feature gate on `salesImport`; GIFSY_STAFF added 2026-11-25 by the owner — an assumed staff with a grant for the tenant,
+`targets:read` to open the pages and `targets:upload` to act; month reopen stays GIFSY_ADMIN-only). The nav + gate read
+the flag from `GET /admin/settings/features` (flags only — staff need no `tenancy:read`); nav item in `app/admin/layout.tsx` near `:189`:
 `{ href: '/admin/sales-import', label: 'Sales Import', icon: FileSpreadsheet, featureFlag: 'salesImport' as const }`.
 Test: hidden when the flag is off (copy `__tests__/offers-nav.test.tsx`).
 

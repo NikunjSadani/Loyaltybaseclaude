@@ -238,7 +238,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   // Feature gating is DB-sourced via the authenticated tenant-config endpoint
   // (§A-DOMAIN "P5"), NOT the in-code registry. Branding still comes from clientConfig.
   // /admin/settings/features (flags only) — readable by an assumed GIFSY_STAFF without tenancy:read.
-  const { features } = useTenantFeatures(ADMIN_FEATURES_URL);
+  const { features, failure: featuresFailure, retry: retryFeatures } = useTenantFeatures(ADMIN_FEATURES_URL);
   const adminSession = useAdminSession();
   // Master Visibility switch (per-tenant, default OFF). Lives in GifsySettings, NOT ClientConfig
   // features — so it is gated here directly rather than via the featureFlag map below.
@@ -549,6 +549,24 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto p-6 print:overflow-visible print:p-0">
+          {/* No silent fallback (owner rule): when the flags read FAILS (network / 5xx) the nav is built from
+              defaults, so say so. A 403 (a role that may not read the flags, e.g. MIS_USER) stays quiet. */}
+          {featuresFailure === 'unavailable' && (
+            <div
+              role="alert"
+              data-testid="admin-features-error"
+              className="mb-4 flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900 print:hidden"
+            >
+              <span>Couldn&apos;t load this client&apos;s settings — some menu items may be missing.</span>
+              <button
+                type="button"
+                onClick={retryFeatures}
+                className="ml-auto rounded-md border border-amber-300 bg-white px-2.5 py-1 text-xs font-medium hover:bg-amber-100"
+              >
+                Retry
+              </button>
+            </div>
+          )}
           <RequireAuth allowedRoles={PORTAL_ROLES.admin}>
             {/* RBAC Option-X P6: a GIFSY_STAFF landing on a route their role lacks sees a
                 clear AccessDenied message instead of a raw 403. INERT for every other role. */}

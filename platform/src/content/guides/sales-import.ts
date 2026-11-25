@@ -208,7 +208,7 @@ Recalculate uses the figures **saved at the month's last apply** — nothing is 
 | "No usable invoice lines were found in this file." | The file has no rows the portal can use. Check it is the invoice-line export, not a summary. |
 | "No KPIs are set up for Sales Import yet…" / "No importer-owned KPIs are defined yet. Add them in Sales Import settings." | Add the KPIs under **Settings → KPIs from the sales file** first. |
 | "<Month> has not started yet." | The file contains future dates. Check the invoice dates and the **Date order** setting. |
-| "<Month> is CLOSED. Only Gifsy can reopen it." | Ask Gifsy to reopen the month if it must change. |
+| "<Month> is CLOSED. Only Gifsy can reopen it." | Ask a Gifsy admin to reopen the month if it must change. |
 | "The column mapping was changed after this file was processed, so no month can be applied from it." | Press **Reprocess** (or **Read again as a new import** if months were already applied from this file). |
 | "<Month> can't be applied until … fixed" / "N problems with the focus products in the <Month> target file — see Focus brands." | Open the month and fix each item under **Focus brands** (see Step 3). |
 | "Confirm the partial-month replacement for <Month>." | Tick the partial-month box under the month — or don't apply that month. |
@@ -247,7 +247,7 @@ The monthly figures **were** applied. Only the day-by-day figures (used by "vs l
 
 | Message | What to do |
 |---|---|
-| **Recalculate** greyed out with "Gifsy must reopen this month first" | The month is closed. Ask Gifsy to reopen it. |
+| **Recalculate** greyed out with "A Gifsy admin must reopen this month first" | The month is closed. Ask a Gifsy admin to reopen it. |
 | "<Month> has no stored history yet — it is saved each time a sales file is applied to the month." | Apply a sales file to the month first. |
 | "<Month> is older than the stored sales lines…" | Apply a sales file to that month again to change it. |
 | "<Month> cannot be recalculated: <reason>" | Follow the reason (often a focus-product problem — fix it under **Focus brands**). |

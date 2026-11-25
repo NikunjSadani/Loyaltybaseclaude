@@ -260,12 +260,13 @@ describe('H — admin/settings page (visibility capture mode)', () => {
     expect(code).toMatch(/Revert optimistic/);
   });
 
-  it('H8: lib falls back to PHOTO_APPROVAL when API response lacks the field', () => {
+  it('H8: lib → PHOTO_APPROVAL only when the field is absent; a FAILED read is UNKNOWN (no silent fallback)', () => {
     const code = src('lib/visibility-capture-mode.ts');
-    // Default fallback expressed in code
-    expect(code).toMatch(/'PHOTO_APPROVAL'/);
-    // catch block returns default
-    expect(code).toMatch(/catch[\s\S]*PHOTO_APPROVAL/);
+    // Absent field = the backend default
+    expect(code).toMatch(/mode === undefined \|\| mode === null\) return 'PHOTO_APPROVAL'/);
+    // catch block returns UNKNOWN, never PHOTO_APPROVAL (behaviour: lib/__tests__/visibility-capture-mode.test.ts)
+    expect(code).toMatch(/catch \{\s*return 'UNKNOWN'/);
+    expect(code).not.toMatch(/catch \{\s*return 'PHOTO_APPROVAL'/);
   });
 });
 

@@ -66,7 +66,7 @@ describe('months page', () => {
     const btn = await screen.findByRole('button', { name: 'Close October 2026' });
     expect(screen.queryByRole('button', { name: 'Close November 2026' })).not.toBeInTheDocument();
     await act(async () => { fireEvent.click(btn); });
-    expect((window.confirm as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatch(/Only Gifsy can reopen it/);
+    expect((window.confirm as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).toMatch(/Only a Gifsy admin can reopen it/);
     expect(apiMock.closeMonth).toHaveBeenCalledWith('2026-10');
     expect(await screen.findByRole('status')).toHaveTextContent('October 2026 is closed');
   });
@@ -86,7 +86,7 @@ describe('months page', () => {
     render(<MonthsPage />);
     await screen.findByText('September 2026');
     expect(screen.queryByRole('button', { name: /Reopen/ })).not.toBeInTheDocument();
-    expect(await screen.findByText(/Ask Gifsy to reopen it/)).toBeInTheDocument();
+    expect(await screen.findByText(/Ask a Gifsy admin to reopen it/)).toBeInTheDocument();
   });
 
   it('GIFSY_ADMIN can reopen a closed month', async () => {
@@ -219,7 +219,7 @@ describe('months page — recalculate from stored history', () => {
     render(<MonthsPage />);
     const btn = await screen.findByRole('button', { name: 'Recalculate October 2026 from stored history' });
     expect(btn).toBeDisabled();
-    expect(await screen.findByText('Gifsy must reopen this month first')).toBeInTheDocument();
+    expect(await screen.findByText('A Gifsy admin must reopen this month first')).toBeInTheDocument();
   });
 
   it('no action for a month without history, or without targets:upload', async () => {
@@ -317,6 +317,31 @@ describe('SalesImportFeatureGate', () => {
     stubConfig(json({}, 500));
     render(<SalesImportFeatureGate><p>inner</p></SalesImportFeatureGate>);
     expect(await screen.findByTestId('sales-import-gate-error')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('a network error offers Retry too', async () => {
+    stubConfig(new Error('offline'));
+    render(<SalesImportFeatureGate><p>inner</p></SalesImportFeatureGate>);
+    expect(await screen.findByTestId('sales-import-gate-error')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it("403 (e.g. staff without a grant) → the server's own reason, NO Retry, children hidden", async () => {
+    stubConfig(json({ success: false, error: 'You do not have access to this client.' }, 403));
+    render(<SalesImportFeatureGate><p>inner</p></SalesImportFeatureGate>);
+    const denied = await screen.findByTestId('sales-import-gate-denied');
+    expect(denied).toHaveTextContent('You do not have access to this client.');
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('sales-import-gate-error')).not.toBeInTheDocument();
+    expect(screen.queryByText('inner')).not.toBeInTheDocument();
+  });
+
+  it('403 with no readable body still says it was refused (never blank), no Retry', async () => {
+    stubConfig(new Response('nope', { status: 403 }));
+    render(<SalesImportFeatureGate><p>inner</p></SalesImportFeatureGate>);
+    expect(await screen.findByTestId('sales-import-gate-denied')).toHaveTextContent(/do not have access/);
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
   });
 
   it('a 409 that is NOT the downstream acknowledgement is shown, not re-asked', async () => {

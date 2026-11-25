@@ -13,26 +13,33 @@ function authHeader(): Record<string, string> {
   return {};
 }
 
+/** The read result: a known mode, or 'UNKNOWN' when the current mode could not be read. */
+export type VisibilityCaptureModeRead = VisibilityCaptureMode | 'UNKNOWN';
+
 /**
  * Reads the current visibility capture mode for the caller's tenant.
  * Fetches from GET /api/admin/settings/features → features.visibilityCaptureMode.
- * Falls back to 'PHOTO_APPROVAL' (the default) if the field is absent or the
- * request fails — matches the backend's TenantService.resolveVisibilityCaptureMode.
+ * A features blob WITHOUT the field → 'PHOTO_APPROVAL' (that IS the backend default —
+ * TenantService.resolveVisibilityCaptureMode). A FAILED read (network / non-2xx / bad body) or an
+ * unrecognised stored value → 'UNKNOWN' — never a guessed PHOTO_APPROVAL (owner rule: no silent
+ * fallback). The settings page must not let the mode be saved while it is UNKNOWN.
  */
-export async function fetchVisibilityCaptureMode(): Promise<VisibilityCaptureMode> {
+export async function fetchVisibilityCaptureMode(): Promise<VisibilityCaptureModeRead> {
   try {
     // Flags-only read (same `features` blob as /api/admin/settings/config).
     const res = await fetch('/api/admin/settings/features', {
       headers: { ...authHeader() },
     });
-    if (!res.ok) return 'PHOTO_APPROVAL';
+    if (!res.ok) return 'UNKNOWN';
     const json = await res.json();
-    const mode: unknown = json?.data?.features?.visibilityCaptureMode
-      ?? json?.features?.visibilityCaptureMode;
+    const features: unknown = json?.data?.features ?? json?.features;
+    if (!features || typeof features !== 'object') return 'UNKNOWN';
+    const mode: unknown = (features as Record<string, unknown>).visibilityCaptureMode;
+    if (mode === undefined || mode === null) return 'PHOTO_APPROVAL';
     if (mode === 'PHOTO_APPROVAL' || mode === 'AMOUNT_UPLOAD') return mode;
-    return 'PHOTO_APPROVAL';
+    return 'UNKNOWN';
   } catch {
-    return 'PHOTO_APPROVAL';
+    return 'UNKNOWN';
   }
 }
 

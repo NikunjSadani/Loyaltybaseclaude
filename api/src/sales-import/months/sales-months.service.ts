@@ -195,7 +195,11 @@ export class SalesMonthsService {
    * `acknowledgeDownstream: true` (409 otherwise, listing them); the response carries the same warnings.
    */
   async reopen(user: JwtPayload, month: string, body: SalesMonthReopenRequest = {}): Promise<SalesMonthReopenResult> {
-    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Only Gifsy can reopen a month.');
+    // THIS role check is the REAL reopen gate — do not remove it. The route's @Roles('GIFSY_ADMIN') does NOT keep
+    // staff out: RolesGuard admits a GIFSY_STAFF past @Roles on any route carrying a @RequirePermission (here
+    // targets:upload — RBAC Option-X), so an assumed staff member holding targets:upload reaches this method.
+    // Reopen stays owner-only (owner 2026-11-25). Spec: sales-months.spec.ts "staff with targets:upload … 403".
+    if (user.role !== 'GIFSY_ADMIN') throw new ForbiddenException('Only a Gifsy admin can reopen a month.');
     if (!user.assumed) throw new BadRequestException('Assume the tenant to reopen a month.');
     if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
     const clientId = user.clientId;

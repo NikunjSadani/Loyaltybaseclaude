@@ -18,6 +18,7 @@ import {
   fetchVisibilityCaptureMode,
   saveVisibilityCaptureMode,
   type VisibilityCaptureMode,
+  type VisibilityCaptureModeRead,
 } from '@/lib/visibility-capture-mode'
 import { useAdminSession } from '@/lib/admin-session'
 import { useAssumedContext } from '@/lib/use-assumed-context'
@@ -825,17 +826,24 @@ export default function SettingsPage() {
   }
 
   // ── Visibility capture mode (GIFSY_ADMIN-only) ──
-  const [captureMode,      setCaptureMode]      = useState<VisibilityCaptureMode>('PHOTO_APPROVAL')
+  // null = still reading; 'UNKNOWN' = the read failed → the control is NOT shown (no saving a guessed mode).
+  const [captureMode,      setCaptureMode]      = useState<VisibilityCaptureModeRead | null>(null)
   const [captureModeLoading, setCaptureModeLoading] = useState(false)
   const [captureModeError,   setCaptureModeError]   = useState<string | null>(null)
   const [captureModeSaved,   setCaptureModeSaved]   = useState(false)
+  const [captureModeAttempt, setCaptureModeAttempt] = useState(0)
 
   useEffect(() => {
     if (!isGifsyAdmin) return
-    fetchVisibilityCaptureMode().then(setCaptureMode)
-  }, [isGifsyAdmin])
+    let cancelled = false
+    setCaptureMode(null)
+    fetchVisibilityCaptureMode().then((m) => { if (!cancelled) setCaptureMode(m) })
+    return () => { cancelled = true }
+  }, [isGifsyAdmin, captureModeAttempt])
 
   async function handleCaptureModeChange(newMode: VisibilityCaptureMode) {
+    // Never save over a mode we could not read (the control is hidden then; this is the belt-and-braces check).
+    if (captureMode !== 'PHOTO_APPROVAL' && captureMode !== 'AMOUNT_UPLOAD') return
     // Optimistic update
     setCaptureMode(newMode)
     setCaptureModeError(null)
@@ -1188,6 +1196,20 @@ export default function SettingsPage() {
             </div>
           </CardHeader>
           <CardContent>
+            {captureMode === null && (
+              <p className="text-xs text-gray-500" data-testid="capture-mode-loading">Loading the current mode…</p>
+            )}
+            {captureMode === 'UNKNOWN' && (
+              <div role="alert" data-testid="capture-mode-unknown" className="flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                <p className="text-xs text-red-700">
+                  Couldn&apos;t load the current capture mode, so it can&apos;t be changed right now.
+                </p>
+                <Button size="sm" variant="outline" className="ml-auto" onClick={() => setCaptureModeAttempt((a) => a + 1)}>
+                  Retry
+                </Button>
+              </div>
+            )}
+            {(captureMode === 'PHOTO_APPROVAL' || captureMode === 'AMOUNT_UPLOAD') && (
             <div className="flex items-center gap-3">
               {/* Segmented control */}
               <SegmentedControl
@@ -1201,6 +1223,7 @@ export default function SettingsPage() {
                 <RefreshCw className="h-4 w-4 animate-spin text-gray-400" aria-label="Saving" />
               )}
             </div>
+            )}
             {captureMode === 'PHOTO_APPROVAL' && (
               <p className="text-xs text-gray-500 mt-2">
                 Active: field agents submit photos via the mobile app. Gifsy admin reviews and
