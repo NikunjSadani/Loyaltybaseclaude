@@ -103,6 +103,96 @@ formula engine is the wrong *default*. Hence the hybrid.)
   deferred axis (no per-invoice store exists yet).
 - band boundaries carry explicit inclusivity; `rounding` is single + final; floor→cap order is structural.
 
+### 3a. Visibility (POSM) inputs — `visibility:*` (owner decision 2026-11-25, shared engine, owner-approved)
+
+A rule can read the outlet's **visibility result for the compute month** — to gate a payout on approved
+visibility (Bajaj SAMT) or to pay a visibility payout (Bajaj Unnati). Four NUMBER input sources:
+
+| Source | Builder label | Value |
+|---|---|---|
+| `visibility:approved` | Visibility approved this month (1/0) | 1 if ≥ 1 window of the month is approved, else 0 |
+| `visibility:approvedWindows` | Approved visibility windows this month | how many windows of the month are approved |
+| `visibility:windows` | Visibility windows in the month | in-scope outlet: the windows of the month it was in scope for (≤ the frequency's 1–4; 1 for AMOUNT_UPLOAD with a record). OUT-of-scope outlet: the MONTH's window count (1 for AMOUNT_UPLOAD) — never 0, so `approvedWindows >= windows` can never pay it; `inScope = 0` tells it apart. The builder + simulator warn (non-blocking, `ruleWarnings`) when a rule compares approvedWindows with windows without reading inScope |
+| `visibility:inScope` | Outlet in the visibility programme (1/0) | 1 when visibility applies to the outlet this month, else 0 — tells "not applicable" (e.g. a wholesaler) from "not approved" |
+
+`validateRule` rejects any other `visibility:<key>` and a non-`number` visibility input. Code:
+`api/src/points-engine/points-engine-visibility.loader.ts` (loader + the approval rule), `resolveRaw` in
+`points-engine.helper.ts` (binding), `PointsComputeService` (wiring + the pending gate).
+
+**"Approved" (fix round 2026-11-25).** PHOTO_APPROVAL: a window counts when the capture's FINAL status is `APPROVED`
+and EITHER (a) the outlet is in that window's dated universe (`visibilityWindowUniverseWhere` — the Visibility
+report's per-window rule: a closed window = outlets live + KYC-approved during it, an open one = today's in-scope),
+OR (b) the outlet passes EVERY rule of `visibilityUniverseBase` TODAY except the dates — not removed / deactivated,
+KYC-approved (`isActive`), not PARKED / NOT_INTERESTED, type + programme in scope (`visibilityOutOfScopeReason` = null).
+An approved capture is proof of the visit, so ONLY the created / KYC-approval DATES are relaxed (an outlet loaded
+late). (b) is a deliberate difference from the report (which drops such captures as "not counted"); every such capture
+is reported (`preview.visibility.countedOutsideDatedScope` + the row note). An approved capture failing any other rule
+is excluded with its reason (`excluded.notInProgramme` / `excluded.notLive`). Decided:
+- **Per-photo review** rolls up server-side (all required photos approved → `APPROVED`), so a half-reviewed capture is not approved.
+- **Imported old-app captures** are stored `APPROVED` (the old app kept only approved visits) → they **count**. A closed
+  window with no capture that was (partly) on the old app carries the report's marker in the row note
+  ("P1: No approved record — part of this window was on the old app" / "Not tracked for imported months"), not a plain 0.
+- `SUBMITTED` (waiting for review), `CHANGES_REQUESTED`, `REJECTED` — open **or** closed window — **do not count**.
+- **NOT counted, always reported** (`preview.visibility.excluded` + the outlet's row note / `row.visibility.excludedApprovals`):
+  an APPROVED capture of an outlet whose type / programme is NOT in the programme (`notInProgramme`); of an outlet
+  removed / deactivated / not KYC-approved / parked / not interested today (`notLive`); an APPROVED capture under an
+  OLDER frequency's window key (e.g. `-P2` after a move to once a month — its day range is unknown; `olderFrequency`).
+- **Every preview figure covers only the run** — the run's program / KPI filter, never deleted outlets (they are not in
+  a run): counts, the pending set, counted-late and excluded approvals.
+- Read AS OF the compute: an approval landing later changes the next run (the POINTS commit TOCTOU key catches it).
+
+**Pending reviews / open windows — never silent (money gate).** Per outlet the loader counts windows still WAITING FOR
+REVIEW and in-scope windows STILL OPEN without an approval (AMOUNT_UPLOAD: a `PENDING` / `UNDER_REVIEW` record = waiting).
+Those outlets read "not approved" for those windows NOW. The preview shows `outletsWaitingReview`, `outletsOpenWindow`,
+`openWindowsInMonth`, `outletsPending`, the pending outlet codes (`waitingOutletCodes` / `openOutletCodes`, sorted,
+capped at 200 each — counts complete) and `pendingKey` = sha256 of the EXACT pending outlet sets. While
+`outletsPending > 0` the **credit-upload export, the payout report and direct credit are REFUSED (409)** unless the
+request carries `acceptVisibilityPendingKey = pendingKey` (the admin ticks "I accept N outlets will read visibility =
+not approved…" on the compute screen, which lists the outlets); the server recomputes and refuses a different outlet
+set (re-accept). Enforced in `PointsComputeService.assertVisibilityPendingAccepted` (commit) and the export kinds at
+file build. The money files also take `expectedKey` like direct credit — the credit file is checked against
+`sourceKey`, the payout report against `payoutKey` (a hash of the OK PAYOUT rows) — a run that changed since review is
+refused. Refusals are `ExportRefusedException` (409); a background build that hits one is FAILED with THAT message on
+the Downloads page (opt-in — every other failure keeps the generic message). No synchronous pre-check before queueing:
+it would run the whole-tenant compute on the API a second time (the reason these kinds always build in the worker) —
+the screen blocks the buttons first, and the build refuses with the plain message. Each accepted action writes ONE
+`AuditLog` row (`action APPROVE`, `entityType POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED`; entityId = the batch id for
+commit — an idempotent repeat writes no second row and a repeat after a failed write fills it in; = the ExportRequest
+id for a file, also in `metadata.exportRequestId`); metadata = counts, capped outlet codes, pendingKey, route, filter,
+sourceKey, payoutKey. A failed audit write after the batch / file exists is logged, never a 500. The review report is
+not gated (it is the review).
+
+**AMOUNT_UPLOAD** tenants: the month's uploaded `OutletVisibilityRecord`; `APPROVED` → 1 of 1; `PENDING` /
+`UNDER_REVIEW` → 0 (pending); no record → 0, windows 1, inScope 0 ("no visibility status uploaded"). Capture mode + master
+switch come from `TenantService` (switch read uncached).
+
+**Missing vs zero.** An outlet **outside the visibility scope** reads `inScope = 0`, `approved = 0`,
+`approvedWindows = 0` and `windows` = the MONTH's window count (1 for AMOUNT_UPLOAD) — never windows 0 — and its row
+says "not in visibility scope (…)" (`row.visibility.scope = NOT_IN_SCOPE`; `NO_RECORD` for AMOUNT_UPLOAD). When the **tenant has
+no usable visibility** (switched off — this also hides past approvals, owner-confirmed — or no outlet types in the
+programme) the values are **absent** → the input's own `nullAs` applies (`reject` → SKIP), the SKIP reason names why,
+and the preview shows an amber "no visibility result" banner.
+
+**Cost / isolation.** Loaded lazily, ONCE per compute, only when a resolved rule declares a `visibility:*` input —
+a run whose rules never read visibility (Deoleo; every existing rule) issues **no** visibility query and is
+unchanged. PHOTO_APPROVAL = the month's captures (1) + one dated-universe outlet query per window (≤ 4) + the old-app
+go-live lookups (2, one cached) — all tenant-scoped, in parallel; AMOUNT_UPLOAD = 1. Keyed by outletCode — no N+1.
+
+**Output.** Each row of such a rule carries `row.visibility` {approvedWindows, approved, windows, inScope, scope,
+waitingWindows, openWindows, excludedApprovals, note} and its explanation starts with the note (a formula trace does
+not echo its inputs); `preview.visibility` summarises the run. The simulator takes test values (`context.visibility`),
+rejects impossible ones (non-negative whole numbers; approved / inScope ∈ {0,1}; windows ≤ 4; approvedWindows ≤
+windows; approved = 1 exactly when approvedWindows ≥ 1; inScope 0 ⇒ nothing approved — windows > 0 is allowed, the
+real out-of-scope shape) and returns `visibilityUsed`.
+
+**Metro.** `Outlet.metro` is FREE TEXT read through `segment:metro`. Bajaj data uses **`Metro`** / **`Non Metro`**
+(RESUME 2026-11-16: Metro 1,657 / Non Metro 4,834). Declare the metro input as an enum with `values: ['Metro','Non Metro']`
+and `nullAs: 'reject'` so a blank or other spelling (e.g. "Non-Metro") is SURFACED, not paid at the wrong rate.
+Unnati worked example (PAYOUT, formula `set`): inputs `TOTAL` (kpi TOTAL, `zero`), `visApproved`
+(`visibility:approved`, `reject`), `metro` (enum as above) →
+`if(visApproved == 1 && TOTAL >= 4000, if(metro == 'Metro', 500, 250), 0)`. SAMT gate:
+`{ gate, when: visApproved eq 1, onFail: zero }` before the accrual nodes.
+
 ---
 
 ## 4. Evaluation pipeline (fixed, documented order)
@@ -117,6 +207,21 @@ formula engine is the wrong *default*. Hence the hybrid.)
 
 A flat ordered list (vs a nested tree) is diffable in a UI, maps 1:1 to trace steps, and makes
 floor/cap/rounding order a structural guarantee.
+
+**Row reasons (owner-approved 2026-11-25, platform-wide, OPT-IN).** A `gate` may carry `failReason` (≤ 200 chars)
+and `failAs: 'zero' | 'skip'`. Absent → today's behaviour exactly (pinned by a snapshot test of an existing rule).
+On failure: `failAs: 'skip'` → the row is SKIPPED (flagged for review) with `failReason`; `failAs: 'zero'`, or
+`onFail: 'zero'` with a `failReason`, → the rule pays 0 and the OK outcome carries `reason = failReason`
+(`skipNode` / `passthrough` are unchanged and carry no reason — so `validateRule` REFUSES a `failReason` on such a soft
+gate without `failAs`, and the builder disables the field there: a reason is never silently dropped). With `failAs`
+set the builder offers only the hard outcomes and shows the effective one; `failAs` is never dropped on change; an
+over-long reason is kept and flagged (never truncated). A rule zeroed by a missing `nullAs: 'skipRule'` input now says
+why too: `reason = "No <KPI> target"` / "No <KPI> achievement" / "No visibility result" … (was an empty explanation)
+— **owner-approved 2026-11-25 for ALL rules (platform-wide, display only)**. KPI-scope skips carry a structured
+`row.skipKind = 'KPI_SCOPE'`; consumers use it, never the reason text (a failReason may say anything). The reason is on `EvalOutcome.reason` → `row.reason` on OK rows, shown in the preview row, the simulator
+and the reports' "Reason / Explanation" column as "<reason> — <explanation>" (rows with only one of the two are
+unchanged; the credit-upload file is untouched). Bajaj uses: gate `target > 0` failReason "Target is 0"; gate
+`NON_ADHO ≥ 400` failReason "NON ADHO below ₹400"; ADHO target input `nullAs: skipRule` → "No ADHO target".
 
 ---
 
@@ -350,7 +455,7 @@ shows raw JSON; it renders typed cards. Disclosure levels (match the node the au
 - **Attachment card:** program (select, "any" allowed) × programCategory (optional) × KPI (select from the
   tenant's `KpiDef` list — NEVER free text, so the publish-time KPI reconciliation can't trip). Effective from/to.
 - **Inputs card:** auto-seeds a `value` input bound to the attachment KPI; author adds more inputs (achievement
-  `kpiCode`, `target:<kpi>`, `pct:<kpi>`, or a `segment:<field>` enum) with a per-input null policy
+  `kpiCode`, `target:<kpi>`, `pct:<kpi>`, a `segment:<field>` enum, or a `visibility:*` number — §3a) with a per-input null policy
   (reject/zero/skipRule) shown as plain-English radios ("missing → skip row / treat as 0 / this rule pays 0").
 - **Pipeline builder:** an ordered, reorderable list of node cards; "Add step" menu groups them by level:
   - L1 **Rate** — 2 fields: measure (input picker) × rate. (The simple 90% case = just this.)

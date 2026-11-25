@@ -10,6 +10,8 @@
  * See POINTS-COMPUTE-ENGINE-DESIGN.md §6 (integration) + §11 (Wave 1).
  */
 
+import type { VisibilityPreviewSummary } from './points-engine-visibility.loader';
+
 export type PreviewRowStatus = 'OK' | 'SKIP' | 'ERROR' | 'NO_RULE';
 
 /** One computed line for one outlet under its resolved rule (or a skip/no-rule marker). */
@@ -48,10 +50,36 @@ export interface ComputePreviewRow {
   /** Raw inputs echoed for the preview report (achievement + target for the primary KPI). */
   achievement?: number | null;
   target?: number | null;
-  /** Why a row did not produce points (SKIP reason / ERROR messages / 'no active rule'). */
+  /**
+   * Why a row did not produce points (SKIP reason / ERROR messages / 'no active rule'), or — on an OK row that paid 0
+   * — why it paid 0 (an opt-in gate `failReason`, or "No <KPI> target" for a missing skipRule input).
+   */
   reason?: string;
+  /**
+   * Structured skip category — 'KPI_SCOPE' = the (outlet, KPI) pair is outside the KPI's APPLIES-TO scope (expected,
+   * nothing to fix). Consumers MUST use this, never match the reason text (a gate failReason can say anything).
+   */
+  skipKind?: 'KPI_SCOPE';
   /** One-line human explanation of the math (from the evaluator trace) for the preview report. */
   explanation?: string;
+  /**
+   * The outlet's visibility (POSM) values the rule read (design §3a) — present only when the rule declares a
+   * `visibility:*` input AND the tenant has usable visibility data. `scope` tells a real "0 approved" (IN_SCOPE)
+   * apart from an outlet outside the visibility programme (NOT_IN_SCOPE) or with no uploaded status (NO_RECORD).
+   */
+  visibility?: {
+    approvedWindows: number;
+    approved: 0 | 1;
+    windows: number;
+    inScope: 0 | 1;
+    scope: 'IN_SCOPE' | 'NOT_IN_SCOPE' | 'NO_RECORD';
+    waitingWindows: number;
+    /** In-scope windows still open with no approval (the rep can still capture). */
+    openWindows: number;
+    /** APPROVED captures of this outlet NOT counted, by reason (older frequency / outlet not in the programme). */
+    excludedApprovals: { olderFrequency: number; notInProgramme: number };
+    note: string;
+  };
 }
 
 /**
@@ -101,4 +129,8 @@ export interface ComputePreview {
   /** Deterministic content hash of this run's creditable rows — the UI passes it back as `expectedKey`
    *  on commit so a run that changed since it was previewed is rejected (review→commit TOCTOU guard). */
   sourceKey: string;
+  /** Content hash of the run's OK PAYOUT rows — passed back as `expectedKey` on the payout-report download. */
+  payoutKey: string;
+  /** Only when a rule read visibility (design §3a): the month's visibility setup + headline counts. */
+  visibility?: VisibilityPreviewSummary;
 }

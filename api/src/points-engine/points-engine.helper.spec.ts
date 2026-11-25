@@ -7,7 +7,7 @@
  * whitelist rejections, the formula divide-by-zero guard, and trace-step chain correctness.
  */
 
-import { evaluateRule, validateRule } from './points-engine.helper';
+import { evaluateRule, ruleWarnings, validateRule } from './points-engine.helper';
 import {
   PointsRuleConfig,
   PipelineNode,
@@ -868,5 +868,243 @@ describe('Audit fixes', () => {
       rounding: { mode: 'half_up' as const, scale: 0 },
     };
     expect(validateRule(ok).some((e) => /PAYOUT.*scale 0|whole rupees|INR/.test(e))).toBe(false);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// §3a Visibility (POSM) inputs — visibility:approved / approvedWindows / windows (owner decision 2026-11-25)
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('visibility inputs (§3a)', () => {
+  const visCtx = (
+    visibility: EvalContext['visibility'],
+    extra: Partial<EvalContext> = {},
+  ): EvalContext => ({ achievements: {}, targets: {}, segment: {}, ...extra, ...(visibility !== undefined ? { visibility } : {}) });
+
+  // SAMT-style: pay the cases rate ONLY when visibility was approved this month.
+  const samt = rule({
+    inputs: [
+      { ref: 'cases', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+      { ref: 'visApproved', source: 'visibility:approved', type: 'number', nullAs: 'reject' },
+    ],
+    pipeline: [
+      { type: 'gate', id: 'g1', when: { op: 'eq', left: { var: 'visApproved' }, right: { lit: 1 } }, onFail: 'zero' },
+      { type: 'rate', id: 'r1', measure: { var: 'cases' }, rate: 2 },
+    ],
+  });
+
+  it('gate on visibilityApproved: approved → pays; not approved → 0 (hard gate)', () => {
+    const ok = expectOk(evaluateRule(samt, visCtx({ approved: 1, approvedWindows: 1, windows: 1 }, { achievements: { CASES_SOLD: 50 } })));
+    expect(ok.points).toBe(100);
+    expect(ok.trace[0].detail).toContain('visApproved=1');
+    const no = expectOk(evaluateRule(samt, visCtx({ approved: 0, approvedWindows: 0, windows: 1 }, { achievements: { CASES_SOLD: 50 } })));
+    expect(no.points).toBe(0);
+    expect(no.trace[0].detail).toMatch(/FAILED/);
+  });
+
+  it('absent visibility data (tenant has none) → the input nullAs applies (reject → SKIP, zero → 0)', () => {
+    const skip = expectSkip(evaluateRule(samt, visCtx(undefined, { achievements: { CASES_SOLD: 50 } })));
+    expect(skip.reason).toContain('visApproved (visibility:approved)');
+    const zeroRule = rule({
+      inputs: [
+        { ref: 'cases', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+        { ref: 'visApproved', source: 'visibility:approved', type: 'number', nullAs: 'zero' },
+      ],
+      pipeline: samt.pipeline,
+    });
+    expect(expectOk(evaluateRule(zeroRule, visCtx(undefined, { achievements: { CASES_SOLD: 50 } }))).points).toBe(0);
+  });
+
+  // Unnati-style visibility payout: ₹500 Metro / ₹250 Non-Metro when visibility approved AND billing ≥ 4,000.
+  const unnati: PointsRuleConfig = {
+    ...rule({
+      inputs: [
+        { ref: 'TOTAL', kpiCode: 'TOTAL', type: 'number', nullAs: 'zero' },
+        { ref: 'visApproved', source: 'visibility:approved', type: 'number', nullAs: 'reject' },
+        { ref: 'metro', source: 'segment:metro', type: 'enum', nullAs: 'reject', values: ['Metro', 'Non Metro'] },
+      ],
+      pipeline: [
+        { type: 'formula', id: 'f1', expr: "if(visApproved == 1 && TOTAL >= 4000, if(metro == 'Metro', 500, 250), 0)", output: 'set' },
+      ],
+    }),
+    output: { awardType: 'PAYOUT', fieldId: 'cf_vis' },
+  };
+
+  it('Unnati payout: Metro 500 / Non Metro 250 / below threshold 0 / not approved 0', () => {
+    const run = (metro: string, total: number, approved: number) =>
+      evaluateRule(unnati, visCtx({ approved, approvedWindows: approved, windows: 1 }, { achievements: { TOTAL: total }, segment: { metro } }));
+    expect(validateRule(unnati)).toEqual([]);
+    expect(expectOk(run('Metro', 4000, 1)).points).toBe(500);
+    expect(expectOk(run('Non Metro', 9000, 1)).points).toBe(250);
+    expect(expectOk(run('Metro', 3999, 1)).points).toBe(0);
+    expect(expectOk(run('Metro', 9000, 0)).points).toBe(0);
+    // A metro spelling outside the enum list (e.g. "Non-Metro") is surfaced, never guessed.
+    expect(expectSkip(run('Non-Metro', 9000, 1)).reason).toMatch(/not an allowed enum value/);
+  });
+
+  it('"every window approved" via approvedWindows vs windows', () => {
+    const all = rule({
+      inputs: [
+        { ref: 'ok', source: 'visibility:approvedWindows', type: 'number', nullAs: 'reject' },
+        { ref: 'n', source: 'visibility:windows', type: 'number', nullAs: 'reject' },
+      ],
+      pipeline: [{ type: 'milestone', id: 'm1', when: { all: [{ op: 'gte', left: { var: 'ok' }, right: { var: 'n' } }, { op: 'gt', left: { var: 'n' }, right: { lit: 0 } }] }, flat: 100 }],
+    });
+    expect(expectOk(evaluateRule(all, visCtx({ approvedWindows: 2, approved: 1, windows: 2 }))).points).toBe(100);
+    expect(expectOk(evaluateRule(all, visCtx({ approvedWindows: 1, approved: 1, windows: 2 }))).points).toBe(0);
+  });
+
+  it('ruleWarnings: approvedWindows vs windows without inScope → a (non-blocking) warning; with inScope → none', () => {
+    const base = (withInScope: boolean) =>
+      rule({
+        inputs: [
+          { ref: 'ok', source: 'visibility:approvedWindows', type: 'number', nullAs: 'reject' },
+          { ref: 'n', source: 'visibility:windows', type: 'number', nullAs: 'reject' },
+          ...(withInScope ? [{ ref: 'in', source: 'visibility:inScope', type: 'number' as const, nullAs: 'reject' as const }] : []),
+        ],
+        pipeline: [{ type: 'milestone', id: 'm', when: { op: 'gte', left: { var: 'ok' }, right: { var: 'n' } }, flat: 1 }],
+      });
+    expect(validateRule(base(false))).toEqual([]); // valid — only a warning
+    expect(ruleWarnings(base(false)).join(' ')).toMatch(/does not read “Outlet in the visibility programme/);
+    expect(ruleWarnings(base(true))).toEqual([]);
+    expect(ruleWarnings(samt)).toEqual([]);
+  });
+
+  it('inScope tells "not applicable" from "not approved"', () => {
+    const r = rule({
+      inputs: [
+        { ref: 'inScope', source: 'visibility:inScope', type: 'number', nullAs: 'reject' },
+        { ref: 'ok', source: 'visibility:approved', type: 'number', nullAs: 'reject' },
+      ],
+      pipeline: [{ type: 'formula', id: 'f', expr: 'if(inScope == 0, 100, if(ok == 1, 100, 0))', output: 'set' }],
+    });
+    expect(expectOk(evaluateRule(r, visCtx({ inScope: 0, approved: 0, approvedWindows: 0, windows: 0 }))).points).toBe(100);
+    expect(expectOk(evaluateRule(r, visCtx({ inScope: 1, approved: 0, approvedWindows: 0, windows: 1 }))).points).toBe(0);
+  });
+
+  it('validateRule accepts the four visibility sources and rejects an unknown key / a non-number type', () => {
+    const mk = (source: string, type: 'number' | 'enum' = 'number') =>
+      rule({
+        inputs: [{ ref: 'v', source, type, nullAs: 'reject', ...(type === 'enum' ? { values: ['1'] } : {}) }],
+        pipeline: [{ type: 'rate', id: 'r1', measure: { lit: 1 }, rate: 1 }],
+      });
+    expect(validateRule(mk('visibility:approved'))).toEqual([]);
+    expect(validateRule(mk('visibility:approvedWindows'))).toEqual([]);
+    expect(validateRule(mk('visibility:windows'))).toEqual([]);
+    expect(validateRule(mk('visibility:inScope'))).toEqual([]);
+    expect(validateRule(mk('visibility:approvd')).join(' ')).toMatch(/unknown visibility source "visibility:approvd"/);
+    expect(validateRule(mk('visibility:approved', 'enum')).join(' ')).toMatch(/visibility input must be type 'number'/);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Gate failReason / failAs (opt-in, owner-approved 2026-11-25) + skipRule "No <KPI> target" reason
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('gate failReason / failAs + missing-input reason', () => {
+  // Archetype-style existing rule: gate value ≥ target (onFail zero) then a rate. NO opt-in fields.
+  const existing = rule({
+    inputs: [
+      { ref: 'value', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+      { ref: 'target', source: 'target:CASES_SOLD', type: 'number', nullAs: 'reject' },
+    ],
+    pipeline: [
+      { type: 'gate', id: 'g1', when: { op: 'gte', left: { var: 'value' }, right: { var: 'target' } }, onFail: 'zero' },
+      { type: 'rate', id: 'r1', measure: { var: 'value' }, rate: 2 },
+    ],
+  });
+
+  it('default unchanged: an existing rule without the opt-in fields yields the exact same outcome (snapshot)', () => {
+    expect(evaluateRule(existing, ctx({ achievements: { CASES_SOLD: 80 }, targets: { CASES_SOLD: 100 } }))).toEqual({
+      status: 'OK',
+      points: 0,
+      trace: [
+        {
+          nodeId: 'g1', type: 'gate', detail: "gate FAILED (value=80 ≥ target=100) → onFail 'zero', rule → 0",
+          pointsBefore: 0, delta: 0, pointsAfter: 0,
+        },
+      ],
+    });
+    expect(evaluateRule(existing, ctx({ achievements: { CASES_SOLD: 120 }, targets: { CASES_SOLD: 100 } }))).toEqual({
+      status: 'OK',
+      points: 240,
+      trace: [
+        { nodeId: 'g1', type: 'gate', detail: 'gate passed: value=120 ≥ target=100', pointsBefore: 0, delta: 0, pointsAfter: 0 },
+        { nodeId: 'r1', type: 'rate', detail: 'rate "r1": 120 × 2 → +240', pointsBefore: 0, delta: 240, pointsAfter: 240 },
+      ],
+    });
+  });
+
+  // Bajaj "target is 0": pay 0 and SAY so.
+  const zeroTarget = rule({
+    inputs: [
+      { ref: 'value', kpiCode: 'ADHO', type: 'number', nullAs: 'zero' },
+      { ref: 'target', source: 'target:ADHO', type: 'number', nullAs: 'skipRule' },
+    ],
+    pipeline: [
+      { type: 'gate', id: 'g0', when: { op: 'gt', left: { var: 'target' }, right: { lit: 0 } }, onFail: 'zero', failReason: 'Target is 0', failAs: 'zero' },
+      { type: 'rate', id: 'r1', measure: { var: 'value' }, rate: 1 },
+    ],
+  });
+
+  it('failAs zero: target 0 → amount 0 with the reason', () => {
+    const o = expectOk(evaluateRule(zeroTarget, ctx({ achievements: { ADHO: 50 }, targets: { ADHO: 0 } })));
+    expect(o.points).toBe(0);
+    expect(o.reason).toBe('Target is 0');
+    expect(o.trace[0].detail).toMatch(/failAs 'zero', rule → 0: Target is 0/);
+    // Passing → no reason.
+    const ok = expectOk(evaluateRule(zeroTarget, ctx({ achievements: { ADHO: 50 }, targets: { ADHO: 10 } })));
+    expect(ok.points).toBe(50);
+    expect(ok.reason).toBeUndefined();
+  });
+
+  it('missing target under nullAs skipRule → 0 with "No ADHO target" (not an empty explanation)', () => {
+    const o = expectOk(evaluateRule(zeroTarget, ctx({ achievements: { ADHO: 50 }, targets: {} })));
+    expect(o.points).toBe(0);
+    expect(o.reason).toBe('No ADHO target');
+  });
+
+  it('failAs skip: "NON ADHO below ₹400" → row SKIPPED (flagged) with that reason', () => {
+    const r = rule({
+      inputs: [{ ref: 'nonAdho', kpiCode: 'NON_ADHO', type: 'number', nullAs: 'zero' }],
+      pipeline: [
+        { type: 'gate', id: 'g', when: { op: 'gte', left: { var: 'nonAdho' }, right: { lit: 400 } }, onFail: 'zero', failReason: 'NON ADHO below ₹400', failAs: 'skip' },
+        { type: 'rate', id: 'r', measure: { var: 'nonAdho' }, rate: 1 },
+      ],
+    });
+    const s = expectSkip(evaluateRule(r, ctx({ achievements: { NON_ADHO: 399 } })));
+    expect(s.reason).toBe('NON ADHO below ₹400');
+    expect(expectOk(evaluateRule(r, ctx({ achievements: { NON_ADHO: 400 } }))).points).toBe(400);
+  });
+
+  it('failReason alone keeps onFail (zero → 0 + reason); on a SOFT gate it is refused by validateRule, never silently dropped', () => {
+    const mk = (onFail: 'zero' | 'skipNode') =>
+      rule({
+        inputs: [{ ref: 'v', kpiCode: 'V', type: 'number', nullAs: 'zero' }],
+        pipeline: [
+          { type: 'gate', id: 'g', when: { op: 'gte', left: { var: 'v' }, right: { lit: 10 } }, onFail, failReason: 'Below 10' },
+          { type: 'rate', id: 'r', measure: { var: 'v' }, rate: 1 },
+        ],
+      });
+    expect(expectOk(evaluateRule(mk('zero'), ctx({ achievements: { V: 5 } })))).toMatchObject({ points: 0, reason: 'Below 10' });
+    expect(validateRule(mk('zero'))).toEqual([]);
+    expect(validateRule(mk('skipNode')).join(' ')).toMatch(/failReason is only shown when the gate pays 0 or skips the row/);
+    // With an explicit failAs the onFail value no longer matters (failAs decides) → valid.
+    const soft = mk('skipNode');
+    (soft.pipeline[0] as { failAs?: string }).failAs = 'skip';
+    expect(validateRule(soft)).toEqual([]);
+  });
+
+  it('validateRule: accepts the opt-in fields, rejects a bad failAs / an over-long failReason', () => {
+    expect(validateRule(zeroTarget)).toEqual([]);
+    const bad = rule({
+      inputs: [{ ref: 'v', kpiCode: 'V', type: 'number', nullAs: 'zero' }],
+      pipeline: [
+        { type: 'gate', id: 'g', when: { op: 'gte', left: { var: 'v' }, right: { lit: 1 } }, onFail: 'zero', failAs: 'nope' as never, failReason: 'x'.repeat(201) },
+      ],
+    });
+    const errs = validateRule(bad).join(' ');
+    expect(errs).toMatch(/failAs must be 'zero' or 'skip'/);
+    expect(errs).toMatch(/failReason must be text of at most 200 characters/);
   });
 });

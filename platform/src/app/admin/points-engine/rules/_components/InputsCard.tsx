@@ -4,16 +4,17 @@
  * Inputs card — the variables the pipeline may read.
  *
  * Each input binds a `ref` name to a source (an achievement KPI code, a target:/pct: of a KPI, or a
- * segment field) with a type + a plain-English null policy. Exactly one of kpiCode / source is set
- * (mirrors the backend validator). A new rule auto-seeds one `value` input bound to the attachment KPI.
+ * segment field, or the outlet's VISIBILITY result for the month) with a type + a plain-English null policy.
+ * Exactly one of kpiCode / source is set (mirrors the backend validator). A new rule auto-seeds one `value`
+ * input bound to the attachment KPI. Visibility sources are always NUMBER inputs (design §3a).
  */
 
 import React from 'react';
 import { Plus, Trash2, Variable } from 'lucide-react';
-import type { RuleInput, NullPolicy } from '@/lib/points-engine/types';
+import { VISIBILITY_SOURCES, type RuleInput, type NullPolicy } from '@/lib/points-engine/types';
 import { Field, TextField, SelectField, labelCls } from './kit';
 
-type SourceKind = 'achievement' | 'target' | 'pct' | 'segment';
+type SourceKind = 'achievement' | 'target' | 'pct' | 'segment' | 'visibility';
 
 function readKind(inp: RuleInput): { kind: SourceKind; value: string } {
   if (inp.kpiCode != null && inp.kpiCode !== '') return { kind: 'achievement', value: inp.kpiCode };
@@ -21,7 +22,8 @@ function readKind(inp: RuleInput): { kind: SourceKind; value: string } {
     const idx = inp.source.indexOf(':');
     const kind = (idx >= 0 ? inp.source.slice(0, idx) : inp.source) as SourceKind;
     const value = idx >= 0 ? inp.source.slice(idx + 1) : '';
-    if (kind === 'achievement' || kind === 'target' || kind === 'pct' || kind === 'segment') return { kind, value };
+    if (kind === 'achievement' || kind === 'target' || kind === 'pct' || kind === 'segment' || kind === 'visibility')
+      return { kind, value };
   }
   return { kind: 'achievement', value: '' };
 }
@@ -63,6 +65,8 @@ export function InputsCard({
       {inputs.map((inp, i) => {
         const { kind, value } = readKind(inp);
         const isSegment = kind === 'segment';
+        const isVisibility = kind === 'visibility';
+        const visMeta = isVisibility ? VISIBILITY_SOURCES.find((v) => v.key === value) : undefined;
         return (
           <div key={i} className="rounded-xl border border-gray-200 bg-gray-50 p-3">
             <div className="mb-2 flex items-center justify-between">
@@ -98,21 +102,43 @@ export function InputsCard({
                     // Segment ⇒ enum input (seed a concrete field so the source isn't an empty "segment:");
                     // leaving segment for a numeric source ⇒ drop the forced enum so the input is valid again
                     // (an enum input needs `values`, which a KPI/target source doesn't collect).
-                    const nextType = k === 'segment' ? 'enum' : kind === 'segment' ? 'number' : inp.type;
-                    const nextValue = k === 'segment' ? value || 'program' : value;
-                    replaceInput(i, applyKind({ ...inp, type: nextType }, k, nextValue));
+                    // Visibility ⇒ always a NUMBER input (1/0 or a window count), seeded with "approved".
+                    const nextType =
+                      k === 'segment' ? 'enum' : k === 'visibility' ? 'number' : kind === 'segment' ? 'number' : inp.type;
+                    const nextValue =
+                      k === 'segment'
+                        ? value || 'program'
+                        : k === 'visibility'
+                          ? 'approved'
+                          : kind === 'visibility'
+                            ? ''
+                            : value;
+                    const next = applyKind({ ...inp, type: nextType }, k, nextValue);
+                    if (k === 'visibility') delete next.values;
+                    replaceInput(i, next);
                   }}
                   options={[
                     { value: 'achievement', label: 'Achievement (KPI code)' },
                     { value: 'target', label: 'Target of a KPI' },
                     { value: 'pct', label: '% achievement of target' },
                     { value: 'segment', label: 'Segment field' },
+                    { value: 'visibility', label: 'Visibility (POSM) this month' },
                   ]}
                 />
               </Field>
 
-              <Field label={isSegment ? 'Segment field' : 'KPI code'}>
-                {isSegment ? (
+              <Field
+                label={isSegment ? 'Segment field' : isVisibility ? 'Visibility value' : 'KPI code'}
+                hint={isVisibility ? visMeta?.hint : undefined}
+              >
+                {isVisibility ? (
+                  <SelectField
+                    value={value || 'approved'}
+                    disabled={disabled}
+                    onChange={(v) => replaceInput(i, applyKind(inp, kind, v))}
+                    options={VISIBILITY_SOURCES.map((v) => ({ value: v.key, label: v.label }))}
+                  />
+                ) : isSegment ? (
                   <SelectField
                     value={value || 'program'}
                     disabled={disabled}
@@ -135,10 +161,10 @@ export function InputsCard({
                 )}
               </Field>
 
-              <Field label="Type">
+              <Field label="Type" hint={isVisibility ? 'Visibility values are always numbers.' : undefined}>
                 <SelectField
                   value={inp.type}
-                  disabled={disabled}
+                  disabled={disabled || isVisibility}
                   onChange={(type) => setInput(i, { type })}
                   options={[
                     { value: 'number', label: 'Number' },
@@ -178,6 +204,20 @@ export function InputsCard({
                   ))}
                 </div>
               </div>
+              {isVisibility && (
+                <p className="sm:col-span-2 rounded-lg border border-sky-100 bg-sky-50 px-2.5 py-1.5 text-[11px] leading-snug text-sky-800">
+                  Reads the outlet&apos;s visibility result for the compute month. A window counts only when its
+                  capture is <strong>approved</strong> (every photo approved; imported old-app approvals count) —
+                  waiting for review, re-take requested and rejected do not. An outlet outside the visibility
+                  programme reads in programme = 0, approved = 0 and the month&apos;s window count (so it never passes
+                  &ldquo;every window approved&rdquo;) — use &ldquo;Outlet in the visibility programme (1/0)&rdquo; to
+                  tell &ldquo;not applicable&rdquo; apart from &ldquo;not approved&rdquo;. Windows still waiting for review or still open
+                  read as not approved, and the compute screen asks you to accept that before exporting or crediting.
+                  If the tenant has no visibility set up, the value is missing and the rule below decides what
+                  happens. Example payout formula:{' '}
+                  <code className="rounded bg-white px-1">if(visApproved == 1 &amp;&amp; TOTAL &gt;= 4000, if(metro == &apos;Metro&apos;, 500, 250), 0)</code>
+                </p>
+              )}
             </div>
           </div>
         );

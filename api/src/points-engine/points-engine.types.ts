@@ -24,7 +24,11 @@ export interface RuleInput {
   ref: string;
   /** Achievement source: `OutletSalesRecord.kpiValues[kpiCode]`. Omit if `source` is set. */
   kpiCode?: string;
-  /** Alternate source, e.g. "target:CASES_SOLD" → `OutletTarget.targetValues["CASES_SOLD"]`. */
+  /**
+   * Alternate source, e.g. "target:CASES_SOLD" → `OutletTarget.targetValues["CASES_SOLD"]`. Kinds:
+   * `target:<kpi>` · `achievement:<kpi>` · `pct:<kpi>` · `segment:<field>` ·
+   * `visibility:approved | approvedWindows | windows | inScope` (number inputs — see EvalContext.visibility).
+   */
   source?: string;
   type: 'number' | 'enum';
   nullAs: NullPolicy;
@@ -95,6 +99,16 @@ export interface GateNode {
   id: string;
   when: Predicate;
   onFail: OnFail;
+  /**
+   * OPT-IN (owner-approved 2026-11-25): the plain reason shown on the row when this gate fails, e.g. "Target is 0",
+   * "NON ADHO below ₹400". Absent → today's behaviour exactly (no reason).
+   */
+  failReason?: string;
+  /**
+   * OPT-IN: what a failure does, overriding `onFail` — 'zero' = the rule pays 0 and the row carries `failReason`;
+   * 'skip' = the row is SKIPPED (flagged for review) with `failReason`. Absent → `onFail` decides, as today.
+   */
+  failAs?: 'zero' | 'skip';
 }
 
 /** L3 — restrict to a segment (program/category/outletType/metro) value set. */
@@ -206,6 +220,23 @@ export interface EvalContext {
     /** Free-text metro classification from the outlet master (e.g. "Metro"/"Non-Metro"); null when unset. */
     metro?: string | null;
   };
+  /**
+   * The outlet's VISIBILITY (POSM) result for the compute month — read by `source: "visibility:<key>"` inputs
+   * (owner decision 2026-11-25; POINTS-COMPUTE-ENGINE-DESIGN.md §3a). Loaded by the compute service ONLY when a
+   * rule declares a visibility input. Absent (undefined / a null key) = the tenant has no usable visibility data
+   * (module off / no programme scope) → the input's own nullAs applies. An outlet OUTSIDE the visibility scope gets
+   * real zeros (it has nothing to approve) — the compute trace says "not in visibility scope".
+   */
+  visibility?: {
+    /** Windows of the month whose capture is APPROVED (final status), or 1/0 for an AMOUNT_UPLOAD record. */
+    approvedWindows?: number | null;
+    /** 1 when approvedWindows ≥ 1, else 0 (numeric so gate/formula nodes can test it). */
+    approved?: number | null;
+    /** Windows of the month the OUTLET was in scope for (≤ the frequency's 1–4); 1 for AMOUNT_UPLOAD with a record. */
+    windows?: number | null;
+    /** 1 when the outlet is in the visibility programme for the month, else 0 ("not applicable" vs "not approved"). */
+    inScope?: number | null;
+  };
   /** Optional identifiers for trace/debug (NOT read by rule logic). */
   meta?: { outletCode?: string; period?: string };
 }
@@ -223,7 +254,9 @@ export interface TraceStep {
 
 /** The pure evaluator's outcome for one entity × period. */
 export type EvalOutcome =
-  | { status: 'OK'; points: number; trace: TraceStep[] } // points = whole, non-negative, rounded
+  // points = whole, non-negative, rounded. `reason` (opt-in) = why the rule paid 0: a failed gate's `failReason`, or
+  // the missing input(s) under nullAs 'skipRule' (e.g. "No ADHO target").
+  | { status: 'OK'; points: number; trace: TraceStep[]; reason?: string }
   | { status: 'SKIP'; reason: string; trace: TraceStep[] } // e.g. a `reject` input was null
   | { status: 'ERROR'; errors: string[]; trace: TraceStep[] }; // malformed rule reached runtime
 

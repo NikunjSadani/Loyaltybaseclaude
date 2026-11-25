@@ -51,6 +51,7 @@ function samplePreview(overrides: Partial<ComputePreview> = {}): ComputePreview 
     engineDisabled: false,
     directCreditEnabled: false,
     sourceKey: 'pe_test',
+    payoutKey: 'pp_test',
     ruleVersionsUsed: [
       { ruleId: 'rule_cases_q3', version: 7 },
       { ruleId: 'rule_vis', version: 2 },
@@ -261,6 +262,16 @@ describe('buildPreviewReportXlsx — full human review report', () => {
     expect(o1['Rule ID']).toBe('rule_cases_q3');
     expect(o1['Rule Version']).toBe(7);
     expect(String(o1['Reason / Explanation'])).toContain('1,300 pts');
+  });
+
+  it('an OK row that paid 0 for a stated reason shows "<reason> — <explanation>"', async () => {
+    const p = samplePreview();
+    p.rows.push({
+      outletCode: 'O9', kpiCode: 'ADHO', status: 'OK', awardType: 'POINTS', points: 0,
+      reason: 'No ADHO target', explanation: '0 pts',
+    });
+    const rows = readSheet(await buildPreviewReportXlsx(p), 'Preview Rows');
+    expect(rows.find((r) => r['Outlet Code'] === 'O9')!['Reason / Explanation']).toBe('No ADHO target — 0 pts');
   });
 
   it('renders a non-OK row with its reason and no points', async () => {

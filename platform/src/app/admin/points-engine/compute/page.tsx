@@ -113,9 +113,9 @@ const GROUP_STYLES: Record<
   },
 };
 
-/** APPLIES-TO D5: the backend SKIPs an (outlet, KPI) pair outside the KPI's scope with the reason
- *  "KPI not applicable to this outlet (KPI scope)" — the row itself shows that reason verbatim. */
-const isKpiScopeSkip = (r: ComputePreviewRow) => (r.reason ?? '').includes('(KPI scope)');
+/** APPLIES-TO D5: the backend SKIPs an (outlet, KPI) pair outside the KPI's scope and flags it `skipKind: 'KPI_SCOPE'`
+ *  (the row shows its reason verbatim). Structured flag only — a gate's failReason text may contain anything. */
+const isKpiScopeSkip = (r: ComputePreviewRow) => r.skipKind === 'KPI_SCOPE';
 
 /** ERROR / SKIP / NO_RULE non-OK groups rendered as a reasoned panel list. */
 function NonOkGroup({ status, rows }: { status: Exclude<PreviewRowStatus, 'OK'>; rows: ComputePreviewRow[] }) {
@@ -201,7 +201,10 @@ function OkGroup({ rows, engineDisabled }: { rows: ComputePreviewRow[]; engineDi
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.achievement)}</td>
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.target)}</td>
                 <td className="px-2 py-2.5 text-right font-semibold text-gray-900">{num(r.points)}</td>
-                <td className="px-4 py-2.5 text-xs text-gray-500">{r.explanation ?? '—'}</td>
+                <td className="px-4 py-2.5 text-xs text-gray-500">
+                  {r.reason && <span className="mr-1 font-semibold text-amber-700" data-testid="row-reason">{r.reason} —</span>}
+                  {r.explanation ?? '—'}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -252,7 +255,10 @@ function PayoutOkGroup({ rows }: { rows: ComputePreviewRow[] }) {
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.achievement)}</td>
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.target)}</td>
                 <td className="px-2 py-2.5 text-right font-semibold text-indigo-700">₹{num(r.payoutRupees)}</td>
-                <td className="px-4 py-2.5 text-xs text-gray-500">{r.explanation ?? '—'}</td>
+                <td className="px-4 py-2.5 text-xs text-gray-500">
+                  {r.reason && <span className="mr-1 font-semibold text-amber-700" data-testid="row-reason">{r.reason} —</span>}
+                  {r.explanation ?? '—'}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -312,6 +318,8 @@ export default function PointsComputePage() {
   // The previewed run's content hash — passed back as `expectedKey` on commit so a run that changed since
   // the preview (achievements/targets/rules edited) is rejected with a 409 instead of crediting stale data.
   const [appliedSourceKey, setAppliedSourceKey] = useState<string | null>(null);
+  // §3a: the admin's explicit "I accept N outlets will read visibility = not approved" for THIS preview.
+  const [visAccepted, setVisAccepted] = useState(false);
 
   // EXPORT
   // One shared button state per file (useDownloadAction): "Preparing…" while in flight; a big file is
@@ -343,6 +351,7 @@ export default function PointsComputePage() {
     setPreview(null);
     setCommitResult(null);
     setCommitError(null);
+    setVisAccepted(false);
     resetExports();
 
     const filter: AppliedFilter = {
@@ -365,7 +374,10 @@ export default function PointsComputePage() {
   const handleExport = async () => {
     if (!applied || fileAction.blocked) return;
     setExportMsg(null);
-    showOutcome(await fileAction.run(() => downloadExport(applied)), 'Credit-upload file downloaded.');
+    showOutcome(
+      await fileAction.run(() => downloadExport({ ...applied, ...visAccept, expectedKey: preview?.sourceKey ?? null })),
+      'Credit-upload file downloaded.',
+    );
   };
 
   const handleReport = async () => {
@@ -377,7 +389,10 @@ export default function PointsComputePage() {
   const handlePayoutReport = async () => {
     if (!applied || payoutAction.blocked) return;
     setExportMsg(null);
-    showOutcome(await payoutAction.run(() => downloadPayoutReport(applied)), 'Payout report downloaded.');
+    showOutcome(
+      await payoutAction.run(() => downloadPayoutReport({ ...applied, ...visAccept, expectedKey: preview?.payoutKey ?? null })),
+      'Payout report downloaded.',
+    );
   };
 
   const handleCommit = async () => {
@@ -391,6 +406,7 @@ export default function PointsComputePage() {
       program: applied.program,
       kpiCode: applied.kpiCode,
       expectedKey: appliedSourceKey,
+      ...visAccept,
     });
     if (res.success) {
       setCommitResult(res.data);
@@ -406,6 +422,7 @@ export default function PointsComputePage() {
     setPreview(null);
     setApplied(null);
     setAppliedSourceKey(null);
+    setVisAccepted(false);
     setPreviewError(null);
     resetExports();
     setCommitResult(null);
@@ -413,6 +430,13 @@ export default function PointsComputePage() {
   };
 
   // ─── Derived ──────────────────────────────────────────────────────────────
+  // §3a: outlets whose visibility is still pending (waiting for review / window open). Money actions (credit file,
+  // payout report, direct credit) need the explicit acceptance; the server refuses them otherwise.
+  const visPending = preview?.visibility?.available ? preview.visibility.outletsPending : 0;
+  const visBlocked = visPending > 0 && !visAccepted;
+  // The acceptance is bound to the EXACT pending outlet set (the server recomputes the key and refuses a different set).
+  const visAccept =
+    visPending > 0 && visAccepted && preview?.visibility ? { acceptVisibilityPendingKey: preview.visibility.pendingKey } : {};
   const errorRows = preview?.rows.filter((r) => r.status === 'ERROR') ?? [];
   const skipRows = preview?.rows.filter((r) => r.status === 'SKIP') ?? [];
   const noRuleRows = preview?.rows.filter((r) => r.status === 'NO_RULE') ?? [];
@@ -578,6 +602,98 @@ export default function PointsComputePage() {
             </div>
           )}
 
+          {/* Visibility (POSM) inputs — only when a rule read visibility this run (design §3a). */}
+          {preview.visibility && (
+            preview.visibility.available ? (
+              <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-600" data-testid="visibility-summary">
+                <span className="font-semibold text-gray-800">Visibility used by the rules:</span>{' '}
+                {preview.visibility.outletsApproved.toLocaleString('en-IN')} outlet
+                {preview.visibility.outletsApproved === 1 ? '' : 's'} with approved visibility in{' '}
+                {monthLabel(preview.visibility.month)}
+                {preview.visibility.mode === 'AMOUNT_UPLOAD'
+                  ? ' (from the uploaded visibility status)'
+                  : ` · ${preview.visibility.windows} window${preview.visibility.windows === 1 ? '' : 's'} this month`}
+                . Each row's explanation shows that outlet's visibility.
+                {(preview.visibility.countedOutsideDatedScope > 0 ||
+                  preview.visibility.excluded.notInProgramme > 0 ||
+                  preview.visibility.excluded.notLive > 0 ||
+                  preview.visibility.excluded.olderFrequency > 0) && (
+                  <ul className="mt-1 list-disc pl-5" data-testid="visibility-exceptions">
+                    {preview.visibility.countedOutsideDatedScope > 0 && (
+                      <li>
+                        {preview.visibility.countedOutsideDatedScope} approved capture(s) counted for outlets added or
+                        KYC-approved after their window (the approval is proof of the visit).
+                      </li>
+                    )}
+                    {preview.visibility.excluded.notInProgramme > 0 && (
+                      <li>
+                        {preview.visibility.excluded.notInProgramme} approved capture(s) NOT counted — the outlet&apos;s type /
+                        programme is not in the visibility programme.
+                      </li>
+                    )}
+                    {preview.visibility.excluded.notLive > 0 && (
+                      <li>
+                        {preview.visibility.excluded.notLive} approved capture(s) NOT counted — the outlet is removed,
+                        deactivated, not KYC-approved, parked or not interested.
+                      </li>
+                    )}
+                    {preview.visibility.excluded.olderFrequency > 0 && (
+                      <li>
+                        {preview.visibility.excluded.olderFrequency} approved capture(s) NOT counted — taken under an older
+                        capture frequency (a window this month no longer has).
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4" data-testid="visibility-unavailable">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+                <div>
+                  <p className="text-sm font-semibold text-amber-800">A rule reads visibility, but there is no visibility result</p>
+                  <p className="mt-0.5 text-xs text-amber-700">{preview.visibility.unavailableReason}</p>
+                </div>
+              </div>
+            )
+          )}
+
+          {visPending > 0 && preview.visibility && (
+            <div className="rounded-xl border border-amber-300 bg-amber-50 p-4" data-testid="visibility-pending">
+              <p className="text-sm font-semibold text-amber-800">
+                {visPending.toLocaleString('en-IN')} outlet{visPending === 1 ? '' : 's'} will read visibility = NOT approved for
+                part of {monthLabel(preview.visibility.month)}
+              </p>
+              <p className="mt-0.5 text-xs text-amber-700">
+                {preview.visibility.outletsWaitingReview.toLocaleString('en-IN')} with a capture still waiting for review ·{' '}
+                {preview.visibility.outletsOpenWindow.toLocaleString('en-IN')} with a window still open (
+                {preview.visibility.openWindowsInMonth} of {preview.visibility.windows} window
+                {preview.visibility.windows === 1 ? '' : 's'} of the month still open). If you go ahead now, they are paid as
+                not approved. Wait for the reviews / windows to finish, or accept below.
+              </p>
+              {(() => {
+                const codes = [...new Set([...preview.visibility.waitingOutletCodes, ...preview.visibility.openOutletCodes])].sort();
+                const shown = codes.slice(0, 20);
+                return (
+                  <p className="mt-1 text-[11px] text-amber-700" data-testid="visibility-pending-codes">
+                    Outlets: {shown.join(', ')}
+                    {visPending > shown.length ? ` (+${(visPending - shown.length).toLocaleString('en-IN')} more — in the review report)` : ''}
+                  </p>
+                );
+              })()}
+              <label className="mt-2 flex items-start gap-2 text-xs font-semibold text-amber-900">
+                <input
+                  type="checkbox"
+                  checked={visAccepted}
+                  onChange={(e) => setVisAccepted(e.target.checked)}
+                  className="mt-0.5 accent-amber-600"
+                  data-testid="visibility-accept"
+                />
+                I accept {visPending.toLocaleString('en-IN')} outlet{visPending === 1 ? '' : 's'} will read visibility = not
+                approved because review is pending / the window is open. (Recorded in the audit log.)
+              </label>
+            </div>
+          )}
+
           {/* Summary cards */}
           {(() => {
             const showPayoutCard = hasPayoutRows || preview.totalPayoutRupees > 0;
@@ -666,7 +782,7 @@ export default function PointsComputePage() {
               <div className="flex flex-wrap gap-3">
                 <button
                   onClick={() => void handleExport()}
-                  disabled={fileAction.blocked || preview.engineDisabled || !hasPointsOkRows || filtersChanged}
+                  disabled={fileAction.blocked || preview.engineDisabled || !hasPointsOkRows || filtersChanged || visBlocked}
                   title={
                     preview.engineDisabled
                       ? 'Unavailable while the engine is disabled'
@@ -690,7 +806,7 @@ export default function PointsComputePage() {
                 {hasPayoutRows && (
                   <button
                     onClick={() => void handlePayoutReport()}
-                    disabled={payoutAction.blocked || filtersChanged}
+                    disabled={payoutAction.blocked || filtersChanged || visBlocked}
                     className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-40"
                   >
                     {payoutAction.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
@@ -727,7 +843,7 @@ export default function PointsComputePage() {
                 </div>
                 <button
                   onClick={() => void handleCommit()}
-                  disabled={committing || filtersChanged}
+                  disabled={committing || filtersChanged || visBlocked}
                   className="inline-flex items-center gap-2 rounded-xl border-2 border-[var(--brand-primary)] px-4 py-2.5 text-sm font-semibold text-[var(--brand-primary)] transition hover:bg-[var(--brand-primary)]/5 disabled:opacity-40"
                 >
                   {committing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}

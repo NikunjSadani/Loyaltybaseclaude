@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException } from '@nes
 import * as XLSX from 'xlsx';
 import { aoaToSheetSafe, buildXlsx } from '../../../common/xlsx';
 import type { JwtPayload } from '../../../common/decorators/current-user.decorator';
+import { ExportRefusedException } from '../../export-kinds';
 import { PointsComputeService } from '../../../points-engine/points-compute.service';
 import type { ComputePreview, ComputePreviewRow } from '../../../points-engine/points-compute.types';
 import { TenantSettingsService } from '../../../tenant/tenant-settings.service';
@@ -345,6 +346,7 @@ function preview(n: number, over: Partial<ComputePreview> = {}): ComputePreview 
     directCreditEnabled: false,
     ruleVersionsUsed: [],
     sourceKey: 'k',
+    payoutKey: 'pk',
     ...over,
   };
 }
@@ -420,6 +422,46 @@ describe('points-* export kinds', () => {
     });
     // Exactly ONE record per built file (the route's guard does not record the 202 that queued it).
     expect(ok.prisma.auditLog.create).toHaveBeenCalledTimes(1);
+  }, XLSX_TIMEOUT);
+
+  it('§3a pending visibility: credit file + payout report refused until the exact outlet set is accepted (then audited with the request id); review report never gated', async () => {
+    const pending = preview(10, {
+      visibility: {
+        month: '2026-07', mode: 'PHOTO_APPROVAL', available: true, windows: 1, openWindowsInMonth: 0,
+        outletsApproved: 5, outletsWithData: 8, outletsWaitingReview: 3, outletsOpenWindow: 0, outletsPending: 3,
+        countedOutsideDatedScope: 0, excluded: { olderFrequency: 0, notInProgramme: 0, notLive: 0 },
+        waitingOutletCodes: ['A', 'B', 'C'], openOutletCodes: [], pendingKey: 'vp_abc',
+      },
+    });
+    const s = setup(pending);
+    await expect(renderKind(POINTS_CREDIT_UPLOAD_KIND, s.ctx, params())).rejects.toThrow(/3 outlets will read visibility = NOT approved/);
+    await expect(
+      renderKind(POINTS_PAYOUT_REPORT_KIND, s.ctx, params({ period: '2026-07', acceptVisibilityPendingKey: 'vp_old' })),
+    ).rejects.toBeInstanceOf(ExportRefusedException);
+    await expect(renderKind(POINTS_PREVIEW_REPORT_KIND, s.ctx, params())).resolves.toBeDefined();
+
+    const ok = setup(pending);
+    await renderKind(POINTS_PAYOUT_REPORT_KIND, { ...ok.ctx, requestId: 'exp-9' }, params({ period: '2026-07', acceptVisibilityPendingKey: 'vp_abc' }));
+    expect(ok.prisma.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'APPROVE',
+        entityType: 'POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED',
+        entityId: 'exp-9',
+        metadata: expect.objectContaining({ outletsPending: 3, route: 'payoutReport', exportRequestId: 'exp-9', waitingOutletCodes: ['A', 'B', 'C'] }),
+      }),
+    });
+  }, XLSX_TIMEOUT);
+
+  it('expectedKey: a credit file / payout report built from a run that changed since review is refused (409)', async () => {
+    const s = setup(preview(10, { sourceKey: 'pe_new', payoutKey: 'pp_new' }));
+    await expect(renderKind(POINTS_CREDIT_UPLOAD_KIND, s.ctx, params({ period: '2026-07', expectedKey: 'pe_old' }))).rejects.toThrow(
+      /computation changed since you last previewed it/,
+    );
+    await expect(renderKind(POINTS_PAYOUT_REPORT_KIND, s.ctx, params({ period: '2026-07', expectedKey: 'pp_old' }))).rejects.toBeInstanceOf(
+      ExportRefusedException,
+    );
+    await expect(renderKind(POINTS_PAYOUT_REPORT_KIND, s.ctx, params({ period: '2026-07', expectedKey: 'pp_new' }))).resolves.toBeDefined();
+    await expect(renderKind(POINTS_CREDIT_UPLOAD_KIND, s.ctx, params({ period: '2026-07', expectedKey: 'pe_new' }))).resolves.toBeDefined();
   }, XLSX_TIMEOUT);
 
   it('always heavy (whole-tenant compute in the worker); access, validation, names', () => {

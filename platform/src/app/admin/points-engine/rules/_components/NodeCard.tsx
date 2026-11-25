@@ -18,7 +18,7 @@ import type {
   RuleInput,
 } from '@/lib/points-engine/types';
 import { NODE_META } from '@/lib/points-engine/types';
-import { Field, SelectField, NumberField, TextField, OperandPicker, varOptions } from './kit';
+import { Field, SelectField, NumberField, TextField, OperandPicker, varOptions, GATE_FAIL_REASON_MAX } from './kit';
 import { PredicateBuilder } from './PredicateBuilder';
 import { SlabGrid } from './SlabGrid';
 
@@ -238,8 +238,57 @@ function NodeEditor({
             <PredicateBuilder value={node.when} vars={vars} disabled={disabled} onChange={(when) => onChange({ ...node, when })} />
           </Field>
           <Field label="If the check fails">
-            <SelectField value={node.onFail} disabled={disabled} onChange={(onFail) => onChange({ ...node, onFail })} options={onFailOptions(node.onFail)} />
+            <SelectField<string>
+              // failAs (opt-in) decides the failure when set — the select always shows the EFFECTIVE choice.
+              value={node.failAs === 'skip' ? 'skip' : node.failAs === 'zero' ? 'zero' : node.onFail}
+              disabled={disabled}
+              onChange={(v) => {
+                if (v === 'skip') onChange({ ...node, onFail: 'zero', failAs: 'skip' });
+                else if (v === 'zero') {
+                  // Pay 0: an explicit failAs stays explicit ('zero') — never silently dropped.
+                  onChange({ ...node, onFail: 'zero', ...(node.failAs !== undefined ? { failAs: 'zero' as const } : {}) });
+                } else onChange({ ...node, onFail: v as OnFail }); // a legacy soft value (offered only without failAs)
+              }}
+              options={[
+                // With an explicit failAs only the hard outcomes are offered (a soft one would contradict it).
+                ...(node.failAs !== undefined
+                  ? [{ value: 'zero', label: 'Pay 0 points if this fails (withhold)' }]
+                  : onFailOptions(node.onFail)),
+                { value: 'skip', label: 'Skip the row and flag it for review' },
+              ]}
+            />
           </Field>
+          {(() => {
+            const soft = node.failAs === undefined && node.onFail !== 'zero';
+            const len = node.failReason?.length ?? 0;
+            return (
+              <Field
+                label="Reason shown when it fails (optional)"
+                hint={
+                  soft
+                    ? 'Only shown when the gate pays 0 or skips the row — switch “If the check fails” to Pay 0 to use a reason.'
+                    : `Shown on the row, the simulator and the reports — e.g. “Target is 0”, “NON ADHO below ₹400”. ${len}/${GATE_FAIL_REASON_MAX}`
+                }
+              >
+                <TextField
+                  value={node.failReason ?? ''}
+                  disabled={disabled || (soft && !node.failReason)}
+                  placeholder="e.g. Target is 0"
+                  onChange={(v) => {
+                    const { failReason: _old, ...rest } = node;
+                    void _old;
+                    // Never silently truncated — an over-long reason is kept and flagged (draftIssues blocks it).
+                    onChange(v.trim() === '' ? rest : { ...rest, failReason: v });
+                  }}
+                />
+              </Field>
+            );
+          })()}
+          {(node.failReason?.length ?? 0) > GATE_FAIL_REASON_MAX && (
+            <p className="text-[11px] font-semibold text-red-600" data-testid="fail-reason-too-long">
+              The reason is {node.failReason!.length} characters — shorten it to {GATE_FAIL_REASON_MAX} to save.
+            </p>
+          )}
         </div>
       );
 

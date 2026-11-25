@@ -56,6 +56,7 @@ export function simulate(body: {
     achievements?: Record<string, number | null>;
     targets?: Record<string, number | null>;
     segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
+    visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null };
   };
 }): Promise<ApiResponse<SimulateResult>> {
   return api.post<SimulateResult>(`${COMPUTE}/simulate`, body);
@@ -65,15 +66,33 @@ export function simulate(body: {
 export function previewCompute(body: { period: string; program?: string | null; kpiCode?: string | null }): Promise<ApiResponse<ComputePreview>> {
   return api.post<ComputePreview>(`${COMPUTE}/preview`, body);
 }
-export function commitCompute(body: { period: string; program?: string | null; kpiCode?: string | null; expectedKey?: string | null }): Promise<ApiResponse<ComputeCommitResult>> {
+export function commitCompute(body: {
+  period: string;
+  program?: string | null;
+  kpiCode?: string | null;
+  expectedKey?: string | null;
+  /** §3a: the pendingKey of the visibility-pending outlet set the admin accepted (server refuses a different set). */
+  acceptVisibilityPendingKey?: string | null;
+}): Promise<ApiResponse<ComputeCommitResult>> {
   return api.post<ComputeCommitResult>(`${COMPUTE}/commit`, body);
 }
 
 // ── Binary downloads (export credit-upload xlsx / review report) ──────────────────────
-function computeQs(q: { period: string; program?: string | null; kpiCode?: string | null }): string {
+type ComputeQ = {
+  period: string;
+  program?: string | null;
+  kpiCode?: string | null;
+  /** §3a: the accepted pending-visibility outlet set (money files only). */
+  acceptVisibilityPendingKey?: string | null;
+  /** The run key the operator reviewed (sourceKey for the credit file, payoutKey for the payout report). */
+  expectedKey?: string | null;
+};
+function computeQs(q: ComputeQ): string {
   const params = new URLSearchParams({ period: q.period });
   if (q.program) params.set('program', q.program);
   if (q.kpiCode) params.set('kpiCode', q.kpiCode);
+  if (q.acceptVisibilityPendingKey) params.set('acceptVisibilityPendingKey', q.acceptVisibilityPendingKey);
+  if (q.expectedKey) params.set('expectedKey', q.expectedKey);
   return params.toString();
 }
 /**
@@ -83,11 +102,11 @@ function computeQs(q: { period: string; program?: string | null; kpiCode?: strin
 function download(url: string, filename: string): Promise<DownloadOutcome> {
   return downloadOrQueue(url, { fallbackFileName: filename, init: { credentials: 'same-origin' } });
 }
-export const downloadExport = (q: { period: string; program?: string | null; kpiCode?: string | null }) =>
+export const downloadExport = (q: ComputeQ) =>
   download(`${COMPUTE}/export?${computeQs(q)}`, `points-credit-upload-${q.period}.xlsx`);
 export const downloadPreviewReport = (q: { period: string; program?: string | null; kpiCode?: string | null }) =>
   download(`${COMPUTE}/preview-report?${computeQs(q)}`, `points-preview-${q.period}.xlsx`);
-export const downloadPayoutReport = (q: { period: string; program?: string | null; kpiCode?: string | null }) =>
+export const downloadPayoutReport = (q: ComputeQ) =>
   download(`${COMPUTE}/payout-report?${computeQs(q)}`, `points-payout-report-${q.period}.xlsx`);
 
 // ── Settings ────────────────────────────────────────────────────────────────────────

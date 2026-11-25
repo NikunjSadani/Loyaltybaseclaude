@@ -53,6 +53,21 @@ const SLAB_APPLY: ReadonlySet<string> = new Set(['marginal', 'whole']);
 const FORMULA_OUTPUTS: ReadonlySet<string> = new Set(['add', 'multiply', 'set']);
 const ROUNDING_MODES: ReadonlySet<string> = new Set(['half_up', 'half_even', 'floor', 'ceil']);
 
+/**
+ * The `visibility:<key>` input sources (owner decision 2026-11-25, design §3a) — the outlet's visibility (POSM)
+ * result for the compute month. All NUMBER inputs:
+ *   approved        → 1 if ≥ 1 window of the month is APPROVED, else 0;
+ *   approvedWindows → how many windows of the month are APPROVED;
+ *   windows         → how many windows of the month the outlet was in scope for (for "every window" rules);
+ *   inScope         → 1 when the outlet is in the visibility programme for the month, else 0.
+ */
+export const VISIBILITY_SOURCE_KEYS: ReadonlySet<string> = new Set(['approved', 'approvedWindows', 'windows', 'inScope']);
+
+/** True when an input reads the visibility result (the compute service loads visibility data only then). */
+export function isVisibilityInput(input: { source?: string | null } | null | undefined): boolean {
+  return typeof input?.source === 'string' && input.source.startsWith('visibility:');
+}
+
 /** Whitelisted formula functions → allowed arity [min,max]. Nothing else may be called. */
 const FORMULA_FUNCS: Record<string, { min: number; max: number }> = {
   min: { min: 1, max: Infinity },
@@ -112,7 +127,30 @@ type BoundValues = Record<string, number | string>;
 type BindResult =
   | { kind: 'ok'; values: BoundValues }
   | { kind: 'skip'; reason: string } //      reject → EvalOutcome SKIP
-  | { kind: 'ruleZero'; reason: string }; // skipRule → EvalOutcome OK / 0
+  | { kind: 'ruleZero'; reason: string; plain: string }; // skipRule → EvalOutcome OK / 0 (+ plain row reason)
+
+/** Plain words for a missing input ("no ADHO target") — the reason on a row a skipRule input zeroed. */
+function absentLabel(input: RuleInput): string {
+  if (input.kpiCode) return `no ${input.kpiCode} achievement`;
+  const src = input.source ?? '';
+  const idx = src.indexOf(':');
+  const kind = idx >= 0 ? src.slice(0, idx) : src;
+  const key = idx >= 0 ? src.slice(idx + 1) : '';
+  switch (kind) {
+    case 'target':
+      return `no ${key} target`;
+    case 'achievement':
+      return `no ${key} achievement`;
+    case 'pct':
+      return `no ${key} target or achievement (cannot work out % of target)`;
+    case 'segment':
+      return `no ${key} on the outlet`;
+    case 'visibility':
+      return 'no visibility result';
+    default:
+      return `no value for ${input.ref}`;
+  }
+}
 
 function sourceLabel(input: RuleInput): string {
   if (input.kpiCode) return `kpi:${input.kpiCode}`;
@@ -142,6 +180,10 @@ function resolveRaw(input: RuleInput, ctx: EvalContext): number | string | null 
       const a = ctx.achievements ? ctx.achievements[key] : undefined;
       const t = ctx.targets ? ctx.targets[key] : undefined;
       v = a == null || t == null || t <= 0 ? undefined : (a / t) * 100;
+    } else if (kind === 'visibility') {
+      // The outlet's visibility (POSM) result for the period month (§3a). ctx.visibility is absent when the
+      // tenant has no usable visibility data → the input's nullAs applies (never a silent 0).
+      v = ctx.visibility && VISIBILITY_SOURCE_KEYS.has(key) ? (ctx.visibility as Record<string, unknown>)[key] : undefined;
     } else v = undefined; // unknown source kind → absent (validateRule flags the config)
     if (v === undefined || v === null) return null;
     if (typeof v === 'number' || typeof v === 'string') return v;
@@ -161,6 +203,7 @@ function bindInputs(inputs: RuleInput[], ctx: EvalContext): BindResult {
   const values: BoundValues = {};
   const rejects: string[] = [];
   const skips: string[] = [];
+  const skipPlain: string[] = [];
 
   for (const inp of inputs) {
     const raw = resolveRaw(inp, ctx);
@@ -168,7 +211,10 @@ function bindInputs(inputs: RuleInput[], ctx: EvalContext): BindResult {
 
     if (absent) {
       if (inp.nullAs === 'reject') rejects.push(`${inp.ref} (${sourceLabel(inp)})`);
-      else if (inp.nullAs === 'skipRule') skips.push(`${inp.ref} (${sourceLabel(inp)})`);
+      else if (inp.nullAs === 'skipRule') {
+        skips.push(`${inp.ref} (${sourceLabel(inp)})`);
+        skipPlain.push(absentLabel(inp));
+      }
       else values[inp.ref] = inp.type === 'enum' ? '' : 0; // 'zero'
       continue;
     }
@@ -195,7 +241,12 @@ function bindInputs(inputs: RuleInput[], ctx: EvalContext): BindResult {
     return { kind: 'skip', reason: `Missing/invalid input(s): ${rejects.join('; ')}` };
   }
   if (skips.length > 0) {
-    return { kind: 'ruleZero', reason: `Input(s) absent (skipRule → 0 points): ${skips.join('; ')}` };
+    const plain = [...new Set(skipPlain)].join('; ');
+    return {
+      kind: 'ruleZero',
+      reason: `Input(s) absent (skipRule → 0 points): ${skips.join('; ')}`,
+      plain: plain.charAt(0).toUpperCase() + plain.slice(1),
+    };
   }
   return { kind: 'ok', values };
 }
@@ -838,8 +889,8 @@ export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutc
     const bind = bindInputs(rule.inputs ?? [], ctx);
     if (bind.kind === 'skip') return { status: 'SKIP', reason: bind.reason, trace };
     if (bind.kind === 'ruleZero') {
-      // skipRule: the rule contributes 0 points — the row is NOT an error.
-      return { status: 'OK', points: roundNonNeg(0, rule.rounding), trace };
+      // skipRule: the rule contributes 0 points — the row is NOT an error, but it says WHY ("No ADHO target").
+      return { status: 'OK', points: roundNonNeg(0, rule.rounding), trace, reason: bind.plain };
     }
     const values = bind.values;
     const pipeline = rule.pipeline ?? [];
@@ -867,11 +918,19 @@ export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutc
         continue;
       }
 
-      // Failed → apply onFail.
-      if (node.onFail === 'zero') {
+      // Failed → apply the opt-in failAs (gate only), else onFail exactly as before.
+      const failReason = node.type === 'gate' && typeof node.failReason === 'string' && node.failReason.trim() ? node.failReason.trim() : undefined;
+      const failAs = node.type === 'gate' ? node.failAs : undefined;
+      if (failAs === 'skip') {
+        trace.push(step(node, points, points, `${node.type} FAILED (${desc}) → skip row${failReason ? `: ${failReason}` : ''}`));
+        return { status: 'SKIP', reason: failReason ?? `gate "${node.id}" failed (${desc})`, trace };
+      }
+      if (failAs === 'zero' || node.onFail === 'zero') {
         // Hard gate: short-circuit the WHOLE rule to 0 — before floor/cap, so a floor can't revive it.
-        trace.push(step(node, points, 0, `${node.type} FAILED (${desc}) → onFail 'zero', rule → 0`));
-        return { status: 'OK', points: roundNonNeg(0, rule.rounding), trace };
+        trace.push(
+          step(node, points, 0, `${node.type} FAILED (${desc}) → ${failAs === 'zero' ? "failAs 'zero'" : "onFail 'zero'"}, rule → 0${failReason ? `: ${failReason}` : ''}`),
+        );
+        return { status: 'OK', points: roundNonNeg(0, rule.rounding), trace, ...(failReason ? { reason: failReason } : {}) };
       }
       // skipNode / passthrough → no points change, continue.
       trace.push(step(node, points, points, `${node.type} failed (${desc}) → onFail '${node.onFail}', continue`));
@@ -1089,6 +1148,23 @@ function validateSlabBands(node: SlabNode, where: string, errs: string[]): void 
   }
 }
 
+/**
+ * NON-blocking authoring warnings (valid configs that are easy to get wrong). Surfaced by the simulator + builder;
+ * never stops a save. Today: a rule comparing approved visibility windows with the month's windows that does not read
+ * `visibility:inScope` — an outlet OUTSIDE the visibility programme reads approvedWindows 0 / windows = the month's
+ * count, so it never passes "every window approved", but the rule cannot tell "not applicable" from "not approved".
+ */
+export function ruleWarnings(rule: PointsRuleConfig): string[] {
+  const warns: string[] = [];
+  const srcs = new Set((Array.isArray(rule?.inputs) ? rule.inputs : []).map((i) => i?.source).filter((x): x is string => typeof x === 'string'));
+  if (srcs.has('visibility:approvedWindows') && srcs.has('visibility:windows') && !srcs.has('visibility:inScope')) {
+    warns.push(
+      'This rule compares approved visibility windows with the month’s windows but does not read “Outlet in the visibility programme (1/0)”. Outlets outside the programme never pass “every window approved” (they read 0 approved) — add the inScope input if they should be treated differently.',
+    );
+  }
+  return warns;
+}
+
 export function validateRule(rule: PointsRuleConfig): string[] {
   const errs: string[] = [];
   if (!isObj(rule)) return ['rule must be an object.'];
@@ -1119,6 +1195,13 @@ export function validateRule(rule: PointsRuleConfig): string[] {
       const hasKpi = typeof inp.kpiCode === 'string' && inp.kpiCode !== '';
       const hasSrc = typeof inp.source === 'string' && inp.source !== '';
       if (hasKpi === hasSrc) errs.push(`${w}: set exactly one of kpiCode or source.`);
+      if (hasSrc && isVisibilityInput(inp)) {
+        const key = (inp.source as string).slice('visibility:'.length);
+        if (!VISIBILITY_SOURCE_KEYS.has(key)) {
+          errs.push(`${w}: unknown visibility source "${inp.source}" — use one of ${[...VISIBILITY_SOURCE_KEYS].map((k) => `visibility:${k}`).join(', ')}.`);
+        }
+        if (inp.type !== 'number') errs.push(`${w}: a visibility input must be type 'number'.`);
+      }
       if (inp.type === 'enum' && (!Array.isArray(inp.values) || inp.values.length === 0)) {
         errs.push(`${w}: an enum input must list non-empty 'values'.`);
       }
@@ -1227,6 +1310,19 @@ export function validateRule(rule: PointsRuleConfig): string[] {
       case 'gate':
         validatePredicate(n.when, declared, `${w}.when`, errs);
         if (!ON_FAIL.has(n.onFail)) errs.push(`${w}: onFail must be one of ${[...ON_FAIL].join(', ')}.`);
+        if (n.failReason !== undefined && (typeof n.failReason !== 'string' || n.failReason.length > 200)) {
+          errs.push(`${w}: failReason must be text of at most 200 characters.`);
+        }
+        if (n.failAs !== undefined && n.failAs !== 'zero' && n.failAs !== 'skip') {
+          errs.push(`${w}: failAs must be 'zero' or 'skip'.`);
+        }
+        // A reason is only ever SHOWN when the failure ends the rule (pay 0 / skip). On a soft gate (onFail skipNode /
+        // passthrough, no failAs) it would be silently dropped — refuse it instead.
+        if (typeof n.failReason === 'string' && n.failReason.trim() !== '' && n.failAs === undefined && n.onFail !== 'zero') {
+          errs.push(
+            `${w}: failReason is only shown when the gate pays 0 or skips the row — set onFail 'zero' or failAs 'zero' / 'skip', or remove the reason.`,
+          );
+        }
         break;
       case 'segmentFilter':
         if (typeof n.field !== 'string' || n.field === '') errs.push(`${w}: field must be a non-empty string.`);

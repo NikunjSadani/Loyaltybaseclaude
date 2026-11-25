@@ -12,7 +12,7 @@ export type NullPolicy = 'reject' | 'zero' | 'skipRule';
 export interface RuleInput {
   ref: string;
   kpiCode?: string;
-  source?: string; // 'target:<kpi>' | 'achievement:<kpi>' | 'pct:<kpi>' | 'segment:<field>'
+  source?: string; // 'target:<kpi>' | 'achievement:<kpi>' | 'pct:<kpi>' | 'segment:<field>' | 'visibility:<key>'
   type: 'number' | 'enum';
   nullAs: NullPolicy;
   values?: string[];
@@ -45,7 +45,16 @@ export interface SlabNode {
   apply: 'marginal' | 'whole';
   bands: SlabBand[];
 }
-export interface GateNode { type: 'gate'; id: string; when: Predicate; onFail: OnFail }
+export interface GateNode {
+  type: 'gate';
+  id: string;
+  when: Predicate;
+  onFail: OnFail;
+  /** Opt-in: the reason shown on the row when the gate fails (e.g. "Target is 0"). */
+  failReason?: string;
+  /** Opt-in: 'zero' = pay 0 with the reason; 'skip' = skip + flag the row. Absent = onFail decides (today). */
+  failAs?: 'zero' | 'skip';
+}
 export interface SegmentFilterNode { type: 'segmentFilter'; id: string; field: string; allow: string[]; onFail: OnFail }
 export interface MilestoneNode { type: 'milestone'; id: string; when: Predicate; flat: number }
 export interface FloorNode { type: 'floor'; id: string; min: number }
@@ -108,7 +117,17 @@ export interface EvalContext {
   achievements: Record<string, number | null>;
   targets: Record<string, number | null>;
   segment: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
+  /** Test values for `visibility:*` inputs (a missing key = absent → the input's null policy). */
+  visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null; inScope?: number | null };
 }
+
+/** The `visibility:<key>` input sources (design §3a) — keys + the plain labels the builder shows. */
+export const VISIBILITY_SOURCES: ReadonlyArray<{ key: 'approved' | 'approvedWindows' | 'windows' | 'inScope'; label: string; hint: string }> = [
+  { key: 'approved', label: 'Visibility approved this month (1/0)', hint: '1 when at least one visibility window of the month is approved, else 0.' },
+  { key: 'approvedWindows', label: 'Approved visibility windows this month', hint: 'How many of the month’s visibility windows are approved.' },
+  { key: 'windows', label: 'Visibility windows in the month', hint: 'How many of the month’s windows this outlet was in the visibility programme for (for “every window approved” rules). An outlet outside the programme reads the month’s window count, with in programme = 0 and approved = 0.' },
+  { key: 'inScope', label: 'Outlet in the visibility programme (1/0)', hint: '1 when visibility applies to this outlet this month, 0 when it does not (e.g. a wholesaler — it then reads approved 0 and the month’s window count) — tells “not applicable” apart from “not approved”.' },
+];
 export interface TraceStep {
   nodeId: string;
   type: NodeType;
@@ -118,7 +137,7 @@ export interface TraceStep {
   pointsAfter: number;
 }
 export type EvalOutcome =
-  | { status: 'OK'; points: number; trace: TraceStep[] }
+  | { status: 'OK'; points: number; trace: TraceStep[]; reason?: string }
   | { status: 'SKIP'; reason: string; trace: TraceStep[] }
   | { status: 'ERROR'; errors: string[]; trace: TraceStep[] };
 
@@ -126,6 +145,10 @@ export interface SimulateResult {
   valid: boolean;
   errors: string[];
   outcome?: EvalOutcome;
+  /** The test visibility values the rule read (one per visibility input; null = blank → null policy). */
+  visibilityUsed?: Array<{ ref: string; source: string; value: number | null }>;
+  /** Non-blocking authoring warnings from the backend. */
+  warnings?: string[];
 }
 
 // ── Compute preview + commit (Waves 1–2) ─────────────────────────────────────────
@@ -148,7 +171,21 @@ export interface ComputePreviewRow {
   achievement?: number | null;
   target?: number | null;
   reason?: string;
+  /** Structured skip category — 'KPI_SCOPE' = outside the KPI's scope (never match the reason text). */
+  skipKind?: 'KPI_SCOPE';
   explanation?: string;
+  /** The outlet's visibility values the rule read (only when the rule has a visibility input). */
+  visibility?: {
+    approvedWindows: number;
+    approved: 0 | 1;
+    windows: number;
+    inScope: 0 | 1;
+    scope: 'IN_SCOPE' | 'NOT_IN_SCOPE' | 'NO_RECORD';
+    waitingWindows: number;
+    openWindows: number;
+    excludedApprovals: { olderFrequency: number; notInProgramme: number; notLive: number };
+    note: string;
+  };
 }
 export interface ComputePreview {
   clientId: string;
@@ -165,6 +202,33 @@ export interface ComputePreview {
   ruleVersionsUsed: Array<{ ruleId: string; version: number }>;
   /** Content hash of this run — pass back as `expectedKey` on commit to guard the review→commit TOCTOU. */
   sourceKey: string;
+  /** Content hash of the run's PAYOUT rows — pass back as `expectedKey` on the payout-report download. */
+  payoutKey: string;
+  /** Only when a rule read visibility this run: the month's visibility setup + headline counts. */
+  visibility?: {
+    month: string;
+    mode: 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
+    available: boolean;
+    unavailableReason?: string;
+    windows: number;
+    /** Windows of the month still open at compute time. */
+    openWindowsInMonth: number;
+    outletsApproved: number;
+    outletsWithData: number;
+    outletsWaitingReview: number;
+    outletsOpenWindow: number;
+    /** Outlets reading "not approved" because a review is pending / a window is open — must be accepted to export / credit. */
+    outletsPending: number;
+    /** Approved captures counted although the outlet was outside the dated window scope (loaded late). */
+    countedOutsideDatedScope: number;
+    /** Approved captures NOT counted, by reason. */
+    excluded: { olderFrequency: number; notInProgramme: number; notLive: number };
+    /** The pending outlets (sorted, capped at 200 per list — the counts are complete). */
+    waitingOutletCodes: string[];
+    openOutletCodes: string[];
+    /** Hash of the exact pending outlet set — sent back as acceptVisibilityPendingKey. */
+    pendingKey: string;
+  };
 }
 export interface ComputeCommitResult {
   batchId: string;

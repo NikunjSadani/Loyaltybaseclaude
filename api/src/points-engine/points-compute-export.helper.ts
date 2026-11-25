@@ -164,6 +164,15 @@ function num(v: number | null | undefined): number | string {
   return typeof v === 'number' && Number.isFinite(v) ? v : '';
 }
 
+/**
+ * The "Reason / Explanation" cell: a non-OK row's reason, an OK row's explanation, and — when an OK row paid 0 for a
+ * stated reason (an opt-in gate failReason, or "No <KPI> target") — "<reason> — <explanation>". A row with only one
+ * of the two is byte-identical to before.
+ */
+function reasonCell(r: ComputePreviewRow): string {
+  return [r.reason, r.explanation].filter((x): x is string => typeof x === 'string' && x !== '').join(' — ');
+}
+
 function statusCounts(rows: ComputePreviewRow[]) {
   const counts = { ok: 0, skip: 0, error: 0, noRule: 0 };
   for (const r of rows) {
@@ -200,8 +209,8 @@ export async function writePreviewReportXlsx(preview: ComputePreview, out: XlsxS
       Status: r.status,
       // Whole points only on OK rows; blank otherwise (no points to show).
       Points: r.status === 'OK' ? num(r.points) : '',
-      // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation`.
-      'Reason / Explanation': r.reason ?? r.explanation ?? '',
+      // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation` (+ a `reason` when they paid 0).
+      'Reason / Explanation': reasonCell(r),
       'Rule ID': r.ruleId ?? '',
       'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
     });
@@ -282,8 +291,8 @@ export async function writePayoutReportXlsx(preview: ComputePreview, out: XlsxSt
       Status: r.status,
       // Whole INR only on OK rows; blank otherwise (no amount to pay).
       'Payout (INR)': r.status === 'OK' ? num(r.payoutRupees) : '',
-      // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation`.
-      'Reason / Explanation': r.reason ?? r.explanation ?? '',
+      // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation` (+ a `reason` when they paid 0).
+      'Reason / Explanation': reasonCell(r),
       'Rule ID': r.ruleId ?? '',
       'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
     });

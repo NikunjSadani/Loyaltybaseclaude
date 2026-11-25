@@ -3,7 +3,8 @@
 /**
  * Live simulator — the sticky right-hand panel of the rule builder.
  *
- * The author types one sample outlet's achievement / target / segment values; we POST the CURRENT
+ * The author types one sample outlet's achievement / target / segment (and, when the rule reads them,
+ * visibility) values; we POST the CURRENT
  * draft config + that context to the pure `simulate` route (the backend evaluator is the single source
  * of truth — no second JS evaluator ships to the browser). It renders the SimulateResult: config errors
  * when invalid, else the EvalOutcome — big final points (or SKIP reason / ERROR) + the per-node trace
@@ -13,13 +14,25 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Play, AlertCircle, SkipForward, Sparkles, Loader2 } from 'lucide-react';
 import { simulate } from '@/lib/points-engine/api';
-import type { RuleConfigDraft, SimulateResult, TraceStep } from '@/lib/points-engine/types';
+import { VISIBILITY_SOURCES, type RuleConfigDraft, type SimulateResult, type TraceStep } from '@/lib/points-engine/types';
 import { labelCls } from './kit';
 
 interface SampleContext {
   achievements: Record<string, string>;
   targets: Record<string, string>;
   segment: { program: string; programCategory: string; outletType: string; metro: string };
+  visibility: Record<string, string>;
+}
+
+type VisKey = (typeof VISIBILITY_SOURCES)[number]['key'];
+
+/** Which `visibility:<key>` values the draft reads, so the simulator asks for exactly those (design §3a). */
+function referencedVisibility(draft: RuleConfigDraft): VisKey[] {
+  const keys = new Set<string>();
+  for (const inp of draft.inputs) {
+    if (inp.source?.startsWith('visibility:')) keys.add(inp.source.slice('visibility:'.length));
+  }
+  return VISIBILITY_SOURCES.map((v) => v.key).filter((k) => keys.has(k));
 }
 
 /** Which achievement / target KPIs the draft references, so the simulator asks for exactly those. */
@@ -52,11 +65,13 @@ function toNumOrNull(v: string): number | null {
 
 export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
   const { achievements: achKpis, targets: tgtKpis } = useMemo(() => referencedKpis(draft), [draft]);
+  const visKeys = useMemo(() => referencedVisibility(draft), [draft]);
 
   const [ctx, setCtx] = useState<SampleContext>({
     achievements: {},
     targets: {},
     segment: { program: '', programCategory: '', outletType: '', metro: '' },
+    visibility: {},
   });
   const [result, setResult] = useState<SimulateResult | null>(null);
   const [running, setRunning] = useState(false);
@@ -71,6 +86,8 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
     for (const k of achKpis) achievements[k] = toNumOrNull(ctx.achievements[k] ?? '');
     const targets: Record<string, number | null> = {};
     for (const k of tgtKpis) targets[k] = toNumOrNull(ctx.targets[k] ?? '');
+    const visibility: Record<string, number | null> = {};
+    for (const k of visKeys) visibility[k] = toNumOrNull(ctx.visibility[k] ?? '');
 
     const res = await simulate({
       attachsTo: draft.attachsTo,
@@ -89,13 +106,14 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
           outletType: ctx.segment.outletType || null,
           metro: ctx.segment.metro || null,
         },
+        ...(visKeys.length > 0 ? { visibility } : {}),
       },
     });
     if (id !== reqId.current) return; // a newer run superseded this one
     if (res.success) setResult(res.data);
     else setCallError(res.error ?? 'Simulation failed');
     setRunning(false);
-  }, [achKpis, tgtKpis, ctx, draft]);
+  }, [achKpis, tgtKpis, visKeys, ctx, draft]);
 
   // Debounced auto-run whenever the draft or sample context changes.
   useEffect(() => {
@@ -109,6 +127,8 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
     setCtx((c) => ({ ...c, targets: { ...c.targets, [k]: v } }));
   const setSeg = (k: keyof SampleContext['segment'], v: string) =>
     setCtx((c) => ({ ...c, segment: { ...c.segment, [k]: v } }));
+  const setVis = (k: string, v: string) =>
+    setCtx((c) => ({ ...c, visibility: { ...c.visibility, [k]: v } }));
 
   const numCls =
     'w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20';
@@ -136,7 +156,7 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
         <div className="space-y-3">
           <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Sample outlet</p>
 
-          {achKpis.length === 0 && tgtKpis.length === 0 && (
+          {achKpis.length === 0 && tgtKpis.length === 0 && visKeys.length === 0 && (
             <p className="text-xs text-gray-400">Add inputs to the rule to supply sample achievement / target values.</p>
           )}
 
@@ -173,6 +193,30 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
                   />
                 </div>
               ))}
+            </div>
+          )}
+
+          {visKeys.length > 0 && (
+            <div className="grid grid-cols-1 gap-2">
+              {visKeys.map((k) => {
+                const meta = VISIBILITY_SOURCES.find((v) => v.key === k)!;
+                return (
+                  <div key={`v-${k}`}>
+                    <label htmlFor={`sim-vis-${k}`} className={labelCls}>{meta.label}</label>
+                    <input
+                      id={`sim-vis-${k}`}
+                      type="number"
+                      min={0}
+                      max={k === 'approved' || k === 'inScope' ? 1 : 4}
+                      step={1}
+                      value={ctx.visibility[k] ?? ''}
+                      placeholder={k === 'approved' ? '1 or 0 · blank = missing' : 'blank = missing'}
+                      onChange={(e) => setVis(k, e.target.value)}
+                      className={numCls}
+                    />
+                  </div>
+                );
+              })}
             </div>
           )}
 
@@ -237,6 +281,11 @@ function OutcomeView({ result, awardType }: { result: SimulateResult; awardType?
           <p className="text-3xl font-extrabold text-green-700">
             {isPayout ? `₹${Math.round(outcome.points).toLocaleString('en-IN')}` : outcome.points.toLocaleString()}
           </p>
+          {outcome.reason && (
+            <p className="mt-1 text-[11px] font-semibold text-amber-700" data-testid="sim-reason">
+              Reason: {outcome.reason}
+            </p>
+          )}
         </div>
       )}
       {outcome.status === 'SKIP' && (
@@ -255,6 +304,28 @@ function OutcomeView({ result, awardType }: { result: SimulateResult; awardType?
           <ul className="mt-1 list-disc space-y-0.5 pl-5 text-[11px] text-red-700">
             {outcome.errors.map((e, i) => (
               <li key={i}>{e}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {result.warnings && result.warnings.length > 0 && (
+        <ul className="list-disc space-y-0.5 rounded-lg border border-amber-200 bg-amber-50 py-2 pl-6 pr-2 text-[11px] text-amber-800" data-testid="sim-warnings">
+          {result.warnings.map((w, i) => (
+            <li key={i}>{w}</li>
+          ))}
+        </ul>
+      )}
+
+      {result.visibilityUsed && result.visibilityUsed.length > 0 && (
+        <div className="rounded-lg border border-sky-100 bg-sky-50 p-2" data-testid="sim-visibility-used">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-700">Visibility values used</p>
+          <ul className="mt-1 space-y-0.5 text-[11px] text-sky-800">
+            {result.visibilityUsed.map((v) => (
+              <li key={v.ref}>
+                {v.ref} ({VISIBILITY_SOURCES.find((s) => `visibility:${s.key}` === v.source)?.label ?? v.source}) ={' '}
+                {v.value === null ? 'missing — the input’s “if the value is missing” rule applies' : v.value}
+              </li>
             ))}
           </ul>
         </div>

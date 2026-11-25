@@ -5,7 +5,8 @@ import * as XLSX from 'xlsx';
 import type { PrismaService } from '../prisma/prisma.service';
 import { WorkerStop, drainImports } from '../sales-import/ingest/worker-stop';
 import type { StorageService } from '../storage/storage.service';
-import type { AnyExportKind, ExportRunContext } from './export-kinds';
+import { ConflictException } from '@nestjs/common';
+import { ExportRefusedException, type AnyExportKind, type ExportRunContext } from './export-kinds';
 import {
   EXPORT_FAILED_MESSAGE,
   EXPORT_GAVE_UP_MESSAGE,
@@ -127,6 +128,25 @@ describe('ExportsProcessorService.processClaimed', () => {
     expect(await proc.processClaimed(claimed())).toBe('finished');
     expect(prisma.exportRequest.updateMany.mock.calls.at(-1)![0].data).toMatchObject({ status: 'FAILED', error: EXPORT_FAILED_MESSAGE });
     expect(storage.deleteFile).toHaveBeenCalledWith('exports/bajaj/exp1/tok-1/k_report.xlsx');
+  });
+
+  it('a DELIBERATE refusal (ExportRefusedException) → FAILED with ITS message for the Downloads page; ctx carries the request id', async () => {
+    let seenId: string | undefined;
+    const msg = '3 outlets will read visibility = NOT approved for 2026-10 … Tick "I accept" on the preview to continue.';
+    const { proc, prisma, storage } = setup(
+      makeKind(async (ctx) => {
+        seenId = ctx.requestId;
+        throw new ExportRefusedException(msg);
+      }),
+    );
+    expect(await proc.processClaimed(claimed())).toBe('finished');
+    expect(seenId).toBe('exp1');
+    expect(prisma.exportRequest.updateMany.mock.calls.at(-1)![0].data).toMatchObject({ status: 'FAILED', error: msg });
+    expect(storage.deleteFile).toHaveBeenCalled();
+    // Any OTHER HttpException keeps the generic message (opt-in only).
+    const other = setup(makeKind(async () => { throw new ConflictException('internal detail'); }));
+    await other.proc.processClaimed(claimed());
+    expect(other.prisma.exportRequest.updateMany.mock.calls.at(-1)![0].data).toMatchObject({ status: 'FAILED', error: EXPORT_FAILED_MESSAGE });
   });
 
   it('unknown kind → FAILED; attempts over the limit → FAILED (gave up), report never run', async () => {

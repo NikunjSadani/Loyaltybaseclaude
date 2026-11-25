@@ -49,6 +49,17 @@ const exportMock = downloadExport as unknown as ReturnType<typeof vi.fn>;
 const reportMock = downloadPreviewReport as unknown as ReturnType<typeof vi.fn>;
 const payoutReportMock = downloadPayoutReport as unknown as ReturnType<typeof vi.fn>;
 
+/** A preview.visibility block (§3a) — defaults: available, nothing pending, no exceptions. */
+function vis(over: Partial<NonNullable<ComputePreview['visibility']>> = {}): NonNullable<ComputePreview['visibility']> {
+  return {
+    month: '2026-10', mode: 'PHOTO_APPROVAL', available: true, windows: 2, openWindowsInMonth: 0,
+    outletsApproved: 3, outletsWithData: 5, outletsWaitingReview: 0, outletsOpenWindow: 0, outletsPending: 0,
+    countedOutsideDatedScope: 0, excluded: { olderFrequency: 0, notInProgramme: 0, notLive: 0 },
+    waitingOutletCodes: [], openOutletCodes: [], pendingKey: '',
+    ...over,
+  };
+}
+
 function makePreview(over: Partial<ComputePreview> = {}): ComputePreview {
   return {
     clientId: 'deoleo',
@@ -59,6 +70,7 @@ function makePreview(over: Partial<ComputePreview> = {}): ComputePreview {
     engineDisabled: false,
     directCreditEnabled: true,
     sourceKey: 'deoleo|2026-09|cf_x|v7',
+    payoutKey: 'pp_x',
     ruleVersionsUsed: [{ ruleId: 'rule_cases_q3', version: 7 }],
     rows: [
       {
@@ -190,6 +202,88 @@ describe('Points Engine compute page', () => {
     expect(await screen.findByText(/points engine is disabled for this tenant/i)).toBeInTheDocument();
     // No direct-credit affordance when the engine is disabled.
     expect(screen.queryByRole('button', { name: /credit in portal/i })).not.toBeInTheDocument();
+  });
+
+  it('PE-C2b: visibility summary when a rule read visibility', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        visibility: vis({ countedOutsideDatedScope: 2, excluded: { olderFrequency: 1, notInProgramme: 0, notLive: 3 } }),
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    expect((await screen.findByTestId('visibility-summary')).textContent).toMatch(/3 outlets with approved visibility/);
+    const exc = (await screen.findByTestId('visibility-exceptions')).textContent ?? '';
+    expect(exc).toMatch(/2 approved capture\(s\) counted for outlets added or KYC-approved after their window/);
+    expect(exc).toMatch(/1 approved capture\(s\) NOT counted — taken under an older capture frequency/);
+    expect(exc).toMatch(/3 approved capture\(s\) NOT counted — the outlet is removed, deactivated/);
+    expect(screen.queryByTestId('visibility-pending')).not.toBeInTheDocument();
+  });
+
+  it('PE-C2b2: amber banner + the reason when a rule reads visibility but there is no visibility result', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        visibility: vis({
+          available: false, windows: 0, outletsApproved: 0, outletsWithData: 0,
+          unavailableReason: 'Visibility is switched off for this tenant, so there is no visibility result to read.',
+        }),
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    expect(await screen.findByTestId('visibility-unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/Visibility is switched off for this tenant/)).toBeInTheDocument();
+  });
+
+  it('PE-C2d: pending visibility blocks Export / Credit until the admin ticks "I accept N", then sends N', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        visibility: vis({
+          outletsWaitingReview: 2, outletsOpenWindow: 3, outletsPending: 4, openWindowsInMonth: 1,
+          waitingOutletCodes: ['A', 'B'], openOutletCodes: ['B', 'C', 'D'], pendingKey: 'vp_set1',
+        }),
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    const box = await screen.findByTestId('visibility-pending');
+    expect(box.textContent).toMatch(/4 outlets will read visibility = NOT approved/);
+    expect(box.textContent).toMatch(/2 with a capture still waiting for review · 3 with a window still open/);
+    const creditBtn = await screen.findByRole('button', { name: /credit in portal/i });
+    expect(creditBtn).toBeDisabled();
+    fireEvent.click(creditBtn);
+    expect(commitMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('visibility-accept'));
+    expect(creditBtn).not.toBeDisabled();
+    fireEvent.click(creditBtn);
+    await waitFor(() => expect(commitMock).toHaveBeenCalledTimes(1));
+    expect(commitMock).toHaveBeenCalledWith(expect.objectContaining({ acceptVisibilityPendingKey: 'vp_set1' }));
+    expect(screen.getByTestId('visibility-pending-codes').textContent).toBe('Outlets: A, B, C, D');
+  });
+
+  it('PE-C2e: an OK row that paid 0 shows its reason', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        rows: [{ outletCode: 'OUT-009', kpiCode: 'ADHO', status: 'OK', points: 0, reason: 'Target is 0', explanation: '0 pts' }],
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    expect((await screen.findByTestId('row-reason')).textContent).toMatch(/Target is 0/);
+  });
+
+  it('PE-C2c: no visibility block when no rule read visibility', async () => {
+    previewMock.mockResolvedValue({ success: true, data: makePreview() });
+    render(<ComputePage />);
+    await runPreview();
+    await screen.findByText('Total points');
+    expect(screen.queryByTestId('visibility-summary')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('visibility-unavailable')).not.toBeInTheDocument();
   });
 
   it('PE-C3: the direct-credit block is hidden when there are no OK rows', async () => {
@@ -447,13 +541,19 @@ describe('Points Engine compute page', () => {
   it('PE-C15 (APPLIES-TO D5): a KPI-scope SKIP row shows its reason and the SKIP group counts scope skips', async () => {
     const scopeSkip = (code: string): ComputePreviewRow => ({
       outletCode: code, outletName: 'Store', kpiCode: 'UNNATI_VOL', status: 'SKIP',
-      reason: 'KPI not applicable to this outlet (KPI scope)',
+      reason: 'KPI not applicable to this outlet (KPI scope)', skipKind: 'KPI_SCOPE',
     });
     previewMock.mockResolvedValue({
       success: true,
       data: makePreview({
-        counts: { total: 3, ok: 0, skip: 3, error: 0, noRule: 0 },
-        rows: [scopeSkip('OUT-7'), scopeSkip('OUT-8'), { outletCode: 'OUT-9', kpiCode: 'CASES_SOLD', status: 'SKIP', reason: 'Target is zero' }],
+        counts: { total: 4, ok: 0, skip: 4, error: 0, noRule: 0 },
+        rows: [
+          scopeSkip('OUT-7'),
+          scopeSkip('OUT-8'),
+          { outletCode: 'OUT-9', kpiCode: 'CASES_SOLD', status: 'SKIP', reason: 'Target is zero' },
+          // A gate failReason that merely SAYS "(KPI scope)" is NOT a KPI-scope skip (structured flag only).
+          { outletCode: 'OUT-10', kpiCode: 'CASES_SOLD', status: 'SKIP', reason: 'Not eligible (KPI scope) per Bajaj' },
+        ],
       }),
     });
     render(<ComputePage />);

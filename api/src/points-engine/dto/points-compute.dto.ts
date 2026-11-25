@@ -26,6 +26,25 @@ export class PreviewComputeDto {
   @IsOptional()
   @IsString()
   kpiCode?: string;
+
+  /**
+   * §3a: the `preview.visibility.pendingKey` of the visibility-pending outlet set (waiting for review / window open)
+   * the admin ACCEPTED will read "not approved". Required — and must equal the fresh run's key (same outlets) — for
+   * the credit-upload export, the payout report and direct credit whenever outlets are pending; ignored by preview /
+   * the review report.
+   */
+  @IsOptional()
+  @IsString()
+  acceptVisibilityPendingKey?: string;
+
+  /**
+   * The run key the operator reviewed: `sourceKey` (direct credit + credit-upload file) or `payoutKey` (payout
+   * report). A fresh compute with a different key is refused (409) — never a file / batch the operator did not see.
+   * Omitted → no staleness check (direct API use). Ignored by preview / the review report.
+   */
+  @IsOptional()
+  @IsString()
+  expectedKey?: string;
 }
 
 /**
@@ -34,11 +53,7 @@ export class PreviewComputeDto {
  * edited or a rule republished since review), the commit is REJECTED so we never credit a run that no
  * longer matches what was reviewed/approved (TOCTOU guard). Omitted → direct API use, no staleness check.
  */
-export class CommitComputeDto extends PreviewComputeDto {
-  @IsOptional()
-  @IsString()
-  expectedKey?: string;
-}
+export class CommitComputeDto extends PreviewComputeDto {}
 
 /**
  * Simulate body — a DRAFT rule's authoring fields + ONE sample context, for the builder's live simulator.
@@ -82,5 +97,7 @@ export class SimulateComputeDto {
     achievements?: Record<string, number | null>;
     targets?: Record<string, number | null>;
     segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
+    /** Test visibility values for `visibility:*` inputs (design §3a); a missing key = absent → nullAs. */
+    visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null; inScope?: number | null };
   };
 }

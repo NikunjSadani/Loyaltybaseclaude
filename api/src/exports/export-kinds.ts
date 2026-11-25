@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 /**
  * Export kinds — the plug-in shape every heavy report implements ONCE (Downloads page design,
  * platform/docs/plans/DOWNLOADS-PAGE.md). Lane A (engine) runs kinds; lanes B/C (reports) write kinds.
@@ -24,7 +25,16 @@ export interface ExportRunContext {
   user: JwtPayload;
   /** Request time — use it instead of `new Date()` so the file reflects when it was asked for. */
   now: Date;
+  /** The ExportRequest id for a background build (absent for an instant download) — for audit rows. */
+  requestId?: string;
 }
+
+/**
+ * A DELIBERATE refusal by a kind's run (409) whose message is written for people — e.g. "the computation changed since
+ * you previewed it". A background build that throws it is FAILED with THIS message on the Downloads page instead of
+ * the generic "couldn't prepare this file". Opt-in: every other error keeps the generic message.
+ */
+export class ExportRefusedException extends ConflictException {}
 
 export interface ExportAccess {
   /** Same roles as today's endpoint's @Roles. */
