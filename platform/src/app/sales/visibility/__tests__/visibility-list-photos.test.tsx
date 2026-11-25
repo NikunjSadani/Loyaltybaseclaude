@@ -170,6 +170,22 @@ describe('VLP — Visibility list photo view', () => {
     expect(getSalesEligible).toHaveBeenCalledTimes(2);
   });
 
+  it('VLP7: level not listed → no chips, but View photos on the caller OWN capture only', async () => {
+    const data = {
+      ...BASE,
+      outlets: [
+        row('o2', 'My Store', { captureId: 'c2', status: 'SUBMITTED', currentVersion: 1, windowState: 'awaiting', ownCapture: true }),
+        row('o3', 'Their Store', { captureId: 'c3', status: 'APPROVED', currentVersion: 1, windowState: 'approved' }),
+      ] as SalesEligibleResponse['outlets'],
+    };
+    getSalesEligible.mockResolvedValue({ success: true, data });
+    render(<SalesVisibilityPage />);
+    await screen.findByText('My Store');
+    expect(screen.queryByTestId('photo-chips')).toBeNull();
+    expect(screen.getByTestId('view-photos-o2')).toBeInTheDocument();
+    expect(screen.queryByTestId('view-photos-o3')).toBeNull();
+  });
+
   it('VLP3: no photoView flag → no chips and no Photos buttons', async () => {
     getSalesEligible.mockResolvedValue({ success: true, data: BASE });
     render(<SalesVisibilityPage />);

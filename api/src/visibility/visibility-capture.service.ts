@@ -302,6 +302,9 @@ export class VisibilityCaptureService {
     // Sales photo view (tenant-scoped): a top-level flag ONLY when on for this caller's level — the photos themselves
     // load on demand per capture (GET sales/captures/:id/photos), never in this list. Absent → byte-identical.
     const photoFlag = this.canViewPhotos(config, caller.levelCode) ? { photoView: true as const } : {};
+    // Photo-view tenant but this level is not listed → per-row `ownCapture` marks the caller's own captures (A3).
+    const ownCaptureFlag =
+      (config.salesPhotoViewLevels ?? []).length > 0 && !this.canViewPhotos(config, caller.levelCode);
     const now = new Date();
     const freq = this.freqOf(config);
     const windowKey = currentWindowKey(now, freq);
@@ -407,6 +410,8 @@ export class VisibilityCaptureService {
         // Per-photo review map — on a CHANGES_REQUESTED capture the rep needs to know WHICH
         // photos to re-shoot (and why); the whole-capture rejectionReason is null for per-photo.
         photoReviews: true,
+        // A3 UX: on a photo-view tenant a caller whose level is NOT listed still sees their OWN captures' photos.
+        ...(ownCaptureFlag ? { submittedBySalesUserId: true } : {}),
       },
     });
     const byOutlet = new Map(captures.map((c) => [c.outletId, c]));
@@ -439,6 +444,11 @@ export class VisibilityCaptureService {
           // canCapture (D8): allowed level AND in the caller's subtree (every listed
           // outlet is in-subtree, so this reduces to the level check).
           canCapture: levelAllowed,
+          ...(ownCaptureFlag &&
+          cap &&
+          (cap as { submittedBySalesUserId?: string | null }).submittedBySalesUserId === caller.id
+            ? { ownCapture: true as const }
+            : {}),
         };
       }),
     };
@@ -741,7 +751,7 @@ export class VisibilityCaptureService {
    * is left to viewMedia's existing check (unchanged). Cost per image: the cached settings / field ids / reach, one
    * capture lookup on the (clientId, windowKey) index, and one sales-user read.
    */
-  async assertSalesMediaAccess(user: JwtPayload, key: string): Promise<void> {
+  async assertSalesMediaAccess(user: JwtPayload, key: string, captureHint?: string): Promise<void> {
     if (!SALES_ROLES.has(user.role)) return;
     if (typeof key !== 'string' || !key.startsWith(`${MEDIA_FOLDER_PREFIX}${user.clientId}/`)) return;
     const config = await this.getConfig(user.clientId);
@@ -753,26 +763,39 @@ export class VisibilityCaptureService {
     const { fieldIds, sampleKeys } = await this.photoFieldInfo(user.clientId);
     if (sampleKeys.has(key)) return;
 
-    // The caller's own upload of this month (IST month, or the UTC month the key was stamped with around midnight).
+    // The caller's own upload of this month. The key is stamped with the UTC month; the UTC-month form is accepted ONLY
+    // while the UTC and IST months differ — i.e. 00:00–05:30 IST on the 1st (N2). Otherwise the IST month only.
     const ownMonth = ownUploadMonth(key, user.clientId, uploaderSegment(user.sub));
     if (ownMonth) {
       const now = new Date();
       const istMonth = currentWindowKey(now, 1).slice(0, 7);
-      if (ownMonth === istMonth || ownMonth === now.toISOString().slice(0, 7)) return;
+      const utcMonth = now.toISOString().slice(0, 7);
+      if (ownMonth === istMonth) return;
+      if (utcMonth !== istMonth && ownMonth === utcMonth) return;
       throw deny();
     }
 
     if (fieldIds.length === 0) throw deny();
-    const current = (
-      (await this.prisma.visibilityCapture.findMany({
-        where: {
-          clientId: user.clientId,
-          windowKey: { in: this.currentMonthWindowKeys(config) },
-          OR: mediaKeyRefWhere(fieldIds, key),
-        },
-        select: { outletId: true, formValues: true, submittedBySalesUserId: true },
-      })) ?? []
-    ).filter((c) => formValuesHoldKey(c.formValues, fieldIds, key));
+    const monthKeys = this.currentMonthWindowKeys(config);
+    const rowSelect = { outletId: true, formValues: true, submittedBySalesUserId: true } as const;
+    // A2: the sales viewer sends the capture id (`c`) with each photo URL → one primary-key read, then verify the key is
+    // really on that capture's current version. A missing / wrong hint falls back to the current-month scan.
+    let current: Array<{ outletId: string; formValues: Prisma.JsonValue | null; submittedBySalesUserId: string | null }> = [];
+    if (typeof captureHint === 'string' && captureHint) {
+      const row = await this.prisma.visibilityCapture.findFirst({
+        where: { id: captureHint, clientId: user.clientId, windowKey: { in: monthKeys } },
+        select: rowSelect,
+      });
+      if (row && formValuesHoldKey(row.formValues, fieldIds, key)) current = [row];
+    }
+    if (current.length === 0) {
+      current = (
+        (await this.prisma.visibilityCapture.findMany({
+          where: { clientId: user.clientId, windowKey: { in: monthKeys }, OR: mediaKeyRefWhere(fieldIds, key) },
+          select: rowSelect,
+        })) ?? []
+      ).filter((c) => formValuesHoldKey(c.formValues, fieldIds, key));
+    }
     if (current.length === 0) throw deny();
 
     const caller = await this.requireCallerSalesUser(user);
@@ -1036,6 +1059,16 @@ export class VisibilityCaptureService {
     // L1 — every submitted CAMERA key must live under THIS caller's tenant media folder;
     // a rep cannot point a capture at an arbitrary/cross-tenant object.
     this.assertMediaKeysOwned(user.clientId, schema, values);
+    // N1 (photo-view tenants only): a rep may not "borrow" a known photo key into their own capture (and then read it as
+    // its submitter). Every photo must be their OWN upload, or exactly the photo that field held on this capture's
+    // previous version (the carry-forward). Tenants without salesPhotoViewLevels: unchanged.
+    if ((config.salesPhotoViewLevels ?? []).length > 0) {
+      const priorFv =
+        priorRow?.formValues && typeof priorRow.formValues === 'object' && !Array.isArray(priorRow.formValues)
+          ? (priorRow.formValues as Record<string, unknown>)
+          : {};
+      this.assertPhotosTakenThisVisit(user, schema, values, priorFv);
+    }
 
     // The photoReviews to persist on the re-opened capture: carried-forward APPROVED photos
     // on a partial re-capture; nothing (null) on a fresh submit / whole-capture re-capture.
@@ -1676,6 +1709,30 @@ export class VisibilityCaptureService {
    * so a rep cannot submit (or later have exported) a capture that references an arbitrary
    * or cross-tenant object. A non-string / foreign-prefixed key is a 400.
    */
+  /**
+   * N1 — photo-view tenants: each submitted CAMERA key must be under the caller's own upload folder
+   * (`visibility-media/<cid>/u/<userId>/`) or equal the key the same field held on this capture's previous version.
+   * Anything else → 400 "Photo must be taken in this visit."
+   */
+  private assertPhotosTakenThisVisit(
+    user: JwtPayload,
+    schema: VisibilityFormSchema,
+    values: Record<string, unknown>,
+    priorValues: Record<string, unknown>,
+  ): void {
+    const ownPrefix = `${MEDIA_FOLDER_PREFIX}${user.clientId}/${uploaderSegment(user.sub)}/`;
+    for (const f of schema.fields ?? []) {
+      if (f.type !== 'CAMERA') continue;
+      const v = values[f.id];
+      if (v == null || v === '') continue;
+      const key = readMediaValue(v).key;
+      if (key.startsWith(ownPrefix) && !key.includes('..')) continue;
+      const prior = readMediaValue(priorValues[f.id]).key;
+      if (prior && key === prior) continue;
+      throw new BadRequestException('Photo must be taken in this visit.');
+    }
+  }
+
   private assertMediaKeysOwned(
     clientId: string,
     schema: VisibilityFormSchema,

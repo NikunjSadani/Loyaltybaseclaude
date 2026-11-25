@@ -67,10 +67,12 @@ export class VisibilityAdminController {
     @CurrentUser() user: JwtPayload,
     @Query('key') key: string,
     @Res({ passthrough: true }) res: Response,
+    // Optional capture-id hint sent by the sales photo viewer (a direct row lookup); ignored by everyone else.
+    @Query('c') captureHint?: string,
   ): Promise<StreamableFile> {
     // Sales photo view tightening — SALES roles only, and only for a tenant with salesPhotoViewLevels set (see
     // VisibilityCaptureService.assertSalesMediaAccess). Admin roles / every other tenant: a no-op (unchanged).
-    await this.capture.assertSalesMediaAccess(user, key);
+    await this.capture.assertSalesMediaAccess(user, key, captureHint);
     const { stream, size, contentType, inline } = await this.media.viewMedia(user, key);
     const disposition = inline ? 'inline' : 'attachment; filename="media"';
     res.setHeader('Content-Type', contentType);
@@ -79,10 +81,13 @@ export class VisibilityAdminController {
     // Sales roles on a sales-photo-view tenant: keys are immutable and access is re-checked on every request, so the
     // phone may keep its own private copy for 5 minutes (thumbnail → full view is one download). Everyone else: no-store
     // exactly as before.
-    res.setHeader(
-      'Cache-Control',
-      (await this.capture.salesMediaCacheable(user)) ? 'private, max-age=300' : 'no-store',
-    );
+    if (await this.capture.salesMediaCacheable(user)) {
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      // The private copy belongs to THIS signed-in session — never reused for another cookie / bearer (N3).
+      res.setHeader('Vary', 'Cookie, Authorization');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     return streamObjectResponse(res, { stream, size }, { type: contentType, disposition });
   }
 

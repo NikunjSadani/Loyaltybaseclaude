@@ -665,6 +665,47 @@ describe('VisibilityCaptureService', () => {
     ]);
   });
 
+  describe('N1 — photo-view tenants: every photo must be taken in this visit', () => {
+    const photoCfg = () =>
+      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, salesPhotoViewLevels: ['SO'] } });
+    const OWN = 'visibility-media/t1/u/u1/2026-11/mine.jpg';
+
+    it("a BORROWED key (not the rep's own upload, not this capture's earlier photo) → 400, nothing written", async () => {
+      photoCfg();
+      await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues }))
+        .rejects.toThrow('Photo must be taken in this visit.');
+      expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+    });
+
+    it("the rep's OWN upload → accepted", async () => {
+      photoCfg();
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: { ...nearFormValues, photo: OWN } });
+      expect(res.version).toBe(1);
+    });
+
+    it("a CARRIED-FORWARD key (the same field's photo on this capture's previous version) → accepted on resubmit", async () => {
+      photoCfg();
+      const prior = { id: 'cap1', status: 'REJECTED', outletId: 'o1', currentVersion: 1, windowKey: CUR_WINDOW,
+        formValues: { photo: 'visibility-media/t1/old-by-someone.jpg' } };
+      mockPrisma.visibilityCapture.findFirst.mockImplementation((args: { where?: { status?: string } }) =>
+        Promise.resolve(args?.where?.status === 'APPROVED' ? null : prior));
+      mockPrisma.visibilityCapture.findUnique.mockResolvedValue(prior);
+      const res = await service.resubmitCapture(user, 'cap1', {
+        formValues: { ...nearFormValues, photo: 'visibility-media/t1/old-by-someone.jpg' },
+      });
+      expect(res.version).toBe(2);
+      // …but a borrowed key in another field position still fails.
+      await expect(service.resubmitCapture(user, 'cap1', {
+        formValues: { ...nearFormValues, photo: 'visibility-media/t1/someone-else.jpg' },
+      })).rejects.toThrow('Photo must be taken in this visit.');
+    });
+
+    it('tenant WITHOUT the setting → unchanged (any own-tenant key still accepted)', async () => {
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues });
+      expect(res.version).toBe(1);
+    });
+  });
+
   it('resubmit guards against a concurrent review: writes only if the row is still the one read (status, version, updatedAt); else 409 and nothing written', async () => {
     const readAt = new Date('2026-11-20T05:00:00Z');
     const row = { id: 'cap1', status: 'REJECTED', outletId: 'o1', currentVersion: 1, windowKey: CUR_WINDOW, updatedAt: readAt };

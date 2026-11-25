@@ -667,6 +667,14 @@ tenant (that would be a platform-wide change needing owner approval). On these t
 is `Cache-Control: private, max-age=300` (the key never changes and access is re-checked on every request), so the full
 view re-uses the thumbnail's download; every other caller keeps `no-store`.
 
+**No borrowed photos.** On these tenants a capture is accepted only when every photo is the rep's own upload or exactly
+the photo that field held on the capture's previous version (a carried-forward photo); anything else → 400 "Photo must
+be taken in this visit." (so nobody can submit a known photo key and then read it as its submitter). The own-upload
+read-back accepts the key's UTC month only between 00:00 and 05:30 IST on the 1st (otherwise the IST month). The
+private-cached photo response also sends `Vary: Cookie, Authorization`. Photo links from the sales viewer carry the
+capture id (`&c=`), so the check reads that one row and confirms the photo is on it (falling back to the month scan).
+A rep whose level is not listed still gets **View photos** on the captures they submitted (`ownCapture` on the list).
+
 **Levels are checked.** Both writers check `salesPhotoViewLevels` against the client's real sales levels
 (case-insensitive; stored in the client's own spelling). An unknown code is refused with a plain message. The console
 lists only the client's real levels (`GET /v1/visibility/config/sales-levels`).

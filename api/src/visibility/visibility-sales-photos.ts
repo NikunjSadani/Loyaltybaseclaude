@@ -158,7 +158,8 @@ export function buildSalesCapturePhotos(
       fieldId: f.id,
       label: f.label,
       mediaKey: key,
-      viewPath: `/v1/visibility/captures/media?key=${encodeURIComponent(key)}`,
+      // `c` = this capture: the media check reads that one row (primary key) instead of scanning the month.
+      viewPath: `/v1/visibility/captures/media?key=${encodeURIComponent(key)}&c=${encodeURIComponent(capture.id)}`,
       status,
       reason,
       capturedAt: tagTime(geo?.capturedAt) ?? iso(first?.createdAt) ?? submittedAt,

@@ -502,7 +502,8 @@ function SalesVisibilityContent() {
             );
             // Sales photo view: the action buttons get their OWN line under the name / badge on a phone (below `sm`),
             // so Recapture + Photos never squeeze the name or overlap the badge at 360 px; side by side from `sm` up.
-            if (photoView) {
+            // The caller's own capture (level not listed, A3) also gets View photos — for that capture only.
+            if (photoView || o.ownCapture) {
               return (
                 <div key={o.outletId} className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-2 px-4 py-3.5" data-testid={`vis-row-${o.outletId}`}>
                   <div className="p-2.5 bg-gray-50 rounded-xl shrink-0">{cfg.icon}</div>

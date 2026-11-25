@@ -151,7 +151,7 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
         clientId: 't1', captureId: { in: ['cap1'] },
       });
       expect((w.photos.photos as Array<{ viewPath: string }>)[1].viewPath).toBe(
-        `/v1/visibility/captures/media?key=${encodeURIComponent(KEY2)}`,
+        `/v1/visibility/captures/media?key=${encodeURIComponent(KEY2)}&c=cap1`,
       );
       // No coordinates anywhere in the response.
       const json = JSON.stringify(res);
@@ -213,10 +213,29 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
       expect(res.outlets[0]).not.toHaveProperty('photos');
     });
 
+    it('A3: level not listed → no photoView, but the caller OWN captures carry ownCapture (others do not)', async () => {
+      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...ON, salesPhotoViewLevels: ['XSR'] } });
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { id: 'o1', outletCode: 'OC1', name: 'Shop 1', zone: null, state: null, outletType: { code: 'SSS', name: 'R' } },
+        { id: 'o2', outletCode: 'OC2', name: 'Shop 2', zone: null, state: null, outletType: { code: 'SSS', name: 'R' } },
+      ]);
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'o1' }, { outletId: 'o2' }]);
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([
+        { outletId: 'o1', id: 'c1', status: 'SUBMITTED', currentVersion: 1, rejectionReason: null, photoReviews: null, submittedBySalesUserId: 'su1' },
+        { outletId: 'o2', id: 'c2', status: 'SUBMITTED', currentVersion: 1, rejectionReason: null, photoReviews: null, submittedBySalesUserId: 'su7' },
+      ]);
+      const res = await service.getSalesEligible(user);
+      expect(res).not.toHaveProperty('photoView');
+      expect(mockPrisma.visibilityCapture.findMany.mock.calls[0][0].select).toHaveProperty('submittedBySalesUserId', true);
+      expect(res.outlets.find((o) => o.outletId === 'o1')).toHaveProperty('ownCapture', true);
+      expect(res.outlets.find((o) => o.outletId === 'o2')).not.toHaveProperty('ownCapture');
+    });
+
     it('UNSET → no photoView key (byte-identical)', async () => {
       mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: baseConfig });
       const res = await service.getSalesEligible(user);
       expect(res).not.toHaveProperty('photoView');
+      expect(mockPrisma.visibilityCapture.findMany.mock.calls[0][0].select).not.toHaveProperty('submittedBySalesUserId');
     });
   });
 
@@ -392,6 +411,42 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
     it('another tenant key is left to viewMedia (its existing 403)', async () => {
       await expect(service.assertSalesMediaAccess(user, 'visibility-media/t2/x.jpg')).resolves.toBeUndefined();
       expect(mockSettings.getEffectiveSettings).not.toHaveBeenCalled();
+    });
+
+    it('A2: a capture-id hint → one primary-key read, no month scan; a wrong hint falls back to the scan', async () => {
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({ outletId: 'o1', formValues: captureRow().formValues, submittedBySalesUserId: 'su9' });
+      await expect(service.assertSalesMediaAccess(user, KEY1, 'cap1')).resolves.toBeUndefined();
+      expect(mockPrisma.visibilityCapture.findFirst.mock.calls[0][0].where).toEqual({
+        id: 'cap1', clientId: 't1', windowKey: { in: CUR_MONTH_KEYS },
+      });
+      expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();
+      // Hint row does not hold the key → the scan decides.
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({ outletId: 'o1', formValues: { w1: 'other' }, submittedBySalesUserId: 'su9' });
+      await expect(service.assertSalesMediaAccess(user, KEY1, 'capX')).resolves.toBeUndefined();
+      expect(mockPrisma.visibilityCapture.findMany).toHaveBeenCalledTimes(1);
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+      await expect(service.assertSalesMediaAccess(user, KEY1, 'capX')).rejects.toThrow(ForbiddenException);
+    });
+
+    describe('N2: the UTC-month form of an own key only between 00:00 and 05:30 IST on the 1st', () => {
+      const at = (iso: string) => {
+        jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] });
+        jest.setSystemTime(new Date(iso));
+      };
+      afterEach(() => jest.useRealTimers());
+      const NOV_KEY = 'visibility-media/t1/u/u1/2026-11/late-night.jpg';
+
+      it('01:30 IST on 1 Dec (UTC still 30 Nov) → the Nov-stamped own key is allowed', async () => {
+        at('2026-11-30T20:00:00.000Z');
+        await expect(service.assertSalesMediaAccess(user, NOV_KEY)).resolves.toBeUndefined();
+      });
+
+      it('11:30 IST on 1 Dec → the Nov-stamped own key is refused (IST month only)', async () => {
+        at('2026-12-01T06:00:00.000Z');
+        mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+        await expect(service.assertSalesMediaAccess(user, NOV_KEY)).rejects.toThrow(ForbiddenException);
+        await expect(service.assertSalesMediaAccess(user, 'visibility-media/t1/u/u1/2026-12/x.jpg')).resolves.toBeUndefined();
+      });
     });
 
     it('private caching only for a sales caller of a photo-view tenant', async () => {

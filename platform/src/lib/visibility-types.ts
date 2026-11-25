@@ -460,6 +460,11 @@ export interface SalesEligibleOutlet {
   windowState: CaptureUiState;
   /** Whether THIS rep may capture (allowed level AND in-subtree). */
   canCapture: boolean;
+  /**
+   * Sales photo view: present (true) when the tenant has photo view on, the caller's level is NOT listed, and the caller
+   * submitted this capture — they may still see their own capture's photos.
+   */
+  ownCapture?: true;
 }
 
 /**
