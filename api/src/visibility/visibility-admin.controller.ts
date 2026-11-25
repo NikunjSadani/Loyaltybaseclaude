@@ -15,6 +15,7 @@ import type { Response } from 'express';
 import { streamObjectResponse } from '../common/stream-object';
 import { VisibilityAdminService } from './visibility-admin.service';
 import { VisibilityMediaService } from './visibility-media.service';
+import { VisibilityCaptureService } from './visibility-capture.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -42,6 +43,7 @@ export class VisibilityAdminController {
   constructor(
     private readonly admin: VisibilityAdminService,
     private readonly media: VisibilityMediaService,
+    private readonly capture: VisibilityCaptureService,
   ) {}
 
   // ── Auth-gated media stream (declared FIRST — static path before any :id route) ──
@@ -65,13 +67,27 @@ export class VisibilityAdminController {
     @CurrentUser() user: JwtPayload,
     @Query('key') key: string,
     @Res({ passthrough: true }) res: Response,
+    // Optional capture-id hint sent by the sales photo viewer (a direct row lookup); ignored by everyone else.
+    @Query('c') captureHint?: string,
   ): Promise<StreamableFile> {
+    // Sales photo view tightening — SALES roles only, and only for a tenant with salesPhotoViewLevels set (see
+    // VisibilityCaptureService.assertSalesMediaAccess). Admin roles / every other tenant: a no-op (unchanged).
+    await this.capture.assertSalesMediaAccess(user, key, captureHint);
     const { stream, size, contentType, inline } = await this.media.viewMedia(user, key);
     const disposition = inline ? 'inline' : 'attachment; filename="media"';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', disposition);
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'no-store');
+    // Sales roles on a sales-photo-view tenant: keys are immutable and access is re-checked on every request, so the
+    // phone may keep its own private copy for 5 minutes (thumbnail → full view is one download). Everyone else: no-store
+    // exactly as before.
+    if (await this.capture.salesMediaCacheable(user)) {
+      res.setHeader('Cache-Control', 'private, max-age=300');
+      // The private copy belongs to THIS signed-in session — never reused for another cookie / bearer (N3).
+      res.setHeader('Vary', 'Cookie, Authorization');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     return streamObjectResponse(res, { stream, size }, { type: contentType, disposition });
   }
 
@@ -86,6 +102,13 @@ export class VisibilityAdminController {
   @RequirePermission('visibility:write')
   setConfig(@CurrentUser() user: JwtPayload, @Body() dto: SetVisibilityConfigDto) {
     return this.admin.setConfig(user, dto);
+  }
+
+  // ── The tenant's real sales levels (config editor: who sees team photos) ─────────
+  @Get('config/sales-levels')
+  @RequirePermission('visibility:read')
+  salesLevels(@CurrentUser() user: JwtPayload) {
+    return this.admin.listSalesLevels(user.clientId);
   }
 
   // ── Capture form (versioned) ───────────────────────────────────────────────────

@@ -75,6 +75,16 @@ export class SetVisibilityConfigDto {
   @IsArray()
   @IsString({ each: true })
   subPrograms?: string[];
+
+  /**
+   * Sales photo view (TENANT-SCOPED): SalesHierarchyLevel.code values whose users may see this month's capture photos of
+   * their team's outlets in the sales app. OPTIONAL — an ABSENT key carries over the stored list (a stale editor never
+   * wipes it); an empty list turns the feature OFF (the key is then not stored at all).
+   */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  salesPhotoViewLevels?: string[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

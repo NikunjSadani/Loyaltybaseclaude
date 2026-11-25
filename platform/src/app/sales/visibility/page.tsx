@@ -22,8 +22,9 @@ import React, { Suspense, useEffect, useMemo, useState } from 'react';
 import Link from '@/components/navigation/no-prefetch-link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
-  ArrowLeft, Camera, CheckCircle, Clock, Eye, AlertTriangle, XCircle, Loader2, Search,
+  ArrowLeft, Camera, CheckCircle, Clock, Eye, AlertTriangle, XCircle, Loader2, Search, Image as ImageIcon,
 } from 'lucide-react';
+import { SalesCapturePhotosSheet } from '@/components/visibility/SalesPhotoViewer';
 import { visibilityApi } from '@/lib/visibility';
 import {
   isResubmitCapture,
@@ -70,6 +71,29 @@ function windowLabel(windowKey: string, window: { startDay: number; endDay: numb
   const year = m[1].slice(2);
   const abbr = MONTHS[Number(m[2]) - 1] ?? m[2];
   return `${window.startDay}–${window.endDay} ${abbr} '${year}`;
+}
+
+/* ─── Photo chips (sales photo view only) ────────────────────────────────────── */
+
+type PhotoChip = 'all' | 'waiting' | 'approved' | 'retake';
+
+const PHOTO_CHIPS: { key: PhotoChip; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'waiting', label: 'Waiting' },
+  { key: 'approved', label: 'Approved' },
+  { key: 'retake', label: 'Needs re-take' },
+];
+
+/** Which photo chip a row falls in (null = no capture yet → only under "All"). */
+function photoBucketOf(state: CaptureUiState, status: string | null): Exclude<PhotoChip, 'all'> | null {
+  if (state === 'awaiting') return 'waiting';
+  if (state === 'approved') return 'approved';
+  if (state === 'rejected' || state === 'changes_requested') return 'retake';
+  // A closed window keeps its capture's status.
+  if (status === 'SUBMITTED') return 'waiting';
+  if (status === 'APPROVED') return 'approved';
+  if (status === 'REJECTED' || status === 'CHANGES_REQUESTED') return 'retake';
+  return null;
 }
 
 /* ─── Filter pill (shared select styling, matches the Outlets filter strip) ────── */
@@ -125,6 +149,9 @@ function SalesVisibilityContent() {
   // Session read-back of a fresh capture — outletId → its new window state.
   const [captured, setCaptured] = useState<Record<string, CaptureUiState>>({});
   const [activeOutletId, setActiveOutletId] = useState<string | null>(null);
+  // Sales photo view: quick photo-status chip + the outlet whose photos are open (loaded on demand).
+  const [photoChip, setPhotoChip] = useState<PhotoChip>('all');
+  const [photosFor, setPhotosFor] = useState<{ captureId: string; outletName: string } | null>(null);
 
   const isPhotoMode = settings.visibilityEnabled === true && captureMode === 'PHOTO_APPROVAL';
 
@@ -146,6 +173,15 @@ function SalesVisibilityContent() {
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [isPhotoMode, settingsReady]);
+
+  // Sales photo view: after a capture, quietly re-read the list so the new capture's id (→ its Photos button) shows.
+  // No spinner, and a failed re-read keeps the current list. Photo-view tenants only — everyone else is unchanged.
+  const refreshQuietly = () => {
+    visibilityApi
+      .getSalesEligible()
+      .then((r) => { if (r.success) setEligible(r.data); })
+      .catch(() => { /* keep the list on screen */ });
+  };
 
   // Effective state — a fresh session capture overrides the server row; otherwise a
   // per-photo CHANGES_REQUESTED capture maps to the 'changes_requested' label (robust to
@@ -177,7 +213,8 @@ function SalesVisibilityContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eligible, captured]);
 
-  const anyFilter = search.trim() !== '' || statusFilter !== 'ALL' || programFilter !== 'ALL' || memberFilter !== '';
+  const anyFilter =
+    search.trim() !== '' || statusFilter !== 'ALL' || programFilter !== 'ALL' || memberFilter !== '' || photoChip !== 'all';
 
   // If the selected status leaves the option set (e.g. the last outlet of that status was just
   // captured), fall back to "All" so the list doesn't get stuck on an empty, blank-select state.
@@ -185,10 +222,14 @@ function SalesVisibilityContent() {
     if (statusFilter !== 'ALL' && !statusOptions.includes(statusFilter)) setStatusFilter('ALL');
   }, [statusOptions, statusFilter]);
 
-  const outlets = useMemo(() => {
+  // Sales photo view (tenant-scoped): the backend flags it only when this tenant lets the caller's level see photos.
+  const photoView = eligible?.photoView === true;
+
+  // Rows after search / status / program / member — the photo chips filter (and count) on top of these.
+  const filteredRows = useMemo(() => {
     const list = eligible?.outlets ?? [];
     const q = search.trim().toLowerCase();
-    const rows = list.filter((o) => {
+    return list.filter((o) => {
       if (q && !(o.outletName.toLowerCase().includes(q) || o.outletCode.toLowerCase().includes(q))) return false;
       if (statusFilter !== 'ALL' && stateOf(o) !== statusFilter) return false;
       if (programFilter !== 'ALL' && o.programName !== programFilter) return false;
@@ -197,6 +238,30 @@ function SalesVisibilityContent() {
       if (selectedMemberUserIds && !(o.assignedUserId && selectedMemberUserIds.has(o.assignedUserId))) return false;
       return true;
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eligible, search, captured, statusFilter, programFilter, selectedMemberUserIds]);
+
+  // Photo chips (All / Waiting / Approved / Needs re-take) with counts over the rows above — photo view only.
+  const chipCounts = useMemo(() => {
+    const c: Record<PhotoChip, number> = { all: filteredRows.length, waiting: 0, approved: 0, retake: 0 };
+    for (const o of filteredRows) {
+      const b = photoBucketOf(stateOf(o), o.status ?? null);
+      if (b) c[b]++;
+    }
+    return c;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredRows]);
+
+  // The selected chip lost its last outlet (e.g. it was just captured, or another filter narrowed it) → back to All,
+  // the same rule as the status filter, so the list never sticks on an empty chip.
+  useEffect(() => {
+    if (photoChip !== 'all' && chipCounts[photoChip] === 0) setPhotoChip('all');
+  }, [photoChip, chipCounts]);
+
+  const outlets = useMemo(() => {
+    const rows = photoView && photoChip !== 'all'
+      ? filteredRows.filter((o) => photoBucketOf(stateOf(o), o.status ?? null) === photoChip)
+      : filteredRows;
     const actionRank = (o: SalesEligibleOutlet) =>
       Number(isActionable(captured[o.outletId] ?? o.windowState, o.canCapture));
     return [...rows].sort((a, b) => {
@@ -205,7 +270,7 @@ function SalesVisibilityContent() {
       return d !== 0 ? d : a.outletName.localeCompare(b.outletName);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [eligible, search, captured, statusFilter, programFilter, selectedMemberUserIds]);
+  }, [filteredRows, photoView, photoChip, captured]);
 
   const dueCount = useMemo(
     () =>
@@ -351,6 +416,29 @@ function SalesVisibilityContent() {
         </div>
       )}
 
+      {/* Photo chips — sales photo view only (tenant lets this level see team photos). Counts follow the filters above. */}
+      {photoView && (eligible?.outlets.length ?? 0) > 0 && (
+        <div className="flex flex-wrap items-center gap-2 mb-4" role="group" aria-label="Outlets by photo status" data-testid="photo-chips">
+          {PHOTO_CHIPS.map((c) => {
+            const on = photoChip === c.key;
+            return (
+              <button
+                key={c.key}
+                type="button"
+                aria-pressed={on}
+                data-testid={`photo-chip-${c.key}`}
+                onClick={() => setPhotoChip(c.key)}
+                className={`text-[11px] font-semibold rounded-full px-3 py-1.5 border transition-colors ${
+                  on ? 'bg-[var(--brand-primary)] border-[var(--brand-primary)] text-white' : 'bg-white border-gray-200 text-gray-600'
+                }`}
+              >
+                {c.label} ({chipCounts[c.key]})
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <Loader2 className="h-6 w-6 animate-spin text-[var(--brand-primary)]" />
@@ -368,7 +456,7 @@ function SalesVisibilityContent() {
           </p>
           {anyFilter && (
             <button
-              onClick={() => { setSearch(''); setStatusFilter('ALL'); setProgramFilter('ALL'); setMemberFilter(''); }}
+              onClick={() => { setSearch(''); setStatusFilter('ALL'); setProgramFilter('ALL'); setMemberFilter(''); setPhotoChip('all'); }}
               className="text-xs text-[var(--brand-primary)] font-semibold hover:underline mt-1"
             >
               Clear all filters
@@ -381,6 +469,65 @@ function SalesVisibilityContent() {
             const state = stateOf(o);
             const cfg = STATE_CONFIG[state];
             const actionable = isActionable(state, o.canCapture);
+            const captureBtn = actionable ? (
+              <button
+                onClick={() => setActiveOutletId(o.outletId)}
+                className="shrink-0 flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-xl bg-[var(--brand-primary)] text-white active:opacity-90 transition-opacity"
+              >
+                <Camera className="h-3.5 w-3.5" />
+                {/* A rejected prior capture (incl. rejected-then-late) recaptures (M3). */}
+                {isResubmitCapture(o) ? 'Recapture' : 'Capture'}
+              </button>
+            ) : null;
+            const info = (
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold text-gray-900 truncate min-w-0 flex-1">{o.outletName}</p>
+                  <span className={`shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${cfg.badge}`}>
+                    {actionableStateLabel(state, o.status ?? null, actionable)}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-400 mt-0.5 truncate">
+                  {o.outletCode}{o.outletType ? ` · ${o.outletType.name}` : ''}
+                </p>
+                {state === 'rejected' && o.rejectionReason && (
+                  <p className="text-[11px] text-red-500 mt-0.5 truncate">{o.rejectionReason}</p>
+                )}
+                {state === 'changes_requested' && (
+                  <p className="text-[11px] text-orange-600 mt-0.5 truncate">
+                    Some photos flagged — re-capture required{o.rejectionReason ? `: ${o.rejectionReason}` : ''}
+                  </p>
+                )}
+              </div>
+            );
+            // Sales photo view: the action buttons get their OWN line under the name / badge on a phone (below `sm`),
+            // so Recapture + Photos never squeeze the name or overlap the badge at 360 px; side by side from `sm` up.
+            // The caller's own capture (level not listed, A3) also gets View photos — for that capture only.
+            if (photoView || o.ownCapture) {
+              return (
+                <div key={o.outletId} className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-2 px-4 py-3.5" data-testid={`vis-row-${o.outletId}`}>
+                  <div className="p-2.5 bg-gray-50 rounded-xl shrink-0">{cfg.icon}</div>
+                  {info}
+                  {(captureBtn || o.captureId) && (
+                    <div className="flex w-full sm:w-auto justify-end gap-2 sm:shrink-0" data-testid={`vis-row-actions-${o.outletId}`}>
+                      {captureBtn}
+                      {o.captureId ? (
+                        <button
+                          type="button"
+                          data-testid={`view-photos-${o.outletId}`}
+                          onClick={() => setPhotosFor({ captureId: o.captureId as string, outletName: o.outletName })}
+                          aria-label={`View photos: ${o.outletName}`}
+                          className="shrink-0 flex items-center gap-1 text-[12px] font-semibold px-3 py-1.5 min-h-[36px] rounded-xl border border-gray-200 text-gray-700 active:bg-gray-50"
+                        >
+                          <ImageIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                          View photos
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              );
+            }
             return (
               <div key={o.outletId} className="flex items-center gap-3 px-4 py-3.5">
                 <div className="p-2.5 bg-gray-50 rounded-xl shrink-0">{cfg.icon}</div>
@@ -419,10 +566,21 @@ function SalesVisibilityContent() {
         </div>
       )}
 
+      {photosFor && (
+        <SalesCapturePhotosSheet
+          captureId={photosFor.captureId}
+          outletName={photosFor.outletName}
+          onClose={() => setPhotosFor(null)}
+        />
+      )}
+
       {activeOutlet && (
         <VisibilityCaptureSheet
           outlet={activeOutlet}
-          onCaptured={(outletId, next) => setCaptured((prev) => ({ ...prev, [outletId]: next }))}
+          onCaptured={(outletId, next) => {
+            setCaptured((prev) => ({ ...prev, [outletId]: next }));
+            if (photoView) refreshQuietly();
+          }}
           onClose={() => {
             // When this sheet was opened via the outlet-detail deep-link (?outletId=), return the
             // rep to that OUTLET DETAIL on close (after capture OR dismiss) instead of dropping them

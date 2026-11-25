@@ -19,6 +19,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockPrisma = {
   programSetting: { upsert: jest.fn() },
+  salesHierarchyLevel: { findMany: jest.fn() },
   auditLog: { create: jest.fn() },
   visibilityForm: { findUnique: jest.fn(), upsert: jest.fn() },
   visibilityFormVersion: { findUnique: jest.fn(), create: jest.fn() },
@@ -116,6 +117,50 @@ describe('VisibilityAdminService', () => {
       expect(mockPrisma.auditLog.create).toHaveBeenCalled();
       expect(mockSettings.invalidate).toHaveBeenCalledWith('t1');
       expect(res.visibilityConfig).toEqual(defaultConfig);
+    });
+
+    describe('salesPhotoViewLevels (sales photo view, tenant-scoped)', () => {
+      const stored = () => mockPrisma.programSetting.upsert.mock.calls[0][0].update.settingValue;
+      beforeEach(() => mockPrisma.programSetting.upsert.mockResolvedValue({ id: 'ps1' }));
+
+      beforeEach(() =>
+        mockPrisma.salesHierarchyLevel.findMany.mockResolvedValue([
+          { code: 'XSR', name: 'ISR', level: 1 }, { code: 'SO', name: 'SO', level: 2 }, { code: 'ASM', name: 'ASM', level: 3 },
+        ]),
+      );
+
+      it('a present list is trimmed, matched case-insensitively to the real level codes, de-duplicated and stored', async () => {
+        await service.setConfig(user, { ...defaultConfig, salesPhotoViewLevels: [' xsr', 'SO', 'so', 'Asm'] } as never);
+        expect(stored().salesPhotoViewLevels).toEqual(['XSR', 'SO', 'ASM']);
+      });
+
+      it('an unknown level code → 400 with a plain message, nothing written', async () => {
+        await expect(service.setConfig(user, { ...defaultConfig, salesPhotoViewLevels: ['ISR', 'SO'] } as never))
+          .rejects.toThrow('Unknown sales level: ISR. Use one of: XSR, SO, ASM.');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
+
+      it('listSalesLevels returns the real codes + names', async () => {
+        await expect(service.listSalesLevels('t1')).resolves.toEqual({
+          levels: [{ code: 'XSR', name: 'ISR' }, { code: 'SO', name: 'SO' }, { code: 'ASM', name: 'ASM' }],
+        });
+      });
+
+      it('an ABSENT key carries the stored list (a stale editor never wipes it)', async () => {
+        mockSettings.getEffectiveSettings.mockResolvedValue({
+          visibilityConfig: { ...defaultConfig, salesPhotoViewLevels: ['SO'] },
+        });
+        await service.setConfig(user, defaultConfig as never);
+        expect(stored().salesPhotoViewLevels).toEqual(['SO']);
+      });
+
+      it('an empty list turns it OFF — the key is not stored at all', async () => {
+        mockSettings.getEffectiveSettings.mockResolvedValue({
+          visibilityConfig: { ...defaultConfig, salesPhotoViewLevels: ['SO'] },
+        });
+        await service.setConfig(user, { ...defaultConfig, salesPhotoViewLevels: [] } as never);
+        expect(stored()).not.toHaveProperty('salesPhotoViewLevels');
+      });
     });
   });
 

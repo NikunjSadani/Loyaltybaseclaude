@@ -17,12 +17,14 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 const getConfig = vi.fn();
 const setConfig = vi.fn();
 const getForm = vi.fn();
+const getSalesLevels = vi.fn();
 
 vi.mock('@/lib/visibility', () => ({
   visibilityApi: {
     getConfig: (...a: unknown[]) => getConfig(...a),
     setConfig: (...a: unknown[]) => setConfig(...a),
     getForm: (...a: unknown[]) => getForm(...a),
+    getSalesLevels: (...a: unknown[]) => getSalesLevels(...a),
   },
   mediaViewUrl: (k: string) => `/api/visibility/captures/media?key=${k}`,
   rewriteMediaViewPath: (p: string) => p.replace(/^\/v1\//, '/api/'),
@@ -50,6 +52,11 @@ beforeEach(() => {
   setConfig.mockReset();
   getForm.mockReset();
   setConfig.mockResolvedValue({ success: true, data: {} });
+  getSalesLevels.mockReset();
+  getSalesLevels.mockResolvedValue({
+    success: true,
+    data: { levels: [{ code: 'XSR', name: 'ISR' }, { code: 'SO', name: 'SO' }, { code: 'ASM', name: 'ASM' }] },
+  });
   // Default: a form that DOES capture location (a GPS field present) — no geo-fence warning.
   getForm.mockResolvedValue({
     success: true,
@@ -101,6 +108,55 @@ describe('VISCFG — VisibilityConfigEditor', () => {
     const block = setConfig.mock.calls[0][0];
     expect(block.outletScope).toEqual(expect.arrayContaining(['SSS', 'SSS_TOT']));
     expect(block.allowedSalesLevels).toEqual(expect.arrayContaining(['XSR', 'ASM']));
+  });
+
+  it('VISCFG7: sales photo view levels hydrate, toggle and save; none ticked saves [] (OFF)', async () => {
+    getConfig.mockResolvedValue({
+      success: true,
+      data: { outletScope: ['SSS'], frequencyPerMonth: 1, allowedSalesLevels: ['SO'], geoFence: { enabled: false, radiusMeters: 50 },
+        salesPhotoViewLevels: ['SO'] },
+    });
+    render(<VisibilityConfigEditor />);
+    const so = await screen.findByLabelText('View photos: SO');
+    expect((so as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(await screen.findByLabelText('View photos: ASM'));
+    fireEvent.click(screen.getByLabelText('View photos: XSR'));
+    fireEvent.click(screen.getByRole('button', { name: /save configuration/i }));
+    await waitFor(() => expect(setConfig).toHaveBeenCalledTimes(1));
+    expect(setConfig.mock.calls[0][0].salesPhotoViewLevels).toEqual(['SO', 'ASM', 'XSR']);
+    // Untick all → [] (OFF).
+    setConfig.mockClear();
+    for (const c of ['SO', 'ASM', 'XSR']) fireEvent.click(screen.getByLabelText(`View photos: ${c}`));
+    fireEvent.click(screen.getByRole('button', { name: /save configuration/i }));
+    await waitFor(() => expect(setConfig).toHaveBeenCalledTimes(1));
+    expect(setConfig.mock.calls[0][0].salesPhotoViewLevels).toEqual([]);
+  });
+
+  it('VISCFG8: only the client REAL levels are offered; a stored code that is no longer a level shows flagged', async () => {
+    getSalesLevels.mockResolvedValue({ success: true, data: { levels: [{ code: 'XSR', name: 'ISR' }, { code: 'SO', name: 'SO' }] } });
+    getConfig.mockResolvedValue({
+      success: true,
+      data: { outletScope: ['SSS'], frequencyPerMonth: 1, allowedSalesLevels: ['SO'], geoFence: { enabled: false, radiusMeters: 50 },
+        salesPhotoViewLevels: ['OLD'] },
+    });
+    render(<VisibilityConfigEditor />);
+    const section = await screen.findByTestId('visibility-photo-view-levels');
+    await within(section).findByLabelText('View photos: XSR');
+    expect(within(section).queryByLabelText('View photos: NSM')).toBeNull();
+    expect(within(section).getByLabelText('View photos: OLD')).toBeChecked();
+    expect(section).toHaveTextContent('not a sales level now');
+  });
+
+  it('VISCFG9: the levels list failing shows a plain error with Retry', async () => {
+    getSalesLevels.mockResolvedValueOnce({ success: false, error: 'Network down' });
+    getConfig.mockResolvedValue({
+      success: true,
+      data: { outletScope: ['SSS'], frequencyPerMonth: 1, allowedSalesLevels: ['SO'], geoFence: { enabled: false, radiusMeters: 50 } },
+    });
+    render(<VisibilityConfigEditor />);
+    expect(await screen.findByTestId('photo-levels-error')).toHaveTextContent('Network down');
+    fireEvent.click(within(screen.getByTestId('photo-levels-error')).getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByLabelText('View photos: XSR')).toBeInTheDocument();
   });
 
   it('VISCFG3: describeWindows renders the D6 window preview', () => {

@@ -194,6 +194,11 @@ export interface VisibilityConfig {
   programs?: string[];
   /** APPLIES-TO: narrow to these Outlet.programCategory (Sub-Program) values; empty/absent = every sub-program. */
   subPrograms?: string[];
+  /**
+   * Sales photo view (tenant-scoped): SalesHierarchyLevel.code values whose users see this month's capture photos of
+   * their team's outlets in the sales app. Empty / absent = OFF.
+   */
+  salesPhotoViewLevels?: string[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -455,6 +460,11 @@ export interface SalesEligibleOutlet {
   windowState: CaptureUiState;
   /** Whether THIS rep may capture (allowed level AND in-subtree). */
   canCapture: boolean;
+  /**
+   * Sales photo view: present (true) when the tenant has photo view on, the caller's level is NOT listed, and the caller
+   * submitted this capture — they may still see their own capture's photos.
+   */
+  ownCapture?: true;
 }
 
 /**
@@ -573,6 +583,50 @@ export interface SalesEligibleResponse {
    *  leaf rep with no downline, so the FE hides the filter. */
   members: SalesEligibleMember[];
   outlets: SalesEligibleOutlet[];
+  /** Present (true) only when this tenant lets the caller's level view capture photos (salesPhotoViewLevels). */
+  photoView?: true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sales photo view (tenant-scoped: visibilityConfig.salesPhotoViewLevels)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One photo's review state in plain sales words: Approved / Needs re-take / Waiting. */
+export type SalesPhotoStatus = 'approved' | 'needs_retake' | 'pending';
+
+/** One photo of a capture's CURRENT version, as a sales manager sees it (never GPS coordinates). */
+export interface SalesCapturePhoto {
+  fieldId: string;
+  /** Form field label — also the image alt text. */
+  label: string;
+  mediaKey: string;
+  /** Backend auth-gated stream path (`/v1/visibility/captures/media?key=…`) — rewrite with rewriteMediaViewPath. */
+  viewPath: string;
+  status: SalesPhotoStatus;
+  /** This photo's own re-take reason (a whole-capture reason is `captureReason`, shown once). */
+  reason: string | null;
+  /** When THIS photo was taken (shutter time, else when the version that first held it was submitted). */
+  capturedAt: string | null;
+  /** Who submitted the version that first held this photo (a carried-forward photo keeps its original submitter). */
+  takenBy: string | null;
+  /** Fence-required photos only. */
+  fenceStatus?: PhotoFenceStatus;
+}
+
+/** A capture's current-version photos + who submitted it and when (sales photo view). */
+export interface SalesCapturePhotos {
+  captureId: string;
+  windowKey: string;
+  version: number;
+  status: VisibilityCaptureStatus | string;
+  /** Who submitted the CURRENT version, and when. */
+  submittedBy: string | null;
+  submittedAt: string | null;
+  /** A whole-capture rejection reason (shown once); null otherwise. */
+  captureReason: string | null;
+  /** The window has closed — a never-reviewed photo reads "Not reviewed". */
+  windowClosed: boolean;
+  photos: SalesCapturePhoto[];
 }
 
 /** One window row of the outlet-view "Visibility — this period" card (D13). */
@@ -588,6 +642,8 @@ export interface OutletStatusWindow {
   /** Per-CAMERA-field review state of this window's capture (present for CHANGES_REQUESTED). */
   photoReviews?: VisibilityPhotoReviews | null;
   state: CaptureUiState;
+  /** Sales photo view: this window's capture photos (present only when the feature is on for the caller). */
+  photos?: SalesCapturePhotos | null;
 }
 
 /** GET /outlet/:outletId/status response (D13). */
@@ -606,6 +662,8 @@ export interface OutletStatusResponse {
   notApplicable?: boolean;
   canCapture: boolean;
   windows: OutletStatusWindow[];
+  /** Present (true) only when this tenant lets the caller's level view capture photos. */
+  photoView?: true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -176,6 +176,13 @@ export interface VisibilityConfigSettings {
   programs:           string[];
   /** Outlet.programCategory values; EMPTY = all sub-programs (independent of `programs`, D11). */
   subPrograms:        string[];
+  /**
+   * Sales photo view (owner 2026-11-24, TENANT-SCOPED): SalesHierarchyLevel.code values (like allowedSalesLevels, e.g.
+   * ["XSR","SO","ASM"]) whose users may SEE this month's capture photos of outlets in their team in the sales app.
+   * ABSENT / empty = OFF — the key is only present on the effective config when the tenant stored a non-empty list, so
+   * every other tenant's settings / config responses stay byte-identical.
+   */
+  salesPhotoViewLevels?: string[];
 }
 
 /**
@@ -624,6 +631,9 @@ export class TenantSettingsService {
         geoFence:           { ...base.visibilityConfig.geoFence },
         programs:           [...base.visibilityConfig.programs],
         subPrograms:        [...base.visibilityConfig.subPrograms],
+        ...(base.visibilityConfig.salesPhotoViewLevels
+          ? { salesPhotoViewLevels: [...base.visibilityConfig.salesPhotoViewLevels] }
+          : {}),
       },
       tdsPolicy:          { ...base.tdsPolicy },
     };
@@ -744,6 +754,8 @@ export class TenantSettingsService {
           if (this.isObj(v)) {
             const d = base.visibilityConfig;
             const geo = this.isObj(v.geoFence) ? v.geoFence : {};
+            // Sales photo view: present ONLY when a non-empty list is stored (absent = OFF, byte-identical).
+            const photoLevels = this.stringList(v.salesPhotoViewLevels, []);
             out.visibilityConfig = {
               // Code allow-lists: dedupe/trim, but ALLOW empty here (empty scope just means
               // "no outlets in scope yet") — so pass [] as the fallback, not the default.
@@ -759,6 +771,7 @@ export class TenantSettingsService {
               // APPLIES-TO narrowing: empty = ALL. An older stored config without these keys → [].
               programs:           this.stringList(v.programs,    []),
               subPrograms:        this.stringList(v.subPrograms, []),
+              ...(photoLevels.length ? { salesPhotoViewLevels: photoLevels } : {}),
             };
           }
           break;

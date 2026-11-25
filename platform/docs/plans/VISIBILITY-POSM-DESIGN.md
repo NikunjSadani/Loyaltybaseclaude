@@ -72,6 +72,7 @@ the Scheme decision; the dead reward columns in the current module are removed, 
   way from the LIVE outlet master (`Outlet.state` / `Outlet.zone`; API fields `outletState` / `outletZone`, blank → "—").
 - **D13 — Outlet info view** (`sales/kyc/[id]`): a "Visibility — this period" card showing each window's status,
   with a **Capture CTA** (redirect preselected to the outlet) when the current window is due / missing / rejected.
+  When the tenant turns on the **sales photo view** (§18), each window with a capture also shows its photos.
 - **D14 — Sales Tasks:** a "Visibility captures due" group (mode-aware, reach-scoped), showing **N-of-M for the
   current window** and opening the capture sheet.
 - **D15 — Reporting:** Gifsy coverage view **per window** (captured / pending / approved / rejected / missed) +
@@ -613,3 +614,77 @@ Detail: `LOCATION-GATE.md`.
 2026-11-21; audited + fixed; waiting for the next batch):** concurrent precise-GPS acquires share ONE lookup (no early settle); TIMEOUT /
 POSITION_UNAVAILABLE are transient, PERMISSION_DENIED latches; a reading > 10 s old is never returned; a second photo
 waits only the first lookup's remaining time (≤ 5 s cap) — no added wait.
+
+## 18. Sales photo view (2026-11-24, TENANT-SCOPED — `feat/sales-visibility-photos`)
+
+**What it does.** Sales managers can see THIS month's visibility photos for outlets in their own team, in the sales
+app. Before this, sales users saw only the status and the re-take reasons; photos were visible only to Gifsy and the
+client admin.
+
+**Who sees it — one per-client setting.** `visibilityConfig.salesPhotoViewLevels` = a list of sales level CODES (the
+same codes as `allowedSalesLevels`, e.g. `["XSR","SO","ASM"]` = Bajaj ISR / SO / ASM). Empty or absent = OFF. The key
+is stored and returned ONLY when the list is non-empty, so a tenant that never sets it (Deoleo) gets exactly the same
+responses as before. Set it in the Gifsy console → Visibility config → "Who sees team photos in the sales app". Both
+writers (the Visibility config editor's `PUT /visibility/config` and the generic settings writer) keep a stored list
+when a request leaves the key out, so an older editor tab never switches it off by accident.
+
+**What a manager sees (only when their level is listed).**
+- **Outlet page → "Visibility — this period" card:** under each window of this month that has a capture, a row of
+  small photos, each with a badge — **Approved ✓**, **Needs re-take** (with the reason) or **Waiting** — plus who
+  submitted it and when (India time). Tapping a photo opens it full screen with its own "Taken by" and time; swipe with
+  one finger (or the arrows / arrow keys) to move between photos — a pinch never changes photo; the close button or Esc
+  closes it. A photo that fails to load says "Photo couldn't load · Tap to retry".
+- **Visibility screen:** quick chips **All / Waiting / Approved / Needs re-take** with counts (they apply on top of the
+  other filters; a chip that empties falls back to All), and a **View photos** button on every outlet that has a
+  capture this window — on a phone the buttons sit on their own line under the outlet name. The photos load only when
+  the button is tapped. After a capture the list refreshes so the new capture's button appears.
+- A capture's own submitter can always see that capture's photos this month, even if their level is not listed.
+- Only the CURRENT version of a capture is shown (a re-taken older photo is never shown) and only this month. No GPS
+  coordinates are ever sent — only "At the outlet / Away from the outlet / Location couldn't be verified" for photos
+  that need a location check. Never a broken image.
+
+**API.**
+- `GET /v1/visibility/outlet/:outletId/status` — adds `photoView: true` and, per window with a capture, `photos`
+  `{ captureId, windowKey, version, status, submittedBy, submittedAt, captureReason, windowClosed, photos: [{ fieldId,
+  label, mediaKey, viewPath, status: approved | needs_retake | pending, reason, capturedAt, takenBy, fenceStatus? }] }`.
+  Only when the caller's level is listed; otherwise the response is unchanged.
+- `GET /v1/visibility/sales/eligible` — adds only the `photoView: true` flag (photos are never inlined in the list).
+- `GET /v1/visibility/sales/captures/:captureId/photos` — one capture's photos. 403 when the level is not listed, the
+  outlet is outside the caller's team, or the capture is from another month; 404 when the capture does not exist.
+- Photos are read through the same signed-in media stream the admin review queue uses
+  (`GET /v1/visibility/captures/media?key=`).
+
+**Media stream check (sales roles only, only for a tenant with the setting) — fail-closed.** On these tenants a rep's
+capture photo is uploaded to `visibility-media/<client>/u/<userId>/<YYYY-MM>/…` (the key names the uploader). For a
+sales caller a photo key is served only when it is (a) a sample image of the active capture form, (b) the caller's
+OWN upload of this month (the capture form's read-back before submit — the form shows the phone's local copy first
+anyway), or (c) a photo of the current version of a this-month capture that the caller submitted, or of an outlet in
+the caller's team while the caller's level is listed. Everything else → 403 "You don't have access to this photo.":
+another team's photo, an older month, a replaced older photo, a level that is not listed, an old-format upload
+(ownership can't be proven), an imported old-app photo. Gifsy / client admin access is unchanged. Tenants without the
+setting keep exactly today's behaviour (same upload key, same media rules) — this was deliberately NOT applied to every
+tenant (that would be a platform-wide change needing owner approval). On these tenants a sales caller's photo response
+is `Cache-Control: private, max-age=300` (the key never changes and access is re-checked on every request), so the full
+view re-uses the thumbnail's download; every other caller keeps `no-store`.
+
+**No borrowed photos.** On these tenants a capture is accepted only when every photo is the rep's own upload or exactly
+the photo that field held on the capture's previous version (a carried-forward photo); anything else → 400 "Photo must
+be taken in this visit." (so nobody can submit a known photo key and then read it as its submitter). The own-upload
+read-back accepts the key's UTC month only between 00:00 and 05:30 IST on the 1st (otherwise the IST month). The
+private-cached photo response also sends `Vary: Cookie, Authorization`. Photo links from the sales viewer carry the
+capture id (`&c=`), so the check reads that one row and confirms the photo is on it (falling back to the month scan).
+A rep whose level is not listed still gets **View photos** on the captures they submitted (`ownCapture` on the list).
+
+**Levels are checked.** Both writers check `salesPhotoViewLevels` against the client's real sales levels
+(case-insensitive; stored in the client's own spelling). An unknown code is refused with a plain message. The console
+lists only the client's real levels (`GET /v1/visibility/config/sales-levels`).
+
+**Who took which photo.** When a re-take keeps an approved photo from an earlier version, that photo keeps its own
+"Taken by" and time (from the version that first held it). The capture line reads "Submitted by X · time" for the
+current version. A whole-capture rejection shows its reason once. Once the window has closed, a photo nobody reviewed
+reads "Not reviewed".
+
+**Speed.** The Visibility list makes no extra photo reads; photos are fetched per capture on demand. The outlet card
+reads the form version(s), the capture's stored versions (by capture id) and, only if a photo needs a location word,
+the outlet reference — a fixed number of reads. Each image request = cached settings + cached photo field ids (60 s
+per client) + one capture lookup on the (client, window) index + one sales-user read + cached team reach (60 s).
