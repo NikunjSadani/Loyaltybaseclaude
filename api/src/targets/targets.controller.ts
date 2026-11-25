@@ -35,9 +35,11 @@ import {
   Body,
   Query,
   Res,
+  StreamableFile,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import { streamObjectResponse } from '../common/stream-object';
 import { LimitedFileInterceptor, SPREADSHEET_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import type { Response } from 'express';
 import { TargetsService } from './targets.service';
@@ -234,6 +236,24 @@ export class TargetsController {
   @RequirePermission('targets:read')
   listBatches(@CurrentUser() user: JwtPayload, @Query() q: ListBatchesQueryDto) {
     return this.targets.listBatches(user, q);
+  }
+
+  /** GET /v1/admin/targets/batches/:id/file — the kept file of a confirmed upload (tenant-scoped; 404 if not kept). */
+  @Get('batches/:id/file')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('targets:read')
+  async downloadBatchFile(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { stream, size, contentType, fileName } = await this.targets.openBatchFile(user, id);
+    res.setHeader('Cache-Control', 'no-store');
+    const safeName = fileName.replace(/[^\w.\- ]+/g, '_').slice(0, 120) || 'targets.xlsx';
+    return streamObjectResponse(res, { stream, size }, {
+      type: contentType,
+      disposition: `attachment; filename="${safeName}"`,
+    });
   }
 
   /** GET /v1/admin/targets?month=YYYY-MM — list stored target rows. */

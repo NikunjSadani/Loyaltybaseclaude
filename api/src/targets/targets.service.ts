@@ -19,9 +19,11 @@ import {
   Injectable,
   NotFoundException,
   Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService, type StoredObjectStream } from '../storage/storage.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -89,6 +91,11 @@ export const TARGET_UPLOAD_ACK_CATEGORIES = {
   IGNORED_VALUES: "values ignored because the KPI doesn't apply to the outlet",
 } as const;
 export type TargetUploadAckCategory = keyof typeof TARGET_UPLOAD_ACK_CATEGORIES;
+
+/** AuditLog.entityType of a confirmed target upload (entityId = the TargetUploadBatch id). */
+export const TARGET_UPLOAD_AUDIT_ENTITY = 'TARGET_UPLOAD';
+/** Private-bucket folder of the kept upload files: `target-uploads/<clientId>/<batchId>/…`. */
+export const TARGET_UPLOAD_FILE_PREFIX = 'target-uploads/';
 
 /** One outlet-month a target upload writes: the uploaded KPI map + the stored KPI codes it must carry over. */
 interface TargetUploadWrite {
@@ -211,6 +218,9 @@ export class TargetsService {
     // @Global TenantModule provides it in the app; @Optional so unit-test modules that only provide
     // Prisma keep compiling (falls back to a local instance over the same Prisma — fresh reads).
     @Optional() private readonly tenantSettings?: TenantSettingsService,
+    // @Global StorageModule provides it in the app. A confirmed apply REQUIRES it (keeps the file); @Optional only
+    // so unit-test modules that never confirm keep compiling.
+    @Optional() private readonly storage?: StorageService,
   ) {}
 
   private settingsService(): TenantSettingsService {
@@ -701,7 +711,7 @@ export class TargetsService {
           month,
           outletCode,
           outletName: outletMeta.get(outletCode)?.name ?? outletCode,
-          kpiMap: kpiMap as Record<string, unknown>,
+          kpiMap,
           // Owner decision (audit #3): a re-upload NEVER deletes stored values of KPIs that are out of scope
           // for this outlet (their cells were ignored by the parser). Only a scope-enforced tenant has any.
           carry: parseScope ? parseScope.outOfScopeCodes(outletCode) : [],
@@ -849,7 +859,7 @@ export class TargetsService {
     const focusCheck = await targetUploadFocusCheck(
       this.prisma,
       user.clientId,
-      p.parseResult.acceptedTargets as Record<string, Record<string, unknown>>,
+      p.parseResult.acceptedTargets,
       p.writableMonths,
     );
     return {
@@ -890,15 +900,20 @@ export class TargetsService {
     if (!file) throw new BadRequestException('No file uploaded');
 
     let batchId: string | undefined;
+    let fileSha256: string | undefined;
     if (opts?.confirmToken !== undefined) {
       const m = TargetsService.TOKEN_RE.exec(opts.confirmToken);
       if (!m) throw new BadRequestException('Invalid confirmation token. Pick the file again to preview it.');
-      if (createHash('sha256').update(file.buffer).digest('hex') !== m[1]) {
+      fileSha256 = createHash('sha256').update(file.buffer).digest('hex');
+      if (fileSha256 !== m[1]) {
         throw new ConflictException(
           'This file is not the one you previewed (it was changed or replaced). Nothing was saved. Pick the file again to preview it.',
         );
       }
       batchId = `tgtup_${m[2]}`;
+      if (!this.storage) {
+        throw new ServiceUnavailableException('File storage is not available, so the upload cannot be kept on record. Nothing was saved.');
+      }
     }
 
     const p = await this.prepareTargetUpload(user, file);
@@ -930,6 +945,11 @@ export class TargetsService {
     // transactions ($transaction([...])) so each round-trip stays well under the
     // timeout and the write scales to thousands of outlets. Re-upload stays
     // idempotent (upsert semantics preserved).
+    // Where the confirmed file is kept (private bucket, tenant + batch scoped). The key lives in the audit metadata
+    // (TargetUploadBatch has no column for it — no schema change).
+    const fileKey = batchId
+      ? this.storage!.generateKey(`${TARGET_UPLOAD_FILE_PREFIX}${user.clientId}/${batchId}`, file.originalname || 'targets.xlsx')
+      : undefined;
     let batch: { id: string };
     try {
       const createBatch = this.prisma.targetUploadBatch.create({
@@ -945,23 +965,34 @@ export class TargetsService {
         },
       });
       if (batchId) {
-        // A confirmed apply records WHAT the admin acknowledged as not applied, atomically with the batch row.
+        // A confirmed apply is AUDITED atomically with the batch row: who, what file (name/size/hash + where it is
+        // kept), which months, the row counts, new vs overwritten, and what the admin acknowledged as not applied.
         const [created] = await this.prisma.$transaction([
           createBatch,
           this.prisma.auditLog.create({
             data: {
               action: 'CREATE',
-              entityType: 'TARGET_UPLOAD_BATCH',
+              entityType: TARGET_UPLOAD_AUDIT_ENTITY,
               entityId: batchId,
               actorId: user.sub,
-              newValues: {
+              metadata: {
+                clientId:       user.clientId,
+                change:         'target-upload-confirm',
+                months:         p.writableMonths,
+                skippedLockedMonths: p.lockedMonths,
+                fileName:       file.originalname ?? null,
+                fileSize:       file.buffer.length,
+                fileSha256:     fileSha256 ?? null,
+                fileKey:        fileKey ?? null,
+                totalRows:      p.parseResult.summary.total,
+                acceptedCount:  p.parseResult.summary.accepted,
+                rejectedCount:  p.parseResult.summary.rejected,
+                savedCount:     p.writes.length,
+                newCount:       cls.newCount,
+                overwriteCount: cls.overwriteCount,
                 acknowledged,
                 notApplied,
-                willSave: p.writes.length,
-                newCount: cls.newCount,
-                overwriteCount: cls.overwriteCount,
               } as unknown as Prisma.InputJsonValue,
-              metadata: { clientId: user.clientId, change: 'target-upload-confirm', fileName: file.originalname ?? null },
             },
           }),
         ]);
@@ -977,6 +1008,25 @@ export class TargetsService {
         );
       }
       throw e;
+    }
+
+    // Keep the confirmed file BEFORE any target is written: if it cannot be stored, nothing is applied (loud 503) —
+    // an applied upload always has its file on record.
+    if (fileKey) {
+      try {
+        await this.storage!.uploadFile(
+          file.buffer,
+          fileKey,
+          file.mimetype || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        );
+      } catch {
+        await this.prisma.targetUploadBatch
+          .update({ where: { id: batch.id }, data: { status: 'FAILED' } })
+          .catch(() => undefined);
+        throw new ServiceUnavailableException(
+          'The file could not be stored, so nothing was applied. Pick the file again to preview it and retry.',
+        );
+      }
     }
 
     // Build one OutletTarget upsert per (outletCode, month) with non-blank values. Each op is a THUNK built when its
@@ -1047,7 +1097,7 @@ export class TargetsService {
     const focusCheck = await targetUploadFocusCheck(
       this.prisma,
       user.clientId,
-      p.parseResult.acceptedTargets as Record<string, Record<string, unknown>>,
+      p.parseResult.acceptedTargets,
       p.writableMonths,
     );
 
@@ -1714,14 +1764,91 @@ export class TargetsService {
 
   // ─── List batches ──────────────────────────────────────────────────────────
 
+  /** Newest uploads shown in the Upload history (the list is for reading, not an export). */
+  private static readonly HISTORY_LIMIT = 100;
+
+  /**
+   * Upload history (newest first, tenant-scoped, at most HISTORY_LIMIT): the batch rows + who uploaded (name) + the
+   * confirmed-apply audit details (months, new vs overwritten, acknowledged, whether the file is kept). Batches from
+   * before the confirm step — or applied directly by a script — have no audit row: `fileKept: false`.
+   */
   async listBatches(user: JwtPayload, q: ListBatchesQueryDto) {
-    return this.prisma.targetUploadBatch.findMany({
+    const batches = await this.prisma.targetUploadBatch.findMany({
       where: {
         clientId: user.clientId,
         ...(q.month ? { month: q.month } : {}),
       },
       orderBy: { createdAt: 'desc' },
+      take: TargetsService.HISTORY_LIMIT,
     });
+    if (batches.length === 0) return [];
+    const [audits, users] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where: { entityType: TARGET_UPLOAD_AUDIT_ENTITY, entityId: { in: batches.map((b) => b.id) } },
+        select: { entityId: true, metadata: true },
+      }),
+      this.prisma.user.findMany({
+        where: { id: { in: [...new Set(batches.map((b) => b.uploadedById))] } },
+        select: { id: true, name: true, clientId: true },
+      }),
+    ]);
+    // Only an audit row that belongs to THIS tenant counts (defence in depth — ids are already tenant-scoped).
+    const auditBy = new Map(
+      (audits ?? [])
+        .map((a) => [a.entityId, (a.metadata ?? {}) as Record<string, unknown>] as const)
+        .filter(([, m]) => m.clientId === user.clientId),
+    );
+    // A tenant user's own name; an operator from another tenant (Gifsy staff working in this tenant) is not named.
+    const nameBy = new Map((users ?? []).map((u) => [u.id, u.clientId === user.clientId ? u.name : 'Gifsy team']));
+    return batches.map((b) => {
+      const m = auditBy.get(b.id);
+      return {
+        ...b,
+        uploadedByName: nameBy.get(b.uploadedById) ?? null,
+        months:         (m?.months as string[] | undefined) ?? null,
+        fileName:       (m?.fileName as string | undefined) ?? null,
+        fileSize:       (m?.fileSize as number | undefined) ?? null,
+        savedCount:     (m?.savedCount as number | undefined) ?? null,
+        newCount:       (m?.newCount as number | undefined) ?? null,
+        overwriteCount: (m?.overwriteCount as number | undefined) ?? null,
+        acknowledged:   (m?.acknowledged as string[] | undefined) ?? null,
+        notApplied:     (m?.notApplied as unknown[] | undefined) ?? null,
+        fileKept:       typeof m?.fileKey === 'string' && b.status === 'COMPLETED',
+      };
+    });
+  }
+
+  /**
+   * Stream the kept file of a confirmed upload. Tenant-scoped: the batch must be the caller's tenant's, the audit row
+   * must name that tenant, and the key must sit under that tenant's folder — anything else is a bare 404.
+   */
+  async openBatchFile(
+    user: JwtPayload,
+    batchId: string,
+  ): Promise<StoredObjectStream & { fileName: string }> {
+    const notKept = () => new NotFoundException('The file of this upload was not kept.');
+    const batch = await this.prisma.targetUploadBatch.findFirst({
+      where: { id: batchId, clientId: user.clientId },
+      select: { id: true },
+    });
+    if (!batch) throw new NotFoundException('Upload not found');
+    const audit = await this.prisma.auditLog.findFirst({
+      where: { entityType: TARGET_UPLOAD_AUDIT_ENTITY, entityId: batch.id },
+      select: { metadata: true },
+    });
+    const m = (audit?.metadata ?? {}) as Record<string, unknown>;
+    const key = m.fileKey;
+    if (
+      m.clientId !== user.clientId ||
+      typeof key !== 'string' ||
+      !key.startsWith(`${TARGET_UPLOAD_FILE_PREFIX}${user.clientId}/${batch.id}/`) ||
+      !this.storage
+    ) {
+      throw notKept();
+    }
+    const obj = await this.storage.openBoundedObject(key);
+    if (!obj) throw notKept();
+    return { ...obj, fileName: typeof m.fileName === 'string' && m.fileName ? m.fileName : `targets-${batch.id}.xlsx` };
   }
 
   // ─── List targets ──────────────────────────────────────────────────────────

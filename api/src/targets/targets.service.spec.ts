@@ -34,6 +34,7 @@ import {
 import { ctxFor, renderKind } from '../exports/kinds/batch2/parity.support-spec';
 import { PrismaService } from '../prisma/prisma.service';
 import { SalesNotificationsService } from '../notifications/sales-notifications.service';
+import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import {
   UpsertKpiDefDto,
@@ -115,7 +116,8 @@ const mockPrisma = {
   },
   $executeRaw: jest.fn(),
   // Target upload confirm: the acknowledged not-applied categories are audited with the batch row.
-  auditLog: { create: jest.fn() },
+  auditLog: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn() },
+  user: { findMany: jest.fn() },
   // Handles BOTH forms: the array form ($transaction([...ops])) used by the chunked
   // upload persistence, and the interactive callback form used by upsertKpi.
   $transaction: jest.fn((arg: unknown) =>
@@ -123,6 +125,13 @@ const mockPrisma = {
       ? Promise.all(arg)
       : (arg as (tx: typeof mockTx) => unknown)(mockTx),
   ),
+};
+
+// Private-bucket storage (a confirmed target upload keeps its file).
+const mockStorage = {
+  generateKey: jest.fn((folder: string, name: string) => `${folder}/2026-11/uuid-${name}`),
+  uploadFile: jest.fn().mockResolvedValue('gs://x'),
+  openBoundedObject: jest.fn(),
 };
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -212,6 +221,7 @@ describe('TargetsService', () => {
             targetsUploaded: jest.fn(),
           },
         },
+        { provide: StorageService, useValue: mockStorage },
       ],
     }).compile();
     service = module.get(TargetsService);
@@ -932,17 +942,61 @@ describe('TargetsService', () => {
         const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: ACKS });
         expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
         const audit = mockPrisma.auditLog.create.mock.calls[0][0].data;
-        expect(audit).toEqual(expect.objectContaining({ entityType: 'TARGET_UPLOAD_BATCH', entityId: r.batchId, actorId: 'admin1' }));
-        expect(audit.newValues).toEqual(expect.objectContaining({
+        expect(audit).toEqual(expect.objectContaining({ action: 'CREATE', entityType: 'TARGET_UPLOAD', entityId: r.batchId, actorId: 'admin1' }));
+        expect(audit.metadata).toEqual({
+          clientId: 'deoleo',
+          change: 'target-upload-confirm',
+          months: [WRITABLE_MONTH.ym],
+          skippedLockedMonths: [],
+          fileName: 'targets.xlsx',
+          fileSize: b.length,
+          fileSha256: p.previewToken.split('.')[0],
+          fileKey: `target-uploads/deoleo/${r.batchId}/2026-11/uuid-targets.xlsx`,
+          totalRows: 3,
+          acceptedCount: 2,
+          rejectedCount: 1,
+          savedCount: 2,
+          newCount: 1,
+          overwriteCount: 1,
           acknowledged: ACKS,
           notApplied: [{ category: 'REJECTED_ROWS', count: 1 }, { category: 'OVERWRITE', count: 1 }],
-        }));
-        expect(audit.metadata).toEqual(expect.objectContaining({ clientId: 'deoleo', change: 'target-upload-confirm' }));
+        });
         // batch + audit go in ONE array transaction
         const first = mockPrisma.$transaction.mock.calls.find((c) => Array.isArray(c[0]));
         expect((first![0] as unknown[]).length).toBe(2);
         expect(r.notApplied).toEqual(p.notApplied);
         expect(r.acknowledged).toEqual(ACKS);
+      });
+
+      it('the confirmed file is KEPT in the private bucket (tenant + batch folder) BEFORE any target is written', async () => {
+        const b = buf();
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: ACKS });
+        expect(mockStorage.uploadFile).toHaveBeenCalledTimes(1);
+        const [bytes, key] = mockStorage.uploadFile.mock.calls[0];
+        expect(bytes).toBe(b);
+        expect(key).toBe(`target-uploads/deoleo/${r.batchId}/2026-11/uuid-targets.xlsx`);
+        expect(mockStorage.uploadFile.mock.invocationCallOrder[0])
+          .toBeLessThan(mockTx.outletTarget.upsert.mock.invocationCallOrder[0]);
+      });
+
+      it('PREVIEW and a plain (no-token) upload write NO audit row and keep NO file', async () => {
+        await service.previewTargetUpload(admin, xfile(buf()));
+        await service.uploadTargets(admin, xfile(buf()));
+        expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+        expect(mockStorage.uploadFile).not.toHaveBeenCalled();
+      });
+
+      it('the file cannot be stored -> 503, NOTHING applied, batch marked FAILED', async () => {
+        const update = jest.fn().mockResolvedValue({});
+        (mockPrisma.targetUploadBatch as unknown as { update: jest.Mock }).update = update;
+        mockStorage.uploadFile.mockRejectedValueOnce(new Error('gcs down'));
+        const b = buf();
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: ACKS }))
+          .rejects.toThrow(/could not be stored, so nothing was applied/);
+        expect(mockTx.outletTarget.upsert).not.toHaveBeenCalled();
+        expect(update).toHaveBeenCalledWith({ where: { id: `tgtup_${p.previewToken.split('.')[1]}` }, data: { status: 'FAILED' } });
       });
 
       it('locked past-month outlet-months and blank rows are their own categories', async () => {
@@ -997,6 +1051,74 @@ describe('TargetsService', () => {
 
       const arg = mockPrisma.targetUploadBatch.findMany.mock.calls[0][0];
       expect(arg.where.month).toBe('2026-07');
+    });
+
+    it('UPLOAD HISTORY: joins the audit details + uploader name; older / unaudited batches show the file as not kept', async () => {
+      mockPrisma.targetUploadBatch.findMany.mockResolvedValue([
+        { id: 'tgtup_new', clientId: 'deoleo', uploadedById: 'admin1', month: '2026-12', totalRows: 5, acceptedCount: 4, rejectedCount: 1, status: 'COMPLETED', createdAt: new Date() },
+        { id: 'old1', clientId: 'deoleo', uploadedById: 'gifsy1', month: '2026-11', totalRows: 2, acceptedCount: 2, rejectedCount: 0, status: 'COMPLETED', createdAt: new Date() },
+        { id: 'tgtup_failed', clientId: 'deoleo', uploadedById: 'admin1', month: '2026-12', totalRows: 1, acceptedCount: 1, rejectedCount: 0, status: 'FAILED', createdAt: new Date() },
+      ]);
+      mockPrisma.auditLog.findMany.mockResolvedValue([
+        { entityId: 'tgtup_new', metadata: { clientId: 'deoleo', months: ['2026-12'], fileName: 't.xlsx', fileSize: 10, fileKey: 'target-uploads/deoleo/tgtup_new/k.xlsx', savedCount: 4, newCount: 1, overwriteCount: 3, acknowledged: ['OVERWRITE'] } },
+        // an audit row naming ANOTHER tenant is never trusted
+        { entityId: 'old1', metadata: { clientId: 'other', fileKey: 'target-uploads/other/old1/k.xlsx' } },
+        { entityId: 'tgtup_failed', metadata: { clientId: 'deoleo', fileKey: 'target-uploads/deoleo/tgtup_failed/k.xlsx' } },
+      ]);
+      mockPrisma.user.findMany.mockResolvedValue([
+        { id: 'admin1', name: 'Asha Admin', clientId: 'deoleo' },
+        { id: 'gifsy1', name: 'Ravi Ops', clientId: 'gifsy' },
+      ]);
+      const rows = await service.listBatches(admin, {} as ListBatchesQueryDto);
+      expect(mockPrisma.targetUploadBatch.findMany.mock.calls[0][0].take).toBe(100);
+      expect(mockPrisma.auditLog.findMany.mock.calls[0][0].where).toEqual({
+        entityType: 'TARGET_UPLOAD', entityId: { in: ['tgtup_new', 'old1', 'tgtup_failed'] },
+      });
+      expect(rows[0]).toEqual(expect.objectContaining({
+        id: 'tgtup_new', uploadedByName: 'Asha Admin', months: ['2026-12'], newCount: 1, overwriteCount: 3, fileKept: true,
+      }));
+      expect(rows[1]).toEqual(expect.objectContaining({ id: 'old1', uploadedByName: 'Gifsy team', fileKept: false, overwriteCount: null }));
+      expect(rows[2]).toEqual(expect.objectContaining({ id: 'tgtup_failed', fileKept: false }));
+    });
+  });
+
+  describe('openBatchFile (Download file)', () => {
+    const obj = { stream: {} as never, size: 3, contentType: 'application/x' };
+    beforeEach(() => { mockStorage.openBoundedObject.mockResolvedValue(obj); });
+
+    it("streams the kept file of the caller tenant's batch", async () => {
+      (mockPrisma.targetUploadBatch as unknown as { findFirst: jest.Mock }).findFirst = jest.fn().mockResolvedValue({ id: 'tgtup_a' });
+      mockPrisma.auditLog.findFirst.mockResolvedValue({ metadata: { clientId: 'deoleo', fileName: 'mine.xlsx', fileKey: 'target-uploads/deoleo/tgtup_a/2026-11/u-mine.xlsx' } });
+      const r = await service.openBatchFile(admin, 'tgtup_a');
+      expect(r).toEqual(expect.objectContaining({ size: 3, fileName: 'mine.xlsx' }));
+      expect(mockStorage.openBoundedObject).toHaveBeenCalledWith('target-uploads/deoleo/tgtup_a/2026-11/u-mine.xlsx');
+      // the batch lookup is tenant-scoped
+      const findFirst = (mockPrisma.targetUploadBatch as unknown as { findFirst: jest.Mock }).findFirst;
+      expect(findFirst.mock.calls[0][0].where).toEqual({ id: 'tgtup_a', clientId: 'deoleo' });
+    });
+
+    it("TENANT ISOLATION: another tenant's batch id -> 404, storage never touched", async () => {
+      (mockPrisma.targetUploadBatch as unknown as { findFirst: jest.Mock }).findFirst = jest.fn().mockResolvedValue(null);
+      await expect(service.openBatchFile(admin, 'tgtup_theirs')).rejects.toThrow(NotFoundException);
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
+    });
+
+    it('TENANT ISOLATION: an audit row naming another tenant, or a key outside this tenant/batch folder -> 404', async () => {
+      (mockPrisma.targetUploadBatch as unknown as { findFirst: jest.Mock }).findFirst = jest.fn().mockResolvedValue({ id: 'tgtup_a' });
+      mockPrisma.auditLog.findFirst.mockResolvedValueOnce({ metadata: { clientId: 'other', fileKey: 'target-uploads/deoleo/tgtup_a/k.xlsx' } });
+      await expect(service.openBatchFile(admin, 'tgtup_a')).rejects.toThrow(/not kept/);
+      mockPrisma.auditLog.findFirst.mockResolvedValueOnce({ metadata: { clientId: 'deoleo', fileKey: 'target-uploads/other/tgtup_b/k.xlsx' } });
+      await expect(service.openBatchFile(admin, 'tgtup_a')).rejects.toThrow(/not kept/);
+      expect(mockStorage.openBoundedObject).not.toHaveBeenCalled();
+    });
+
+    it('an older upload (no audit row) or a missing object -> 404 "not kept"', async () => {
+      (mockPrisma.targetUploadBatch as unknown as { findFirst: jest.Mock }).findFirst = jest.fn().mockResolvedValue({ id: 'old1' });
+      mockPrisma.auditLog.findFirst.mockResolvedValueOnce(null);
+      await expect(service.openBatchFile(admin, 'old1')).rejects.toThrow(/not kept/);
+      mockPrisma.auditLog.findFirst.mockResolvedValueOnce({ metadata: { clientId: 'deoleo', fileKey: 'target-uploads/deoleo/old1/k.xlsx' } });
+      mockStorage.openBoundedObject.mockResolvedValueOnce(null);
+      await expect(service.openBatchFile(admin, 'old1')).rejects.toThrow(/not kept/);
     });
   });
 

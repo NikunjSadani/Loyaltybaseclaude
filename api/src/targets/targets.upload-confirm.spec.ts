@@ -64,6 +64,26 @@ describe('POST /admin/targets/upload dispatch', () => {
   });
 });
 
+describe('GET /admin/targets/batches/:id/file', () => {
+  it('streams the kept file as an attachment, never cached, with a sanitised name', async () => {
+    const { Readable } = await import('node:stream');
+    const openBatchFile = jest.fn().mockResolvedValue({
+      stream: Readable.from(['abc']), size: 3, contentType: 'application/vnd.ms-excel', fileName: 'Q4 "targets"\r\n.xlsx',
+    });
+    const ctrl = new TargetsController(
+      { openBatchFile } as unknown as TargetsService, {} as ExportsService, {} as PrismaService,
+    );
+    const headers: Record<string, string> = {};
+    const res = { setHeader: (k: string, v: string) => { headers[k] = v; }, once: jest.fn() };
+    const out = await ctrl.downloadBatchFile(user, 'tgtup_x', res as never);
+    expect(openBatchFile).toHaveBeenCalledWith(user, 'tgtup_x');
+    expect(headers['Cache-Control']).toBe('no-store');
+    const h = out.getHeaders();
+    expect(h.disposition).toBe('attachment; filename="Q4 _targets_.xlsx"');
+    expect(h.length).toBe(3);
+  });
+});
+
 describe('UploadTargetsQueryDto', () => {
   const errs = (q: Record<string, unknown>) =>
     validateSync(plainToInstance(UploadTargetsQueryDto, q), { whitelist: true, forbidNonWhitelisted: true });
