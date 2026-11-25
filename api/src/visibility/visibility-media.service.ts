@@ -20,6 +20,11 @@ const INLINE_SAFE_MIME = new Set([
 /** Object-key tenant folder for all visibility media (photos + reference/sample images). */
 const MEDIA_FOLDER_PREFIX = 'visibility-media/';
 
+/** The uploader path segment (`u/<userId>`) of an owner-foldered sales upload; the id is reduced to safe key chars. */
+export function uploaderSegment(userId: string): string {
+  return `u/${String(userId ?? '').replace(/[^A-Za-z0-9_-]/g, '_')}`;
+}
+
 /**
  * VisibilityMediaService — Visibility (POSM) media upload + auth-gated view, plus the
  * duplicate-photo hash primitives. Cloned from SchemeEnrollmentService's media path
@@ -47,6 +52,13 @@ export class VisibilityMediaService {
   async uploadMedia(
     user: JwtPayload,
     file: Express.Multer.File,
+    /**
+     * Sales photo view (tenant-scoped): when true the key carries the uploader —
+     * `visibility-media/<clientId>/u/<userId>/<YYYY-MM>/…` — so the media stream can prove a not-yet-submitted photo
+     * is the caller's own. Only the sales capture upload of a tenant with salesPhotoViewLevels passes it; every other
+     * upload keeps exactly today's key shape.
+     */
+    opts: { ownerFolder?: boolean } = {},
   ): Promise<{ key: string; fileUrl: string; mimeType: string; fileSizeBytes: number }> {
     if (!file) throw new BadRequestException('No file uploaded');
     if (!file.buffer?.length) throw new BadRequestException('Empty file');
@@ -58,10 +70,10 @@ export class VisibilityMediaService {
       throw new BadRequestException('Unsupported or corrupt file. Upload a JPG, PNG, WEBP, GIF, or PDF.');
     }
 
-    const key = this.storage.generateKey(
-      `${MEDIA_FOLDER_PREFIX}${user.clientId}`,
-      file.originalname || `capture.${sniffed.ext}`,
-    );
+    const folder = opts.ownerFolder
+      ? `${MEDIA_FOLDER_PREFIX}${user.clientId}/${uploaderSegment(user.sub)}`
+      : `${MEDIA_FOLDER_PREFIX}${user.clientId}`;
+    const key = this.storage.generateKey(folder, file.originalname || `capture.${sniffed.ext}`);
     const fileUrl = await this.storage.uploadFile(file.buffer, key, sniffed.mime);
     return { key, fileUrl, mimeType: sniffed.mime, fileSizeBytes: file.size };
   }

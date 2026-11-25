@@ -101,6 +101,7 @@ import {
   programNameIn,
 } from './dashboards/dashboard-program-filter';
 import { resolveVisibilityProgramLists } from '../visibility/visibility-scope.helper';
+import { resolveSalesPhotoViewLevels } from '../visibility/visibility-photo-levels';
 import { loadMonthStatusCounts, resolveMonth } from '../visibility/visibility-metrics';
 import { isFastTrackRow } from '../kyc/kyc-fast-track.helper';
 import { kycAddressableOutletWhere, kycPendingAge, KYC_LATEST_SUBMISSION_SELECT } from './dashboards/kyc-pending-sla';
@@ -1739,7 +1740,14 @@ export class AdminCoreService {
         ? (stored!.settingValue as { salesPhotoViewLevels?: unknown }).salesPhotoViewLevels
         : undefined;
       const cur = dto.value as Record<string, unknown>;
-      if (
+      // A present, non-empty list is validated against the tenant's real sales levels (unknown → 400) and stored in the
+      // tenant's own spelling — the same rule as PUT /visibility/config.
+      if (Array.isArray(cur.salesPhotoViewLevels) && cur.salesPhotoViewLevels.length > 0) {
+        dto.value = {
+          ...cur,
+          salesPhotoViewLevels: await resolveSalesPhotoViewLevels(this.prisma, clientId, cur.salesPhotoViewLevels),
+        } as typeof dto.value;
+      } else if (
         (cur.salesPhotoViewLevels === undefined || cur.salesPhotoViewLevels === null) &&
         Array.isArray(storedPhotoLevels) &&
         storedPhotoLevels.length > 0

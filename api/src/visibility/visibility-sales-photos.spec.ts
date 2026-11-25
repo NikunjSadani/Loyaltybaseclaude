@@ -29,8 +29,9 @@ const mockPrisma = {
   visibilityForm: { findUnique: jest.fn() },
   visibilityFormVersion: { findMany: jest.fn() },
   visibilityCapture: { findFirst: jest.fn(), findMany: jest.fn() },
-  visibilityCaptureSubmission: { findFirst: jest.fn() },
+  visibilityCaptureSubmission: { findFirst: jest.fn(), findMany: jest.fn() },
 };
+const mockMedia = { uploadMedia: jest.fn() };
 const mockTenant = { resolveVisibilityEnabled: jest.fn(), resolveVisibilityCaptureMode: jest.fn() };
 const mockSettings = { getEffectiveSettings: jest.fn() };
 
@@ -110,6 +111,8 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
     mockPrisma.visibilityCapture.findMany.mockResolvedValue([captureRow()]);
     mockPrisma.visibilityCapture.findFirst.mockResolvedValue(null);
     mockPrisma.visibilityCaptureSubmission.findFirst.mockResolvedValue(null);
+    mockPrisma.visibilityCaptureSubmission.findMany.mockResolvedValue([]);
+    mockMedia.uploadMedia.mockResolvedValue({ key: 'k' });
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -118,7 +121,7 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
         { provide: StorageService, useValue: {} },
         { provide: TenantService, useValue: mockTenant },
         { provide: TenantSettingsService, useValue: mockSettings },
-        { provide: VisibilityMediaService, useValue: {} },
+        { provide: VisibilityMediaService, useValue: mockMedia },
       ],
     }).compile();
     service = module.get(VisibilityCaptureService);
@@ -133,12 +136,19 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
       expect(w.photos).toMatchObject({
         captureId: 'cap1',
         version: 2,
-        capturedBy: 'Ravi ISR',
-        capturedAt: '2026-11-03T05:01:00.000Z',
+        submittedBy: 'Ravi ISR',
+        submittedAt: '2026-11-03T05:01:00.000Z',
+        captureReason: null,
+        windowClosed: false,
         photos: [
           { fieldId: 'w1', label: 'Window 1', mediaKey: KEY1, status: 'approved', reason: null, capturedAt: '2026-11-03T05:00:00.000Z', fenceStatus: 'inside' },
           { fieldId: 'w2', label: 'Counter', mediaKey: KEY2, status: 'needs_retake', reason: 'Photo is blurry / unclear' },
         ],
+      });
+      // Versions are read once for all this outlet's captures (by captureId — indexed), never per photo.
+      expect(mockPrisma.visibilityCaptureSubmission.findMany).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.visibilityCaptureSubmission.findMany.mock.calls[0][0].where).toEqual({
+        clientId: 't1', captureId: { in: ['cap1'] },
       });
       expect((w.photos.photos as Array<{ viewPath: string }>)[1].viewPath).toBe(
         `/v1/visibility/captures/media?key=${encodeURIComponent(KEY2)}`,
@@ -226,6 +236,34 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
       await expect(service.getSalesCapturePhotos(user, 'cap1')).rejects.toThrow(ForbiddenException);
     });
 
+    it("level not listed BUT the caller submitted this capture → its own photos are shown (A3)", async () => {
+      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...ON, salesPhotoViewLevels: ['XSR'] } });
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue(captureRow({ submittedBySalesUserId: 'su1' }));
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'o9' }]);
+      await expect(service.getSalesCapturePhotos(user, 'cap1')).resolves.toMatchObject({ captureId: 'cap1' });
+    });
+
+    it('B3: a v2 merge — the carried-forward approved photo keeps its v1 time + submitter; the new photo is v2', async () => {
+      // v1 (Asha SO, 2 Nov) held w1 + an old w2; v2 (Ravi ISR, 3 Nov) re-took w2 only, carrying w1 forward approved.
+      mockPrisma.visibilityCapture.findFirst.mockResolvedValue(
+        captureRow({
+          formValues: { w1: KEY1, w2: KEY2 },
+          photoReviews: { w1: { status: 'APPROVED', reviewedAt: 'x', reviewedByUserId: 'g' } },
+          status: 'SUBMITTED',
+        }),
+      );
+      mockPrisma.visibilityCaptureSubmission.findMany.mockResolvedValue([
+        { captureId: 'cap1', version: 2, formValues: { w1: KEY1, w2: KEY2 }, createdAt: new Date('2026-11-03T05:01:00.000Z'), submittedBy: { user: { name: 'Ravi ISR' } } },
+        { captureId: 'cap1', version: 1, formValues: { w1: KEY1, w2: 'visibility-media/t1/old.jpg' }, createdAt: new Date('2026-11-02T04:00:00.000Z'), submittedBy: { user: { name: 'Asha SO' } } },
+      ]);
+      const res = await service.getSalesCapturePhotos(user, 'cap1');
+      expect(res.submittedBy).toBe('Ravi ISR');
+      expect(res.photos).toEqual([
+        expect.objectContaining({ fieldId: 'w1', status: 'approved', takenBy: 'Asha SO', capturedAt: '2026-11-02T04:00:00.000Z' }),
+        expect.objectContaining({ fieldId: 'w2', status: 'pending', takenBy: 'Ravi ISR', capturedAt: '2026-11-03T05:01:00.000Z' }),
+      ]);
+    });
+
     it('feature OFF (unset) → 403', async () => {
       mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: baseConfig });
       await expect(service.getSalesCapturePhotos(user, 'cap1')).rejects.toThrow(ForbiddenException);
@@ -247,18 +285,33 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
     });
   });
 
-  // ── Media-stream tightening (GET captures/media) ─────────────────────────────────
+  // ── Media-stream tightening (GET captures/media) — FAIL-CLOSED ───────────────────
   describe('assertSalesMediaAccess', () => {
+    const CUR_MONTH = CUR.slice(0, 7);
+    const OWN_KEY = `visibility-media/t1/u/u1/${CUR_MONTH}/abc-w1.jpg`;
     beforeEach(() => {
-      // findMany here = the current-month lookup; default: KEY1 sits on cap1 (o1, in reach).
-      mockPrisma.visibilityCapture.findMany.mockResolvedValue([{ outletId: 'o1', formValues: captureRow().formValues }]);
+      // findMany here = the current-month lookup; default: KEY1 sits on cap1 (o1, in reach), submitted by someone else.
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([
+        { outletId: 'o1', formValues: captureRow().formValues, submittedBySalesUserId: 'su9' },
+      ]);
     });
 
-    it('in reach + current month + level listed → allowed', async () => {
+    it('in reach + current month + level listed → allowed (indexed current-month lookup only)', async () => {
       await expect(service.assertSalesMediaAccess(user, KEY1)).resolves.toBeUndefined();
       const where = mockPrisma.visibilityCapture.findMany.mock.calls[0][0].where;
       expect(where.windowKey.in).toEqual(CUR_MONTH_KEYS);
       expect(where.OR).toEqual(mediaKeyRefWhere(['w1', 'w2'], KEY1));
+      // No all-history scans any more.
+      expect(mockPrisma.visibilityCapture.findFirst).not.toHaveBeenCalled();
+      expect(mockPrisma.visibilityCaptureSubmission.findFirst).not.toHaveBeenCalled();
+    });
+
+    it('caches the field ids + team reach: a second image needs no form-version / hierarchy reads', async () => {
+      await service.assertSalesMediaAccess(user, KEY1);
+      await service.assertSalesMediaAccess(user, KEY2);
+      expect(mockPrisma.visibilityFormVersion.findMany).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.salesUserAssignment.findMany).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.visibilityCapture.findMany).toHaveBeenCalledTimes(2);
     });
 
     it('outlet out of reach → 403', async () => {
@@ -271,21 +324,46 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
       await expect(service.assertSalesMediaAccess(user, KEY1)).rejects.toThrow(ForbiddenException);
     });
 
-    it('a photo of an OLD month → 403', async () => {
+    it('A3: level not listed and out of reach, but the caller submitted that capture → allowed', async () => {
+      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...ON, salesPhotoViewLevels: ['XSR'] } });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'o9' }]);
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([
+        { outletId: 'o1', formValues: captureRow().formValues, submittedBySalesUserId: 'su1' },
+      ]);
+      await expect(service.assertSalesMediaAccess(user, KEY1)).resolves.toBeUndefined();
+    });
+
+    it('not on a current-month current version (old month / replaced photo / unknown) → 403', async () => {
       mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
-      mockPrisma.visibilityCapture.findFirst.mockResolvedValue({ id: 'capOld' });
       await expect(service.assertSalesMediaAccess(user, KEY1)).rejects.toThrow(ForbiddenException);
     });
 
-    it('an OLDER version (re-taken photo, only on a submission) → 403', async () => {
+    it('an OLD-FORMAT unattached upload (ownership cannot be proven) → 403', async () => {
       mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
-      mockPrisma.visibilityCaptureSubmission.findFirst.mockResolvedValue({ id: 'sub1' });
-      await expect(service.assertSalesMediaAccess(user, KEY1)).rejects.toThrow(ForbiddenException);
+      await expect(service.assertSalesMediaAccess(user, `visibility-media/t1/${CUR_MONTH}/new.jpg`)).rejects.toThrow(ForbiddenException);
     });
 
-    it("a key on no capture (the rep's own pre-submit read-back) → allowed", async () => {
+    it('the caller OWN upload of this month → allowed without any capture lookup', async () => {
+      await expect(service.assertSalesMediaAccess(user, OWN_KEY)).resolves.toBeUndefined();
+      expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();
+    });
+
+    it('the caller own upload of an OLDER month, or another user upload → 403', async () => {
       mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
-      await expect(service.assertSalesMediaAccess(user, 'visibility-media/t1/2026-11/new.jpg')).resolves.toBeUndefined();
+      await expect(service.assertSalesMediaAccess(user, 'visibility-media/t1/u/u1/2020-01/old.jpg')).rejects.toThrow(ForbiddenException);
+      await expect(service.assertSalesMediaAccess(user, `visibility-media/t1/u/u2/${CUR_MONTH}/x.jpg`)).rejects.toThrow(ForbiddenException);
+    });
+
+    it('a /vendor-import/ key not on a current-month capture → 403; a path with .. → 403', async () => {
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([]);
+      await expect(service.assertSalesMediaAccess(user, 'visibility-media/t1/vendor-import/a.jpg')).rejects.toThrow(ForbiddenException);
+      await expect(service.assertSalesMediaAccess(user, `visibility-media/t1/u/u1/${CUR_MONTH}/../../x.jpg`)).rejects.toThrow(ForbiddenException);
+    });
+
+    it('a form with no photo field → 403 (fail closed)', async () => {
+      mockPrisma.visibilityForm.findUnique.mockResolvedValue({ formSchema: { fields: [] } });
+      mockPrisma.visibilityFormVersion.findMany.mockResolvedValue([]);
+      await expect(service.assertSalesMediaAccess(user, KEY1)).rejects.toThrow(ForbiddenException);
     });
 
     it('the form sample image → allowed without any capture lookup', async () => {
@@ -293,23 +371,20 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
       expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();
     });
 
-    it('a substring look-alike in a row is not a match (exact key only)', async () => {
-      mockPrisma.visibilityCapture.findMany.mockResolvedValue([{ outletId: 'o9', formValues: { w2: `${KEY1}x` } }]);
-      await expect(service.assertSalesMediaAccess(user, KEY1)).resolves.toBeUndefined();
+    it('a substring look-alike in a row is not a match (exact key only) → 403', async () => {
+      mockPrisma.visibilityCapture.findMany.mockResolvedValue([{ outletId: 'o1', formValues: { w2: `${KEY1}x` } }]);
+      await expect(service.assertSalesMediaAccess(user, KEY1)).rejects.toThrow(ForbiddenException);
     });
 
     it('admin roles are unchanged (no checks at all)', async () => {
       await expect(service.assertSalesMediaAccess(admin, KEY1)).resolves.toBeUndefined();
-      await expect(
-        service.assertSalesMediaAccess({ ...admin, role: 'GIFSY_ADMIN' }, KEY1),
-      ).resolves.toBeUndefined();
+      await expect(service.assertSalesMediaAccess({ ...admin, role: 'GIFSY_ADMIN' }, KEY1)).resolves.toBeUndefined();
       expect(mockSettings.getEffectiveSettings).not.toHaveBeenCalled();
     });
 
     it('tenant with the setting UNSET → unchanged (no lookups, allowed)', async () => {
       mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: baseConfig });
-      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'o9' }]);
-      await expect(service.assertSalesMediaAccess(user, KEY1)).resolves.toBeUndefined();
+      await expect(service.assertSalesMediaAccess(user, `visibility-media/t1/${CUR_MONTH}/new.jpg`)).resolves.toBeUndefined();
       expect(mockPrisma.visibilityForm.findUnique).not.toHaveBeenCalled();
       expect(mockPrisma.visibilityCapture.findMany).not.toHaveBeenCalled();
     });
@@ -318,28 +393,51 @@ describe('Sales photo view (salesPhotoViewLevels)', () => {
       await expect(service.assertSalesMediaAccess(user, 'visibility-media/t2/x.jpg')).resolves.toBeUndefined();
       expect(mockSettings.getEffectiveSettings).not.toHaveBeenCalled();
     });
+
+    it('private caching only for a sales caller of a photo-view tenant', async () => {
+      await expect(service.salesMediaCacheable(user)).resolves.toBe(true);
+      await expect(service.salesMediaCacheable(admin)).resolves.toBe(false);
+      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: baseConfig });
+      await expect(service.salesMediaCacheable(user)).resolves.toBe(false);
+    });
+  });
+
+  // ── Sales upload key carries the uploader only on photo-view tenants ────────────
+  describe('uploadCaptureMedia', () => {
+    it('photo-view tenant → owner-foldered key; unset tenant → exactly the old call', async () => {
+      const file = { buffer: Buffer.from('x') } as Express.Multer.File;
+      await service.uploadCaptureMedia(user, file);
+      expect(mockMedia.uploadMedia).toHaveBeenLastCalledWith(user, file, { ownerFolder: true });
+      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: baseConfig });
+      await service.uploadCaptureMedia(user, file);
+      expect(mockMedia.uploadMedia).toHaveBeenLastCalledWith(user, file);
+    });
   });
 
   // ── Pure builder ─────────────────────────────────────────────────────────────────
   describe('buildSalesCapturePhotos', () => {
-    it('whole-capture REJECTED with no per-photo review → every photo needs re-take with the capture reason', () => {
+    it('whole-capture REJECTED → every photo needs re-take; the reason is given ONCE (captureReason)', () => {
       const out = buildSalesCapturePhotos(
         captureRow({ status: 'REJECTED', photoReviews: null, rejectionReason: null, rejectionReasonCode: 'WRONG_OUTLET' }) as never,
         formSchema as never,
         null,
       );
+      expect(out.captureReason).toBe('Wrong outlet');
       expect(out.photos.map((p) => [p.status, p.reason])).toEqual([
-        ['needs_retake', 'Wrong outlet'],
-        ['needs_retake', 'Wrong outlet'],
+        ['needs_retake', null],
+        ['needs_retake', null],
       ]);
       expect(out.photos[0]).not.toHaveProperty('fenceStatus'); // no policy → no fence word
     });
 
-    it('SUBMITTED with no reviews → Waiting; APPROVED whole-capture → approved', () => {
-      const sub = buildSalesCapturePhotos(captureRow({ status: 'SUBMITTED', photoReviews: null }) as never, formSchema as never, null);
+    it('SUBMITTED with no reviews → pending; APPROVED whole-capture → approved; windowClosed is passed through', () => {
+      const sub = buildSalesCapturePhotos(captureRow({ status: 'SUBMITTED', photoReviews: null }) as never, formSchema as never, null, { windowClosed: true });
       expect(sub.photos.map((p) => p.status)).toEqual(['pending', 'pending']);
+      expect(sub.windowClosed).toBe(true);
       const ok = buildSalesCapturePhotos(captureRow({ status: 'APPROVED', photoReviews: null }) as never, formSchema as never, null);
       expect(ok.photos.map((p) => p.status)).toEqual(['approved', 'approved']);
+      expect(ok.windowClosed).toBe(false);
     });
   });
 });
+

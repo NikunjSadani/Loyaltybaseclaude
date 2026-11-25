@@ -76,7 +76,13 @@ export class VisibilityAdminController {
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', disposition);
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'no-store');
+    // Sales roles on a sales-photo-view tenant: keys are immutable and access is re-checked on every request, so the
+    // phone may keep its own private copy for 5 minutes (thumbnail → full view is one download). Everyone else: no-store
+    // exactly as before.
+    res.setHeader(
+      'Cache-Control',
+      (await this.capture.salesMediaCacheable(user)) ? 'private, max-age=300' : 'no-store',
+    );
     return streamObjectResponse(res, { stream, size }, { type: contentType, disposition });
   }
 
@@ -91,6 +97,13 @@ export class VisibilityAdminController {
   @RequirePermission('visibility:write')
   setConfig(@CurrentUser() user: JwtPayload, @Body() dto: SetVisibilityConfigDto) {
     return this.admin.setConfig(user, dto);
+  }
+
+  // ── The tenant's real sales levels (config editor: who sees team photos) ─────────
+  @Get('config/sales-levels')
+  @RequirePermission('visibility:read')
+  salesLevels(@CurrentUser() user: JwtPayload) {
+    return this.admin.listSalesLevels(user.clientId);
   }
 
   // ── Capture form (versioned) ───────────────────────────────────────────────────

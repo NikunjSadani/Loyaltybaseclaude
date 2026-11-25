@@ -20,7 +20,7 @@ import {
   SalesUserEdge,
 } from '../sales/sales-hierarchy-access.helper';
 import { loadSalesHierarchy } from '../sales/sales-hierarchy.loader';
-import { VisibilityMediaService } from './visibility-media.service';
+import { VisibilityMediaService, uploaderSegment } from './visibility-media.service';
 import { visibilityLocationRefusal } from './visibility-location.helper';
 import {
   isLocationRequiredFor,
@@ -64,6 +64,7 @@ import {
   buildSalesCapturePhotos,
   formValuesHoldKey,
   mediaKeyRefWhere,
+  ownUploadMonth,
   SALES_PHOTO_CAPTURE_SELECT,
   SalesCapturePhotos,
   SalesPhotoCaptureRow,
@@ -100,6 +101,16 @@ const SALES_ROLES: ReadonlySet<string> = new Set([
 
 /** 403 text for a sales photo the caller may not see (same words as the media stream's cross-tenant refusal). */
 const NO_PHOTO_ACCESS = "You don't have access to this photo.";
+/** Media-stream check caches (per instance): photo field ids per tenant, team reach per sales user. */
+const PHOTO_FIELDS_TTL_MS = 60_000;
+const REACH_TTL_MS = 60_000;
+const CACHE_MAX_ENTRIES = 2_000;
+
+/** Map.set with a hard size cap (cleared when full) — keeps the in-memory caches bounded. */
+function boundedSet<K, V>(m: Map<K, V>, k: K, v: V): void {
+  if (m.size >= CACHE_MAX_ENTRIES) m.clear();
+  m.set(k, v);
+}
 
 /** A capture row read with SALES_PHOTO_CAPTURE_SELECT (sales photo view). */
 type SalesPhotoCaptureWithForm = SalesPhotoCaptureRow & { outletId: string; formVersion: number };
@@ -209,6 +220,12 @@ export class VisibilityCaptureService {
     await this.assertEnabled(user.clientId);
     await this.assertPhotoMode(user.clientId);
     await this.requireCallerSalesUser(user);
+    // Sales photo view tenants: the key carries the uploader (u/<userId>) so the media stream can prove a not-yet-
+    // submitted photo is the caller's own (fail-closed check). Every other tenant: exactly today's key.
+    const config = await this.getConfig(user.clientId);
+    if ((config.salesPhotoViewLevels ?? []).length > 0) {
+      return this.media.uploadMedia(user, file, { ownerFolder: true });
+    }
     return this.media.uploadMedia(user, file);
   }
 
@@ -553,7 +570,7 @@ export class VisibilityCaptureService {
     await this.assertEnabled(user.clientId);
     const config = await this.getConfig(user.clientId);
     const caller = await this.requireCallerSalesUser(user);
-    if (!this.canViewPhotos(config, caller.levelCode)) {
+    if ((config.salesPhotoViewLevels ?? []).length === 0) {
       throw new ForbiddenException('Your role cannot view visibility photos.');
     }
     const capture = await this.prisma.visibilityCapture.findFirst({
@@ -561,9 +578,16 @@ export class VisibilityCaptureService {
       select: SALES_PHOTO_CAPTURE_SELECT,
     });
     if (!capture) throw new NotFoundException('Capture not found.');
-    const reach = await this.reachOutletIds(user.clientId, caller.id);
-    if (!reach.has(capture.outletId)) {
-      throw new ForbiddenException('This outlet is not within your team.');
+    // The capture's own submitter may always see its photos (A3); everyone else needs a listed level + team reach.
+    const isSubmitter = capture.submittedBySalesUserId === caller.id;
+    if (!isSubmitter) {
+      if (!this.canViewPhotos(config, caller.levelCode)) {
+        throw new ForbiddenException('Your role cannot view visibility photos.');
+      }
+      const reach = await this.reachOutletIds(user.clientId, caller.id);
+      if (!reach.has(capture.outletId)) {
+        throw new ForbiddenException('This outlet is not within your team.');
+      }
     }
     if (!this.currentMonthWindowKeys(config).includes(capture.windowKey)) {
       throw new ForbiddenException("Only this month's visibility photos can be viewed.");
@@ -611,8 +635,29 @@ export class VisibilityCaptureService {
     for (const c of captures) schemas.set(c.id, await schemaFor(c.formVersion));
     const needFence = [...schemas.values()].some((s) => schemaHasFencePhoto(s));
     const fencePolicy = needFence ? await this.photoFencePolicy(clientId, outletId, config) : null;
+    // Every stored version of these captures (indexed by captureId; a handful each) — dates / attributes a photo carried
+    // forward from an earlier version to that version, not to the current one.
+    const subs =
+      (await this.prisma.visibilityCaptureSubmission.findMany({
+        where: { clientId, captureId: { in: captures.map((c) => c.id) } },
+        select: {
+          captureId: true,
+          version: true,
+          formValues: true,
+          createdAt: true,
+          submittedBy: { select: { user: { select: { name: true } } } },
+        },
+      })) ?? [];
+    const now = new Date();
+    const freq = this.freqOf(config);
     for (const c of captures) {
-      out.set(c.windowKey, buildSalesCapturePhotos(c, schemas.get(c.id) ?? null, fencePolicy));
+      out.set(
+        c.windowKey,
+        buildSalesCapturePhotos(c, schemas.get(c.id) ?? null, fencePolicy, {
+          windowClosed: isWindowClosed(c.windowKey, now, freq),
+          submissions: subs.filter((s) => s.captureId === c.id),
+        }),
+      );
     }
     return out;
   }
@@ -641,17 +686,60 @@ export class VisibilityCaptureService {
   }
 
   /**
-   * Media-stream tightening for SALES callers (GET /visibility/captures/media) — applies ONLY when the tenant has
-   * salesPhotoViewLevels set (absent / empty → returns immediately: today's behaviour, byte-identical). Admin roles are
-   * never affected (they return immediately too). With the feature ON, a sales caller may read a visibility key only
-   * when it is:
+   * The tenant's photo field ids (CAMERA, current form + every stored version) and the active form's sample-image keys,
+   * cached per tenant for PHOTO_FIELDS_TTL_MS so an image request does not re-read every form version.
+   */
+  private async photoFieldInfo(clientId: string): Promise<{ fieldIds: string[]; sampleKeys: Set<string> }> {
+    const hit = this.photoFieldCache.get(clientId);
+    if (hit && hit.exp > Date.now()) return hit.value;
+    const form = await this.prisma.visibilityForm.findUnique({ where: { clientId }, select: { formSchema: true } });
+    const formSchema = (form?.formSchema ?? null) as unknown as VisibilityFormSchema | null;
+    const versions =
+      (await this.prisma.visibilityFormVersion.findMany({ where: { clientId }, select: { formSchema: true } })) ?? [];
+    const ids = new Set<string>();
+    for (const s of [formSchema, ...versions.map((v) => v.formSchema as unknown as VisibilityFormSchema)]) {
+      for (const f of s?.fields ?? []) if (f.type === 'CAMERA') ids.add(f.id);
+    }
+    const sampleKeys = new Set(
+      (formSchema?.fields ?? []).map((f) => f.sampleImageKey).filter((k): k is string => typeof k === 'string' && !!k),
+    );
+    const value = { fieldIds: [...ids], sampleKeys };
+    boundedSet(this.photoFieldCache, clientId, { value, exp: Date.now() + PHOTO_FIELDS_TTL_MS });
+    return value;
+  }
+
+  /** A sales caller on a sales-photo-view tenant (the media stream may then send a short private cache header). */
+  async salesMediaCacheable(user: JwtPayload): Promise<boolean> {
+    if (!SALES_ROLES.has(user.role)) return false;
+    return ((await this.getConfig(user.clientId)).salesPhotoViewLevels ?? []).length > 0;
+  }
+
+  /** reachOutletIds cached per (tenant, sales user) for REACH_TTL_MS — used ONLY by the media-stream check. */
+  private async cachedReach(clientId: string, salesUserId: string): Promise<Set<string>> {
+    const k = `${clientId}:${salesUserId}`;
+    const hit = this.reachCache.get(k);
+    if (hit && hit.exp > Date.now()) return hit.value;
+    const value = await this.reachOutletIds(clientId, salesUserId);
+    boundedSet(this.reachCache, k, { value, exp: Date.now() + REACH_TTL_MS });
+    return value;
+  }
+
+  private readonly photoFieldCache = new Map<string, { value: { fieldIds: string[]; sampleKeys: Set<string> }; exp: number }>();
+  private readonly reachCache = new Map<string, { value: Set<string>; exp: number }>();
+
+  /**
+   * Media-stream tightening for SALES callers (GET /visibility/captures/media) — FAIL-CLOSED, and applied ONLY when the
+   * tenant has salesPhotoViewLevels set (absent / empty → returns immediately: today's behaviour). Admin roles are never
+   * affected. With the feature ON, a sales caller may read a key of their own tenant only when it is:
    *   • a sample image of the tenant's active capture form (the capture form shows it), OR
-   *   • a photo of the CURRENT version of a CURRENT-MONTH capture whose outlet is in the caller's team AND the
-   *     caller's level is in salesPhotoViewLevels, OR
-   *   • not on any capture / submission at all — the rep's own just-uploaded photo read back by the capture form
-   *     before submit (keys are random, unguessable, and only ever handed to the uploader).
-   * Anything else (another team's photo, an older month, a re-taken older version, a level not listed) → 403.
-   * A key outside the caller's tenant folder is left to viewMedia's existing check (unchanged).
+   *   • the caller's OWN upload of this month — `visibility-media/<cid>/u/<caller>/<YYYY-MM>/…` (the capture form's
+   *     pre-submit read-back; the form shows the local photo first anyway), OR
+   *   • a photo of the CURRENT version of a CURRENT-MONTH capture that the caller submitted, or whose outlet is in the
+   *     caller's team while the caller's level is listed.
+   * Everything else → 403: another team's photo, an older month, a replaced older photo, a level not listed, an
+   * old-format upload (ownership cannot be proven), a `/vendor-import/` key. A key outside the caller's tenant folder
+   * is left to viewMedia's existing check (unchanged). Cost per image: the cached settings / field ids / reach, one
+   * capture lookup on the (clientId, windowKey) index, and one sales-user read.
    */
   async assertSalesMediaAccess(user: JwtPayload, key: string): Promise<void> {
     if (!SALES_ROLES.has(user.role)) return;
@@ -659,53 +747,39 @@ export class VisibilityCaptureService {
     const config = await this.getConfig(user.clientId);
     const viewLevels = config.salesPhotoViewLevels ?? [];
     if (viewLevels.length === 0) return; // feature OFF for this tenant → unchanged
+    const deny = () => new ForbiddenException(NO_PHOTO_ACCESS);
+    if (key.includes('..')) throw deny();
 
-    const form = await this.prisma.visibilityForm.findUnique({
-      where: { clientId: user.clientId },
-      select: { formSchema: true },
-    });
-    const formSchema = (form?.formSchema ?? null) as unknown as VisibilityFormSchema | null;
-    if ((formSchema?.fields ?? []).some((f) => f.sampleImageKey === key)) return;
+    const { fieldIds, sampleKeys } = await this.photoFieldInfo(user.clientId);
+    if (sampleKeys.has(key)) return;
 
-    // Every CAMERA field id the tenant's forms ever had (current + all versions) — where a photo key can be stored.
-    const versions = await this.prisma.visibilityFormVersion.findMany({
-      where: { clientId: user.clientId },
-      select: { formSchema: true },
-    });
-    const fieldIds = new Set<string>();
-    for (const s of [formSchema, ...(versions ?? []).map((v) => v.formSchema as unknown as VisibilityFormSchema)]) {
-      for (const f of s?.fields ?? []) if (f.type === 'CAMERA') fieldIds.add(f.id);
+    // The caller's own upload of this month (IST month, or the UTC month the key was stamped with around midnight).
+    const ownMonth = ownUploadMonth(key, user.clientId, uploaderSegment(user.sub));
+    if (ownMonth) {
+      const now = new Date();
+      const istMonth = currentWindowKey(now, 1).slice(0, 7);
+      if (ownMonth === istMonth || ownMonth === now.toISOString().slice(0, 7)) return;
+      throw deny();
     }
-    if (fieldIds.size === 0) return; // no photo field → no capture can hold the key
-    const ids = [...fieldIds];
-    const refWhere = mediaKeyRefWhere(ids, key);
 
+    if (fieldIds.length === 0) throw deny();
     const current = (
       (await this.prisma.visibilityCapture.findMany({
-        where: { clientId: user.clientId, windowKey: { in: this.currentMonthWindowKeys(config) }, OR: refWhere },
-        select: { outletId: true, formValues: true },
+        where: {
+          clientId: user.clientId,
+          windowKey: { in: this.currentMonthWindowKeys(config) },
+          OR: mediaKeyRefWhere(fieldIds, key),
+        },
+        select: { outletId: true, formValues: true, submittedBySalesUserId: true },
       })) ?? []
-    ).filter((c) => formValuesHoldKey(c.formValues, ids, key));
-    if (current.length > 0) {
-      const caller = await this.requireCallerSalesUser(user);
-      if (!viewLevels.includes(caller.levelCode)) throw new ForbiddenException(NO_PHOTO_ACCESS);
-      const reach = await this.reachOutletIds(user.clientId, caller.id);
-      if (!current.some((c) => reach.has(c.outletId))) throw new ForbiddenException(NO_PHOTO_ACCESS);
-      return;
-    }
+    ).filter((c) => formValuesHoldKey(c.formValues, fieldIds, key));
+    if (current.length === 0) throw deny();
 
-    // Not on a current-month capture's current version: on any other capture (older month) or submission (older
-    // version) → refuse; on nothing → the uploader's own pre-submit read-back → allow.
-    const elsewhere =
-      (await this.prisma.visibilityCapture.findFirst({
-        where: { clientId: user.clientId, OR: refWhere },
-        select: { id: true },
-      })) ??
-      (await this.prisma.visibilityCaptureSubmission.findFirst({
-        where: { clientId: user.clientId, OR: refWhere },
-        select: { id: true },
-      }));
-    if (elsewhere) throw new ForbiddenException(NO_PHOTO_ACCESS);
+    const caller = await this.requireCallerSalesUser(user);
+    if (current.some((c) => c.submittedBySalesUserId === caller.id)) return; // A3: the capture's own submitter
+    if (!viewLevels.includes(caller.levelCode)) throw deny();
+    const reach = await this.cachedReach(user.clientId, caller.id);
+    if (!current.some((c) => reach.has(c.outletId))) throw deny();
   }
 
   /** Map a capture status + window-closed flag to a UI state (D7). */

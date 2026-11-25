@@ -23,10 +23,15 @@ export interface SalesCapturePhoto {
   /** Auth-gated stream path (`/v1/visibility/captures/media?key=…`), exactly what the admin review queue renders. */
   viewPath: string;
   status: SalesPhotoStatus;
-  /** Why it needs a re-take (reviewer's words, else the reason code's label); null otherwise. */
+  /** Why THIS photo needs a re-take (per-photo review); null otherwise — a whole-capture reason is `captureReason`. */
   reason: string | null;
-  /** Shutter time from the photo's own tag when present, else the capture's submit time. */
+  /**
+   * When THIS photo was taken: its own shutter time when tagged, else when the version that first held this photo was
+   * submitted (a photo carried forward from v1 keeps its v1 time), else the capture's submit time.
+   */
   capturedAt: string | null;
+  /** Who submitted the version that first held this photo (a carried-forward photo keeps its original submitter). */
+  takenBy: string | null;
   /** Fence-required photos only: inside / outside / unverifiable — never the coordinates. */
   fenceStatus?: PhotoFenceStatus;
 }
@@ -38,9 +43,13 @@ export interface SalesCapturePhotos {
   version: number;
   status: string;
   /** Name of the sales user who submitted the current version (null when unknown / removed). */
-  capturedBy: string | null;
+  submittedBy: string | null;
   /** When the current version was submitted (server time, ISO). */
-  capturedAt: string | null;
+  submittedAt: string | null;
+  /** A whole-capture rejection reason, shown ONCE (null for per-photo reviews / no rejection). */
+  captureReason: string | null;
+  /** The window has closed — a photo never reviewed reads "Not reviewed" instead of "Waiting". */
+  windowClosed: boolean;
   photos: SalesCapturePhoto[];
 }
 
@@ -55,6 +64,15 @@ export interface SalesPhotoCaptureRow {
   rejectionReason: string | null;
   rejectionReasonCode: string | null;
   receivedAt: Date | null;
+  submittedBySalesUserId?: string | null;
+  submittedBy?: { user?: { name?: string | null } | null } | null;
+}
+
+/** One stored version (submission) of a capture — used to find when / by whom each photo was first submitted. */
+export interface SalesPhotoSubmissionRow {
+  version: number;
+  formValues: Prisma.JsonValue | null;
+  createdAt: Date | null;
   submittedBy?: { user?: { name?: string | null } | null } | null;
 }
 
@@ -71,6 +89,7 @@ export const SALES_PHOTO_CAPTURE_SELECT = {
   rejectionReason: true,
   rejectionReasonCode: true,
   receivedAt: true,
+  submittedBySalesUserId: true,
   submittedBy: { select: { user: { select: { name: true } } } },
 } as const;
 
@@ -84,6 +103,9 @@ function tagTime(v: unknown): string | null {
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+const nameOf = (s: { user?: { name?: string | null } | null } | null | undefined): string | null =>
+  s?.user?.name?.trim() || null;
+
 /** True when a form field of this schema could hold a photo needing a fence word (cheap pre-check). */
 export function schemaHasFencePhoto(schema: VisibilityFormSchema | null | undefined): boolean {
   return (schema?.fields ?? []).some((f) => f.type === 'CAMERA' && f.geoFenceRequired === true);
@@ -92,13 +114,15 @@ export function schemaHasFencePhoto(schema: VisibilityFormSchema | null | undefi
 /**
  * The capture's CURRENT photos for a sales viewer. Per photo: the per-photo review wins (APPROVED → approved,
  * REJECTED → needs re-take with its reason); with no per-photo review the whole-capture decision applies (APPROVED →
- * approved, REJECTED → needs re-take with the capture's reason); otherwise pending ("Waiting").
- * `fencePolicy` null → no fence word (the caller had no cheap reference).
+ * approved, REJECTED → needs re-take, its reason given ONCE as `captureReason`); otherwise pending.
+ * `fencePolicy` null → no fence word. `submissions` (any order) date / attribute each photo to the version that first
+ * held it.
  */
 export function buildSalesCapturePhotos(
   capture: SalesPhotoCaptureRow,
   schema: VisibilityFormSchema | null,
   fencePolicy: PhotoFencePolicy | null,
+  opts: { windowClosed?: boolean; submissions?: SalesPhotoSubmissionRow[] } = {},
 ): SalesCapturePhotos {
   const values =
     capture.formValues && typeof capture.formValues === 'object' && !Array.isArray(capture.formValues)
@@ -106,6 +130,9 @@ export function buildSalesCapturePhotos(
       : {};
   const reviews = readPhotoReviews(capture.photoReviews);
   const submittedAt = iso(capture.receivedAt);
+  const submittedBy = nameOf(capture.submittedBy);
+  const versions = [...(opts.submissions ?? [])].sort((a, b) => a.version - b.version);
+  const wholeReject = capture.status === 'REJECTED';
   const photos: SalesCapturePhoto[] = [];
   for (const f of schema?.fields ?? []) {
     if (f.type !== 'CAMERA') continue;
@@ -119,10 +146,14 @@ export function buildSalesCapturePhotos(
       status = 'needs_retake';
       reason = reasonText(review.reason, review.reasonCode) || null;
     } else if (capture.status === 'APPROVED') status = 'approved';
-    else if (capture.status === 'REJECTED') {
-      status = 'needs_retake';
-      reason = reasonText(capture.rejectionReason, capture.rejectionReasonCode) || null;
-    }
+    else if (wholeReject) status = 'needs_retake';
+    // The first stored version holding this exact photo (carried-forward photos keep their original time / submitter).
+    const first = versions.find((s) => {
+      const v = s.formValues && typeof s.formValues === 'object' && !Array.isArray(s.formValues)
+        ? (s.formValues as Record<string, unknown>)
+        : {};
+      return readMediaValue(v[f.id]).key === key;
+    });
     const photo: SalesCapturePhoto = {
       fieldId: f.id,
       label: f.label,
@@ -130,7 +161,8 @@ export function buildSalesCapturePhotos(
       viewPath: `/v1/visibility/captures/media?key=${encodeURIComponent(key)}`,
       status,
       reason,
-      capturedAt: tagTime(geo?.capturedAt) ?? submittedAt,
+      capturedAt: tagTime(geo?.capturedAt) ?? iso(first?.createdAt) ?? submittedAt,
+      takenBy: first ? nameOf(first.submittedBy) : submittedBy,
     };
     if (f.geoFenceRequired === true && fencePolicy) {
       photo.fenceStatus = classifyPhotoFence(geo ?? null, fencePolicy).status;
@@ -142,15 +174,17 @@ export function buildSalesCapturePhotos(
     windowKey: capture.windowKey,
     version: capture.currentVersion,
     status: capture.status,
-    capturedBy: capture.submittedBy?.user?.name?.trim() || null,
-    capturedAt: submittedAt,
+    submittedBy,
+    submittedAt,
+    captureReason: wholeReject ? reasonText(capture.rejectionReason, capture.rejectionReasonCode) || null : null,
+    windowClosed: opts.windowClosed === true,
     photos,
   };
 }
 
 /**
- * Prisma `OR` filters matching a capture / submission whose formValues holds `key` in any of the given CAMERA field
- * ids — both stored shapes: a bare key string, or `{ key, geo }`. Exact match (never a substring).
+ * Prisma `OR` filters matching a capture whose formValues holds `key` in any of the given CAMERA field ids — both
+ * stored shapes: a bare key string, or `{ key, geo }`. Exact match (never a substring).
  */
 export function mediaKeyRefWhere(fieldIds: string[], key: string): Array<{ formValues: { path: string[]; equals: string } }> {
   const out: Array<{ formValues: { path: string[]; equals: string } }> = [];
@@ -166,4 +200,16 @@ export function formValuesHoldKey(formValues: Prisma.JsonValue | null, fieldIds:
   if (!formValues || typeof formValues !== 'object' || Array.isArray(formValues)) return false;
   const v = formValues as Record<string, unknown>;
   return fieldIds.some((id) => readMediaValue(v[id]).key === key);
+}
+
+/**
+ * The `<YYYY-MM>` upload month of an OWNER-foldered sales upload of `userSegment` (`u/<userId>`) in tenant `clientId`:
+ * `visibility-media/<clientId>/u/<userId>/<YYYY-MM>/…` → 'YYYY-MM'; null for any other key (old format, another user,
+ * sample image, vendor import).
+ */
+export function ownUploadMonth(key: string, clientId: string, userSegment: string): string | null {
+  const prefix = `visibility-media/${clientId}/${userSegment}/`;
+  if (!key.startsWith(prefix)) return null;
+  const m = /^(\d{4}-\d{2})\//.exec(key.slice(prefix.length));
+  return m ? m[1] : null;
 }

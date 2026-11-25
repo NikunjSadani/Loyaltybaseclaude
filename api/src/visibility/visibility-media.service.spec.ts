@@ -161,6 +161,14 @@ describe('VisibilityMediaService', () => {
       expect(res.mimeType).toBe('image/jpeg');
     });
 
+    it('ownerFolder (sales photo view tenants) puts the uploader in the key: visibility-media/<cid>/u/<userId>/…', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const file = { buffer: jpegBuffer, size: jpegBuffer.length, originalname: 'shelf.jpg' } as any;
+      const res = await service.uploadMedia({ ...t1User, sub: 'u1/../x' }, file, { ownerFolder: true });
+      expect(mockStorage.generateKey).toHaveBeenLastCalledWith('visibility-media/t1/u/u1____x', 'shelf.jpg');
+      expect(res.key.startsWith('visibility-media/t1/u/u1____x/')).toBe(true);
+    });
+
     it('rejects a payload whose magic bytes are not an allowed type', async () => {
       const file = {
         buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),

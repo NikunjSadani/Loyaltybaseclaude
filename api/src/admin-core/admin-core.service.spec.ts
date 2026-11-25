@@ -1206,6 +1206,20 @@ describe('AdminCoreService', () => {
         await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, salesPhotoViewLevels: [] } });
         expect(written().salesPhotoViewLevels).toEqual([]);
       });
+
+      it('salesPhotoViewLevels: a present list is checked against the tenant levels (case-insensitive); unknown → 400', async () => {
+        mockPrisma.salesHierarchyLevel.findMany.mockResolvedValue([
+          { code: 'XSR', name: 'ISR', level: 1 }, { code: 'SO', name: 'SO', level: 2 },
+        ]);
+        mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: base });
+        await service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, salesPhotoViewLevels: ['xsr', 'SO', 'so'] } });
+        expect(written().salesPhotoViewLevels).toEqual(['XSR', 'SO']);
+        mockPrisma.programSetting.upsert.mockClear();
+        await expect(
+          service.upsertSetting(gifsy, { key: 'visibilityConfig', value: { ...base, salesPhotoViewLevels: ['ISR'] } }),
+        ).rejects.toThrow('Unknown sales level: ISR. Use one of: XSR, SO.');
+        expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
+      });
     });
 
     // ── VPA safeguard: manual UPI entry requires STORED UPI-ID uniqueness ──

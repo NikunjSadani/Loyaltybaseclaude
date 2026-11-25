@@ -15,6 +15,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { validateFormSchema } from './visibility-form.helper';
 import { SetVisibilityConfigDto, ScopeOutletsQueryDto } from './dto/visibility-admin.dto';
 import { resolveVisibilityProgramLists, visibilityUniverseBase, withVisibilityProgramWhere } from './visibility-scope.helper';
+import { resolveSalesPhotoViewLevels, tenantSalesLevels } from './visibility-photo-levels';
 
 /**
  * VisibilityAdminService — GIFSY_ADMIN authoring for the Visibility (POSM) feature:
@@ -58,6 +59,12 @@ export class VisibilityAdminService {
   // ── Config (settings-backed) ─────────────────────────────────────────────────
 
   /** The tenant's effective visibility config (typed + validated by the settings reader). */
+  /** The tenant's real sales levels — the only codes the config editor offers for salesPhotoViewLevels. */
+  async listSalesLevels(clientId: string): Promise<{ levels: Array<{ code: string; name: string }> }> {
+    await this.assertEnabled(clientId);
+    return { levels: await tenantSalesLevels(this.prisma, clientId) };
+  }
+
   async getConfig(clientId: string): Promise<VisibilityConfigSettings> {
     await this.assertEnabled(clientId);
     const settings = await this.tenantSettings.getEffectiveSettings(clientId);
@@ -95,12 +102,13 @@ export class VisibilityAdminService {
       current.visibilityConfig,
     );
 
-    // Sales photo view levels (tenant-scoped): ABSENT → carry the stored list; present → trimmed + de-duplicated. Stored
-    // only when non-empty, so a tenant that never turns it on keeps exactly today's JSON.
+    // Sales photo view levels (tenant-scoped): ABSENT → carry the stored list; present → validated against the tenant's
+    // real sales levels (case-insensitive, stored spelling; unknown → 400). Stored only when non-empty, so a tenant that
+    // never turns it on keeps exactly today's JSON.
     const photoLevels =
       dto.salesPhotoViewLevels === undefined || dto.salesPhotoViewLevels === null
         ? [...(current.visibilityConfig.salesPhotoViewLevels ?? [])]
-        : [...new Set(dto.salesPhotoViewLevels.map((s) => String(s).trim()).filter(Boolean))];
+        : await resolveSalesPhotoViewLevels(this.prisma, clientId, dto.salesPhotoViewLevels);
 
     const value: Prisma.InputJsonValue = {
       outletScope: dto.outletScope,
