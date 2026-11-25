@@ -166,8 +166,9 @@ not gated (it is the review).
 `UNDER_REVIEW` → 0 (pending); no record → 0, windows 1, inScope 0 ("no visibility status uploaded"). Capture mode + master
 switch come from `TenantService` (switch read uncached).
 
-**Missing vs zero.** An outlet **outside the visibility scope** gets real **0**s (inScope 0), and its row says "not in
-visibility scope (…)" (`row.visibility.scope = NOT_IN_SCOPE`; `NO_RECORD` for AMOUNT_UPLOAD). When the **tenant has
+**Missing vs zero.** An outlet **outside the visibility scope** reads `inScope = 0`, `approved = 0`,
+`approvedWindows = 0` and `windows` = the MONTH's window count (1 for AMOUNT_UPLOAD) — never windows 0 — and its row
+says "not in visibility scope (…)" (`row.visibility.scope = NOT_IN_SCOPE`; `NO_RECORD` for AMOUNT_UPLOAD). When the **tenant has
 no usable visibility** (switched off — this also hides past approvals, owner-confirmed — or no outlet types in the
 programme) the values are **absent** → the input's own `nullAs` applies (`reject` → SKIP), the SKIP reason names why,
 and the preview shows an amber "no visibility result" banner.
@@ -181,7 +182,8 @@ go-live lookups (2, one cached) — all tenant-scoped, in parallel; AMOUNT_UPLOA
 waitingWindows, openWindows, excludedApprovals, note} and its explanation starts with the note (a formula trace does
 not echo its inputs); `preview.visibility` summarises the run. The simulator takes test values (`context.visibility`),
 rejects impossible ones (non-negative whole numbers; approved / inScope ∈ {0,1}; windows ≤ 4; approvedWindows ≤
-windows; approved = 1 exactly when approvedWindows ≥ 1; inScope 0 ⇒ nothing approved) and returns `visibilityUsed`.
+windows; approved = 1 exactly when approvedWindows ≥ 1; inScope 0 ⇒ nothing approved — windows > 0 is allowed, the
+real out-of-scope shape) and returns `visibilityUsed`.
 
 **Metro.** `Outlet.metro` is FREE TEXT read through `segment:metro`. Bajaj data uses **`Metro`** / **`Non Metro`**
 (RESUME 2026-11-16: Metro 1,657 / Non Metro 4,834). Declare the metro input as an enum with `values: ['Metro','Non Metro']`

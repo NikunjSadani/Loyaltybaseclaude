@@ -209,8 +209,9 @@ export function InputsCard({
                   Reads the outlet&apos;s visibility result for the compute month. A window counts only when its
                   capture is <strong>approved</strong> (every photo approved; imported old-app approvals count) —
                   waiting for review, re-take requested and rejected do not. An outlet outside the visibility
-                  programme reads 0 — use &ldquo;Outlet in the visibility programme (1/0)&rdquo; to tell &ldquo;not
-                  applicable&rdquo; apart from &ldquo;not approved&rdquo;. Windows still waiting for review or still open
+                  programme reads in programme = 0, approved = 0 and the month&apos;s window count (so it never passes
+                  &ldquo;every window approved&rdquo;) — use &ldquo;Outlet in the visibility programme (1/0)&rdquo; to
+                  tell &ldquo;not applicable&rdquo; apart from &ldquo;not approved&rdquo;. Windows still waiting for review or still open
                   read as not approved, and the compute screen asks you to accept that before exporting or crediting.
                   If the tenant has no visibility set up, the value is missing and the rule below decides what
                   happens. Example payout formula:{' '}

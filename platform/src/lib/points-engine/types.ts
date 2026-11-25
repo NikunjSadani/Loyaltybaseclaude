@@ -125,8 +125,8 @@ export interface EvalContext {
 export const VISIBILITY_SOURCES: ReadonlyArray<{ key: 'approved' | 'approvedWindows' | 'windows' | 'inScope'; label: string; hint: string }> = [
   { key: 'approved', label: 'Visibility approved this month (1/0)', hint: '1 when at least one visibility window of the month is approved, else 0.' },
   { key: 'approvedWindows', label: 'Approved visibility windows this month', hint: 'How many of the month’s visibility windows are approved.' },
-  { key: 'windows', label: 'Visibility windows in the month', hint: 'How many of the month’s windows this outlet was in the visibility programme for (for “every window approved” rules).' },
-  { key: 'inScope', label: 'Outlet in the visibility programme (1/0)', hint: '1 when visibility applies to this outlet this month, 0 when it does not (e.g. a wholesaler) — tells “not applicable” apart from “not approved”.' },
+  { key: 'windows', label: 'Visibility windows in the month', hint: 'How many of the month’s windows this outlet was in the visibility programme for (for “every window approved” rules). An outlet outside the programme reads the month’s window count, with in programme = 0 and approved = 0.' },
+  { key: 'inScope', label: 'Outlet in the visibility programme (1/0)', hint: '1 when visibility applies to this outlet this month, 0 when it does not (e.g. a wholesaler — it then reads approved 0 and the month’s window count) — tells “not applicable” apart from “not approved”.' },
 ];
 export interface TraceStep {
   nodeId: string;

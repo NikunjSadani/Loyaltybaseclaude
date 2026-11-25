@@ -944,6 +944,8 @@ describe('PointsComputeService — visibility (POSM) inputs (§3a)', () => {
     expect(sim({ approvedWindows: 1.5 }).errors.join(' ')).toMatch(/whole number/);
     expect(sim({ approved: 0, approvedWindows: 1, windows: 1 }).errors.join(' ')).toMatch(/exactly when/);
     expect(sim({ inScope: 0, approved: 1, approvedWindows: 1, windows: 1 }).errors.join(' ')).toMatch(/outside the visibility programme/);
+    // The REAL out-of-scope shape: inScope 0, approved 0, approvedWindows 0, windows = the month's count → accepted.
+    expect(sim({ inScope: 0, approved: 0, approvedWindows: 0, windows: 2 }).valid).toBe(true);
     expect(sim({ approved: 1, approvedWindows: 2, windows: 2, inScope: 1 }).valid).toBe(true);
   });
 

@@ -1038,8 +1038,10 @@ function simulateVisibilityErrors(v: {
   if (v.approved !== null && v.approvedWindows !== null && v.approved !== (v.approvedWindows >= 1 ? 1 : 0)) {
     errs.push(`${label.approved} must be 1 exactly when at least one window is approved.`);
   }
-  if (v.inScope === 0 && ((v.approvedWindows ?? 0) > 0 || (v.windows ?? 0) > 0 || v.approved === 1)) {
-    errs.push('An outlet outside the visibility programme has 0 windows and nothing approved.');
+  // Out of scope (inScope 0) = nothing approved; windows stays the MONTH's count (the real compute shape), so a
+  // windows value > 0 is allowed here.
+  if (v.inScope === 0 && ((v.approvedWindows ?? 0) > 0 || v.approved === 1)) {
+    errs.push('An outlet outside the visibility programme has nothing approved (approved 0, approved windows 0).');
   }
   return errs;
 }
