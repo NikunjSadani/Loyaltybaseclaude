@@ -93,8 +93,15 @@ interface ReversalTarget {
   fieldName:    string;
   period:       string;
   awardType:    'POINTS' | 'PAYOUT';
-  /** Original amount in integer paise (PAYOUT) or whole points (POINTS). */
+  /** Original amount in integer paise (PAYOUT) or whole points (POINTS). A deduction: its POSITIVE magnitude. */
   originalPaise: number;
+  /** An upload DEDUCTION row (negative points) — the request undoes it (gives the points back). */
+  isDeduction?: boolean;
+}
+
+/** An OK POINTS row with a negative amount = an upload deduction (tenant negative-deductions setting). */
+function isDeductionRow(r: BatchRow): boolean {
+  return r.status === 'OK' && r.awardType === 'POINTS' && r.amount < 0;
 }
 
 /** WP5 — a payout entry a PAYOUT reversal picks (every tenant — a payout reversal always covers whole entries). */
@@ -224,6 +231,8 @@ export default function PayoutStatusPage() {
 
   function downloadReport(batch: BatchSummary, detail?: BatchDetail) {
     if (!detail) return;
+    // "Type" only when the batch has deduction rows (a credit-only report is unchanged).
+    const withType = detail.rows.some(isDeductionRow);
     import('xlsx').then((XLSX) => {
       const rows = detail.rows
         .filter((r) => r.status === 'OK')
@@ -232,6 +241,7 @@ export default function PayoutStatusPage() {
           'Outlet Name':  r.outletName,
           'Field':        r.fieldName,
           'Award Type':   r.awardType,
+          ...(withType ? { 'Type': isDeductionRow(r) ? 'Deduction' : 'Credit' } : {}),
           'Amount':       r.amount,
           'Narration':    r.narration,
           'Batch Code':   batch.batchCode,
@@ -252,6 +262,29 @@ export default function PayoutStatusPage() {
 
   function openReversal(batch: BatchSummary, row: BatchRow, trigger?: HTMLElement | null) {
     revTriggerRef.current = trigger ?? (document.activeElement as HTMLElement | null);
+    if (isDeductionRow(row)) {
+      // Undo of an upload deduction: same POINTS request shape, the magnitude as the original.
+      const magnitude = Math.abs(row.amount);
+      setRevTarget({
+        batchId:       batch.id,
+        outletId:      row.outletId,
+        outletName:    row.outletName,
+        fieldId:       row.fieldId,
+        fieldName:     row.fieldName,
+        period:        batch.period,
+        awardType:     'POINTS',
+        originalPaise: magnitude,
+        isDeduction:   true,
+      });
+      setRevAmount(String(magnitude));
+      setRevRemarks('');
+      setRevMsg(null);
+      setRevEntries(null);
+      setRevSelected([]);
+      setRevEntryLoad('idle');
+      revRequestRef.current++;
+      return;
+    }
     setRevTarget({
       batchId:       batch.id,
       outletId:      row.outletId,
@@ -446,7 +479,12 @@ export default function PayoutStatusPage() {
       if (!json?.success) {
         setRevMsg({ type: 'err', text: json?.error ?? `Failed to submit reversal (HTTP ${res.status})` });
       } else {
-        setRevMsg({ type: 'ok', text: `Reversal request submitted — awaiting Gifsy approval.` });
+        setRevMsg({
+          type: 'ok',
+          text: revTarget.isDeduction
+            ? 'Undo request submitted — awaiting Gifsy approval.'
+            : `Reversal request submitted — awaiting Gifsy approval.`,
+        });
         fetchBatches();
       }
     } catch (e) {
@@ -577,6 +615,18 @@ export default function PayoutStatusPage() {
                       )}
                     </div>
 
+                    {detail && detail.rows.some(isDeductionRow) && (() => {
+                      const ok = detail.rows.filter((r) => r.status === 'OK' && r.awardType === 'POINTS');
+                      const credited = ok.filter((r) => r.amount > 0).reduce((s, r) => s + r.amount, 0);
+                      const deducted = ok.filter((r) => r.amount < 0);
+                      const deductedPts = deducted.reduce((s, r) => s + Math.abs(r.amount), 0);
+                      return (
+                        <p className="px-5 py-2 text-xs text-gray-600 border-b border-gray-100" data-testid="batch-credit-deduct-totals">
+                          Credited {credited.toLocaleString('en-IN')} pts · Deducted {deductedPts.toLocaleString('en-IN')} pts ({deducted.length} row{deducted.length !== 1 ? 's' : ''})
+                        </p>
+                      );
+                    })()}
+
                     {!detail ? (
                       <p className="px-5 py-4 text-xs text-gray-400 animate-pulse">Loading rows…</p>
                     ) : (
@@ -599,16 +649,24 @@ export default function PayoutStatusPage() {
                                   <td className="px-4 py-2 text-gray-700">{r.outletName}</td>
                                   <td className="px-4 py-2 text-gray-700">{r.fieldName}</td>
                                   <td className="px-4 py-2">
+                                    {isDeductionRow(r) ? (
+                                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700">
+                                        Deduction
+                                      </span>
+                                    ) : (
                                     <span className={`px-1.5 py-0.5 rounded text-xs font-medium
                                       ${r.awardType === 'POINTS' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'}`}>
                                       {r.awardType}
                                     </span>
+                                    )}
                                   </td>
                                   <td className="px-4 py-2 text-gray-700">
                                     {r.awardType === 'PAYOUT'
                                       // amount is integer paise for PAYOUT rows; divide by 100 for display
                                       ? inr(r.amount)
-                                      : r.amount.toLocaleString('en-IN')}
+                                      : isDeductionRow(r)
+                                        ? `−${Math.abs(r.amount).toLocaleString('en-IN')}`
+                                        : r.amount.toLocaleString('en-IN')}
                                   </td>
                                   <td className="px-4 py-2 text-gray-500">{r.narration || '—'}</td>
                                   {isConfirmed && (
@@ -618,7 +676,7 @@ export default function PayoutStatusPage() {
                                         className="flex items-center gap-1 px-2 py-1 text-xs text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg"
                                       >
                                         <RotateCcw className="w-3 h-3" />
-                                        Reverse
+                                        {isDeductionRow(r) ? 'Undo deduction' : 'Reverse'}
                                       </button>
                                     </td>
                                   )}
@@ -686,7 +744,9 @@ export default function PayoutStatusPage() {
             className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4 max-h-[90vh] overflow-y-auto"
           >
             <div className="flex items-center justify-between">
-              <h3 id="reversal-dialog-title" className="font-bold text-gray-900">Request Reversal</h3>
+              <h3 id="reversal-dialog-title" className="font-bold text-gray-900">
+                {revTarget.isDeduction ? 'Request undo of deduction' : 'Request Reversal'}
+              </h3>
               <button onClick={closeReversal} aria-label="Close" className="text-gray-400 hover:text-gray-700 text-lg leading-none">×</button>
             </div>
 
@@ -704,7 +764,7 @@ export default function PayoutStatusPage() {
                 <span className="font-medium text-gray-800">{revTarget.awardType}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-gray-500">Original Amount</span>
+                <span className="text-gray-500">{revTarget.isDeduction ? 'Deducted' : 'Original Amount'}</span>
                 <span className="font-medium text-gray-800">
                   {revTarget.awardType === 'PAYOUT'
                     // originalPaise is integer paise; divide by 100 for human display
@@ -789,7 +849,9 @@ export default function PayoutStatusPage() {
                 </fieldset>
                 ) : (
                 <div className="space-y-2">
-                  <label className="text-xs font-medium text-gray-700">Reversal Amount (pts)</label>
+                  <label className="text-xs font-medium text-gray-700">
+                    {revTarget.isDeduction ? 'Points to give back (pts)' : 'Reversal Amount (pts)'}
+                  </label>
                   <input
                     type="number"
                     value={revAmount}
@@ -798,10 +860,16 @@ export default function PayoutStatusPage() {
                     min={1}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/30"
                   />
+                  {revTarget.isDeduction ? (
+                  <p className="text-xs text-gray-500">
+                    Gives the deducted points back to the wallet that was charged. If the deduction took the balance below zero, the points first clear that debt. Gifsy approves the request.
+                  </p>
+                  ) : (
                   <p className="text-xs text-gray-500">
                     {/* Owner decision 2026-11-19: an over-reversal becomes wallet debt, never a write-off. */}
                     Points are taken back from the wallet that received the credit. Points of that credit that already expired count as recovered — nothing is taken for them. Points it no longer holds (already redeemed) are recorded as debt on that wallet and repaid from its future earnings — nothing is written off. The outlet can’t redeem while the balance is below zero.
                   </p>
+                  )}
                 </div>
                 )}
                 <div className="space-y-2">
@@ -827,7 +895,7 @@ export default function PayoutStatusPage() {
                     }
                     className="flex-1 py-2.5 bg-amber-600 text-white rounded-xl text-sm font-semibold hover:bg-amber-700 disabled:opacity-50"
                   >
-                    {revLoading ? 'Submitting…' : 'Submit Reversal Request'}
+                    {revLoading ? 'Submitting…' : revTarget.isDeduction ? 'Submit Undo Request' : 'Submit Reversal Request'}
                   </button>
                   <button
                     onClick={closeReversal}

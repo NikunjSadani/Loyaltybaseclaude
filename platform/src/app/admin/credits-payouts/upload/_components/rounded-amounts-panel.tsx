@@ -9,6 +9,10 @@ export function roundedAmountText(r: CreditUploadRow): string {
     // r.amount is integer paise (whole rupees × 100); originalAmount is rupees as typed.
     return `₹${r.originalAmount} → ₹${(r.amount / 100).toLocaleString('en-IN')}`;
   }
+  // A deduction row (negative points; only with the tenant's negative-deductions setting ON).
+  if (r.amount < 0) {
+    return `−${Math.abs(r.originalAmount ?? 0)} → −${Math.abs(r.amount).toLocaleString('en-IN')} pts`;
+  }
   return `${r.originalAmount} → ${r.amount.toLocaleString('en-IN')} pts`;
 }
 

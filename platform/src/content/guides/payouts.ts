@@ -68,6 +68,14 @@ On top of those, the platform has a **tax & invoicing layer** (TDS, self-billed 
 
 ![Upload Credits screen](/guides/payouts/upload.png)
 
+**Negative points = a deduction** *(only when Gifsy has switched this on for the client — otherwise a negative amount is an error)*
+- A **negative points** value (e.g. −320 because returns beat sales) **takes those points out** of the outlet's wallet on confirm. A negative **₹ payout** is never allowed — undo a payout through a Reversal instead.
+- Rounded half-up to whole points (−199.5 → −200, −199.4 → −199); a value that rounds to 0 (−0.4) is skipped. The per-row points safety cap applies to the deduction too.
+- Before you confirm, the preview shows **Total credited** and **Total deducted**, a **"Will be deducted"** list, and each outlet whose balance **will go below zero** ("1,200 → −320").
+- A wallet **can go below zero**: it is repaid from the outlet's future earnings, and the outlet **can't redeem** until it is back to zero or more.
+- If an outlet's wallet is **not prepared** for deductions, Confirm is switched off and the server would refuse the whole batch — ask Gifsy to prepare it (or remove those rows). An outlet not linked to a partner is skipped and shown as **NOT deducted**.
+- **To undo a deduction:** on **Payout Status**, open the batch and click **Undo deduction** on that row. Gifsy approves it, and the points go back to the same wallet (clearing any below-zero debt first).
+
 **Step 2 — Confirm the batch**
 - **The operator does:** Review the batch and click **Confirm**.
 - **The system does:** Locks the amounts in. Point rows are added to wallets; cash rows become **payout entries** marked **Pending** (waiting for a bank file). *(If any rows are visibility payouts, the tax & invoicing layer also kicks in here — see that section.)*

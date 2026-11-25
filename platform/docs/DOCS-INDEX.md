@@ -96,6 +96,7 @@ verify. Working agreements: root [`CLAUDE.md`](../../CLAUDE.md). Last updated 20
 | [`CLIENT-MIGRATION-PLAYBOOK.md`](plans/CLIENT-MIGRATION-PLAYBOOK.md) | **Generic client-migration playbook** — existing points programme: vendor closing + dated passbook, **held opening balances** for outlets without a wallet (auto-apply at KYC approval, Gifsy Apply now / Cancel, digest line), reconciliation template, Bajaj numbers |
 | [`BAJAJ-ENROLLMENT-IMPORTER.md`](plans/BAJAJ-ENROLLMENT-IMPORTER.md) · [`BAJAJ-HIERARCHY-RENAME.md`](plans/BAJAJ-HIERARCHY-RENAME.md) | Bajaj enrollment importer; ISR/SM/ZH naming |
 | [`CREDIT-BATCH-EVIDENCE-B1.md`](plans/CREDIT-BATCH-EVIDENCE-B1.md) | Audit-evidence attachments on credit/payout batches |
+| [`UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md`](plans/UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md) | Credits upload: negative POINTS deduct from the wallet (per-client switch, Bajaj); ledger path, undo, reports |
 | [`DATA-VISIBILITY.md`](plans/DATA-VISIBILITY.md) | What each role sees on each page (E2E spec) |
 | [`DELIVERY-ADDRESS-PREFILL-PLAN.md`](plans/DELIVERY-ADDRESS-PREFILL-PLAN.md) | Physical-gift delivery address pre-fill |
 | [`DELIVERY-STATUS-REPORTING-SCOPE.md`](plans/DELIVERY-STATUS-REPORTING-SCOPE.md) | SMS / OTP / WhatsApp delivery-status reporting (dormant) |

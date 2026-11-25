@@ -480,6 +480,12 @@ export interface GifsySettings {
    */
   kycGstinRequired?:       boolean;
   /**
+   * Per-tenant switch (Gifsy-set via the settings API; no UI toggle): when true, a NEGATIVE
+   * POINTS value in the Credits & Payouts upload DEDUCTS points from the outlet wallet instead
+   * of being an error. Default false. Gate with `=== true`. Admin-only in GET /settings.
+   */
+  creditUploadNegativeDeductions?: boolean;
+  /**
    * Controls which redemption channels are visible in the partner rewards catalogue.
    * All three default to true. Disable any to hide that tab entirely for the tenant.
    */
@@ -999,11 +1005,14 @@ export interface CreditUploadRow {
   /**
    * PAYOUT rows: integer paise (e.g. 10000 = ₹100.00).
    * POINTS rows: whole points (a count, NOT money — no ×100).
+   * POINTS DEDUCTION rows (tenant setting `creditUploadNegativeDeductions` ON): a NEGATIVE whole
+   * point amount (e.g. −320) — the magnitude is deducted from the outlet wallet.
    */
   amount:    number;
   /**
    * The amount exactly as typed (points, or RUPEES for PAYOUT rows) — present ONLY when the
-   * parser rounded it half-up to a whole unit (e.g. 199.5 → amount 200 / 20000 paise). Display-only.
+   * parser rounded it half-up to a whole unit (e.g. 199.5 → amount 200 / 20000 paise;
+   * deduction −199.5 → amount −200). Display-only.
    */
   originalAmount?: number;
   narration: string;
@@ -1025,11 +1034,16 @@ export interface CreditParseResult {
     ok:                number;
     skipped:           number;
     errors:            number;
+    /** Sum of the POSITIVE OK POINTS rows (points credited). Deductions are NOT netted in. */
     totalPoints:       number;
     /** Total payout in integer paise (e.g. 1000000 = ₹10,000.00). */
     totalPayoutPaise:  number;
-    /** OK rows whose typed amount was rounded half-up to a whole unit. */
+    /** OK rows whose typed amount was rounded half-up to a whole unit (credits and deductions). */
     rounded:           number;
+    /** Count of OK POINTS deduction rows (negative amount). Always 0 with the setting OFF. */
+    deducted:          number;
+    /** Sum of the deduction MAGNITUDES (a POSITIVE number of points). Always 0 with the setting OFF. */
+    totalDeductedPoints: number;
   };
 }
 

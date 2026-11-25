@@ -21,6 +21,14 @@ import { getGifsySettings }       from '@/lib/gifsy-settings';
 import { jsonToSheetSafe }        from '@/lib/xlsx-safe';
 import { downloadBlob }           from '@/lib/download';
 import { RoundedAmountsPanel }     from './_components/rounded-amounts-panel';
+import {
+  DeductionsPanel,
+  DeductionBalanceCallout,
+  blockingOutlets,
+  deductionOutletCodes,
+  type DeductionPreviewOutlet,
+  type DeductionPreviewState,
+} from './_components/deductions-panel';
 import type { CreditField, CreditParseResult } from '@/types';
 import type { TemplateOutlet } from '@/lib/credits-payouts-template';
 
@@ -143,9 +151,14 @@ type Step = 'template' | 'upload' | 'preview' | 'done';
 interface SkippedRow {
   outletId:  string;
   fieldName: string;
+  /** Negative for a skipped deduction row. */
   points:    number;
   reason:    string;
+  /** 'DEDUCTION' for a deduction row that was NOT deducted (absent for credits). */
+  kind?:     'DEDUCTION';
 }
+
+const isDeductionSkip = (s: SkippedRow) => s.kind === 'DEDUCTION';
 
 interface SavedBatch {
   id:               string;
@@ -160,6 +173,12 @@ interface SavedBatch {
   /** Sum of points actually credited (may be < uploaded total if rows were skipped). */
   pointsCreditedTotal: number;
   payoutEntriesCreated: number;
+  /** Deduction rows actually deducted (0 when the batch has none / the setting is OFF). */
+  pointsDeductedRows:  number;
+  /** Sum (positive magnitude) of the points actually deducted. */
+  pointsDeductedTotal: number;
+  /** Deduction rows in the file that the server did NOT apply at all (switch off) — 0 normally. */
+  deductionsIgnored:   number;
   /** Rows the server could NOT credit, with a reason. */
   skipped: SkippedRow[];
 }
@@ -176,6 +195,16 @@ function skipReasonLabel(reason: string): string {
   }
 }
 
+/** "3 rows NOT credited" — unchanged unless some skipped rows are deductions. */
+function skippedHeader(skipped: SkippedRow[]): string {
+  const d = skipped.filter(isDeductionSkip).length;
+  const c = skipped.length - d;
+  const rows = (n: number) => `${n} row${n !== 1 ? 's' : ''}`;
+  if (d === 0) return `${rows(c)} NOT credited`;
+  if (c === 0) return `${rows(d)} NOT deducted`;
+  return `${rows(c)} NOT credited · ${rows(d)} NOT deducted`;
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function CreditsPayoutsUploadPage() {
@@ -190,6 +219,8 @@ export default function CreditsPayoutsUploadPage() {
   };
 
   const uploadWindowOpen = isUploadWindowOpen(cp.monthCutoffDay);
+  // Per-tenant (Gifsy-set) switch: negative POINTS deduct from the wallet. Strict `=== true`.
+  const negativeDeductions = settings.creditUploadNegativeDeductions === true;
 
   const [step,        setStep]        = useState<Step>('template');
   const [period]                      = useState(getPreviousMonth());
@@ -207,6 +238,14 @@ export default function CreditsPayoutsUploadPage() {
   const [pendingBatch, setPendingBatch] = useState<PendingBatch | null>(null);
   /** Confirm reported the pending batch as already CONFIRMED — nothing left to retry. */
   const [alreadyConfirmed, setAlreadyConfirmed] = useState(false);
+  /** Wallet balance / readiness check for the deduction outlets (null = the parse has no deductions). */
+  const [deductionPreview, setDeductionPreview] = useState<DeductionPreviewState | null>(null);
+  /** Ignore a stale deduction-preview reply after a newer file replaced the parse. */
+  const previewSeqRef = useRef(0);
+  const deductionCheckLoading = deductionPreview?.status === 'loading';
+  const deductionsOffOnServer = deductionPreview?.status === 'off';
+  const deductionBlocked      = blockingOutlets(deductionPreview);
+  const hasDeductions         = (parseResult?.summary.deducted ?? 0) > 0;
 
   const fileInputRef    = useRef<HTMLInputElement>(null);
   const confirmErrorRef = useRef<HTMLDivElement>(null);
@@ -230,6 +269,37 @@ export default function CreditsPayoutsUploadPage() {
     }).catch(() => {});
   }, []);
 
+  // Below-zero / readiness check — ONLY when the parse has deduction rows (never on the OFF path).
+  useEffect(() => {
+    const seq = ++previewSeqRef.current;
+    const codes = parseResult ? deductionOutletCodes(parseResult.rows) : [];
+    if (codes.length === 0) {
+      setDeductionPreview(null);
+      return;
+    }
+    setDeductionPreview({ status: 'loading' });
+    (async () => {
+      let next: DeductionPreviewState = { status: 'error' };
+      try {
+        const res = await fetch('/api/admin/credits/deduction-preview', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ outletCodes: codes }),
+        });
+        const { body } = await readReply(res);
+        const outlets = (body?.data as { outlets?: unknown } | undefined)?.outlets;
+        if (res.ok && body?.success && Array.isArray(outlets)) {
+          next = { status: 'ok', outlets: outlets as DeductionPreviewOutlet[] };
+        } else if (res.status === 400 && /not turned on/i.test(serverErrorOf(body) ?? '')) {
+          // The program's switch is OFF on the server (this screen's settings were stale) — never confirm then:
+          // the server would ignore the negative rows.
+          next = { status: 'off', message: serverErrorOf(body)! };
+        }
+      } catch { /* network drop → visible error state */ }
+      if (seq === previewSeqRef.current) setDeductionPreview(next);
+    })();
+  }, [parseResult]);
+
   // ─── Step 1: Download template ──────────────────────────────────────────────
 
   function handleDownloadTemplate() {
@@ -252,6 +322,7 @@ export default function CreditsPayoutsUploadPage() {
       month:           period,
       safetyCapPoints: cp.safetyCapPoints,
       safetyCapInr:    cp.safetyCapInr,
+      negativeDeductions,
     });
 
     setParseResult(result);
@@ -269,7 +340,7 @@ export default function CreditsPayoutsUploadPage() {
     setDragging(false);
     const file = e.dataTransfer.files[0];
     if (file) processFile(file);
-  }, [fields, period, outlets, cp]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fields, period, outlets, cp, negativeDeductions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Step 3: Confirm ────────────────────────────────────────────────────────
   //
@@ -281,6 +352,8 @@ export default function CreditsPayoutsUploadPage() {
 
   async function handleConfirm() {
     if (!parseResult?.canProceed || inFlightRef.current) return;
+    // A deduction outlet whose wallet isn't prepared → the server would refuse the whole batch.
+    if (!pendingBatch && (deductionCheckLoading || deductionsOffOnServer || deductionBlocked.length > 0)) return;
     inFlightRef.current = true;
     setConfirming(true);
     setConfirmError('');
@@ -390,7 +463,14 @@ export default function CreditsPayoutsUploadPage() {
       pointsCreditedRows:   Number(cd.pointsCredited ?? 0),
       pointsCreditedTotal:  Number(cd.pointsCreditedTotal ?? 0),
       payoutEntriesCreated: Number(cd.payoutEntriesCreated ?? 0),
-      skipped:              Array.isArray(cd.skipped) ? (cd.skipped as SkippedRow[]) : [],
+      // Present only when the batch had deduction rows (absent → 0, a credit-only reply is unchanged).
+      pointsDeductedRows:   Number(cd.pointsDeducted ?? 0),
+      // The file had deduction rows but the server applied none of them (no `pointsDeducted` in the reply — the
+      // program's switch was turned off meanwhile). Said loudly on the done screen, never silently.
+      deductionsIgnored:    (parseResult?.summary.deducted ?? 0) > 0 && cd.pointsDeducted === undefined
+        ? (parseResult?.summary.deducted ?? 0) : 0,
+      pointsDeductedTotal:  Math.abs(Number(cd.pointsDeductedTotal ?? 0)),
+      skipped:             Array.isArray(cd.skipped) ? (cd.skipped as SkippedRow[]) : [],
     });
     setSaved(true);
     setStep('done');
@@ -411,6 +491,10 @@ export default function CreditsPayoutsUploadPage() {
       // "Typed Amount" appears only when something was rounded (whole-number uploads keep
       // the exact previous report layout).
       const anyRounded = parseResult.rows.some((r) => r.originalAmount !== undefined);
+      // "Type" appears only when the parse has deductions (OFF / credit-only report unchanged).
+      const withType = (parseResult.summary.deducted ?? 0) > 0;
+      const rowType = (r: CreditParseResult['rows'][number]) =>
+        r.awardType === 'POINTS' && (r.amount < 0 || (r.originalAmount ?? 0) < 0) ? 'Deduction' : 'Credit';
       const rows = parseResult.rows.map((r) => ({
         'Outlet ID':   r.outletId,
         'Outlet Name': r.outletName,
@@ -418,6 +502,7 @@ export default function CreditsPayoutsUploadPage() {
         ...(anyRounded ? { 'Typed Amount': r.originalAmount ?? '' } : {}),
         'Amount':      r.amount || '',
         'Award Type':  r.awardType,
+        ...(withType ? { 'Type': rowType(r) } : {}),
         'Status':      r.status,
         'Narration':   r.narration,
         'Errors':      r.errors.length > 0 ? r.errors.join('; ') : (r.skipReason ?? ''),
@@ -429,14 +514,16 @@ export default function CreditsPayoutsUploadPage() {
       // After a confirm, append the server-side skipped rows (what was NOT credited
       // and why) so the report actually explains the skips — not just the client parse.
       if (savedBatch && savedBatch.skipped.length > 0) {
+        const anyDeductionSkip = savedBatch.skipped.some(isDeductionSkip);
         const skippedRows = savedBatch.skipped.map((s) => ({
           'Outlet ID': s.outletId,
           'Field':     s.fieldName,
+          ...(anyDeductionSkip ? { 'Type': isDeductionSkip(s) ? 'Deduction (NOT deducted)' : 'Credit (NOT credited)' } : {}),
           'Points':    s.points,
           'Reason':    skipReasonLabel(s.reason),
         }));
         const sws = jsonToSheetSafe(skippedRows);
-        XLSX.utils.book_append_sheet(wb, sws, 'Skipped (Not Credited)');
+        XLSX.utils.book_append_sheet(wb, sws, anyDeductionSkip ? 'Skipped (Not Applied)' : 'Skipped (Not Credited)');
       }
 
       const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
@@ -577,16 +664,25 @@ export default function CreditsPayoutsUploadPage() {
           )}
 
           {/* Summary cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {/* Without deductions the four cards are exactly as before ("Total Pts"). */}
+          <div className={`grid grid-cols-2 ${hasDeductions ? 'sm:grid-cols-5' : 'sm:grid-cols-4'} gap-3`}>
             {[
-              { label: 'OK Rows',   value: parseResult.summary.ok,      color: 'text-emerald-600' },
+              { label: 'OK Rows',   value: parseResult.summary.ok,      color: 'text-emerald-600',
+                sub: hasDeductions
+                  ? `${parseResult.summary.ok - parseResult.summary.deducted} to credit · ${parseResult.summary.deducted} to deduct`
+                  : undefined },
               { label: 'Skipped',   value: parseResult.summary.skipped,  color: 'text-gray-500' },
               { label: 'Errors',    value: parseResult.summary.errors,   color: 'text-red-600' },
-              { label: 'Total Pts', value: parseResult.summary.totalPoints.toLocaleString('en-IN'), color: 'text-blue-600' },
-            ].map((c) => (
+              { label: hasDeductions ? 'Total credited' : 'Total Pts',
+                value: parseResult.summary.totalPoints.toLocaleString('en-IN'), color: 'text-blue-600' },
+              ...(hasDeductions
+                ? [{ label: 'Total deducted', value: `${parseResult.summary.totalDeductedPoints.toLocaleString('en-IN')} pts`, color: 'text-orange-600' }]
+                : []),
+            ].map((c: { label: string; value: string | number; color: string; sub?: string }) => (
               <div key={c.label} className="bg-white rounded-xl border border-gray-200 p-3 text-center">
                 <p className={`text-xl font-bold ${c.color}`}>{c.value}</p>
                 <p className="text-xs text-gray-500 mt-0.5">{c.label}</p>
+                {c.sub && <p className="text-[11px] text-gray-400 mt-0.5" data-testid="credits-ok-split">{c.sub}</p>}
               </div>
             ))}
           </div>
@@ -601,6 +697,9 @@ export default function CreditsPayoutsUploadPage() {
           )}
 
           <RoundedAmountsPanel rows={parseResult.rows} />
+
+          <DeductionsPanel rows={parseResult.rows} />
+          <DeductionBalanceCallout rows={parseResult.rows} state={deductionPreview} />
 
           {parseResult.hasErrors && (
             <div className="bg-white rounded-xl border border-red-200 overflow-hidden">
@@ -667,11 +766,19 @@ export default function CreditsPayoutsUploadPage() {
             </div>
           )}
 
+          {parseResult.canProceed && !saved && !pendingBatch && deductionBlocked.length > 0 && (
+            <p className="text-xs text-red-700" data-testid="credits-confirm-blocked">
+              Confirm is disabled: {deductionBlocked.length} outlet wallet{deductionBlocked.length !== 1 ? 's are' : ' is'} not
+              prepared for deductions, so the server would refuse the whole batch (nothing credited or deducted). Ask
+              Gifsy to prepare {deductionBlocked.length !== 1 ? 'these wallets' : 'this wallet'}, or remove those rows and re-upload.
+            </p>
+          )}
+
           <div className="flex flex-wrap gap-3">
             {parseResult.canProceed && !saved && !pendingBatch && (
               <button
                 onClick={handleConfirm}
-                disabled={!uploadWindowOpen || confirming}
+                disabled={!uploadWindowOpen || confirming || deductionCheckLoading || deductionsOffOnServer || deductionBlocked.length > 0}
                 className="flex items-center gap-2 px-4 py-2.5 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <CheckCircle className="w-4 h-4" />
@@ -738,22 +845,38 @@ export default function CreditsPayoutsUploadPage() {
                 : 'No points credited'}
               {savedBatch.payoutEntriesCreated > 0 && ` · ${savedBatch.payoutEntriesCreated} payout entr${savedBatch.payoutEntriesCreated !== 1 ? 'ies' : 'y'}`}
               {savedBatch.totalPayoutPaise > 0 && ` · ₹${(savedBatch.totalPayoutPaise / 100).toLocaleString('en-IN')} payout`}
+              {savedBatch.pointsDeductedRows > 0 &&
+                ` · ${savedBatch.pointsDeductedRows} deduction${savedBatch.pointsDeductedRows !== 1 ? 's' : ''} · ${savedBatch.pointsDeductedTotal.toLocaleString('en-IN')} pts deducted`}
             </p>
           </div>
+
+          {savedBatch.deductionsIgnored > 0 && (
+            <div role="alert" data-testid="credits-deductions-ignored" className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-left">
+              <p className="text-xs font-semibold text-red-800">
+                {savedBatch.deductionsIgnored} deduction row{savedBatch.deductionsIgnored !== 1 ? 's were' : ' was'} NOT deducted
+              </p>
+              <p className="text-xs text-red-700 mt-0.5">
+                Negative points are not turned on for this program on the server, so the negative values in this file were
+                ignored — only the credits were applied. Ask Gifsy before deducting these points another way.
+              </p>
+            </div>
+          )}
 
           {savedBatch.skipped.length > 0 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl text-left overflow-hidden">
               <div className="px-4 py-2.5 border-b border-amber-100">
                 <p className="text-xs font-semibold text-amber-800 flex items-center gap-2">
                   <AlertTriangle className="w-3.5 h-3.5" />
-                  {savedBatch.skipped.length} row{savedBatch.skipped.length !== 1 ? 's' : ''} NOT credited
+                  {skippedHeader(savedBatch.skipped)}
                 </p>
               </div>
               <div className="divide-y divide-amber-100 max-h-52 overflow-y-auto">
                 {savedBatch.skipped.slice(0, 12).map((s, i) => (
                   <div key={i} className="px-4 py-2">
                     <p className="text-xs font-medium text-gray-800">
-                      {s.outletId} · {s.fieldName} · {s.points.toLocaleString('en-IN')} pts
+                      {isDeductionSkip(s)
+                        ? `${s.outletId} · ${s.fieldName} · −${Math.abs(s.points).toLocaleString('en-IN')} pts · NOT deducted`
+                        : `${s.outletId} · ${s.fieldName} · ${s.points.toLocaleString('en-IN')} pts`}
                     </p>
                     <p className="text-xs text-amber-700 mt-0.5">{skipReasonLabel(s.reason)}</p>
                   </div>

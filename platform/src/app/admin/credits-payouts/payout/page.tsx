@@ -185,6 +185,8 @@ interface Reversal {
   requestRemarks?: string | null;
   /** Approved POINTS reversals only: the server-written plain-words outcome (see PointsOutcome). */
   pointsOutcome?: PointsOutcome;
+  /** 'DEDUCTION_UNDO' (any status): the request UNDOES an upload deduction — approving it gives points back. */
+  kind?:          'DEDUCTION_UNDO' | string;
   /**
    * WP5 — present only for a PAYOUT reversal raised under the V2 reversal engine (or SHADOW before 2026-11-16): the whole entries it
    * holds (RESERVED while pending) or consumed. Absent for every LEGACY-engine reversal.
@@ -291,6 +293,11 @@ interface PayoutOutcome {
  * future earnings"; LEGACY: it is "not recovered — already redeemed or expired, written off".
  */
 interface PointsOutcome {
+  /**
+   * 'DEDUCTION_UNDO' = the approved request UNDID an upload deduction (points given BACK to the wallet — nothing
+   * taken, no debt created). Absent for a credit reversal.
+   */
+  kind?:    'DEDUCTION_UNDO' | string;
   headline: string;
   summary:  string;
   lines:    string[];
@@ -315,9 +322,16 @@ const rupees = formatInrPaise;
  * recover), owed (how far below zero it took the balance), pending (written off). From the server's pointsOutcome;
  * a reversal without one (PAYOUT / older API) is taken = supposed − pending.
  */
+/** An approved undo of an upload deduction (points given back) — never described as a credit reversal. */
+function isDeductionUndo(rev: Pick<Reversal, 'awardType' | 'pointsOutcome'>): boolean {
+  return rev.awardType !== 'PAYOUT' && rev.pointsOutcome?.kind === 'DEDUCTION_UNDO';
+}
+
 function reportPartsOf(rev: Pick<Reversal, 'awardType' | 'pointsOutcome' | 'approvedPaise' | 'shortfallPaise'>) {
   const supposed = Number(rev.approvedPaise ?? 0);
   const pending = Number(rev.shortfallPaise ?? 0);
+  // A deduction undo GIVES points back: nothing taken / expired / owed (its "taken" is the points given back).
+  if (isDeductionUndo(rev)) return { supposed, pending, expired: 0, owed: 0, taken: Math.max(0, supposed - pending) };
   const o = rev.awardType === 'PAYOUT' ? undefined : rev.pointsOutcome;
   const expired = Math.max(0, Number(o?.alreadyExpired ?? 0));
   const owed = Math.max(0, Number(o?.belowZero ?? 0));
@@ -1391,9 +1405,14 @@ function PayoutPageInner() {
                   <div>
                     <p className="text-gray-500">Award</p>
                     <p className="font-medium text-gray-800">{rev.awardType}</p>
+                    {rev.kind === 'DEDUCTION_UNDO' && (
+                      <p className="text-[11px] font-semibold text-blue-700" data-testid={`pending-deduction-undo-${rev.id}`}>
+                        Undo of an upload deduction
+                      </p>
+                    )}
                   </div>
                   <div>
-                    <p className="text-gray-500">Requested Amount</p>
+                    <p className="text-gray-500">{rev.kind === 'DEDUCTION_UNDO' ? 'Points to give back' : 'Requested Amount'}</p>
                     <p className="font-medium text-gray-800">
                       {rev.awardType === 'PAYOUT'
                         ? rupees(rev.requestedPaise)
@@ -1453,6 +1472,12 @@ function PayoutPageInner() {
                         {rupees(rev.requestedPaise)}) — whole payout entries only.
                         Unpaid entries are cancelled; an already-paid entry becomes a receivable to recover off-platform.
                         To change the amount, reject this request and raise a new one.
+                      </p>
+                    )}
+                    {revAction.action === 'approve' && rev.kind === 'DEDUCTION_UNDO' && (
+                      <p className="text-xs text-gray-600">
+                        Approving gives these points back to the wallet the upload deduction was taken from. If that
+                        deduction took the balance below zero, the points clear that debt first.
                       </p>
                     )}
                     {revAction.action === 'approve' && rev.awardType !== 'PAYOUT' && (
@@ -1624,7 +1649,14 @@ function PayoutPageInner() {
                       <td className="py-2 pr-3 text-gray-700">{rev.fieldName}</td>
                       <td className="py-2 pr-3 text-gray-700">{monthLabel(rev.period)}</td>
                       <td className="py-2 pr-3 text-right font-medium text-gray-800">{fmt(supposed)}</td>
-                      <td className="py-2 pr-3 text-right font-medium text-emerald-700">{fmt(reversed)}</td>
+                      <td className="py-2 pr-3 text-right font-medium text-emerald-700">
+                        {isDeductionUndo(rev) ? (
+                          <span data-testid={`processed-deduction-undo-${rev.id}`}>
+                            {fmt(reversed)} given back
+                            <span className="block text-[11px] font-normal text-gray-500">Deduction undone</span>
+                          </span>
+                        ) : fmt(reversed)}
+                      </td>
                       {processedHasExpired && (
                         <td className="py-2 pr-3 text-right font-medium text-gray-600" data-testid={`processed-expired-${rev.id}`}>
                           {fmt(expired)}

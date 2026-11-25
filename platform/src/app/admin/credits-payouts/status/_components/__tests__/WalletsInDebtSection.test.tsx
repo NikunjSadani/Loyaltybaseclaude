@@ -140,3 +140,34 @@ describe('WalletsInDebtSection', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('offline');
   });
 });
+
+describe('WalletsInDebtSection — UPLOAD_DEDUCTION source (negative-points upload rows)', () => {
+  const UD = {
+    kind: 'UPLOAD_DEDUCTION' as const, batchId: 'cb1', fieldName: 'Target Achievement', period: '2026-10',
+    deductedPoints: 320, at: '2026-11-03T06:00:00.000Z', outletCode: 'O3',
+  };
+  const WD: DebtWallet[] = [
+    { walletId: 'w3', partnerName: 'Shop Three', outletCodes: ['O3'], balance: -220, debtPoints: 220, owedPoints: 220, note: null,
+      sources: [UD, { ...SRC, allocationId: 'al9', owedPoints: 50 }] },
+  ];
+
+  it('renders "Upload deduction · <field> · <period> · −<points> pts"; reversal sources unchanged', async () => {
+    stub(() => ({ success: true, data: { total: 1, totalOwedPoints: 220, limit: 1000, anyNegative: true, program: null, wallets: WD } }));
+    render(<WalletsInDebtSection />);
+    await screen.findByTestId('wallets-in-debt-summary');
+    fireEvent.click(screen.getByRole('button', { name: 'Show' }));
+    const lines = screen.getByTestId('debt-wallet-w3').querySelectorAll('li');
+    expect(lines).toHaveLength(2);
+    expect(lines[0].textContent).toBe('Upload deduction · Target Achievement · 2026-10 · −320 pts');
+    expect(lines[1].textContent).toContain('Reversal took more than the wallet held — 50 pts (O1 · Volume · 2026-10) · reversal REV1');
+  });
+
+  it('the Excel row for an upload deduction: Source "Upload deduction", points, outlet, no reversal, dated', () => {
+    const wb = XLSX.read(buildWalletsInDebtXlsx(WD), { type: 'array', cellDates: true });
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets['Wallets below zero'], { header: 1 });
+    const r = rows[1] as unknown[];
+    expect(r.slice(4, 8)).toEqual(['Upload deduction', 320, 'O3', '']);
+    expect(r[8]).toBeInstanceOf(Date);
+    expect(r.slice(9, 11)).toEqual(['Target Achievement', '2026-10']);
+  });
+});

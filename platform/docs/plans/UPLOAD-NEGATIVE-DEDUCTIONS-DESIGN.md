@@ -94,6 +94,11 @@ total is derived from the rows wherever it is shown.
   as "balance will go below zero: <current> → <after>" (after = current + this file's credits − its deductions), and
   every outlet whose wallet is not prepared (confirm will be refused) or not linked to a partner (will be skipped).
 - Done screen: "N outlets credited · X pts · M deductions · Y pts deducted", plus "NOT deducted" rows.
+- **Stale screen settings** (the switch is cached in the browser for ≤ 60 s): the preview call answers 400 "not turned on"
+  when the server's switch is OFF → red call-out, Confirm disabled. If the switch is turned off between preview and
+  confirm, the confirm reply carries no `pointsDeducted` and the done screen shows a red "N deduction rows were NOT
+  deducted" alert — never silent.
+- Confirm is also disabled while the balance check is running and while any outlet's wallet is not prepared.
 
 ## 6. Undo (reversal) semantics
 
@@ -150,6 +155,12 @@ adding a notification event is a platform-wide change (open question for the own
   deduction does not reduce it (cross-batch, operator judgement — open question).
 
 ## 10. OFF path (Deoleo) — unchanged, and the latent gaps found
+
+**As built (2026-11-25):** setting key `creditUploadNegativeDeductions`; `allowDebt` movement flag +
+`WalletService.debitUploadDeduction` / `findUploadDeductions` / `undoUploadDeduction` / `uploadDeductionReadiness`;
+`POST /v1/admin/credits/deduction-preview`; reversals list tags undo requests `kind: 'DEDUCTION_UNDO'` (create marker
+metadata `kind UPLOAD_DEDUCTION_UNDO`); wallets-in-debt lists `UPLOAD_DEDUCTION` sources; the DTO's
+`originalAmount ≥ 0` rule moved into `createBatch` (same 400 for every tenant without the switch).
 
 With the setting OFF nothing new runs: the parser errors "Amount cannot be negative", the server makes no extra read.
 Found while tracing (pre-existing, every tenant, **not changed** because a fix is platform-wide and needs the owner's
