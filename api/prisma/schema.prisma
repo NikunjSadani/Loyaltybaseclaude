@@ -3405,6 +3405,10 @@ model SalesKpiDefinition {
   // FOCUS-FROM-TARGETS: 'FILTER' = `filter` for every outlet (original behaviour, every existing row);
   // 'TARGET_NAMES' = per outlet, the month's target-file names for this KPI (filter must be {}).
   productSource String @default("FILTER")
+  // FOCUS-NAMES-FROM-KPI (2026-11-25): only on a TARGET_NAMES definition — read the per-outlet names written for THIS
+  // other KPI code (an enabled, non-borrowing TARGET_NAMES definition), e.g. FB1 CASES (QUANTITY) borrows FOCUS BRAND's
+  // names so cases count exactly the ₹ measure's products. NULL (every existing row) = the definition's own kpiCode.
+  focusNamesFromKpi String?
   enabled     Boolean  @default(true)
   order       Int      @default(0)
   updatedById String

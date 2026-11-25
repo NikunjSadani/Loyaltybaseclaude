@@ -128,6 +128,12 @@ export interface SalesKpiDefinitionDto {
   filter: SalesKpiFilter;
   /** Absent = 'FILTER'. TARGET_NAMES -> `filter` must be {} (see SalesKpiProductSource). */
   productSource?: SalesKpiProductSource;
+  /**
+   * FOCUS-NAMES-FROM-KPI (2026-11-25): only with TARGET_NAMES — read the per-outlet focus names written for THIS other
+   * KPI code (an enabled TARGET_NAMES definition that does not borrow itself), so e.g. FB1 CASES (QUANTITY) counts
+   * exactly the products of FOCUS BRAND (AMOUNT). Absent / null = the definition's own kpiCode (original behaviour).
+   */
+  focusNamesFromKpi?: string | null;
   outletTypes: string[];
   programs: string[];
   enabled: boolean;
@@ -691,7 +697,11 @@ export interface FocusNameSummary {
   achieved: { total: number; outletsZero: number };
 }
 
-export type FocusBlockerCode = 'FOCUS_UNMATCHED' | 'FOCUS_AMBIGUOUS' | 'FOCUS_MISSING_NAME';
+/**
+ * FOCUS_SOURCE_MISSING (FOCUS-NAMES-FROM-KPI): a definition reads another KPI's names, but that KPI has no enabled
+ * 'from the target file' definition — its outlets get no value until the source is fixed.
+ */
+export type FocusBlockerCode = 'FOCUS_UNMATCHED' | 'FOCUS_AMBIGUOUS' | 'FOCUS_MISSING_NAME' | 'FOCUS_SOURCE_MISSING';
 /** Anything here blocks applying the month (canApply false). */
 export interface FocusBlocker {
   code: FocusBlockerCode;

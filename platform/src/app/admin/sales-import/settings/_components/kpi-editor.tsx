@@ -109,6 +109,9 @@ const PRODUCT_SOURCE_OPTIONS: ReadonlyArray<{ value: SalesKpiProductSource; labe
   { value: 'TARGET_NAMES', label: 'From the target file, per outlet' },
 ];
 
+export const FOCUS_NAMES_FROM_HELP =
+  "Use the same per-outlet focus names as another KPI (e.g. a cases KPI next to the ₹ Focus Brand KPI): both then count exactly the same products for every outlet, and a name problem is fixed once, on that KPI.";
+
 export const TARGET_NAMES_HELP =
   "Each outlet counts the products written for this KPI in that month's target file (the KPI's name column), e.g. 'CNO & ADHO500'. Write each product as brand + SKU group (ADHO500) or just the brand (CNO); separate several with &.";
 
@@ -143,7 +146,7 @@ function TokenInput({ label, values, onChange, placeholder }: { label: string; v
 
 export function KpiEditor({
   initial, tenantKpis, tenantKpisError = null, onRetryTenantKpis, ownedCodes, mapping, combos, segments = null,
-  onSaved, onCancel, onDuplicateAsCases, canEdit = true,
+  onSaved, onCancel, onDuplicateAsCases, canEdit = true, focusNameSources = [],
 }: {
   initial: SalesKpiDefinitionDto;
   tenantKpis: TenantKpi[];
@@ -154,6 +157,11 @@ export function KpiEditor({
   canEdit?: boolean;
   /** KPI codes already owned by OTHER enabled definitions. */
   ownedCodes: string[];
+  /**
+   * FOCUS-NAMES-FROM-KPI: the OTHER enabled "from the target file" definitions that read their own names — the KPIs
+   * whose focus names this one may use.
+   */
+  focusNameSources?: Array<{ kpiCode: string; label: string }>;
   mapping: SalesColumnMapping;
   combos: SalesImportCombos | null;
   /** The tenant's outlet types / programmes; an empty (or unavailable) list falls back to free text. */
@@ -174,6 +182,8 @@ export function KpiEditor({
   const editing = Boolean(initial.id);
   const productSource: SalesKpiProductSource = def.productSource ?? 'FILTER';
   const fromTargets = productSource === 'TARGET_NAMES';
+  const namesFrom = fromTargets ? (def.focusNamesFromKpi ?? '').trim() : '';
+  const namesFromSource = focusNameSources.find((s) => s.kpiCode === namesFrom);
   const dims = mapping.dimensions;
   const hasAmount = Boolean(mapping.amount);
   const hasQty = Boolean(mapping.quantity);
@@ -208,7 +218,12 @@ export function KpiEditor({
   if (def.measure === 'PRODUCT_COUNT' && !hasAmount) blockers.push('The column mapping has no amount column, so a products-bought KPI is not possible (products are counted by their net amount).');
   if (def.measure === 'PRODUCT_COUNT' && dims.length === 0) blockers.push('The column mapping has no product columns, so products cannot be told apart.');
   // L2: "From the target file" needs the KPI's per-outlet name column, or every outlet would count nothing.
-  if (fromTargets && selectedKpi?.hasNameOverride === false) {
+  if (fromTargets && namesFrom && namesFrom === def.kpiCode) {
+    blockers.push("A KPI can't use its own focus names as another KPI's. Pick a different KPI, or use this KPI's own name column.");
+  } else if (fromTargets && namesFrom && !namesFromSource) {
+    blockers.push(`${namesFrom} is not a 'from the target file' KPI with its own names. Pick another KPI, or use this KPI's own name column.`);
+  }
+  if (fromTargets && !namesFrom && selectedKpi?.hasNameOverride === false) {
     blockers.push(`Turn on the per-outlet name column for ${selectedKpi.label || def.kpiCode} under Targets → KPI settings first, or pick the products here.`);
   }
   // L1: a KPI that took its products from the target file, switched to "Pick products here" with nothing picked, would
@@ -241,13 +256,19 @@ export function KpiEditor({
     if (!canEdit || blockers.length || saving) return;
     setSaving(true);
     setSaveError(null);
-    const { id, productSource: _src, ...rest } = def;
+    const { id, productSource: _src, focusNamesFromKpi: _from, ...rest } = def;
     void _src;
+    void _from;
     // productSource is sent when it is TARGET_NAMES, or when the definition already carried one (so switching back to
     // "Pick products here" is saved); a plain FILTER definition is sent exactly as before.
-    const body: SalesKpiDefinitionDto = fromTargets
+    const base: SalesKpiDefinitionDto = fromTargets
       ? { ...rest, productSource: 'TARGET_NAMES', filter: {} }
       : initial.productSource !== undefined ? { ...rest, productSource: 'FILTER' } : rest;
+    // FOCUS-NAMES-FROM-KPI: sent when set, or as null when the saved definition had one (so clearing it is saved);
+    // otherwise the body is exactly as before.
+    const body: SalesKpiDefinitionDto = namesFrom
+      ? { ...base, focusNamesFromKpi: namesFrom }
+      : initial.focusNamesFromKpi ? { ...base, focusNamesFromKpi: null } : base;
     const r = id ? await salesImportApi.patchKpi(id, body) : await salesImportApi.createKpi(body);
     setSaving(false);
     if (!r.success) {
@@ -319,12 +340,37 @@ export function KpiEditor({
         {fromTargets ? (
           <div className="mt-2 space-y-2" data-testid="product-source-target-names">
             <p className="text-[11px] text-gray-600">{TARGET_NAMES_HELP}</p>
-            {selectedKpi?.hasNameOverride && selectedKpi.nameOverrideLabel && (
+            {(focusNameSources.some((s) => s.kpiCode !== def.kpiCode) || namesFrom) && (
+              <div className="text-xs font-medium text-gray-700" data-testid="focus-names-from">
+                <label>
+                  Focus names
+                  <select value={namesFrom} aria-label="Focus names"
+                    onChange={(e) => setDef((d) => ({ ...d, focusNamesFromKpi: e.target.value || null }))}
+                    className="mt-1 block w-full text-sm border border-gray-300 rounded-md px-2 py-1.5">
+                    <option value="">This KPI&apos;s own name column</option>
+                    {focusNameSources.filter((s) => s.kpiCode !== def.kpiCode).map((s) => (
+                      <option key={s.kpiCode} value={s.kpiCode}>
+                        Use the focus names of {s.label && s.label !== s.kpiCode ? `${s.label} (${s.kpiCode})` : s.kpiCode}
+                      </option>
+                    ))}
+                    {namesFrom && !namesFromSource && <option value={namesFrom}>Use the focus names of {namesFrom} (not available)</option>}
+                  </select>
+                </label>
+                <p className="mt-1 text-[11px] font-normal text-gray-500">{FOCUS_NAMES_FROM_HELP}</p>
+              </div>
+            )}
+            {namesFrom && namesFromSource && (
+              <p className="text-[11px] text-gray-600" data-testid="focus-names-from-note">
+                Each outlet counts the products written for <strong>{namesFromSource.label || namesFrom}</strong> in that
+                month&apos;s target file — the same products as {namesFrom}, counted in {def.measure === 'QUANTITY' ? 'cases' : def.measure === 'AMOUNT' ? '₹' : 'products bought'}.
+              </p>
+            )}
+            {!namesFrom && selectedKpi?.hasNameOverride && selectedKpi.nameOverrideLabel && (
               <p className="text-[11px] text-gray-600">
                 Name column for {def.kpiCode} in the target file: <strong>{selectedKpi.nameOverrideLabel}</strong>.
               </p>
             )}
-            {selectedKpi && selectedKpi.hasNameOverride === false && (
+            {!namesFrom && selectedKpi && selectedKpi.hasNameOverride === false && (
               <p role="status" data-testid="product-source-no-name-column"
                 className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                 The KPI {def.kpiCode} has no per-outlet name column yet. Turn it on for this KPI under Targets → KPI
@@ -461,7 +507,9 @@ export function KpiEditor({
             if (!window.confirm('Start a new cases KPI with the same products? Unsaved changes to this KPI are discarded — save it first if you changed it.')) return;
             onDuplicateAsCases({
             kpiCode: '', measure: 'QUANTITY', filter: fromTargets ? {} : def.filter, outletTypes: def.outletTypes, programs: def.programs,
-              enabled: true, order: def.order + 1, ...(fromTargets ? { productSource: 'TARGET_NAMES' as const } : {}),
+              enabled: true, order: def.order + 1,
+              // FOCUS-NAMES-FROM-KPI: a cases copy of a "from the target file" KPI uses ITS focus names (same products).
+              ...(fromTargets ? { productSource: 'TARGET_NAMES' as const, focusNamesFromKpi: namesFrom || def.kpiCode || null } : {}),
             });
           }}>
             Duplicate as cases KPI

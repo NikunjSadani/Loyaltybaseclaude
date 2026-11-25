@@ -153,6 +153,14 @@ export function focusAcceptanceKey(kpiCode: string, key: string): string {
   return `${kpiCode}|${key}`;
 }
 
+/**
+ * FOCUS-NAMES-FROM-KPI: the KPI code whose per-outlet names a TARGET_NAMES definition reads — its own kpiCode, or the
+ * code it borrows (`focusNamesFromKpi`, e.g. FB1 CASES → FOCUS BRAND).
+ */
+export function focusNamesKpiOf(def: Pick<KpiDefLite, 'kpiCode' | 'focusNamesFromKpi'>): string {
+  return def.focusNamesFromKpi && def.focusNamesFromKpi.trim() !== '' ? def.focusNamesFromKpi : def.kpiCode;
+}
+
 /** Is the definition per-outlet (products from the target file)? */
 export function isTargetNamesDef(def: Pick<KpiDefLite, 'productSource'>): boolean {
   return def.productSource === 'TARGET_NAMES';
@@ -236,8 +244,50 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
   const fpAccepted = new Set<string>();
   const fpResolutions = new Map<string, unknown>(); // name key → its token resolutions
 
+  // FOCUS-NAMES-FROM-KPI: the codes a borrowing definition may read from = enabled TARGET_NAMES defs reading their OWN
+  // names (one level only, matching the save-time validation). Blockers are collected per definition and emitted in
+  // the same kpiCode order as before; a borrower's UNMATCHED / AMBIGUOUS blockers that its source already reports are
+  // dropped (one fix / acceptance on the source clears both).
+  const ownNameCodes = new Set(tnDefs.filter((d) => focusNamesKpiOf(d) === d.kpiCode).map((d) => d.kpiCode));
+  const blockersByDef = new Map<string, FocusBlocker[]>();
+  const borrowedFrom = new Map<string, string>(); // borrower kpiCode → source kpiCode
+
   for (const def of [...tnDefs].sort((a, b) => cmp(a.kpiCode, b.kpiCode))) {
     const kpiCode = def.kpiCode;
+    const nameKpi = focusNamesKpiOf(def);
+    const defBlockers: FocusBlocker[] = [];
+    blockersByDef.set(kpiCode, defBlockers);
+    const display = focusKpiDisplay(kpiCode, input.labelOf);
+    const label = (input.labelOf.get(kpiCode) ?? '').trim() || kpiCode;
+    if (nameKpi !== kpiCode) {
+      borrowedFrom.set(kpiCode, nameKpi);
+      if (!ownNameCodes.has(nameKpi)) {
+        // The source is not an enabled own-names TARGET_NAMES definition: no outlet gets a value (omitted, never a
+        // silent 0) and the month is blocked until the source is fixed.
+        outletFilters.set(kpiCode, new Map());
+        outletNameKeys.set(kpiCode, new Map());
+        const inScope = rosterSorted.filter(([, meta]) => outletInScope(def, meta)).map(([code]) => code);
+        defBlockers.push({
+          code: 'FOCUS_SOURCE_MISSING',
+          kpiCode,
+          outlets: inScope.length,
+          sampleOutletCodes: sample(inScope),
+          message: `${display} uses the focus product names of "${nameKpi}", but "${nameKpi}" is not an enabled Sales Import KPI whose products come from the target file. Fix it in Sales Import settings.`,
+        });
+        fpMissing.push([kpiCode, `\u0000SOURCE:${nameKpi}`]);
+        focus.push({ kpiCode, label, measure: def.measure, names: [], missingName: { outlets: 0, sampleOutletCodes: [] } });
+        continue;
+      }
+    }
+    // An UNMATCHED token is accepted when accepted for this KPI or (borrower) for the KPI whose names it reads.
+    const acceptanceOf = (key: string): { ak: string; info: FocusAcceptanceInfo } | null => {
+      for (const code of nameKpi === kpiCode ? [kpiCode] : [kpiCode, nameKpi]) {
+        const ak = focusAcceptanceKey(code, key);
+        const info = input.acceptances.get(ak);
+        if (info) return { ak, info };
+      }
+      return null;
+    };
     const filters = new Map<string, SalesKpiFilter>();
     const nameKeys = new Map<string, string>();
     const groups = new Map<string, NameGroup>();
@@ -249,7 +299,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
     for (const [code, meta] of rosterSorted) {
       if (!outletInScope(def, meta)) continue;
       const row = input.targets.get(code);
-      const rawName = row?.names?.[kpiCode];
+      const rawName = row?.names?.[nameKpi];
       const name = typeof rawName === 'string' ? rawName.trim() : '';
       const t = row?.values?.[kpiCode];
       const hasTarget = typeof t === 'number' && Number.isFinite(t);
@@ -298,9 +348,9 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
       for (const tok of tokens) {
         const r = resolveKey(tok);
         if (r.status === 'UNMATCHED') {
-          const ak = focusAcceptanceKey(kpiCode, r.key);
-          if (input.acceptances.has(ak)) {
-            fpAccepted.add(ak);
+          const acc = acceptanceOf(r.key);
+          if (acc) {
+            fpAccepted.add(acc.ak);
             continue;
           }
           let u = unmatched.get(r.key);
@@ -321,11 +371,9 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
     outletFilters.set(kpiCode, filters);
     outletNameKeys.set(kpiCode, nameKeys);
 
-    const display = focusKpiDisplay(kpiCode, input.labelOf);
-    const label = (input.labelOf.get(kpiCode) ?? '').trim() || kpiCode;
     for (const [key, u] of [...unmatched.entries()].sort((a, b) => cmp(a[0], b[0]))) {
       const n = u.outlets.size;
-      blockers.push({
+      defBlockers.push({
         code: 'FOCUS_UNMATCHED',
         kpiCode,
         token: u.token,
@@ -337,7 +385,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
     }
     for (const [key, a] of [...ambiguous.entries()].sort((x, y) => cmp(x[0], y[0]))) {
       const n = a.outlets.size;
-      blockers.push({
+      defBlockers.push({
         code: 'FOCUS_AMBIGUOUS',
         kpiCode,
         token: a.token,
@@ -349,18 +397,21 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
     }
     if (missing.length > 0) {
       const n = missing.length;
-      blockers.push({
+      defBlockers.push({
         code: 'FOCUS_MISSING_NAME',
         kpiCode,
         outlets: n,
         sampleOutletCodes: sample(missing),
-        message: `${outletsText(n)} ${plural(n, 'has', 'have')} a ${label} target but no product name in the target file.`,
+        message:
+          nameKpi === kpiCode
+            ? `${outletsText(n)} ${plural(n, 'has', 'have')} a ${label} target but no product name in the target file.`
+            : `${outletsText(n)} ${plural(n, 'has', 'have')} a ${label} target but no ${focusKpiDisplay(nameKpi, input.labelOf)} product name in the target file (${label} uses those names).`,
       });
     }
     // Same code (FOCUS_MISSING_NAME — cleared only by fixing the target file), its own message per name as written.
     for (const [written, outlets] of [...separatorOnly.entries()].sort((a, b) => cmp(a[0], b[0]))) {
       const n = outlets.size;
-      blockers.push({
+      defBlockers.push({
         code: 'FOCUS_MISSING_NAME',
         kpiCode,
         outlets: n,
@@ -375,7 +426,7 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
         const r = resolveKey(tok);
         const out: FocusTokenResolution = { ...r, token: tok.trim() };
         if (r.status === 'UNMATCHED') {
-          const acc = input.acceptances.get(focusAcceptanceKey(kpiCode, r.key));
+          const acc = acceptanceOf(r.key)?.info;
           if (acc) out.accepted = { byName: acc.byName, at: acc.at };
         }
         return out;
@@ -408,6 +459,19 @@ export function resolveMonthFocus(input: MonthFocusInput): MonthFocusResolution 
       names,
       missingName: { outlets: missing.length, sampleOutletCodes: sample(missing) },
     });
+  }
+
+  for (const def of [...tnDefs].sort((a, b) => cmp(a.kpiCode, b.kpiCode))) {
+    const own = blockersByDef.get(def.kpiCode) ?? [];
+    const src = borrowedFrom.get(def.kpiCode);
+    if (src === undefined || !ownNameCodes.has(src)) {
+      blockers.push(...own);
+      continue;
+    }
+    const reported = new Set(
+      (blockersByDef.get(src) ?? []).filter((b) => b.key !== undefined).map((b) => `${b.code}|${b.key}`),
+    );
+    blockers.push(...own.filter((b) => b.key === undefined || !reported.has(`${b.code}|${b.key}`)));
   }
 
   const tupleCmp = (a: string[], b: string[]) => {

@@ -162,7 +162,9 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
                   <td className="px-3 py-2 text-gray-700">{measureUnitLabel(d.measure)}</td>
                   <td className="px-3 py-2 text-gray-700 max-w-md">
                     {d.productSource === 'TARGET_NAMES'
-                      ? <span data-testid={`kpi-products-${d.kpiCode}`}>From the target file<span className="block text-[11px] text-gray-500">per outlet, each month</span></span>
+                      ? <span data-testid={`kpi-products-${d.kpiCode}`}>From the target file<span className="block text-[11px] text-gray-500">{d.focusNamesFromKpi
+                        ? `per outlet, each month — the focus names of ${kpiLabel(d.focusNamesFromKpi)} (${d.focusNamesFromKpi})`
+                        : 'per outlet, each month'}</span></span>
                       : describeFilter(d.filter, mapping.dimensions)}
                   </td>
                   <td className="px-3 py-2 text-gray-600 text-xs">
@@ -200,6 +202,9 @@ function KpiSection({ mapping, canEdit }: { mapping: SalesColumnMapping; canEdit
           onRetryTenantKpis={reload}
           canEdit={canEdit}
           ownedCodes={ownedBy(editing.id)}
+          focusNameSources={(defs ?? [])
+            .filter((d) => d.enabled && d.productSource === 'TARGET_NAMES' && !d.focusNamesFromKpi && d.id !== editing.id)
+            .map((d) => ({ kpiCode: d.kpiCode, label: kpiLabel(d.kpiCode) }))}
           mapping={mapping}
           combos={combos}
           segments={segments}

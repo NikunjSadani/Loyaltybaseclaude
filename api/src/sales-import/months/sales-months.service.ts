@@ -325,12 +325,12 @@ export class SalesMonthsService {
    * existing acceptance is kept as it is, no second audit row). Audited.
    */
   async accept(user: JwtPayload, month: string, body: FocusAcceptanceRequest): Promise<FocusAcceptanceList> {
-    const { kpiCode, key } = await this.acceptanceArgs(user.clientId, month, body?.kpiCode, body?.key);
+    const { kpiCode, key, namesKpi } = await this.acceptanceArgs(user.clientId, month, body?.kpiCode, body?.key);
     const clientId = user.clientId;
     await this.prisma.$transaction(
       async (tx) => {
         await this.lockOpenMonth(tx, clientId, month);
-        await this.assertKeyInMonthTargets(tx, clientId, month, kpiCode, key);
+        await this.assertKeyInMonthTargets(tx, clientId, month, namesKpi, key);
         const existing = await tx.salesFocusAcceptance.findUnique({ where: { clientId_month_kpiCode_key: { clientId, month, kpiCode, key } } });
         if (existing) return;
         const row = await tx.salesFocusAcceptance.create({ data: { clientId, month, kpiCode, key, acceptedById: user.sub } });
@@ -384,7 +384,7 @@ export class SalesMonthsService {
     rawKpiCode: unknown,
     rawKey: unknown,
     opts: { requireDefinition: boolean } = { requireDefinition: true },
-  ): Promise<{ kpiCode: string; key: string }> {
+  ): Promise<{ kpiCode: string; key: string; namesKpi: string }> {
     if (!isMonthKey(month)) throw new BadRequestException('month must be YYYY-MM.');
     const kpiCode = typeof rawKpiCode === 'string' ? rawKpiCode.trim() : '';
     if (!kpiCode) throw new BadRequestException('kpiCode is required.');
@@ -397,11 +397,14 @@ export class SalesMonthsService {
     if (opts.requireDefinition) {
       const def = await this.prisma.salesKpiDefinition.findFirst({
         where: { clientId, kpiCode, enabled: true, productSource: 'TARGET_NAMES' },
-        select: { id: true },
+        select: { id: true, focusNamesFromKpi: true },
       });
       if (!def) throw new BadRequestException(`"${kpiCode}" is not a Sales Import KPI whose products come from the target file.`);
+      // FOCUS-NAMES-FROM-KPI: a borrowing KPI's names are written under the KPI it borrows from.
+      const from = typeof def.focusNamesFromKpi === 'string' ? def.focusNamesFromKpi.trim() : '';
+      return { kpiCode, key, namesKpi: from === '' ? kpiCode : from };
     }
-    return { kpiCode, key };
+    return { kpiCode, key, namesKpi: kpiCode };
   }
 
   /**

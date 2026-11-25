@@ -151,3 +151,19 @@ automatically. Nothing here requires targets first:
 - Migration: `20261115130000_focus_from_targets` (unique timestamp), no redundant index.
 - Known limitations (no Bajaj instance today): a brand whose name contains `&` or `,` can't be written as a focus name; a
   token that genuinely matches two different products (AMBIGUOUS) can only be fixed in the target file.
+
+## 13. Focus names from another KPI (owner-approved 2026-11-25, platform-wide but opt-in)
+
+A TARGET_NAMES definition may set `focusNamesFromKpi = <KPI code>` (nullable column, migration
+`20261125100000_sales_kpi_focus_names_from_kpi`): it reads the per-outlet names written for THAT code instead of its own,
+in the same `resolveMonthFocus` pass, so e.g. `FB1 CASES` (QUANTITY) gets exactly `FOCUS BRAND`'s product set per outlet
+(`CNO & ADHO500` → all CNO + ADHO 500 cases).
+- Save-time: TARGET_NAMES only; not itself; the source must be an ENABLED TARGET_NAMES definition of the same tenant that
+  reads its OWN names (one level → no chains / cycles). The borrower needs no name column of its own. A source with
+  enabled borrowers cannot be disabled, renamed, switched to FILTER or made to borrow (409 naming the borrowers).
+- Month: `FOCUS_MISSING_NAME` when the borrower has its own numeric target but the source name is blank (outlet omitted);
+  UNMATCHED / AMBIGUOUS tokens already reported on the source are not repeated (one fix / acceptance on the source clears
+  both; an acceptance on the borrower also counts); source not available at run time → `FOCUS_SOURCE_MISSING` (no outlet
+  gets a value, month blocked).
+- NULL (every existing row) = unchanged: same DTO, lite, `definitionsHash` and focus fingerprint (pinned in
+  `api/src/sales-import/kpi/focus-names-from-kpi.spec.ts`).

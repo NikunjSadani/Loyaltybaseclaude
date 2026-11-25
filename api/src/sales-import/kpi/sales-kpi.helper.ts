@@ -74,6 +74,11 @@ export interface KpiDefLite {
   /** FOCUS-FROM-TARGETS: absent / 'FILTER' = `filter` for every outlet; 'TARGET_NAMES' = per-outlet products (see below). */
   productSource?: SalesKpiProductSource;
   /**
+   * FOCUS-NAMES-FROM-KPI: only on a TARGET_NAMES definition that reads ANOTHER KPI's per-outlet names (absent = its own
+   * kpiCode). The products are resolved by the same resolveMonthFocus pass, so they equal the source KPI's per outlet.
+   */
+  focusNamesFromKpi?: string;
+  /**
    * FOCUS-FROM-TARGETS (set by attachOutletFilters, only on TARGET_NAMES definitions): the filter to use for a ROSTER
    * outlet code; `undefined` → the outlet gets NO key for this KPI (omitted, not 0). Absent → `filter` for every outlet.
    */
@@ -609,6 +614,8 @@ export function definitionsHash(
       ...canonicalScopeKey(kpiOwnScope(d)),
       // FOCUS-FROM-TARGETS: only when per-outlet — every FILTER definition's hash is unchanged.
       ...(d.productSource === 'TARGET_NAMES' ? { productSource: 'TARGET_NAMES' } : {}),
+      // FOCUS-NAMES-FROM-KPI: only when borrowing another KPI's names — every other definition's hash is unchanged.
+      ...(d.productSource === 'TARGET_NAMES' && d.focusNamesFromKpi ? { focusNamesFromKpi: d.focusNamesFromKpi } : {}),
     }))
     .sort((a, b) => (a.kpiCode < b.kpiCode ? -1 : a.kpiCode > b.kpiCode ? 1 : 0));
   return createHash('sha256').update(stableStringify(canon)).digest('hex');
