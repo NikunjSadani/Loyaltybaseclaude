@@ -215,6 +215,10 @@ export const visibilityApi = {
   getConfig() {
     return api.get<VisibilityConfig>(`${BASE}/config`);
   },
+  /** The tenant's real sales levels (code + name) — the only codes offered for "who sees team photos". */
+  getSalesLevels() {
+    return api.get<{ levels: Array<{ code: string; name: string }> }>(`${BASE}/config/sales-levels`);
+  },
   setConfig(input: SetVisibilityConfigInput) {
     return api.put<VisibilityConfigResult>(`${BASE}/config`, input);
   },

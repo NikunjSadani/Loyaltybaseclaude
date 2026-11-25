@@ -174,6 +174,15 @@ function SalesVisibilityContent() {
     return () => { cancelled = true; };
   }, [isPhotoMode, settingsReady]);
 
+  // Sales photo view: after a capture, quietly re-read the list so the new capture's id (→ its Photos button) shows.
+  // No spinner, and a failed re-read keeps the current list. Photo-view tenants only — everyone else is unchanged.
+  const refreshQuietly = () => {
+    visibilityApi
+      .getSalesEligible()
+      .then((r) => { if (r.success) setEligible(r.data); })
+      .catch(() => { /* keep the list on screen */ });
+  };
+
   // Effective state — a fresh session capture overrides the server row; otherwise a
   // per-photo CHANGES_REQUESTED capture maps to the 'changes_requested' label (robust to
   // either backend windowState mapping, via the capture status).
@@ -242,6 +251,12 @@ function SalesVisibilityContent() {
     return c;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filteredRows]);
+
+  // The selected chip lost its last outlet (e.g. it was just captured, or another filter narrowed it) → back to All,
+  // the same rule as the status filter, so the list never sticks on an empty chip.
+  useEffect(() => {
+    if (photoChip !== 'all' && chipCounts[photoChip] === 0) setPhotoChip('all');
+  }, [photoChip, chipCounts]);
 
   const outlets = useMemo(() => {
     const rows = photoView && photoChip !== 'all'
@@ -403,7 +418,7 @@ function SalesVisibilityContent() {
 
       {/* Photo chips — sales photo view only (tenant lets this level see team photos). Counts follow the filters above. */}
       {photoView && (eligible?.outlets.length ?? 0) > 0 && (
-        <div className="flex flex-wrap items-center gap-2 mb-4" role="group" aria-label="Filter by photo status" data-testid="photo-chips">
+        <div className="flex flex-wrap items-center gap-2 mb-4" role="group" aria-label="Outlets by photo status" data-testid="photo-chips">
           {PHOTO_CHIPS.map((c) => {
             const on = photoChip === c.key;
             return (
@@ -454,6 +469,64 @@ function SalesVisibilityContent() {
             const state = stateOf(o);
             const cfg = STATE_CONFIG[state];
             const actionable = isActionable(state, o.canCapture);
+            const captureBtn = actionable ? (
+              <button
+                onClick={() => setActiveOutletId(o.outletId)}
+                className="shrink-0 flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-xl bg-[var(--brand-primary)] text-white active:opacity-90 transition-opacity"
+              >
+                <Camera className="h-3.5 w-3.5" />
+                {/* A rejected prior capture (incl. rejected-then-late) recaptures (M3). */}
+                {isResubmitCapture(o) ? 'Recapture' : 'Capture'}
+              </button>
+            ) : null;
+            const info = (
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold text-gray-900 truncate min-w-0 flex-1">{o.outletName}</p>
+                  <span className={`shrink-0 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${cfg.badge}`}>
+                    {actionableStateLabel(state, o.status ?? null, actionable)}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-400 mt-0.5 truncate">
+                  {o.outletCode}{o.outletType ? ` · ${o.outletType.name}` : ''}
+                </p>
+                {state === 'rejected' && o.rejectionReason && (
+                  <p className="text-[11px] text-red-500 mt-0.5 truncate">{o.rejectionReason}</p>
+                )}
+                {state === 'changes_requested' && (
+                  <p className="text-[11px] text-orange-600 mt-0.5 truncate">
+                    Some photos flagged — re-capture required{o.rejectionReason ? `: ${o.rejectionReason}` : ''}
+                  </p>
+                )}
+              </div>
+            );
+            // Sales photo view: the action buttons get their OWN line under the name / badge on a phone (below `sm`),
+            // so Recapture + Photos never squeeze the name or overlap the badge at 360 px; side by side from `sm` up.
+            if (photoView) {
+              return (
+                <div key={o.outletId} className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-2 px-4 py-3.5" data-testid={`vis-row-${o.outletId}`}>
+                  <div className="p-2.5 bg-gray-50 rounded-xl shrink-0">{cfg.icon}</div>
+                  {info}
+                  {(captureBtn || o.captureId) && (
+                    <div className="flex w-full sm:w-auto justify-end gap-2 sm:shrink-0" data-testid={`vis-row-actions-${o.outletId}`}>
+                      {captureBtn}
+                      {o.captureId ? (
+                        <button
+                          type="button"
+                          data-testid={`view-photos-${o.outletId}`}
+                          onClick={() => setPhotosFor({ captureId: o.captureId as string, outletName: o.outletName })}
+                          aria-label={`View photos: ${o.outletName}`}
+                          className="shrink-0 flex items-center gap-1 text-[12px] font-semibold px-3 py-1.5 min-h-[36px] rounded-xl border border-gray-200 text-gray-700 active:bg-gray-50"
+                        >
+                          <ImageIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                          View photos
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              );
+            }
             return (
               <div key={o.outletId} className="flex items-center gap-3 px-4 py-3.5">
                 <div className="p-2.5 bg-gray-50 rounded-xl shrink-0">{cfg.icon}</div>
@@ -486,19 +559,6 @@ function SalesVisibilityContent() {
                     {isResubmitCapture(o) ? 'Recapture' : 'Capture'}
                   </button>
                 ) : null}
-                {/* Sales photo view: any row with a capture this window can show its photos (loaded on demand). */}
-                {photoView && o.captureId ? (
-                  <button
-                    type="button"
-                    data-testid={`view-photos-${o.outletId}`}
-                    onClick={() => setPhotosFor({ captureId: o.captureId as string, outletName: o.outletName })}
-                    aria-label={`View photos: ${o.outletName}`}
-                    className="shrink-0 flex items-center gap-1 text-[12px] font-semibold px-2.5 py-1.5 rounded-xl border border-gray-200 text-gray-700 active:bg-gray-50"
-                  >
-                    <ImageIcon className="h-3.5 w-3.5" />
-                    Photos
-                  </button>
-                ) : null}
               </div>
             );
           })}
@@ -516,7 +576,10 @@ function SalesVisibilityContent() {
       {activeOutlet && (
         <VisibilityCaptureSheet
           outlet={activeOutlet}
-          onCaptured={(outletId, next) => setCaptured((prev) => ({ ...prev, [outletId]: next }))}
+          onCaptured={(outletId, next) => {
+            setCaptured((prev) => ({ ...prev, [outletId]: next }));
+            if (photoView) refreshQuietly();
+          }}
           onClose={() => {
             // When this sheet was opened via the outlet-detail deep-link (?outletId=), return the
             // rep to that OUTLET DETAIL on close (after capture OR dismiss) instead of dropping them

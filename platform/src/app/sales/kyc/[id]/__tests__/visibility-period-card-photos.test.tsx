@@ -64,10 +64,10 @@ function status(withPhotos: boolean): OutletStatusResponse {
             ...WINDOW,
             photos: {
               captureId: 'c1', windowKey: '2026-11-P1', version: 2, status: 'CHANGES_REQUESTED',
-              capturedBy: 'Ravi ISR', capturedAt: '2026-11-03T05:01:00.000Z',
+              submittedBy: 'Ravi ISR', submittedAt: '2026-11-03T05:01:00.000Z', captureReason: null, windowClosed: false,
               photos: [
-                { fieldId: 'w1', label: 'Window 1', mediaKey: 'k1', viewPath: '/v1/visibility/captures/media?key=k1', status: 'approved', reason: null, capturedAt: null },
-                { fieldId: 'w2', label: 'Counter', mediaKey: 'k2', viewPath: '/v1/visibility/captures/media?key=k2', status: 'needs_retake', reason: 'Wrong outlet', capturedAt: null },
+                { fieldId: 'w1', label: 'Window 1', mediaKey: 'k1', viewPath: '/v1/visibility/captures/media?key=k1', status: 'approved', reason: null, capturedAt: null, takenBy: 'Asha SO' },
+                { fieldId: 'w2', label: 'Counter', mediaKey: 'k2', viewPath: '/v1/visibility/captures/media?key=k2', status: 'needs_retake', reason: 'Wrong outlet', capturedAt: null, takenBy: 'Ravi ISR' },
               ],
             },
           }
@@ -101,7 +101,7 @@ describe('VPP — Visibility card photos', () => {
     expect(strip).toHaveTextContent('Approved ✓');
     expect(strip).toHaveTextContent('Needs re-take');
     expect(strip).toHaveTextContent('Counter: Wrong outlet');
-    expect(strip).toHaveTextContent('Taken by Ravi ISR');
+    expect(strip).toHaveTextContent('Submitted by Ravi ISR');
     fireEvent.click(screen.getByRole('button', { name: /Open photo: Counter/ }));
     expect(screen.getByTestId('photo-lightbox')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close photo' }));

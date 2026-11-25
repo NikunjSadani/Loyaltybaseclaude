@@ -22,7 +22,7 @@ import { useGifsySettings } from '@/lib/gifsy-settings';
 import { visibilityApi } from '@/lib/visibility';
 import { isChangesRequested, CAPTURE_UI_STATE_LABELS } from '@/lib/visibility-types';
 import type { CaptureUiState, OutletStatusWindow } from '@/lib/visibility-types';
-import { SalesPhotoThumbStrip, SalesPhotoLightbox, capturedByLine } from '@/components/visibility/SalesPhotoViewer';
+import { SalesPhotoThumbStrip, SalesPhotoLightbox } from '@/components/visibility/SalesPhotoViewer';
 import { hasReKycFlags, isReKycActionable, reKycRemarks, flaggedLabels, flaggedDocTypes, type ReKycFlags } from '@/lib/rekyc-fields';
 import { SignaturePad, SignatureClearButton, type SignaturePadHandle } from '@/components/signature-pad';
 import { SoDeclarationView } from '@/components/so-declaration-view';
@@ -1059,7 +1059,8 @@ function VisibilityPeriodCard({ outletId, enabled }: { outletId: string; enabled
               index={viewer.index}
               onIndexChange={(index) => setViewer({ windowKey: viewer.windowKey, index })}
               onClose={() => setViewer(null)}
-              capturedLine={capturedByLine(data)}
+              windowClosed={data.windowClosed}
+              captureReason={data.captureReason}
             />
           );
         })()}

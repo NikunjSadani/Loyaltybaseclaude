@@ -120,6 +120,31 @@ export function VisibilityConfigEditor() {
     }));
 
   const photoLevels = config.salesPhotoViewLevels ?? [];
+  // The tenant's REAL sales levels (A4) — the only codes offered for "who sees team photos". A stored code that is no
+  // longer a level still shows (so it can be unticked); the backend refuses an unknown code on save.
+  const [tenantLevels, setTenantLevels] = useState<Array<{ code: string; name: string }> | null>(null);
+  const [levelsError, setLevelsError] = useState<string | null>(null);
+  const [levelsAttempt, setLevelsAttempt] = useState(0);
+  useEffect(() => {
+    if (loading || loadError) return;
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => visibilityApi.getSalesLevels())
+      .then((r) => {
+        if (cancelled) return;
+        if (r.success) { setTenantLevels(r.data?.levels ?? []); setLevelsError(null); }
+        else setLevelsError(r.error || "Couldn't load this client's sales levels.");
+      })
+      .catch(() => { if (!cancelled) setLevelsError("Couldn't load this client's sales levels."); });
+    return () => { cancelled = true; };
+  }, [loading, loadError, levelsAttempt]);
+  const photoLevelOptions = useMemo(() => {
+    const opts = (tenantLevels ?? []).map((l) => ({ code: l.code, name: l.name, stale: false }));
+    for (const c of photoLevels) {
+      if (!opts.some((o) => o.code === c)) opts.push({ code: c, name: tenantLevels ? 'not a sales level now' : '', stale: !!tenantLevels });
+    }
+    return opts;
+  }, [tenantLevels, photoLevels]);
   const togglePhotoLevel = (code: string) =>
     setConfig((c) => {
       const cur = c.salesPhotoViewLevels ?? [];
@@ -291,8 +316,19 @@ export function VisibilityConfigEditor() {
           Waiting — for outlets in their own team. Leave all unticked to keep photos visible only to Gifsy and the
           client admin.
         </p>
+        {levelsError && (
+          <p className="text-[11px] text-red-600" data-testid="photo-levels-error">
+            {levelsError}{' '}
+            <button type="button" onClick={() => { setLevelsError(null); setTenantLevels(null); setLevelsAttempt((n) => n + 1); }}
+              className="underline font-semibold">Retry</button>
+          </p>
+        )}
+        {!tenantLevels && !levelsError && <p className="text-[11px] text-gray-400">Loading sales levels…</p>}
+        {tenantLevels && tenantLevels.length === 0 && (
+          <p className="text-[11px] text-gray-500">This client has no sales levels set up yet.</p>
+        )}
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          {SALES_LEVELS.map((code) => {
+          {photoLevelOptions.map(({ code, name, stale }) => {
             const on = photoLevels.includes(code);
             return (
               <label key={code}
@@ -300,7 +336,7 @@ export function VisibilityConfigEditor() {
                 <input type="checkbox" checked={on} onChange={() => togglePhotoLevel(code)}
                   aria-label={`View photos: ${code}`} className="w-3.5 h-3.5 accent-[var(--brand-primary)]" />
                 <span className="text-xs font-semibold text-gray-700">{code}</span>
-                <span className="text-[10px] text-gray-400 truncate">{ROLE_LABELS[code]}</span>
+                <span className={`text-[10px] truncate ${stale ? 'text-red-500' : 'text-gray-400'}`}>{name}</span>
               </label>
             );
           })}

@@ -5,41 +5,53 @@
  * photos of an outlet in the manager's team. TENANT-SCOPED: the backend only sends photo data when the tenant lists the
  * caller's level in `visibilityConfig.salesPhotoViewLevels`; callers render these only when that data is present.
  *
- *   - PhotoStatusBadge          Approved ✓ / Needs re-take / Waiting.
- *   - SalesPhotoThumbStrip      lazy-loaded thumbnails with a badge each, reason, captured-by + IST time.
- *   - SalesPhotoLightbox        full-screen viewer: swipe / arrow keys between photos, Esc + close button, focus trap,
- *                               alt text = the photo label.
+ *   - PhotoStatusBadge          Approved ✓ / Needs re-take / Waiting (Not reviewed once the window has closed).
+ *   - SalesPhotoThumbStrip      lazy-loaded thumbnails with a badge each, re-take reasons, "Submitted by X · time".
+ *   - SalesPhotoLightbox        full-screen viewer: swipe (one finger) / arrow keys between photos, Esc + close button,
+ *                               focus trap, body scroll lock, live photo counter, alt text = the photo label.
  *   - SalesCapturePhotosSheet   bottom sheet that loads one capture's photos on demand (loading skeleton, error +
- *                               Retry, "No photos yet") — the Visibility screen's "View photos".
+ *                               Retry, "No photos in this capture") — the Visibility screen's "Photos".
  *
- * Never a broken image: a photo that fails to load shows a placeholder + "Photo couldn't load".
- * Images are read through the auth-gated media stream (same as the admin review queue), never a public URL.
+ * Never a broken image: a photo that fails to load shows a placeholder + "Photo couldn't load · Tap to retry".
+ * Images are read through the auth-gated media stream (same as the admin review queue), never a public URL; the
+ * stream lets the phone keep a short private copy, so the full view re-uses the thumbnail's download.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, ImageOff, RefreshCw, X, AlertTriangle } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ImageOff, Loader2, RefreshCw, X, AlertTriangle } from 'lucide-react';
 import { visibilityApi, rewriteMediaViewPath } from '@/lib/visibility';
 import { formatISTDateTime } from '@/lib/ist-date';
 import type { SalesCapturePhoto, SalesCapturePhotos, SalesPhotoStatus } from '@/lib/visibility-types';
 
 /* ─── Badge ──────────────────────────────────────────────────────────────────── */
 
-const BADGE: Record<SalesPhotoStatus, { label: string; cls: string }> = {
+type BadgeKey = SalesPhotoStatus | 'not_reviewed';
+
+const BADGE: Record<BadgeKey, { label: string; cls: string }> = {
   approved: { label: 'Approved ✓', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
   needs_retake: { label: 'Needs re-take', cls: 'bg-orange-50 text-orange-700 border-orange-200' },
   pending: { label: 'Waiting', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+  not_reviewed: { label: 'Not reviewed', cls: 'bg-gray-50 text-gray-600 border-gray-200' },
 };
 
-/** Plain badge words for a photo's review state. */
-export function photoStatusLabel(s: SalesPhotoStatus): string {
-  return BADGE[s]?.label ?? BADGE.pending.label;
+/** A pending photo in a closed window was never reviewed — it is not "waiting" any more. */
+function badgeKey(status: SalesPhotoStatus, windowClosed?: boolean): BadgeKey {
+  return status === 'pending' && windowClosed ? 'not_reviewed' : status;
 }
 
-export function PhotoStatusBadge({ status, className = '' }: { status: SalesPhotoStatus; className?: string }) {
-  const b = BADGE[status] ?? BADGE.pending;
+/** Plain badge words for a photo's review state. */
+export function photoStatusLabel(s: SalesPhotoStatus, windowClosed?: boolean): string {
+  return (BADGE[badgeKey(s, windowClosed)] ?? BADGE.pending).label;
+}
+
+export function PhotoStatusBadge({
+  status, windowClosed, className = '',
+}: { status: SalesPhotoStatus; windowClosed?: boolean; className?: string }) {
+  const k = badgeKey(status, windowClosed);
+  const b = BADGE[k] ?? BADGE.pending;
   return (
     <span
-      data-testid={`photo-badge-${status}`}
+      data-testid={`photo-badge-${k}`}
       className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-full border whitespace-nowrap ${b.cls} ${className}`}
     >
       {b.label}
@@ -47,61 +59,128 @@ export function PhotoStatusBadge({ status, className = '' }: { status: SalesPhot
   );
 }
 
-/** "Taken by Ravi · 3 Nov 2026, 10:31 am" (IST) — either half dropped when unknown. */
-export function capturedByLine(data: Pick<SalesCapturePhotos, 'capturedBy' | 'capturedAt'>): string {
-  const when = formatISTDateTime(data.capturedAt);
-  const who = data.capturedBy?.trim();
-  if (who && when) return `Taken by ${who} · ${when}`;
-  if (who) return `Taken by ${who}`;
-  return when ? `Taken ${when}` : '';
+function whoWhen(prefix: string, who: string | null | undefined, at: string | null | undefined): string {
+  const when = formatISTDateTime(at);
+  const name = who?.trim();
+  if (name && when) return `${prefix} by ${name} · ${when}`;
+  if (name) return `${prefix} by ${name}`;
+  return when ? `${prefix} ${when}` : '';
 }
 
-/* ─── Image with a never-broken fallback ─────────────────────────────────────── */
+/** "Submitted by Ravi · 3 Nov 2026, 10:31 am" (IST) — the CURRENT version; either half dropped when unknown. */
+export function submittedByLine(data: Pick<SalesCapturePhotos, 'submittedBy' | 'submittedAt'>): string {
+  return whoWhen('Submitted', data.submittedBy, data.submittedAt);
+}
 
+/** "Taken by Asha · 2 Nov 2026, 9:30 am" (IST) — THIS photo (a carried-forward photo keeps its own). */
+export function takenByLine(p: Pick<SalesCapturePhoto, 'takenBy' | 'capturedAt'>): string {
+  return whoWhen('Taken', p.takenBy, p.capturedAt);
+}
+
+/** Lock page scrolling while an overlay is open (restores the previous value on close). */
+function useBodyScrollLock() {
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+}
+
+/* ─── Image with a never-broken fallback + tap to retry ──────────────────────── */
+
+/**
+ * A photo that never shows a broken image. Uncontrolled by default (its own "Tap to retry" button); a parent that
+ * already wraps it in a button (the thumbnail strip) passes `failed` / `attempt` / `onFail` and handles the retry tap
+ * itself, so no button is nested in a button.
+ */
 function SafeImage({
-  photo, className, imgClassName, lazy, testId,
-}: { photo: SalesCapturePhoto; className?: string; imgClassName?: string; lazy?: boolean; testId?: string }) {
-  const [failed, setFailed] = useState(false);
+  photo, className, imgClassName, lazy, testId, showSpinner, failed: failedProp, attempt: attemptProp, onFail,
+}: {
+  photo: SalesCapturePhoto;
+  className?: string;
+  imgClassName?: string;
+  lazy?: boolean;
+  testId?: string;
+  showSpinner?: boolean;
+  failed?: boolean;
+  attempt?: number;
+  onFail?: () => void;
+}) {
+  const controlled = failedProp !== undefined;
+  const [failedState, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [attemptState, setAttempt] = useState(0);
+  const failed = controlled ? failedProp : failedState;
+  const attempt = controlled ? attemptProp ?? 0 : attemptState;
+  const base = rewriteMediaViewPath(photo.viewPath);
+  // A retry adds a cache-buster so the browser does not reuse the failed response.
+  const src = attempt > 0 ? `${base}${base.includes('?') ? '&' : '?'}r=${attempt}` : base;
+
   if (failed) {
-    return (
-      <div
-        data-testid={testId ? `${testId}-error` : undefined}
-        role="img"
-        aria-label={`${photo.label} — photo couldn't load`}
-        className={`flex flex-col items-center justify-center gap-1 bg-gray-100 text-gray-500 text-center ${className ?? ''}`}
-      >
+    const body = (
+      <>
         <ImageOff className="h-5 w-5" aria-hidden="true" />
         <span className="text-[10px] font-medium leading-tight px-1">Photo couldn&apos;t load</span>
-      </div>
+        <span className="text-[10px] font-semibold leading-tight px-1 text-[var(--brand-primary)]">Tap to retry</span>
+      </>
+    );
+    const cls = `flex flex-col items-center justify-center gap-1 bg-gray-100 text-gray-500 text-center ${className ?? ''}`;
+    if (controlled) {
+      return <span data-testid={testId ? `${testId}-error` : undefined} className={cls}>{body}</span>;
+    }
+    return (
+      <button
+        type="button"
+        data-testid={testId ? `${testId}-error` : undefined}
+        aria-label={`${photo.label} — photo couldn't load. Tap to retry`}
+        onClick={(e) => { e.stopPropagation(); setFailed(false); setLoaded(false); setAttempt((n) => n + 1); }}
+        className={cls}
+      >
+        {body}
+      </button>
     );
   }
   return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      data-testid={testId}
-      src={rewriteMediaViewPath(photo.viewPath)}
-      alt={photo.label}
-      loading={lazy ? 'lazy' : undefined}
-      decoding="async"
-      onError={() => setFailed(true)}
-      className={`${className ?? ''} ${imgClassName ?? ''}`}
-    />
+    <span className="relative inline-flex items-center justify-center max-h-full max-w-full">
+      {showSpinner && !loaded && (
+        <Loader2
+          data-testid={testId ? `${testId}-loading` : undefined}
+          className="absolute h-7 w-7 animate-spin text-white/80"
+          aria-hidden="true"
+        />
+      )}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        key={attempt}
+        data-testid={testId}
+        src={src}
+        alt={photo.label}
+        loading={lazy ? 'lazy' : undefined}
+        decoding="async"
+        onLoad={() => setLoaded(true)}
+        onError={() => { if (controlled) onFail?.(); else setFailed(true); }}
+        className={`${className ?? ''} ${imgClassName ?? ''}`}
+      />
+    </span>
   );
 }
 
 /* ─── Thumbnail strip ────────────────────────────────────────────────────────── */
 
 /**
- * One capture's thumbnails (horizontal strip, lazy-loaded), each with its badge; the re-take reason under the strip;
- * who took it and when. Tapping a thumbnail calls `onOpen(index)`.
+ * One capture's thumbnails (horizontal strip, lazy-loaded), each with its badge; the re-take reason(s) under the strip
+ * (a whole-capture reason once); who submitted the current version and when. Tapping a thumbnail calls `onOpen(index)`.
  */
 export function SalesPhotoThumbStrip({
   data, onOpen, testId = 'photo-strip',
 }: { data: SalesCapturePhotos; onOpen: (index: number) => void; testId?: string }) {
+  // Per-thumbnail load failure + retry count (the thumbnail button retries a failed photo instead of opening it).
+  const [failed, setFailed] = useState<Record<string, boolean>>({});
+  const [attempts, setAttempts] = useState<Record<string, number>>({});
   if (data.photos.length === 0) {
-    return <p className="text-[11px] text-gray-500" data-testid={`${testId}-empty`}>No photos yet</p>;
+    return <p className="text-[11px] text-gray-500" data-testid={`${testId}-empty`}>No photos in this capture</p>;
   }
-  const line = capturedByLine(data);
+  const line = submittedByLine(data);
   const reasons = data.photos.filter((p) => p.status === 'needs_retake' && p.reason);
   return (
     <div data-testid={testId} className="space-y-1.5">
@@ -110,17 +189,40 @@ export function SalesPhotoThumbStrip({
           <li key={p.fieldId} className="shrink-0 w-20">
             <button
               type="button"
-              onClick={() => onOpen(i)}
-              aria-label={`Open photo: ${p.label} (${photoStatusLabel(p.status)})`}
+              onClick={() => {
+                if (failed[p.fieldId]) {
+                  setFailed((f) => ({ ...f, [p.fieldId]: false }));
+                  setAttempts((a) => ({ ...a, [p.fieldId]: (a[p.fieldId] ?? 0) + 1 }));
+                } else onOpen(i);
+              }}
+              aria-label={
+                failed[p.fieldId]
+                  ? `${p.label} — photo couldn't load. Tap to retry`
+                  : `Open photo: ${p.label} (${photoStatusLabel(p.status, data.windowClosed)})`
+              }
               className="block w-20 rounded-lg overflow-hidden border border-gray-200 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]"
             >
-              <SafeImage photo={p} lazy className="w-20 h-20" imgClassName="object-cover" testId={`thumb-${p.fieldId}`} />
+              <SafeImage
+                photo={p}
+                lazy
+                className="w-20 h-20"
+                imgClassName="object-cover"
+                testId={`thumb-${p.fieldId}`}
+                failed={!!failed[p.fieldId]}
+                attempt={attempts[p.fieldId] ?? 0}
+                onFail={() => setFailed((f) => ({ ...f, [p.fieldId]: true }))}
+              />
             </button>
-            <PhotoStatusBadge status={p.status} className="mt-1" />
+            <PhotoStatusBadge status={p.status} windowClosed={data.windowClosed} className="mt-1" />
             <p className="text-[10px] text-gray-500 truncate mt-0.5" title={p.label}>{p.label}</p>
           </li>
         ))}
       </ul>
+      {data.captureReason && (
+        <p className="text-[11px] text-orange-700" data-testid={`${testId}-capture-reason`}>
+          Re-take needed: {data.captureReason}
+        </p>
+      )}
       {reasons.map((p) => (
         <p key={p.fieldId} className="text-[11px] text-orange-700" data-testid={`photo-reason-${p.fieldId}`}>
           {p.label}: {p.reason}
@@ -136,7 +238,7 @@ export function SalesPhotoThumbStrip({
 const FENCE_WORDS: Record<string, string> = {
   inside: 'At the outlet',
   outside: 'Away from the outlet',
-  unverifiable: 'Location not checked',
+  unverifiable: "Location couldn't be verified",
 };
 
 /** Tab-cycles focus inside `root` (a minimal focus trap). */
@@ -153,24 +255,28 @@ function trapTab(e: React.KeyboardEvent, root: HTMLElement | null) {
 }
 
 /**
- * Full-screen photo viewer. Swipe left / right (or ← / →, or the arrow buttons) between photos; Esc or the close button
- * closes. Focus is moved into the dialog on open, kept inside it, and handed back to the opener on close.
+ * Full-screen photo viewer. One-finger swipe left / right (or ← / →, or the arrow buttons) between photos — a
+ * two-finger pinch never moves to another photo; Esc or the close button closes. Focus is moved into the dialog on
+ * open, kept inside it, and handed back to the opener on close; the page behind does not scroll.
  */
 export function SalesPhotoLightbox({
-  photos, index, onIndexChange, onClose, capturedLine,
+  photos, index, onIndexChange, onClose, windowClosed, captureReason,
 }: {
   photos: SalesCapturePhoto[];
   index: number;
   onIndexChange: (i: number) => void;
   onClose: () => void;
-  capturedLine?: string;
+  windowClosed?: boolean;
+  captureReason?: string | null;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const touchX = useRef<number | null>(null);
+  const multiTouch = useRef(false);
   const count = photos.length;
   const safeIndex = Math.min(Math.max(index, 0), Math.max(count - 1, 0));
   const photo = photos[safeIndex];
+  useBodyScrollLock();
 
   const go = useCallback(
     (delta: number) => {
@@ -195,28 +301,48 @@ export function SalesPhotoLightbox({
     trapTab(e, rootRef.current);
   };
 
+  const taken = takenByLine(photo);
+
   return (
     <div
       ref={rootRef}
       role="dialog"
       aria-modal="true"
-      aria-label={`Photo ${safeIndex + 1} of ${count}: ${photo.label}`}
+      aria-label={`Photo viewer: ${photo.label}`}
       data-testid="photo-lightbox"
       onKeyDown={onKeyDown}
-      onTouchStart={(e) => { touchX.current = e.touches[0]?.clientX ?? null; }}
+      onTouchStart={(e) => {
+        if (e.touches.length > 1) { multiTouch.current = true; touchX.current = null; return; }
+        multiTouch.current = false;
+        touchX.current = e.touches[0]?.clientX ?? null;
+      }}
+      onTouchMove={(e) => { if (e.touches.length > 1) { multiTouch.current = true; touchX.current = null; } }}
       onTouchEnd={(e) => {
         const start = touchX.current;
+        // A pinch (any multi-touch during the gesture) or a finger still down → never a swipe.
+        if (multiTouch.current || e.touches.length > 0) {
+          if (e.touches.length === 0) multiTouch.current = false;
+          touchX.current = null;
+          return;
+        }
         touchX.current = null;
         const end = e.changedTouches[0]?.clientX;
         if (start == null || end == null) return;
         const dx = end - start;
         if (Math.abs(dx) > 40) go(dx < 0 ? 1 : -1);
       }}
-      className="fixed inset-0 z-[70] bg-black/95 flex flex-col"
+      className="fixed inset-0 z-[70] bg-black/95 flex flex-col overscroll-contain"
     >
-      <div className="flex items-center gap-2 px-4 py-3 text-white">
-        <p className="flex-1 min-w-0 text-sm font-semibold truncate">{photo.label}</p>
-        <span className="text-xs text-white/70" data-testid="photo-lightbox-counter">{safeIndex + 1} / {count}</span>
+      <div
+        className="flex items-center gap-2 px-4 pb-3 text-white"
+        style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}
+      >
+        <p className="flex-1 min-w-0 text-sm font-semibold truncate" aria-live="polite" data-testid="photo-lightbox-label">
+          {photo.label}
+        </p>
+        <span className="text-xs text-white/70" aria-live="polite" data-testid="photo-lightbox-counter">
+          {safeIndex + 1} / {count}
+        </span>
         <button
           ref={closeRef}
           type="button"
@@ -227,13 +353,14 @@ export function SalesPhotoLightbox({
           <X className="h-5 w-5" />
         </button>
       </div>
-      <div className="relative flex-1 min-h-0 flex items-center justify-center px-2">
+      <div className="relative flex-1 min-h-0 flex items-center justify-center px-2" style={{ touchAction: 'pan-y pinch-zoom' }}>
         <SafeImage
           key={photo.fieldId}
           photo={photo}
           className="max-h-full max-w-full rounded-md text-white"
           imgClassName="object-contain"
           testId="photo-lightbox-img"
+          showSpinner
         />
         {count > 1 && (
           <>
@@ -248,17 +375,17 @@ export function SalesPhotoLightbox({
           </>
         )}
       </div>
-      <div className="px-4 py-3 space-y-1 text-white">
+      <div className="px-4 pt-3 space-y-1 text-white" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
         <div className="flex items-center gap-2 flex-wrap">
-          <PhotoStatusBadge status={photo.status} />
+          <PhotoStatusBadge status={photo.status} windowClosed={windowClosed} />
           {photo.fenceStatus && (
             <span className="text-[11px] text-white/80" data-testid="photo-lightbox-fence">{FENCE_WORDS[photo.fenceStatus] ?? ''}</span>
           )}
         </div>
-        {photo.status === 'needs_retake' && photo.reason && (
-          <p className="text-xs text-orange-200" data-testid="photo-lightbox-reason">Reason: {photo.reason}</p>
+        {photo.status === 'needs_retake' && (photo.reason || captureReason) && (
+          <p className="text-xs text-orange-200" data-testid="photo-lightbox-reason">Reason: {photo.reason || captureReason}</p>
         )}
-        {capturedLine && <p className="text-[11px] text-white/70">{capturedLine}</p>}
+        {taken && <p className="text-[11px] text-white/70" data-testid="photo-lightbox-taken">{taken}</p>}
       </div>
     </div>
   );
@@ -268,7 +395,7 @@ export function SalesPhotoLightbox({
 
 /**
  * Loads ONE capture's photos on demand (GET sales/captures/:id/photos) and shows them as a thumbnail strip in a bottom
- * sheet; a tap opens the full-screen viewer. States: loading skeleton · error + Retry · "No photos yet".
+ * sheet; a tap opens the full-screen viewer. States: loading skeleton · error + Retry · "No photos in this capture".
  */
 export function SalesCapturePhotosSheet({
   captureId, outletName, onClose,
@@ -280,6 +407,7 @@ export function SalesCapturePhotosSheet({
   const [viewer, setViewer] = useState<number | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  useBodyScrollLock();
 
   useEffect(() => {
     let cancelled = false;
@@ -318,7 +446,7 @@ export function SalesCapturePhotosSheet({
         aria-modal="true"
         aria-label={`Visibility photos — ${outletName}`}
         onKeyDown={onKeyDown}
-        className="relative w-full sm:max-w-md bg-white rounded-t-2xl sm:rounded-2xl p-4 pb-6 max-h-[85vh] overflow-y-auto"
+        className="relative w-full sm:max-w-md bg-white rounded-t-2xl sm:rounded-2xl p-4 pb-6 max-h-[85vh] overflow-y-auto overscroll-contain"
       >
         <div className="flex items-center gap-2 mb-3">
           <div className="flex-1 min-w-0">
@@ -344,7 +472,7 @@ export function SalesCapturePhotosSheet({
             </button>
           </div>
         ) : !data || data.photos.length === 0 ? (
-          <p className="text-xs text-gray-500" data-testid="photos-sheet-empty">No photos yet</p>
+          <p className="text-xs text-gray-500" data-testid="photos-sheet-empty">No photos in this capture</p>
         ) : (
           <SalesPhotoThumbStrip data={data} onOpen={setViewer} testId="photos-sheet-strip" />
         )}
@@ -355,7 +483,8 @@ export function SalesCapturePhotosSheet({
           index={viewer}
           onIndexChange={setViewer}
           onClose={() => setViewer(null)}
-          capturedLine={capturedByLine(data)}
+          windowClosed={data.windowClosed}
+          captureReason={data.captureReason}
         />
       )}
     </div>

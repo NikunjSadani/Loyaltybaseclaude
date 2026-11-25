@@ -598,8 +598,12 @@ export interface SalesCapturePhoto {
   /** Backend auth-gated stream path (`/v1/visibility/captures/media?key=…`) — rewrite with rewriteMediaViewPath. */
   viewPath: string;
   status: SalesPhotoStatus;
+  /** This photo's own re-take reason (a whole-capture reason is `captureReason`, shown once). */
   reason: string | null;
+  /** When THIS photo was taken (shutter time, else when the version that first held it was submitted). */
   capturedAt: string | null;
+  /** Who submitted the version that first held this photo (a carried-forward photo keeps its original submitter). */
+  takenBy: string | null;
   /** Fence-required photos only. */
   fenceStatus?: PhotoFenceStatus;
 }
@@ -610,8 +614,13 @@ export interface SalesCapturePhotos {
   windowKey: string;
   version: number;
   status: VisibilityCaptureStatus | string;
-  capturedBy: string | null;
-  capturedAt: string | null;
+  /** Who submitted the CURRENT version, and when. */
+  submittedBy: string | null;
+  submittedAt: string | null;
+  /** A whole-capture rejection reason (shown once); null otherwise. */
+  captureReason: string | null;
+  /** The window has closed — a never-reviewed photo reads "Not reviewed". */
+  windowClosed: boolean;
   photos: SalesCapturePhoto[];
 }
 
