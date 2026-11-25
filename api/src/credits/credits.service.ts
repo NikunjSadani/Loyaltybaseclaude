@@ -1628,12 +1628,13 @@ export class CreditsService {
   ): Promise<Partial<Record<UploadAckCategory, AckItem[]>>> {
     const req: Partial<Record<UploadAckCategory, AckItem[]>> = {};
     const ok = rows.filter((r) => r.status === 'OK');
-    const fmt = (n: number) => new Intl.NumberFormat('en-IN').format(n);
+    // Screen format: Indian grouping and a real minus sign (−).
+    const fmt = (n: number) => `${n < 0 ? '−' : ''}${new Intl.NumberFormat('en-IN').format(Math.abs(n))}`;
     const rounded = ok.filter((r) => typeof r.originalAmount === 'number');
     if (rounded.length > 0) {
       req.ROUNDED = rounded.map((r) => ({
         key: `${r.outletId}|${r.fieldId}|${r.awardType}|${r.amount}|${r.originalAmount}`,
-        text: `${r.outletId} · ${r.fieldName ?? r.fieldId}: ${r.originalAmount} → ${r.awardType === 'PAYOUT' ? `₹${fmt(r.amount / 100)}` : `${fmt(r.amount)} pts`}`,
+        text: `${r.outletId} · ${r.fieldName ?? r.fieldId}: ${r.awardType === 'PAYOUT' ? `₹${fmt(r.originalAmount as number)}` : `${fmt(r.originalAmount as number)} pts`} → ${r.awardType === 'PAYOUT' ? `₹${fmt(r.amount / 100)}` : `${fmt(r.amount)} pts`}`,
       }));
     }
     const pointsRows = ok.filter((r) => r.awardType === 'POINTS' && r.amount !== 0);
@@ -1681,7 +1682,7 @@ export class CreditsService {
         if (after < 0) {
           below.push({
             key: `${k}|${after}`,
-            text: `Wallet of ${v.outlets.sort().join(', ')}: ${fmt(v.start)} → ${fmt(after)}${expired > 0 ? ` (after ${fmt(expired)} points expiring now are taken off)` : ''}`,
+            text: `Wallet of ${v.outlets.sort().join(', ')}: ${fmt(v.start)} pts → ${fmt(after)} pts${expired > 0 ? ` (after ${fmt(expired)} points expiring now are taken off)` : ''}`,
           });
         }
       }

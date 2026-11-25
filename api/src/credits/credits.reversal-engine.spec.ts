@@ -1553,7 +1553,7 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     let e: any;
     try { await h.credits.confirmBatch(adminUser, 'B1', ticked); } catch (x) { e = x; }
     expect(e.getResponse()).toMatchObject({
-      details: { missingAcknowledgements: ['BELOW_ZERO'], items: { BELOW_ZERO: [{ key: 'cp1|-150', text: 'Wallet of O1: 150 → -150' }] } },
+      details: { missingAcknowledgements: ['BELOW_ZERO'], items: { BELOW_ZERO: [{ key: 'cp1|-150', text: 'Wallet of O1: 150 pts → −150 pts' }] } },
     });
     expect(h.T.walletTxns.filter((t) => t.transactionType === 'DEBIT_ADJUSTMENT')).toHaveLength(0);
     await h.credits.confirmBatch(adminUser, 'B1', { acknowledged: ['BELOW_ZERO'], ackItems: { BELOW_ZERO: ['cp1|-150'] } });
