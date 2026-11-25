@@ -12,7 +12,7 @@ export type NullPolicy = 'reject' | 'zero' | 'skipRule';
 export interface RuleInput {
   ref: string;
   kpiCode?: string;
-  source?: string; // 'target:<kpi>' | 'achievement:<kpi>' | 'pct:<kpi>' | 'segment:<field>'
+  source?: string; // 'target:<kpi>' | 'achievement:<kpi>' | 'pct:<kpi>' | 'segment:<field>' | 'visibility:<key>'
   type: 'number' | 'enum';
   nullAs: NullPolicy;
   values?: string[];
@@ -108,7 +108,16 @@ export interface EvalContext {
   achievements: Record<string, number | null>;
   targets: Record<string, number | null>;
   segment: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
+  /** Test values for `visibility:*` inputs (a missing key = absent → the input's null policy). */
+  visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null };
 }
+
+/** The `visibility:<key>` input sources (design §3a) — keys + the plain labels the builder shows. */
+export const VISIBILITY_SOURCES: ReadonlyArray<{ key: 'approved' | 'approvedWindows' | 'windows'; label: string; hint: string }> = [
+  { key: 'approved', label: 'Visibility approved this month (1/0)', hint: '1 when at least one visibility window of the month is approved, else 0.' },
+  { key: 'approvedWindows', label: 'Approved visibility windows this month', hint: 'How many of the month’s visibility windows are approved.' },
+  { key: 'windows', label: 'Visibility windows in the month', hint: 'How many windows the month has at the capture frequency (for “every window approved” rules).' },
+];
 export interface TraceStep {
   nodeId: string;
   type: NodeType;
@@ -126,6 +135,8 @@ export interface SimulateResult {
   valid: boolean;
   errors: string[];
   outcome?: EvalOutcome;
+  /** The test visibility values the rule read (one per visibility input; null = blank → null policy). */
+  visibilityUsed?: Array<{ ref: string; source: string; value: number | null }>;
 }
 
 // ── Compute preview + commit (Waves 1–2) ─────────────────────────────────────────
@@ -149,6 +160,15 @@ export interface ComputePreviewRow {
   target?: number | null;
   reason?: string;
   explanation?: string;
+  /** The outlet's visibility values the rule read (only when the rule has a visibility input). */
+  visibility?: {
+    approvedWindows: number;
+    approved: 0 | 1;
+    windows: number;
+    scope: 'IN_SCOPE' | 'NOT_IN_SCOPE' | 'NO_RECORD';
+    waitingWindows: number;
+    note: string;
+  };
 }
 export interface ComputePreview {
   clientId: string;
@@ -165,6 +185,16 @@ export interface ComputePreview {
   ruleVersionsUsed: Array<{ ruleId: string; version: number }>;
   /** Content hash of this run — pass back as `expectedKey` on commit to guard the review→commit TOCTOU. */
   sourceKey: string;
+  /** Only when a rule read visibility this run: the month's visibility setup + headline counts. */
+  visibility?: {
+    month: string;
+    mode: 'PHOTO_APPROVAL' | 'AMOUNT_UPLOAD';
+    available: boolean;
+    unavailableReason?: string;
+    windows: number;
+    outletsApproved: number;
+    outletsWithData: number;
+  };
 }
 export interface ComputeCommitResult {
   batchId: string;

@@ -9,6 +9,7 @@
  */
 
 import React from 'react';
+import { VISIBILITY_SOURCES } from '@/lib/points-engine/types';
 import type {
   Operand,
   PipelineNode,
@@ -411,6 +412,13 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
 
     if (inp.type === 'enum' && (!Array.isArray(inp.values) || inp.values.length === 0))
       blocking.push(`${w}: an enum / segment input must list at least one allowed value.`);
+
+    // Visibility sources (design §3a) — mirror validateRule: a known key, number-typed.
+    if (hasSrc && inp.source!.startsWith('visibility:')) {
+      const key = inp.source!.slice('visibility:'.length);
+      if (!VISIBILITY_SOURCES.some((v) => v.key === key)) blocking.push(`${w}: pick which visibility value to read.`);
+      if (inp.type !== 'number') blocking.push(`${w}: a visibility input must be a Number.`);
+    }
   });
 
   // ── effective window ───────────────────────────────────────────────────────────

@@ -578,6 +578,30 @@ export default function PointsComputePage() {
             </div>
           )}
 
+          {/* Visibility (POSM) inputs — only when a rule read visibility this run (design §3a). */}
+          {preview.visibility && (
+            preview.visibility.available ? (
+              <div className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-600" data-testid="visibility-summary">
+                <span className="font-semibold text-gray-800">Visibility used by the rules:</span>{' '}
+                {preview.visibility.outletsApproved.toLocaleString('en-IN')} outlet
+                {preview.visibility.outletsApproved === 1 ? '' : 's'} with approved visibility in{' '}
+                {monthLabel(preview.visibility.month)}
+                {preview.visibility.mode === 'AMOUNT_UPLOAD'
+                  ? ' (from the uploaded visibility status)'
+                  : ` · ${preview.visibility.windows} window${preview.visibility.windows === 1 ? '' : 's'} this month`}
+                . Each row's explanation shows that outlet's visibility.
+              </div>
+            ) : (
+              <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4" data-testid="visibility-unavailable">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+                <div>
+                  <p className="text-sm font-semibold text-amber-800">A rule reads visibility, but there is no visibility result</p>
+                  <p className="mt-0.5 text-xs text-amber-700">{preview.visibility.unavailableReason}</p>
+                </div>
+              </div>
+            )
+          )}
+
           {/* Summary cards */}
           {(() => {
             const showPayoutCard = hasPayoutRows || preview.totalPayoutRupees > 0;

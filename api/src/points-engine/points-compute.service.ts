@@ -30,7 +30,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { CreditsService } from '../credits/credits.service';
 import { PointsEngineService } from './points-engine.service';
-import { evaluateRule, validateRule } from './points-engine.helper';
+import { evaluateRule, isVisibilityInput, validateRule } from './points-engine.helper';
 import type {
   AwardType,
   EvalContext,
@@ -46,6 +46,14 @@ import type { PointsRule } from '@prisma/client';
 import { UploadRowDto, UploadRowStatus } from '../credits/dto/credits.dto';
 import type { AppliesToOutletFacets } from '../common/applies-to/applies-to';
 import { kpiOutletPredicate } from '../sales/outlet-kpi-scope.helper';
+import { TenantService } from '../tenant/tenant.service';
+import {
+  loadVisibilityInputs,
+  summarizeVisibility,
+  visibilityContext,
+  visibilityFactsFor,
+  type VisibilityInputData,
+} from './points-engine-visibility.loader';
 
 /** The reserved non-KPI key inside a targetValues/kpiValues JSON (custom display names). */
 const NAMES_KEY = '__names';
@@ -63,7 +71,29 @@ export class PointsComputeService {
     private readonly pointsEngine: PointsEngineService,
     private readonly tenantSettings: TenantSettingsService,
     private readonly credits: CreditsService,
+    private readonly tenant: TenantService,
   ) {}
+
+  /**
+   * The tenant's visibility (POSM) result for the period — loaded ONCE per compute and only when a resolved rule
+   * declares a `visibility:*` input (design §3a). Master switch + capture mode are read uncached / per call.
+   */
+  private async loadVisibility(
+    clientId: string,
+    period: string,
+    visibilityConfig: unknown,
+  ): Promise<VisibilityInputData> {
+    const [enabled, mode] = await Promise.all([
+      this.tenant.resolveVisibilityEnabled(clientId),
+      this.tenant.resolveVisibilityCaptureMode(clientId),
+    ]);
+    return loadVisibilityInputs(this.prisma, clientId, period, {
+      enabled,
+      mode,
+      config: (visibilityConfig ?? null) as Parameters<typeof loadVisibilityInputs>[3]['config'],
+      now: new Date(),
+    });
+  }
 
   /**
    * Compute a read-only preview for a (tenant × period). No writes.
@@ -225,6 +255,11 @@ export class PointsComputeService {
     const rows: ComputePreviewRow[] = [];
     const ruleVersions = new Map<string, { ruleId: string; version: number }>();
 
+    // Visibility (POSM) inputs (§3a): loaded lazily, ONCE, the first time a resolved rule declares a
+    // `visibility:*` input — a run whose rules never read visibility issues no visibility query at all.
+    let visibilityLoad: Promise<VisibilityInputData> | null = null;
+    const getVisibility = () => (visibilityLoad ??= this.loadVisibility(clientId, period, (settings as { visibilityConfig?: unknown }).visibilityConfig));
+
     for (const outlet of outlets) {
       const program = outlet.programName ?? null;
       const programCategory = outlet.programCategory ?? null;
@@ -291,13 +326,39 @@ export class PointsComputeService {
           continue;
         }
 
+        // Visibility facts for this outlet — only when THIS rule reads visibility (else nothing changes).
+        const usesVisibility = (config.inputs ?? []).some(isVisibilityInput);
+        let visData: VisibilityInputData | null = null;
+        let visFacts: ReturnType<typeof visibilityFactsFor> = null;
+        if (usesVisibility) {
+          visData = await getVisibility();
+          visFacts = visibilityFactsFor(visData, outlet);
+        }
+
         const ctx: EvalContext = {
           achievements,
           targets,
           segment,
+          ...(usesVisibility ? { visibility: visibilityContext(visFacts) } : {}),
           meta: { outletCode: outlet.outletCode, period },
         };
         const outcome = evaluateRule(config, ctx);
+        const visRow = visFacts
+          ? {
+              visibility: {
+                approvedWindows: visFacts.approvedWindows,
+                approved: visFacts.approved,
+                windows: visFacts.windows,
+                scope: visFacts.scope,
+                waitingWindows: visFacts.waitingWindows,
+                note: visFacts.note,
+              },
+            }
+          : {};
+        // Prefix the explanation with the visibility values used (a formula trace does not echo its inputs).
+        const visPrefix = visFacts ? `${visFacts.note} · ` : '';
+        // No usable visibility data → name WHY on the row (never a bare "missing input").
+        const visUnavailable = usesVisibility && visData && !visData.available ? visData.unavailableReason : undefined;
 
         if (outcome.status === 'OK') {
           rows.push({
@@ -308,7 +369,10 @@ export class PointsComputeService {
             fieldId,
             status: 'OK',
             points: outcome.points,
-            explanation: explainTrace(outcome.trace, outcome.points),
+            explanation: `${visPrefix}${explainTrace(outcome.trace, outcome.points)}${
+              visUnavailable ? ` (visibility: ${visUnavailable})` : ''
+            }`,
+            ...visRow,
           });
         } else if (outcome.status === 'SKIP') {
           rows.push({
@@ -318,7 +382,8 @@ export class PointsComputeService {
             awardType,
             fieldId,
             status: 'SKIP',
-            reason: outcome.reason,
+            reason: `${outcome.reason}${visUnavailable ? ` — ${visUnavailable}` : ''}`,
+            ...visRow,
           });
         } else {
           rows.push({
@@ -462,6 +527,9 @@ export class PointsComputeService {
       directCreditEnabled,
       ruleVersionsUsed,
       sourceKey: '', // set below
+      // Present ONLY when a rule read visibility — the month's visibility setup + counts, shown on the preview so
+      // an unusable setup (switched off / no scope) is loud. Absent for every run that never touches visibility.
+      ...(visibilityLoad ? { visibility: summarizeVisibility(await visibilityLoad) } : {}),
     };
     // Deterministic key over the creditable (OK, amount>0) rows — the UI stores it and passes it back as
     // `expectedKey` on commit; commitCompute reuses this exact value so a run that changed since preview is
@@ -630,9 +698,16 @@ export class PointsComputeService {
         achievements?: Record<string, number | null>;
         targets?: Record<string, number | null>;
         segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
+        visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null };
       };
     },
-  ): { valid: boolean; errors: string[]; outcome?: ReturnType<typeof evaluateRule> } {
+  ): {
+    valid: boolean;
+    errors: string[];
+    outcome?: ReturnType<typeof evaluateRule>;
+    /** The test visibility values the rule read (one per `visibility:*` input; null = left blank → nullAs). */
+    visibilityUsed?: Array<{ ref: string; source: string; value: number | null }>;
+  } {
     const config: PointsRuleConfig = {
       ruleId: 'simulation',
       tenantId: user.clientId,
@@ -650,13 +725,30 @@ export class PointsComputeService {
     const errors = validateRule(config);
     if (errors.length > 0) return { valid: false, errors };
 
+    const visInputs = (config.inputs ?? []).filter(isVisibilityInput);
+    const rawVis = dto.context?.visibility;
+    const visibility =
+      rawVis && typeof rawVis === 'object' && !Array.isArray(rawVis)
+        ? {
+            approvedWindows: toNumOrNull(rawVis.approvedWindows),
+            approved: toNumOrNull(rawVis.approved),
+            windows: toNumOrNull(rawVis.windows),
+          }
+        : undefined;
     const ctx: EvalContext = {
       achievements: dto.context?.achievements ?? {},
       targets: dto.context?.targets ?? {},
       segment: dto.context?.segment ?? {},
+      ...(visibility ? { visibility } : {}),
       meta: {},
     };
-    return { valid: true, errors: [], outcome: evaluateRule(config, ctx) };
+    const outcome = evaluateRule(config, ctx);
+    if (visInputs.length === 0) return { valid: true, errors: [], outcome };
+    const visibilityUsed = visInputs.map((inp) => {
+      const key = (inp.source as string).slice('visibility:'.length) as 'approvedWindows' | 'approved' | 'windows';
+      return { ref: inp.ref, source: inp.source as string, value: visibility ? visibility[key] ?? null : null };
+    });
+    return { valid: true, errors: [], outcome, visibilityUsed };
   }
 
   /**

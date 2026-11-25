@@ -53,6 +53,20 @@ const SLAB_APPLY: ReadonlySet<string> = new Set(['marginal', 'whole']);
 const FORMULA_OUTPUTS: ReadonlySet<string> = new Set(['add', 'multiply', 'set']);
 const ROUNDING_MODES: ReadonlySet<string> = new Set(['half_up', 'half_even', 'floor', 'ceil']);
 
+/**
+ * The `visibility:<key>` input sources (owner decision 2026-11-25, design §3a) — the outlet's visibility (POSM)
+ * result for the compute month. All NUMBER inputs:
+ *   approved        → 1 if ≥ 1 window of the month is APPROVED, else 0;
+ *   approvedWindows → how many windows of the month are APPROVED;
+ *   windows         → how many windows the month has at the tenant's capture frequency (for "every window" rules).
+ */
+export const VISIBILITY_SOURCE_KEYS: ReadonlySet<string> = new Set(['approved', 'approvedWindows', 'windows']);
+
+/** True when an input reads the visibility result (the compute service loads visibility data only then). */
+export function isVisibilityInput(input: { source?: string | null } | null | undefined): boolean {
+  return typeof input?.source === 'string' && input.source.startsWith('visibility:');
+}
+
 /** Whitelisted formula functions → allowed arity [min,max]. Nothing else may be called. */
 const FORMULA_FUNCS: Record<string, { min: number; max: number }> = {
   min: { min: 1, max: Infinity },
@@ -142,6 +156,10 @@ function resolveRaw(input: RuleInput, ctx: EvalContext): number | string | null 
       const a = ctx.achievements ? ctx.achievements[key] : undefined;
       const t = ctx.targets ? ctx.targets[key] : undefined;
       v = a == null || t == null || t <= 0 ? undefined : (a / t) * 100;
+    } else if (kind === 'visibility') {
+      // The outlet's visibility (POSM) result for the period month (§3a). ctx.visibility is absent when the
+      // tenant has no usable visibility data → the input's nullAs applies (never a silent 0).
+      v = ctx.visibility && VISIBILITY_SOURCE_KEYS.has(key) ? (ctx.visibility as Record<string, unknown>)[key] : undefined;
     } else v = undefined; // unknown source kind → absent (validateRule flags the config)
     if (v === undefined || v === null) return null;
     if (typeof v === 'number' || typeof v === 'string') return v;
@@ -1119,6 +1137,13 @@ export function validateRule(rule: PointsRuleConfig): string[] {
       const hasKpi = typeof inp.kpiCode === 'string' && inp.kpiCode !== '';
       const hasSrc = typeof inp.source === 'string' && inp.source !== '';
       if (hasKpi === hasSrc) errs.push(`${w}: set exactly one of kpiCode or source.`);
+      if (hasSrc && isVisibilityInput(inp)) {
+        const key = (inp.source as string).slice('visibility:'.length);
+        if (!VISIBILITY_SOURCE_KEYS.has(key)) {
+          errs.push(`${w}: unknown visibility source "${inp.source}" — use one of ${[...VISIBILITY_SOURCE_KEYS].map((k) => `visibility:${k}`).join(', ')}.`);
+        }
+        if (inp.type !== 'number') errs.push(`${w}: a visibility input must be type 'number'.`);
+      }
       if (inp.type === 'enum' && (!Array.isArray(inp.values) || inp.values.length === 0)) {
         errs.push(`${w}: an enum input must list non-empty 'values'.`);
       }

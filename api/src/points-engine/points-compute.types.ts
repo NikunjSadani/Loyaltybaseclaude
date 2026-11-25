@@ -10,6 +10,8 @@
  * See POINTS-COMPUTE-ENGINE-DESIGN.md §6 (integration) + §11 (Wave 1).
  */
 
+import type { VisibilityPreviewSummary } from './points-engine-visibility.loader';
+
 export type PreviewRowStatus = 'OK' | 'SKIP' | 'ERROR' | 'NO_RULE';
 
 /** One computed line for one outlet under its resolved rule (or a skip/no-rule marker). */
@@ -52,6 +54,19 @@ export interface ComputePreviewRow {
   reason?: string;
   /** One-line human explanation of the math (from the evaluator trace) for the preview report. */
   explanation?: string;
+  /**
+   * The outlet's visibility (POSM) values the rule read (design §3a) — present only when the rule declares a
+   * `visibility:*` input AND the tenant has usable visibility data. `scope` tells a real "0 approved" (IN_SCOPE)
+   * apart from an outlet outside the visibility programme (NOT_IN_SCOPE) or with no uploaded status (NO_RECORD).
+   */
+  visibility?: {
+    approvedWindows: number;
+    approved: 0 | 1;
+    windows: number;
+    scope: 'IN_SCOPE' | 'NOT_IN_SCOPE' | 'NO_RECORD';
+    waitingWindows: number;
+    note: string;
+  };
 }
 
 /**
@@ -101,4 +116,6 @@ export interface ComputePreview {
   /** Deterministic content hash of this run's creditable rows — the UI passes it back as `expectedKey`
    *  on commit so a run that changed since it was previewed is rejected (review→commit TOCTOU guard). */
   sourceKey: string;
+  /** Only when a rule read visibility (design §3a): the month's visibility setup + headline counts. */
+  visibility?: VisibilityPreviewSummary;
 }

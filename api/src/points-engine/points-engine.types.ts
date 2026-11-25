@@ -24,7 +24,11 @@ export interface RuleInput {
   ref: string;
   /** Achievement source: `OutletSalesRecord.kpiValues[kpiCode]`. Omit if `source` is set. */
   kpiCode?: string;
-  /** Alternate source, e.g. "target:CASES_SOLD" → `OutletTarget.targetValues["CASES_SOLD"]`. */
+  /**
+   * Alternate source, e.g. "target:CASES_SOLD" → `OutletTarget.targetValues["CASES_SOLD"]`. Kinds:
+   * `target:<kpi>` · `achievement:<kpi>` · `pct:<kpi>` · `segment:<field>` ·
+   * `visibility:approved | approvedWindows | windows` (number inputs — see EvalContext.visibility).
+   */
   source?: string;
   type: 'number' | 'enum';
   nullAs: NullPolicy;
@@ -205,6 +209,21 @@ export interface EvalContext {
     outletType?: string | null;
     /** Free-text metro classification from the outlet master (e.g. "Metro"/"Non-Metro"); null when unset. */
     metro?: string | null;
+  };
+  /**
+   * The outlet's VISIBILITY (POSM) result for the compute month — read by `source: "visibility:<key>"` inputs
+   * (owner decision 2026-11-25; POINTS-COMPUTE-ENGINE-DESIGN.md §3a). Loaded by the compute service ONLY when a
+   * rule declares a visibility input. Absent (undefined / a null key) = the tenant has no usable visibility data
+   * (module off / no programme scope) → the input's own nullAs applies. An outlet OUTSIDE the visibility scope gets
+   * real zeros (it has nothing to approve) — the compute trace says "not in visibility scope".
+   */
+  visibility?: {
+    /** Windows of the month whose capture is APPROVED (final status), or 1/0 for an AMOUNT_UPLOAD record. */
+    approvedWindows?: number | null;
+    /** 1 when approvedWindows ≥ 1, else 0 (numeric so gate/formula nodes can test it). */
+    approved?: number | null;
+    /** Windows in the month at the tenant's capture frequency (1–4); 1 for AMOUNT_UPLOAD. */
+    windows?: number | null;
   };
   /** Optional identifiers for trace/debug (NOT read by rule logic). */
   meta?: { outletCode?: string; period?: string };

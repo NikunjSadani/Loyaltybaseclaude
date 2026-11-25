@@ -82,5 +82,7 @@ export class SimulateComputeDto {
     achievements?: Record<string, number | null>;
     targets?: Record<string, number | null>;
     segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
+    /** Test visibility values for `visibility:*` inputs (design §3a); a missing key = absent → nullAs. */
+    visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null };
   };
 }

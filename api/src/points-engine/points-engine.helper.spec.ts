@@ -870,3 +870,100 @@ describe('Audit fixes', () => {
     expect(validateRule(ok).some((e) => /PAYOUT.*scale 0|whole rupees|INR/.test(e))).toBe(false);
   });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// §3a Visibility (POSM) inputs — visibility:approved / approvedWindows / windows (owner decision 2026-11-25)
+// ════════════════════════════════════════════════════════════════════════════
+
+describe('visibility inputs (§3a)', () => {
+  const visCtx = (
+    visibility: EvalContext['visibility'],
+    extra: Partial<EvalContext> = {},
+  ): EvalContext => ({ achievements: {}, targets: {}, segment: {}, ...extra, ...(visibility !== undefined ? { visibility } : {}) });
+
+  // SAMT-style: pay the cases rate ONLY when visibility was approved this month.
+  const samt = rule({
+    inputs: [
+      { ref: 'cases', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+      { ref: 'visApproved', source: 'visibility:approved', type: 'number', nullAs: 'reject' },
+    ],
+    pipeline: [
+      { type: 'gate', id: 'g1', when: { op: 'eq', left: { var: 'visApproved' }, right: { lit: 1 } }, onFail: 'zero' },
+      { type: 'rate', id: 'r1', measure: { var: 'cases' }, rate: 2 },
+    ],
+  });
+
+  it('gate on visibilityApproved: approved → pays; not approved → 0 (hard gate)', () => {
+    const ok = expectOk(evaluateRule(samt, visCtx({ approved: 1, approvedWindows: 1, windows: 1 }, { achievements: { CASES_SOLD: 50 } })));
+    expect(ok.points).toBe(100);
+    expect(ok.trace[0].detail).toContain('visApproved=1');
+    const no = expectOk(evaluateRule(samt, visCtx({ approved: 0, approvedWindows: 0, windows: 1 }, { achievements: { CASES_SOLD: 50 } })));
+    expect(no.points).toBe(0);
+    expect(no.trace[0].detail).toMatch(/FAILED/);
+  });
+
+  it('absent visibility data (tenant has none) → the input nullAs applies (reject → SKIP, zero → 0)', () => {
+    const skip = expectSkip(evaluateRule(samt, visCtx(undefined, { achievements: { CASES_SOLD: 50 } })));
+    expect(skip.reason).toContain('visApproved (visibility:approved)');
+    const zeroRule = rule({
+      inputs: [
+        { ref: 'cases', kpiCode: 'CASES_SOLD', type: 'number', nullAs: 'reject' },
+        { ref: 'visApproved', source: 'visibility:approved', type: 'number', nullAs: 'zero' },
+      ],
+      pipeline: samt.pipeline,
+    });
+    expect(expectOk(evaluateRule(zeroRule, visCtx(undefined, { achievements: { CASES_SOLD: 50 } }))).points).toBe(0);
+  });
+
+  // Unnati-style visibility payout: ₹500 Metro / ₹250 Non-Metro when visibility approved AND billing ≥ 4,000.
+  const unnati: PointsRuleConfig = {
+    ...rule({
+      inputs: [
+        { ref: 'TOTAL', kpiCode: 'TOTAL', type: 'number', nullAs: 'zero' },
+        { ref: 'visApproved', source: 'visibility:approved', type: 'number', nullAs: 'reject' },
+        { ref: 'metro', source: 'segment:metro', type: 'enum', nullAs: 'reject', values: ['Metro', 'Non Metro'] },
+      ],
+      pipeline: [
+        { type: 'formula', id: 'f1', expr: "if(visApproved == 1 && TOTAL >= 4000, if(metro == 'Metro', 500, 250), 0)", output: 'set' },
+      ],
+    }),
+    output: { awardType: 'PAYOUT', fieldId: 'cf_vis' },
+  };
+
+  it('Unnati payout: Metro 500 / Non Metro 250 / below threshold 0 / not approved 0', () => {
+    const run = (metro: string, total: number, approved: number) =>
+      evaluateRule(unnati, visCtx({ approved, approvedWindows: approved, windows: 1 }, { achievements: { TOTAL: total }, segment: { metro } }));
+    expect(validateRule(unnati)).toEqual([]);
+    expect(expectOk(run('Metro', 4000, 1)).points).toBe(500);
+    expect(expectOk(run('Non Metro', 9000, 1)).points).toBe(250);
+    expect(expectOk(run('Metro', 3999, 1)).points).toBe(0);
+    expect(expectOk(run('Metro', 9000, 0)).points).toBe(0);
+    // A metro spelling outside the enum list (e.g. "Non-Metro") is surfaced, never guessed.
+    expect(expectSkip(run('Non-Metro', 9000, 1)).reason).toMatch(/not an allowed enum value/);
+  });
+
+  it('"every window approved" via approvedWindows vs windows', () => {
+    const all = rule({
+      inputs: [
+        { ref: 'ok', source: 'visibility:approvedWindows', type: 'number', nullAs: 'reject' },
+        { ref: 'n', source: 'visibility:windows', type: 'number', nullAs: 'reject' },
+      ],
+      pipeline: [{ type: 'milestone', id: 'm1', when: { all: [{ op: 'gte', left: { var: 'ok' }, right: { var: 'n' } }, { op: 'gt', left: { var: 'n' }, right: { lit: 0 } }] }, flat: 100 }],
+    });
+    expect(expectOk(evaluateRule(all, visCtx({ approvedWindows: 2, approved: 1, windows: 2 }))).points).toBe(100);
+    expect(expectOk(evaluateRule(all, visCtx({ approvedWindows: 1, approved: 1, windows: 2 }))).points).toBe(0);
+  });
+
+  it('validateRule accepts the three visibility sources and rejects an unknown key / a non-number type', () => {
+    const mk = (source: string, type: 'number' | 'enum' = 'number') =>
+      rule({
+        inputs: [{ ref: 'v', source, type, nullAs: 'reject', ...(type === 'enum' ? { values: ['1'] } : {}) }],
+        pipeline: [{ type: 'rate', id: 'r1', measure: { lit: 1 }, rate: 1 }],
+      });
+    expect(validateRule(mk('visibility:approved'))).toEqual([]);
+    expect(validateRule(mk('visibility:approvedWindows'))).toEqual([]);
+    expect(validateRule(mk('visibility:windows'))).toEqual([]);
+    expect(validateRule(mk('visibility:approvd')).join(' ')).toMatch(/unknown visibility source "visibility:approvd"/);
+    expect(validateRule(mk('visibility:approved', 'enum')).join(' ')).toMatch(/visibility input must be type 'number'/);
+  });
+});

@@ -192,6 +192,43 @@ describe('Points Engine compute page', () => {
     expect(screen.queryByRole('button', { name: /credit in portal/i })).not.toBeInTheDocument();
   });
 
+  it('PE-C2b: visibility summary when a rule read visibility', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        visibility: { month: '2026-10', mode: 'PHOTO_APPROVAL', available: true, windows: 2, outletsApproved: 3, outletsWithData: 5 },
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    expect((await screen.findByTestId('visibility-summary')).textContent).toMatch(/3 outlets with approved visibility/);
+  });
+
+  it('PE-C2b2: amber banner + the reason when a rule reads visibility but there is no visibility result', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        visibility: {
+          month: '2026-10', mode: 'PHOTO_APPROVAL', available: false, windows: 0, outletsApproved: 0, outletsWithData: 0,
+          unavailableReason: 'Visibility is switched off for this tenant, so there is no visibility result to read.',
+        },
+      }),
+    });
+    render(<ComputePage />);
+    await runPreview();
+    expect(await screen.findByTestId('visibility-unavailable')).toBeInTheDocument();
+    expect(screen.getByText(/Visibility is switched off for this tenant/)).toBeInTheDocument();
+  });
+
+  it('PE-C2c: no visibility block when no rule read visibility', async () => {
+    previewMock.mockResolvedValue({ success: true, data: makePreview() });
+    render(<ComputePage />);
+    await runPreview();
+    await screen.findByText('Total points');
+    expect(screen.queryByTestId('visibility-summary')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('visibility-unavailable')).not.toBeInTheDocument();
+  });
+
   it('PE-C3: the direct-credit block is hidden when there are no OK rows', async () => {
     previewMock.mockResolvedValue({
       success: true,
