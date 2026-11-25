@@ -107,7 +107,9 @@ next credit repays D first. `allowDebt` never takes the pre-engine path: an un-s
 whole confirm (WALLET_NOT_SEQUENCED / WALLET_NEEDS_ATTENTION, audited phase `CONFIRM_DEDUCTION`). Undo is a per-row
 POINTS reversal of the deduction line: the charged wallet gets a `CREDIT_REVERSAL` / `REVERSE` credit with
 `reversedCreditTxId` = the deduction row (no credit position, no allocation rows). Wallets in debt explain such a stretch
-as `UPLOAD_DEDUCTION`. Full design: `UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md`.
+as `UPLOAD_DEDUCTION`. Fix round (owner 2026-11-25): the deduction first expires the wallet's due lots through the
+sweep's own code (F2), records the debt it created and the lots it consumed; an undo is refused once later points repaid
+that debt (D2) and restores the earliest expiry of the consumed lots (L1). Full design: `UPLOAD-NEGATIVE-DEDUCTIONS-DESIGN.md` §11.
 
 ## 1. Why this exists (history — so nobody repeats it)
 

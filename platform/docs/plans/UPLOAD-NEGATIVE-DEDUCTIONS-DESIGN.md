@@ -166,3 +166,57 @@ With the setting OFF nothing new runs: the parser errors "Amount cannot be negat
 Found while tracing (pre-existing, every tenant, **not changed** because a fix is platform-wide and needs the owner's
 approval): a hand-crafted API batch can (a) carry a negative POINTS row, which confirm silently ignores, and (b) carry a
 negative PAYOUT row, which confirm turns into a negative payout entry. The UI never sends either.
+
+## 11. Fix round after 3 audits (owner decisions 2026-11-25) — supersedes §4, §5, §6, §7 and §10 where they differ
+
+**D1 — row guards, EVERY tenant (platform-wide, owner-approved), at create AND confirm** (confirm covers batches saved
+before the guard): an OK PAYOUT row ≤ 0 → "Payout amounts can't be negative — use Reverse on Payout Status."; an OK row
+of amount 0 → refused; an OK POINTS row < 0 while the switch is OFF → "Deductions are switched off for this client —
+remove the negative rows or ask Gifsy" (F3 — never silently ignored). §10's "OFF path unchanged" no longer holds for
+hand-made API batches; the upload screen never sent any of these.
+
+**D2 — undo blocked once repaid:** each deduction records `debtCreated` (the part beyond what the wallet held). An undo is
+refused at create AND at approve (re-checked under the wallet lock) when what is still owed for it
+(`debtCreated − givenBack`) exceeds the wallet's current debt — later points repaid it: "This deduction has already been
+repaid by later points — correct it with a manual wallet adjustment." A deduction that created no debt can always be
+undone. Known limit: a later, unrelated debt on the same wallet can keep the current debt high enough to allow it.
+
+**F2 — expiry first:** under the wallet lock, the wallet's due lots (expiresAt ≤ now, not yet swept) are expired through
+the sweep's own code (EXPIRE rows written) before the deduction.
+
+**L1 — undo expiry:** the deduction records the lots it consumed (`consumedLots`, `consumedLotPoints`,
+`earliestLotExpiresAt`); the give-back lot gets the EARLIEST of those expiries (no expiry when a consumed lot never
+expires); a deduction that consumed no lot (pure debt) gets the tenant's normal expiry. A give-back whose restored expiry
+is already past is expired by the next sweep.
+
+**Owner rule "no silent failure" (every tenant, owner-requested platform-wide UI):** the preview has one "Before you
+confirm" section; each present category — SKIPPED (blank / zero / NA rows), ROUNDED, NOT_APPLIED (points rows whose outlet
+isn't found / linked), BELOW_ZERO (wallets this file deducts from that end below zero), REPEAT_DEDUCTION (same outlet +
+field + period already deducted in another confirmed batch — L4) — needs its own tick before Confirm. Hard blocks (error
+rows, a wallet not prepared, deductions switched off, the preview check failed / loading) can't be ticked away. The
+confirm body carries `{ acknowledged, skippedRows }`; the server re-derives ROUNDED, NOT_APPLIED, BELOW_ZERO and
+REPEAT_DEDUCTION and refuses (400, `missingAcknowledgements`) any not ticked; SKIPPED rows never reach the server, so they
+are recorded as reported. Programmatic batches (points engine, `sourceKind` set) have their own preview and are exempt.
+The confirm writes one `CREDIT_BATCH_CONFIRM` audit row (same transaction): acknowledged, required counts, reported
+skipped rows, every row NOT applied with its reason. Payout Status reads it back (`getBatch.notApplied`,
+`acknowledged`) and lists "Not applied (N)" + a report sheet.
+
+**Preview endpoint:** `POST /v1/admin/credits/upload-preview { outletCodes, period, lines }` (every tenant; replaces
+`deduction-preview`) → `{ deductionsEnabled, outlets[{ outletCode, found, linked, walletId, partnerId, balance,
+heldOpeningBalance, ready, reason, code }], priorDeductions[] }`. "current → after" is per WALLET (F5) and includes a
+PENDING held opening balance (F6, it posts first at confirm).
+
+**Payout Status (F3):** labels and "Undo deduction" come from the actual wallet deduction rows (`getBatch.deductionLines`
+with `givenBack` and `undoBlockedReason`), never from the batch rows — a row skipped at confirm shows "Not deducted".
+
+**Wording:** passbook "320 points deducted — Target Achievement, November 2026 · <narration>" (statement type "Deducted",
+the field name not repeated); give-back "… given back — deduction undone (<field>, <Month YYYY>)"; the tenant refusal for
+unprepared wallets: "Some outlets' wallets aren't ready for deductions yet — ask Gifsy to prepare them, then upload
+again. Outlets: …" (the runbook pointer only in the audit row `gifsyNextStep` / the Gifsy banner); notification: "320
+points were deducted from your wallet — <field>, <Month YYYY> (<narration>). Your balance is now −220 points. You can
+redeem again once your balance is 0 or more."
+
+**Reports:** the Daily Ops Digest "Points" line adds "points deducted (uploads)" and "given back" when > 0 (L3).
+Wallets in debt list a deduction net of partial give-backs; the wallet summary adds `owedFromDeduction` +
+`owedDeductionFields` ("balance is below zero because points were deducted (<field>)"), and an undo give-back is never
+counted as "from a reversed credit" (F4).
