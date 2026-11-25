@@ -1,16 +1,18 @@
 # Credits upload — negative points become deductions (design note)
 
 > Owner decision 2026-11-25. Branch `feat/upload-negative-deductions` (from prod `main` `d1aeb786`).
-> **TENANT-SCOPED**: everything is behind one per-client setting, default OFF. With it OFF (Deoleo) the upload,
-> the confirm, the reversals and every report behave exactly as before. Turned ON for Bajaj only.
+> **Deductions are TENANT-SCOPED** (one per-client setting, default OFF; ON for Bajaj only). **The "Before you confirm"
+> checks are for EVERY client, Deoleo included** (owner 2026-11-25, platform-wide approved): the upload preview call, the
+> skipped / rounded / not-applied ticks and the row guards (no zero / negative payout rows; negative points refused when
+> deductions are off) — decided in ONE place, `api/src/credits/upload-ack-scope.ts` (§11–§12).
 
 ## 1. What it does
 
 In **Credits & Payouts → Upload**, a **negative POINTS value** (e.g. a target-achievement row of −320 because sales
 returns exceeded sales) **deducts** those points from the outlet's wallet instead of being an error.
 
-- **POINTS only.** A negative ₹ **PAYOUT** value stays an error: *"Payout amounts can't be negative — deduct via
-  Reversals."*
+- **POINTS only.** A negative ₹ **PAYOUT** value stays an error: *"Payout amounts can't be negative — use Reverse on
+  Payout Status."*
 - **Rounding:** the magnitude is rounded half-up to a whole point (−199.5 → −200, −199.4 → −199); a value whose
   magnitude rounds to 0 (−0.4) is skipped ("nothing to deduct").
 - **Safety cap:** the rounded magnitude counts against the existing per-row points cap (`safetyCapPoints`).
@@ -23,7 +25,7 @@ returns exceeded sales) **deducts** those points from the outlet's wallet instea
 |---|---|
 | Key | `creditUploadNegativeDeductions` (row in `program_settings`, scalar boolean) |
 | Default | `false` (absent row, a read error, anything but a strict `true` → OFF) |
-| Read on the money path | `TenantSettingsService.getCreditUploadNegativeDeductionsUncached(clientId)` — uncached (like the visibility / GSTIN switches), only when a batch actually carries a negative row, so a Deoleo upload makes no extra read |
+| Read on the money path | `TenantSettingsService.getCreditUploadNegativeDeductionsUncached(clientId)` — uncached (like the visibility / GSTIN switches); the confirm reads it only when a batch carries a negative row; the upload preview (every client) reads it to report `deductionsEnabled` |
 | Read by the screen | `EffectiveSettings.creditUploadNegativeDeductions` via `GET /v1/settings` (admins only — omitted for partner / sales, like `creditsPayouts`) |
 | Write | the generic Gifsy-admin settings PUT; coerced to a strict boolean (only `true` / `"true"` turns it on) |
 
@@ -220,3 +222,36 @@ redeem again once your balance is 0 or more."
 Wallets in debt list a deduction net of partial give-backs; the wallet summary adds `owedFromDeduction` +
 `owedDeductionFields` ("balance is below zero because points were deducted (<field>)"), and an undo give-back is never
 counted as "from a reversed credit" (F4).
+
+## 12. Fix round 2 (owner decisions + audits, 2026-11-25) — supersedes §11 where they differ
+
+**D2 = STRICT BLOCK** (replaces §11's debt comparison, which let A's undo through after B created new debt and refused B's
+after A's undo): "Undo deduction" is refused — at create, at approve under the wallet lock, and on Payout Status — when
+ANY points were added to that wallet after the deduction (any positive movement with a higher movement seq, or later in
+time on an un-sequenced row), except give-backs of THIS deduction: "Can't undo: points were added to this wallet after
+the deduction on <date>. Give the points back with a manual credit instead."
+
+**Give-back expiry (money audit #1):** each deduction records `giveBackSegments` in GIVE-BACK order = the reverse of
+consumption: the debt part first (`'NEW'` = the tenant's normal expiry for a new credit), any points whose lot could not
+be found (`'NEW'`), then every consumed lot last-consumed-first with ITS OWN expiry (`null` = never expires). An undo
+posts one credit movement per segment it covers; a partial undo takes the next segments in that order, so a later undo
+continues where the earlier one stopped. `debtCreated` is the wallet's ACTUAL debt change (audit #7).
+
+**Refused confirms are recorded (audit #5):** any refused confirm (missing ticks, row guards, held balance, unprepared
+wallet, upload window) writes `auditLog` action REJECT, entityType `CREDIT_BATCH`, metadata
+`{ event: 'CREDIT_BATCH_CONFIRM_REFUSED', status, reason, missingAcknowledgements, acknowledged }`. The required ticks
+are computed INSIDE the confirm transaction, after the wallet locks.
+
+**Refused-for-missing-ticks flow (UI audit U1):** the 400 says "Before confirming, reload the page and tick: …" and
+carries `details.missingAcknowledgements` (the global error envelope now passes an opt-in `details` object through —
+no other exception changes). The screen re-runs the preview, shows the missing boxes, and Retry confirm re-sends the
+ticks — never "upload again".
+
+**Preview and tick check agree (U2–U5):** current balance = balance − points due to expire first (`dueExpiry`, the same
+due lots the deduction expires) + the partner's held opening balance ONLY when it would post first (wallet missing or
+empty), counted once per wallet; no-wallet outlets grouped by partner; "possible repeat" is net of give-backs (fully
+undone deductions are not repeats).
+
+**One scope switch:** `api/src/credits/upload-ack-scope.ts` — `uploadAckScope()` returns the categories a client must
+tick (the preview returns them as `ackCategories`; the screen shows / requires exactly those) and whether OK rows of
+amount 0 are refused. `ALL_CLIENTS = true` (owner: every client, Deoleo included).
