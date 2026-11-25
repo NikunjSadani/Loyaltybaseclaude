@@ -467,4 +467,36 @@ describe('UND — upload with deductions + Before you confirm', () => {
       .toHaveTextContent('This batch is saved and waiting. Ask Gifsy to prepare the listed wallets, then press Retry confirm — no need to upload again.');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Retry confirm for CB-1' })).toBeEnabled());
   });
+
+  it('UND19: the outlet list stops at the first full stop — "Nothing was credited or deducted" is not part of it', async () => {
+    previewReplies = [previewOk([outletOk('BJ1', 100), outletOk('BJ2', 5000)])];
+    confirmQueue = [{ status: 409, body: {
+      success: false,
+      error: "Some outlets' wallets aren't ready for deductions yet — ask Gifsy to prepare them, then upload again. Outlets: BJ1. Nothing was credited or deducted.",
+    } }];
+    await upload(MIXED);
+    await tickAll(3);
+    fireEvent.click(confirmBtn());
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent("aren't ready for deductions yet (BJ1), so nothing was credited or deducted.");
+    expect(alert.textContent).not.toMatch(/Nothing was credited or deducted\)/);
+    expect(alert.textContent).not.toMatch(/\(BJ1\. Nothing/);
+  });
+
+  it('UND20: retrying a SAVED batch while deductions are switched off shows the saved-batch advice, never "remove the negative rows"', async () => {
+    previewReplies = [previewOk([outletOk('BJ1', 100), outletOk('BJ2', 5000)])];
+    confirmQueue = [{ status: 400, body: {
+      success: false,
+      error: 'Deductions are switched off for this client — remove the negative rows or ask Gifsy. Row for One (BJ1) / field "Display Bonus" has -350 points.',
+    } }];
+    await upload(MIXED);
+    await tickAll(3);
+    fireEvent.click(confirmBtn());
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      'Batch CB-1 is saved and waiting — deductions are switched off for this client, so nothing was credited or deducted. Ask Gifsy to switch deductions on, then press Retry confirm — no need to upload again.',
+    );
+    expect(alert.textContent).not.toMatch(/remove the negative rows/);
+    expect(screen.getByRole('button', { name: 'Retry confirm for CB-1' })).toBeInTheDocument();
+  });
 });

@@ -128,6 +128,20 @@ function walletsNotReadyMsg(batchCode: string, outlets?: string): string {
     'wallets, then press Retry confirm — no need to upload again.';
 }
 
+/**
+ * A SAVED batch refused because deductions are switched off for this client: the server's "remove the negative rows"
+ * advice doesn't apply once the batch is saved — Gifsy switches deductions on, then Retry confirm.
+ */
+function deductionsOffSavedMsg(batchCode: string): string {
+  return `Batch ${batchCode} is saved and waiting — deductions are switched off for this client, so nothing was credited ` +
+    'or deducted. Ask Gifsy to switch deductions on, then press Retry confirm — no need to upload again.';
+}
+
+/** The outlet list of the server's wallet-not-ready refusal ("… Outlets: O4, O5. Nothing was …") — up to the first full stop. */
+function outletListOf(err: string): string | undefined {
+  return /Outlets:\s*([^.]+)/i.exec(err)?.[1]?.trim() || undefined;
+}
+
 /** Confirm says the batch is already CONFIRMED — e.g. an earlier attempt went through. */
 function alreadyConfirmedMsg(batchCode: string): string {
   return `Batch ${batchCode} is already confirmed — its credits were applied when it was first confirmed. ` +
@@ -599,7 +613,12 @@ export default function CreditsPayoutsUploadPage() {
         // A wallet isn't prepared for deductions (the server refused the WHOLE batch). Never a silent wait and never
         // "upload again": re-run the check so the not-ready list shows now; the saved batch waits for Gifsy.
         setPreviewRun((n) => n + 1);
-        showConfirmError(walletsNotReadyMsg(batch.batchCode, /Outlets:\s*(.+?)\.?\s*$/i.exec(err)?.[1]));
+        showConfirmError(walletsNotReadyMsg(batch.batchCode, outletListOf(err)));
+      } else if (/^Deductions are switched off for this client/i.test(err)) {
+        // The batch is saved: never the server's "remove the negative rows" advice — refresh the check and say how to
+        // resolve it here (Gifsy switches deductions on, then Retry confirm).
+        setPreviewRun((n) => n + 1);
+        showConfirmError(deductionsOffSavedMsg(batch.batchCode));
       } else if (already === 'CONFIRMED') {
         setAlreadyConfirmed(true);
         showConfirmError(alreadyConfirmedMsg(batch.batchCode));
