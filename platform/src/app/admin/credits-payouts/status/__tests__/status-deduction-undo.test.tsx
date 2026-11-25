@@ -219,3 +219,45 @@ describe('Payout status — U9: every deduction row is reachable for Undo', () =
     expect(screen.queryByLabelText(/Deductions only/)).toBeNull();
   });
 });
+
+describe('Payout status — undo past expiry is never silent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useAdminSession).mockReturnValue({
+      role: 'CLIENT_ADMIN', clientId: 'bajaj', name: 'Test Admin', userId: '', canManageSchemes: true,
+    } as ReturnType<typeof useAdminSession>);
+  });
+
+  it('the undo dialog (from the line) and the success message say how many points come back past expiry', async () => {
+    const api = mockApi([deductionRow], { deductionLines: [{ ...LINE, pastExpiryPoints: 120 }] });
+    // The POST reply for the undo carries its own figure.
+    const base = global.fetch;
+    global.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/reversals') && init?.method === 'POST') {
+        api.posts.push(JSON.parse(String(init.body)));
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ success: true, data: { id: 'r1', pastExpiryPoints: 80 } }) });
+      }
+      return (base as typeof fetch)(input, init);
+    }) as unknown as typeof fetch;
+
+    render(<PayoutStatusPage />);
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    fireEvent.click(await screen.findByRole('button', { name: /Undo deduction/ }));
+    await screen.findByRole('dialog');
+    expect(screen.getByTestId('undo-past-expiry'))
+      .toHaveTextContent('120 pts would come back already past their expiry and will expire at the next sweep.');
+    fireEvent.click(screen.getByRole('button', { name: 'Submit Undo Request' }));
+    expect(await screen.findByText(
+      'Undo request submitted — awaiting Gifsy approval. 80 pts would come back already past their expiry and will expire at the next sweep.',
+    )).toBeInTheDocument();
+  });
+
+  it('no past-expiry points → no extra sentence', async () => {
+    mockApi([deductionRow]);
+    render(<PayoutStatusPage />);
+    fireEvent.click(await screen.findByTestId('batch-header-b1'));
+    fireEvent.click(await screen.findByRole('button', { name: /Undo deduction/ }));
+    await screen.findByRole('dialog');
+    expect(screen.queryByTestId('undo-past-expiry')).toBeNull();
+  });
+});

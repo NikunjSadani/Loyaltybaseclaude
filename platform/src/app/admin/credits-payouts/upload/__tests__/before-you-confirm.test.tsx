@@ -14,6 +14,8 @@ import {
   repeatDeductionRows,
   walletLines,
   withServerRequired,
+  ackItemsFor,
+  ackSignature,
   ACK_ORDER,
   type UploadPreviewData,
   type UploadPreviewOutlet,
@@ -55,23 +57,23 @@ describe('BYC — request body', () => {
 });
 
 describe('BYC — derivations', () => {
-  it('BYC2: per WALLET after: two outlets of one partner share one wallet line; held opening balance included', () => {
+  it('BYC2: per PARTNER wallet: two outlets of one partner share one line; held opening balance counted once (U4)', () => {
     const rows = [
       row({ outletId: 'A', amount: 30 }),
       row({ outletId: 'A', amount: -500, fieldId: 'f2' }),
       row({ outletId: 'B', amount: -100, fieldId: 'f2' }),
       row({ outletId: 'C', amount: -10, fieldId: 'f2' }),
     ];
-    // U4: the held opening balance is PARTNER-level and repeated on each outlet → counted ONCE per wallet.
+    // The held opening balance is PARTNER-level and repeated on each outlet → counted ONCE per wallet.
     const d = data([
-      outlet('A', { walletId: 'W1', balance: 200, heldOpeningBalance: 150 }),
-      outlet('B', { walletId: 'W1', balance: 200, heldOpeningBalance: 150 }),
-      outlet('C', { walletId: null, partnerId: null, balance: null }),
+      outlet('A', { walletId: 'W1', partnerId: 'P1', balance: 200, heldOpeningBalance: 150 }),
+      outlet('B', { walletId: 'W1', partnerId: 'P1', balance: 200, heldOpeningBalance: 150 }),
+      outlet('C', { walletId: null, partnerId: 'P2', balance: null }),
     ]);
     expect(walletLines(rows, d)).toEqual([
-      // current = 200 + 150 held (once); after = 350 + 30 − 500 − 100
-      { key: 'W1', outletCodes: ['A', 'B'], current: 350, held: 150, dueExpiry: 0, after: -220 },
-      { key: 'outlet:C', outletCodes: ['C'], current: 0, held: null, dueExpiry: 0, after: -10 },
+      // start = 200 + 150 held (once); before deduct = 350 + 30; after = 380 − 500 − 100
+      { key: 'P1', outletCodes: ['A', 'B'], current: 350, held: 150, expired: 0, after: -220 },
+      { key: 'P2', outletCodes: ['C'], current: 0, held: null, expired: 0, after: -10 },
     ]);
   });
 
@@ -82,17 +84,29 @@ describe('BYC — derivations', () => {
       outlet('B', { walletId: null, partnerId: 'P1', balance: null }),
     ]);
     expect(walletLines(rows, d)).toEqual([
-      { key: 'partner:P1', outletCodes: ['A', 'B'], current: 0, held: null, dueExpiry: 0, after: -100 },
+      { key: 'P1', outletCodes: ['A', 'B'], current: 0, held: null, expired: 0, after: -100 },
     ]);
+    // BELOW_ZERO ack key = partnerId|after
+    expect(presentCategories(parse(rows), d).find((c) => c.category === 'BELOW_ZERO')!.items[0].key).toBe('P1|-100');
   });
 
-  it('BYC2c: points expiring now come off the current balance (once per wallet) and are named', () => {
-    const rows = [row({ outletId: 'A', amount: -300 }), row({ outletId: 'B', amount: 0, status: 'SKIP' })];
-    const d = data([outlet('A', { walletId: 'W', balance: 500, dueExpiry: 250 })]);
-    expect(walletLines(rows, d)).toEqual([{ key: 'W', outletCodes: ['A'], current: 250, held: null, dueExpiry: 250, after: -50 }]);
+  it('BYC2c (U5): due lots expire AFTER the file credits land — expired = min(dueExpiry, max(0, before-deduct))', () => {
+    // balance 500, credit 100, raw dueExpiry 250 → before deduct 600, expired 250, after 600 − 250 − 400 = −50
+    const rows = [row({ outletId: 'A', amount: 100 }), row({ outletId: 'A', amount: -400, fieldId: 'f2' })];
+    const d = data([outlet('A', { walletId: 'W', partnerId: 'PA', balance: 500, dueExpiry: 250 })]);
+    expect(walletLines(rows, d)).toEqual([{ key: 'PA', outletCodes: ['A'], current: 500, held: null, expired: 250, after: -50 }]);
     const below = presentCategories(parse(rows), d).find((c) => c.category === 'BELOW_ZERO')!;
-    expect(below.items[0].text).toBe('A · Balance will go below zero: 250 → −50 pts');
-    expect(below.items[0].detail).toBe('(includes 250 points expiring now)');
+    expect(below.items[0].text).toBe('A · Balance will go below zero: 500 → −50 pts');
+    expect(below.items[0].detail).toBe('(after 250 points expiring now are taken off)');
+    expect(below.items[0].key).toBe('PA|-50');
+  });
+
+  it('BYC2d (U5): the raw dueExpiry is clamped — a wallet already at/below zero expires nothing', () => {
+    const rows = [row({ outletId: 'A', amount: -10 })];
+    const d = data([outlet('A', { partnerId: 'PA', balance: -40, dueExpiry: 999 })]);
+    expect(walletLines(rows, d)).toEqual([{ key: 'PA', outletCodes: ['A'], current: -40, held: null, expired: 0, after: -50 }]);
+    const d2 = data([outlet('A', { partnerId: 'PA', balance: 30, dueExpiry: 999 })]);
+    expect(walletLines(rows, d2)[0]).toMatchObject({ expired: 30, after: -10 });
   });
 
   it('BYC3: a wallet the file only credits is never a below-zero line', () => {
@@ -199,5 +213,55 @@ describe('BYC — server-decided acknowledgements', () => {
     expect(out.map((c) => [c.category, c.required])).toEqual([['SKIPPED', true], ['BELOW_ZERO', true]]);
     expect(out[1].label).toBe('I understand some wallets will go below zero');
     expect(withServerRequired(cats, [])).toBe(cats);
+  });
+});
+
+describe('BYC — ack keys (byte-identical with the server)', () => {
+  it('BYC12: ROUNDED / NOT_APPLIED / REPEAT keys and ackItemsFor (SKIPPED sends no items)', () => {
+    const rows = [
+      row({ rowNum: 3, status: 'SKIP', amount: 0 }),
+      row({ rowNum: 4, outletId: 'BJ1', fieldId: 'f1', amount: 200, originalAmount: 199.5 }),
+      row({ rowNum: 5, outletId: 'BJ1', fieldId: 'f2', awardType: 'PAYOUT', amount: 20000, originalAmount: 199.5 }),
+      row({ rowNum: 6, outletId: 'X', fieldId: 'f3' }),
+      row({ rowNum: 7, outletId: 'BJ1', fieldId: 'f4', amount: -50 }),
+    ];
+    const d = data([outlet('BJ1', { partnerId: 'P1', balance: 5000 }), outlet('X', { found: false })], {
+      priorDeductions: [
+        { outletCode: 'BJ1', fieldId: 'f4', batchId: 'b0', batchCode: 'CB-0', confirmedAt: '2026-11-01T00:00:00.000Z', points: 40, givenBack: 10 },
+        { outletCode: 'BJ1', fieldId: 'f4', batchId: 'b1', batchCode: 'CB-1', confirmedAt: '2026-11-02T00:00:00.000Z', points: 25 },
+      ],
+    });
+    const cats = presentCategories(parse(rows), d);
+    const keys = Object.fromEntries(cats.map((c) => [c.category, c.items.map((i) => i.key)]));
+    expect(keys.ROUNDED).toEqual(['BJ1|f1|POINTS|200|199.5', 'BJ1|f2|PAYOUT|20000|199.5']);
+    expect(keys.NOT_APPLIED).toEqual(['X|f3']);
+    expect(keys.REPEAT_DEDUCTION).toEqual(['BJ1|f4|b0|40', 'BJ1|f4|b1|25']);
+    expect(cats.find((c) => c.category === 'REPEAT_DEDUCTION')!.label).toBe('I understand 1 deduction may be a repeat');
+    expect(ackItemsFor(cats, ['SKIPPED', 'ROUNDED', 'NOT_APPLIED'])).toEqual({
+      ROUNDED: ['BJ1|f1|POINTS|200|199.5', 'BJ1|f2|PAYOUT|20000|199.5'],
+      NOT_APPLIED: ['X|f3'],
+    });
+  });
+
+  it('BYC13 (U1): the tick signature changes when the item KEYS change, not only the wording', () => {
+    const rows = [row({ outletId: 'A', amount: -300 })];
+    const c1 = presentCategories(parse(rows), data([outlet('A', { partnerId: 'P', balance: 100 })])).find((c) => c.category === 'BELOW_ZERO')!;
+    const c2 = presentCategories(parse(rows), data([outlet('A', { partnerId: 'P', balance: 50 })])).find((c) => c.category === 'BELOW_ZERO')!;
+    expect(c1.label).toBe(c2.label);                  // same wording ("1 wallet will go below zero")
+    expect(ackSignature(c1)).not.toBe(ackSignature(c2)); // different after → different key → tick cleared
+  });
+
+  it('BYC14 (U2): server items replace the local list when their keys differ; a missing category is built from them', () => {
+    const rows = [row({ outletId: 'A', amount: -300 })];
+    const cats = presentCategories(parse(rows), data([outlet('A', { partnerId: 'P', balance: 100 })]));
+    const out = withServerRequired(cats, ['BELOW_ZERO', 'REPEAT_DEDUCTION'], {
+      BELOW_ZERO:       [{ key: 'P|-260', text: 'Wallet of A: 40 → -260' }],
+      REPEAT_DEDUCTION: [{ key: 'A|f1|b9|300', text: 'A · Target — already deducted in CB-9' }],
+    });
+    const bz = out.find((c) => c.category === 'BELOW_ZERO')!;
+    expect(bz.items).toEqual([{ key: 'P|-260', text: 'Wallet of A: 40 → -260' }]);
+    const rp = out.find((c) => c.category === 'REPEAT_DEDUCTION')!;
+    expect([rp.required, rp.items.length]).toEqual([true, 1]);
+    expect(ackItemsFor(out, ['BELOW_ZERO', 'REPEAT_DEDUCTION'])).toEqual({ BELOW_ZERO: ['P|-260'], REPEAT_DEDUCTION: ['A|f1|b9|300'] });
   });
 });

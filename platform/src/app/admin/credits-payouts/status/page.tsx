@@ -82,6 +82,14 @@ interface DeductionLine {
   givenBack:         number;
   /** Set when the deduction can't be undone any more (e.g. already repaid by later points). */
   undoBlockedReason: string | null;
+  /** Undoing the whole remaining amount would give back this many points already past their expiry. */
+  pastExpiryPoints?: number;
+}
+
+/** "N pts would come back already past their expiry and will expire at the next sweep." (never silent) */
+function pastExpiryText(points: number | undefined | null): string | null {
+  const n = Number(points ?? 0);
+  return n > 0 ? `${n.toLocaleString('en-IN')} pts would come back already past their expiry and will expire at the next sweep.` : null;
 }
 
 /** A row the confirm did NOT apply (GET batch detail `notApplied`, batches confirmed after the acknowledgement release). */
@@ -130,6 +138,8 @@ interface ReversalTarget {
   isDeduction?: boolean;
   /** Deductions: points already given back (shown in the modal; the undo cap is originalPaise − givenBack). */
   givenBack?: number;
+  /** Deductions: points of the remaining amount already past their expiry (from the deduction line). */
+  pastExpiryPoints?: number;
 }
 
 /** An OK POINTS row with a negative amount = an upload deduction row (tenant negative-deductions setting). */
@@ -341,6 +351,7 @@ export default function PayoutStatusPage() {
         originalPaise: magnitude,
         isDeduction:   true,
         givenBack:     magnitude - remaining,
+        pastExpiryPoints: Math.max(0, Number(line.pastExpiryPoints ?? 0)),
       });
       setRevAmount(String(remaining));
       setRevRemarks('');
@@ -549,10 +560,11 @@ export default function PayoutStatusPage() {
       if (!json?.success) {
         setRevMsg({ type: 'err', text: json?.error ?? `Failed to submit reversal (HTTP ${res.status})` });
       } else {
+        const expiryNote = revTarget.isDeduction ? pastExpiryText(json?.data?.pastExpiryPoints) : null;
         setRevMsg({
           type: 'ok',
           text: revTarget.isDeduction
-            ? 'Undo request submitted — awaiting Gifsy approval.'
+            ? `Undo request submitted — awaiting Gifsy approval.${expiryNote ? ` ${expiryNote}` : ''}`
             : `Reversal request submitted — awaiting Gifsy approval.`,
         });
         fetchBatches();
@@ -917,6 +929,9 @@ export default function PayoutStatusPage() {
                     : `${revTarget.originalPaise.toLocaleString('en-IN')} pts`}
                 </span>
               </div>
+              {revTarget.isDeduction && pastExpiryText(revTarget.pastExpiryPoints) && (
+                <p className="text-amber-700 pt-1" data-testid="undo-past-expiry">{pastExpiryText(revTarget.pastExpiryPoints)}</p>
+              )}
               {revTarget.isDeduction && (revTarget.givenBack ?? 0) > 0 && (
                 <div className="flex justify-between">
                   <span className="text-gray-500">Already given back</span>

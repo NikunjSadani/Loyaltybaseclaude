@@ -30,6 +30,9 @@ import {
   presentCategories,
   previewRequestBody,
   withServerRequired,
+  ackSignature,
+  ackItemsFor,
+  type ServerAckItems,
   type AckCategory,
   type UploadPreviewData,
   type UploadPreviewState,
@@ -116,6 +119,13 @@ function missingAcksMsg(batchCode: string): string {
   return `Batch ${batchCode} is saved but not confirmed yet — something changed since the check, so it was refreshed ` +
     'below. Review the lists under "Before you confirm", tick the boxes, then press Retry confirm. ' +
     'Nothing has been credited or deducted.';
+}
+
+/** Confirm refused (409) because some deduction wallets aren't prepared — the batch stays saved, the check re-runs. */
+function walletsNotReadyMsg(batchCode: string, outlets?: string): string {
+  return `Batch ${batchCode} is saved and waiting — some outlets' wallets aren't ready for deductions yet` +
+    `${outlets ? ` (${outlets.trim()})` : ''}, so nothing was credited or deducted. Ask Gifsy to prepare the listed ` +
+    'wallets, then press Retry confirm — no need to upload again.';
 }
 
 /** Confirm says the batch is already CONFIRMED — e.g. an earlier attempt went through. */
@@ -260,43 +270,67 @@ export default function CreditsPayoutsUploadPage() {
   /** Ignore a stale preview reply after a newer file / re-check replaced it. */
   const previewSeqRef = useRef(0);
   /**
-   * "Before you confirm" ticks: category → the exact box text that was ticked. A tick only counts while its text is
-   * unchanged, so a re-check that changes a list (e.g. a new below-zero wallet) needs a fresh tick; a new file resets all.
+   * "Before you confirm" ticks: category → the signature (box text + item KEYS) that was ticked. A tick only counts while
+   * the signature is unchanged, so a re-check that changes a list's rows (e.g. a different after-balance) clears it (U1);
+   * a new file resets all.
    */
   const [ackLabels, setAckLabels] = useState<Map<AckCategory, string>>(() => new Map());
   const hasDeductions = (parseResult?.summary.deducted ?? 0) > 0;
   const previewData: UploadPreviewData | null = preview?.status === 'ok' ? preview.data : null;
-  /** Categories a refused confirm said were missing (U1) — they need a box even if this screen can't list their rows. */
+  /**
+   * A refused confirm's `missingAcknowledgements` + `details.items` (U1/U2): those categories need a box WITH the server's
+   * rows. Cleared on every new preview answer except the re-check that the refusal itself started.
+   */
   const [serverRequired, setServerRequired] = useState<AckCategory[]>([]);
+  const [serverItems, setServerItems] = useState<ServerAckItems>({});
+  /** Set by a refused confirm: the NEXT preview answer (the re-check it starts) keeps the server's findings. */
+  const keepServerFindingsRef = useRef(false);
   const categories = useMemo(
     () => (parseResult && !parseResult.headerError
-      ? withServerRequired(presentCategories(parseResult, previewData), serverRequired)
+      ? withServerRequired(presentCategories(parseResult, previewData), serverRequired, serverItems)
       : []),
-    [parseResult, previewData, serverRequired],
+    [parseResult, previewData, serverRequired, serverItems],
   );
   const notReady = useMemo(
     () => (parseResult && previewData ? notReadyOutlets(parseResult.rows, previewData) : []),
     [parseResult, previewData],
   );
   const acked = useMemo(
-    () => new Set(categories.filter((c) => c.required && ackLabels.get(c.category) === c.label).map((c) => c.category)),
+    () => new Set(categories.filter((c) => c.required && ackLabels.get(c.category) === ackSignature(c)).map((c) => c.category)),
     [categories, ackLabels],
   );
   // Only the categories THIS client must acknowledge (server ackCategories) need a tick.
   const unticked = categories.filter((c) => c.required && !acked.has(c.category));
   // HARD blocks (no tick overrides them) first, then the unticked boxes. null = Confirm may run.
+  // U4: once a batch is SAVED (pending confirm) the advice never says to remove rows or upload again — the batch waits;
+  // the fix is made elsewhere, then Retry confirm.
+  const saved_ = !!pendingBatch;
+  const SAVED_WAITS = 'This batch is saved and waiting.';
+  const wallets = notReady.length !== 1 ? 'these wallets' : 'this wallet';
   const confirmBlockReason: string | null =
     preview?.status === 'loading'
       ? 'Checking wallet balances… Confirm switches on when the check is done.'
       : preview?.status === 'error'
-        ? "Couldn't check wallet balances — use Check again. Confirm stays off until the check succeeds."
+        ? saved_
+          ? `${SAVED_WAITS} The wallet check failed — press Check again, then Retry confirm.`
+          : "Couldn't check wallet balances — use Check again. Confirm stays off until the check succeeds."
         : hasDeductions && previewData && !previewData.deductionsEnabled
-          ? 'Deductions are switched off for this client — remove the negative rows or ask Gifsy.'
+          ? saved_
+            ? `${SAVED_WAITS} Ask Gifsy to switch deductions on for this client, then press Retry confirm — no need to upload again.`
+            : 'Deductions are switched off for this client — remove the negative rows or ask Gifsy.'
           : notReady.length > 0
-            ? `${notReady.length} outlet wallet${notReady.length !== 1 ? 's are' : ' is'} not prepared for deductions, so the server would refuse the whole batch (nothing credited or deducted). Ask Gifsy to prepare ${notReady.length !== 1 ? 'these wallets' : 'this wallet'}, or remove those rows and re-upload.`
+            ? saved_
+              ? `${SAVED_WAITS} Ask Gifsy to prepare the listed wallets, then press Retry confirm — no need to upload again.`
+              : `${notReady.length} outlet wallet${notReady.length !== 1 ? 's are' : ' is'} not prepared for deductions, so the server would refuse the whole batch (nothing credited or deducted). Ask Gifsy to prepare ${wallets}, or remove those rows and re-upload.`
             : unticked.length > 0
               ? `Tick ${unticked.length === 1 ? 'the box' : `all ${unticked.length} boxes`} under "Before you confirm" to continue.`
               : null;
+  /**
+   * U4: for a SAVED batch, "wallet not prepared" / "deductions switched off" are fixed by Gifsy elsewhere — Retry confirm
+   * stays pressable (the server re-checks under the wallet lock and refuses again, loudly, if it isn't fixed yet).
+   */
+  const blockedByGifsyFix = saved_ && (notReady.length > 0 || (hasDeductions && !!previewData && !previewData.deductionsEnabled));
+  const retryBlocked = blockedByGifsyFix ? unticked.length > 0 : !!confirmBlockReason;
   /** A hard block (not just unticked boxes) — shown in red. */
   const isHardBlock = !!confirmBlockReason && !confirmBlockReason.startsWith('Tick ');
 
@@ -359,7 +393,13 @@ export default function CreditsPayoutsUploadPage() {
       } catch {
         next = { status: 'error', message: 'the server could not be reached.' };
       }
-      if (seq === previewSeqRef.current) setPreview(next);
+      if (seq !== previewSeqRef.current) return;
+      setPreview(next);
+      // A fresh answer replaces the refused confirm's findings — except the re-check that refusal started (U2).
+      if (next.status === 'ok') {
+        if (keepServerFindingsRef.current) keepServerFindingsRef.current = false;
+        else { setServerRequired([]); setServerItems({}); }
+      }
     })();
   }, [parseResult, period, previewRun]);
 
@@ -367,13 +407,15 @@ export default function CreditsPayoutsUploadPage() {
   useEffect(() => {
     setAckLabels(new Map());
     setServerRequired([]);
+    setServerItems({});
+    keepServerFindingsRef.current = false;
   }, [parseResult]);
 
   function toggleAck(c: AckCategory) {
-    const label = categories.find((x) => x.category === c)?.label;
+    const cat = categories.find((x) => x.category === c);
     setAckLabels((cur) => {
       const next = new Map(cur);
-      if (acked.has(c) || !label) next.delete(c); else next.set(c, label);
+      if (acked.has(c) || !cat) next.delete(c); else next.set(c, ackSignature(cat));
       return next;
     });
   }
@@ -432,7 +474,7 @@ export default function CreditsPayoutsUploadPage() {
     if (!parseResult?.canProceed || inFlightRef.current) return;
     // Hard blocks + unticked "Before you confirm" boxes (the button is disabled too; this guards keyboard / races).
     // Also for "Retry confirm": after a refused acknowledgement the refreshed boxes must be ticked first.
-    if (confirmBlockReason) return;
+    if (pendingBatch ? retryBlocked : !!confirmBlockReason) return;
     inFlightRef.current = true;
     setConfirming(true);
     setConfirmError('');
@@ -513,7 +555,12 @@ export default function CreditsPayoutsUploadPage() {
       const confirmRes = await fetch(`/api/admin/credits/batches/${batch.id}/confirm`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ acknowledged, skippedRows: parseResult?.summary.skipped ?? 0 }),
+        // ackItems: the exact item keys the admin saw per ticked category — the server refuses a different set.
+        body:    JSON.stringify({
+          acknowledged,
+          ackItems:    ackItemsFor(categories, acknowledged),
+          skippedRows: parseResult?.summary.skipped ?? 0,
+        }),
       });
       reply = await readReply(confirmRes);
     } catch {
@@ -530,12 +577,17 @@ export default function CreditsPayoutsUploadPage() {
       const err = serverErrorOf(body) ?? 'Failed to confirm batch';
       // confirmBatch: `Batch is already ${batch.status}` for any non-PENDING_CONFIRM batch.
       const already = /^Batch is already (\w+)/.exec(err)?.[1];
-      const missing = (body as { details?: { missingAcknowledgements?: unknown } }).details?.missingAcknowledgements;
+      const details = (body as { details?: { missingAcknowledgements?: unknown; items?: unknown } }).details;
+      const missing = details?.missingAcknowledgements;
       if (Array.isArray(missing) && missing.length > 0) {
         // U1: the server found a category this screen hadn't acknowledged (e.g. a wallet's balance changed since the
         // check). Never a re-upload: refresh the check, keep this batch pending, let the admin tick and Retry confirm.
         const cats = missing.filter((c): c is AckCategory => (ACK_ORDER as string[]).includes(String(c)));
         setServerRequired(cats);
+        // U2: the server's own rows for each re-shown box (used for its keys when ticked).
+        const items = details?.items && typeof details.items === 'object' ? (details.items as ServerAckItems) : {};
+        setServerItems(items);
+        keepServerFindingsRef.current = true;
         setAckLabels((cur) => {
           const next = new Map(cur);
           cats.forEach((c) => next.delete(c)); // the refused categories must be ticked again
@@ -543,6 +595,11 @@ export default function CreditsPayoutsUploadPage() {
         });
         setPreviewRun((n) => n + 1);
         showConfirmError(missingAcksMsg(batch.batchCode));
+      } else if (status === 409 && /wallet/i.test(err) && /(not ready|aren.t ready|prepare)/i.test(err)) {
+        // A wallet isn't prepared for deductions (the server refused the WHOLE batch). Never a silent wait and never
+        // "upload again": re-run the check so the not-ready list shows now; the saved batch waits for Gifsy.
+        setPreviewRun((n) => n + 1);
+        showConfirmError(walletsNotReadyMsg(batch.batchCode, /Outlets:\s*(.+?)\.?\s*$/i.exec(err)?.[1]));
       } else if (already === 'CONFIRMED') {
         setAlreadyConfirmed(true);
         showConfirmError(alreadyConfirmedMsg(batch.batchCode));
@@ -822,8 +879,9 @@ export default function CreditsPayoutsUploadPage() {
             <div role="alert" className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 flex items-start gap-2" data-testid="credits-deductions-off">
               <XCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" aria-hidden="true" />
               <p className="text-xs text-red-800">
-                Deductions are switched off for this client — remove the negative rows or ask Gifsy. Nothing in this file
-                can be confirmed while it has negative points.
+                {pendingBatch
+                  ? 'Deductions are switched off for this client. This batch is saved and waiting — ask Gifsy to switch deductions on, then press Retry confirm. No need to upload again.'
+                  : 'Deductions are switched off for this client — remove the negative rows or ask Gifsy. Nothing in this file can be confirmed while it has negative points.'}
               </p>
             </div>
           )}
@@ -904,7 +962,7 @@ export default function CreditsPayoutsUploadPage() {
               <button
                 onClick={handleConfirm}
                 aria-describedby={confirmBlockReason ? 'confirm-block-reason' : undefined}
-                disabled={confirming || !!confirmBlockReason}
+                disabled={confirming || retryBlocked}
                 className="flex items-center gap-2 px-4 py-2.5 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <RotateCcw className="w-4 h-4" />

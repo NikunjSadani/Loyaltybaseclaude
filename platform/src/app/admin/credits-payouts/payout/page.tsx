@@ -187,6 +187,8 @@ interface Reversal {
   pointsOutcome?: PointsOutcome;
   /** 'DEDUCTION_UNDO' (any status): the request UNDOES an upload deduction — approving it gives points back. */
   kind?:          'DEDUCTION_UNDO' | string;
+  /** Pending undo only (> 0): points that would come back already past their expiry (expire at the next sweep). */
+  pastExpiryPoints?: number;
   /**
    * WP5 — present only for a PAYOUT reversal raised under the V2 reversal engine (or SHADOW before 2026-11-16): the whole entries it
    * holds (RESERVED while pending) or consumed. Absent for every LEGACY-engine reversal.
@@ -1424,6 +1426,13 @@ function PayoutPageInner() {
                     <p className="font-medium text-gray-800">{new Date(rev.requestedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</p>
                   </div>
                 </div>
+
+                {rev.kind === 'DEDUCTION_UNDO' && Number(rev.pastExpiryPoints ?? 0) > 0 && (
+                  <p className="text-xs text-amber-800" data-testid={`pending-undo-past-expiry-${rev.id}`}>
+                    {Number(rev.pastExpiryPoints).toLocaleString('en-IN')} pts would come back already past their expiry and
+                    will expire at the next sweep.
+                  </p>
+                )}
 
                 {rev.requestRemarks && (
                   <p className="text-xs text-gray-700 break-words" data-testid={`request-remarks-${rev.id}`}>

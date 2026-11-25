@@ -189,7 +189,12 @@ describe('UND — upload with deductions + Before you confirm', () => {
     fireEvent.click(confirmBtn());
     await screen.findByText('Upload confirmed'); // U8: the file has deductions — not "Credits confirmed"
     expect(screen.queryByText(/Credits confirmed/)).toBeNull();
-    expect(JSON.parse(confirmBodies[0])).toEqual({ acknowledged: ['SKIPPED', 'ROUNDED', 'BELOW_ZERO'], skippedRows: 1 });
+    expect(JSON.parse(confirmBodies[0])).toEqual({
+      acknowledged: ['SKIPPED', 'ROUNDED', 'BELOW_ZERO'],
+      // The exact keys the admin saw, built byte-identically to the server (SKIPPED: category only).
+      ackItems: { ROUNDED: ['BJ2|f1|POINTS|-200|-199.5'], BELOW_ZERO: ['P-BJ1|-220'] },
+      skippedRows: 1,
+    });
     const accepted = screen.getByTestId('credits-accepted');
     expect(accepted).toHaveTextContent('You accepted:');
     expect(accepted).toHaveTextContent('1 wallet will go below zero');
@@ -253,7 +258,7 @@ describe('UND — upload with deductions + Before you confirm', () => {
     expect(JSON.parse(previewBodies[0])).toEqual({ outletCodes: ['BJ1'], period: expectedPeriod(), lines: [] });
     fireEvent.click(confirmBtn());
     await screen.findByText('Credits confirmed successfully');
-    expect(JSON.parse(confirmBodies[0])).toEqual({ acknowledged: [], skippedRows: 0 });
+    expect(JSON.parse(confirmBodies[0])).toEqual({ acknowledged: [], ackItems: {}, skippedRows: 0 });
     expect(screen.queryByTestId('credits-accepted')).toBeNull();
   });
 
@@ -283,8 +288,8 @@ describe('UND — upload with deductions + Before you confirm', () => {
   it('UND9: two outlets sharing one wallet → ONE line with both codes, held opening balance included', async () => {
     previewReplies = [previewOk([
       // Partner-level held opening balance repeated on both outlets → counted ONCE (U4).
-      outletOk('BJ1', 100, { walletId: 'W', heldOpeningBalance: 50 }),
-      outletOk('BJ2', 100, { walletId: 'W', heldOpeningBalance: 50 }),
+      outletOk('BJ1', 100, { walletId: 'W', partnerId: 'P', heldOpeningBalance: 50 }),
+      outletOk('BJ2', 100, { walletId: 'W', partnerId: 'P', heldOpeningBalance: 50 }),
     ])];
     await upload(MIXED);
     // current = 100 + 50 held; after = 150 + 30 − 350 − 200 = −370
@@ -303,6 +308,7 @@ describe('UND — upload with deductions + Before you confirm', () => {
     fireEvent.click(confirmBtn());
     await screen.findByText(/Upload confirmed/);
     expect(JSON.parse(confirmBodies[0]).acknowledged).toEqual(['SKIPPED', 'ROUNDED', 'REPEAT_DEDUCTION']);
+    expect(JSON.parse(confirmBodies[0]).ackItems.REPEAT_DEDUCTION).toEqual(['BJ1|f1|b0|350']);
   });
 
   it('UND11 (U1): a refused acknowledgement → the check re-runs, the batch stays pending, tick + Retry confirm', async () => {
@@ -336,7 +342,11 @@ describe('UND — upload with deductions + Before you confirm', () => {
     fireEvent.click(retry);
     await screen.findByText('Upload confirmed');
     expect(confirmBodies).toHaveLength(2);
-    expect(JSON.parse(confirmBodies[1])).toEqual({ acknowledged: ['SKIPPED', 'ROUNDED', 'BELOW_ZERO'], skippedRows: 1 });
+    expect(JSON.parse(confirmBodies[1])).toEqual({
+      acknowledged: ['SKIPPED', 'ROUNDED', 'BELOW_ZERO'],
+      ackItems: { ROUNDED: ['BJ2|f1|POINTS|-200|-199.5'], BELOW_ZERO: ['P-BJ1|-220'] },
+      skippedRows: 1,
+    });
     // One batch only — never a second save.
     expect(vi.mocked(global.fetch).mock.calls.filter(([u, i]) => String(u).endsWith('/credits/batches') && (i as RequestInit)?.method === 'POST')).toHaveLength(1);
   });
@@ -350,7 +360,7 @@ describe('UND — upload with deductions + Before you confirm', () => {
     expect(confirmBtn()).toBeEnabled();
     fireEvent.click(confirmBtn());
     await screen.findByText('Upload confirmed');
-    expect(JSON.parse(confirmBodies[0])).toEqual({ acknowledged: ['BELOW_ZERO'], skippedRows: 1 });
+    expect(JSON.parse(confirmBodies[0])).toEqual({ acknowledged: ['BELOW_ZERO'], ackItems: { BELOW_ZERO: ['P-BJ1|-220'] }, skippedRows: 1 });
   });
 
   it('UND12: Upload Again + a new file resets the ticks', async () => {
@@ -363,5 +373,98 @@ describe('UND — upload with deductions + Before you confirm', () => {
     await screen.findByText('BJ1 · Balance will go below zero: 100 → −220 pts');
     within(screen.getByTestId('before-you-confirm')).getAllByRole('checkbox').forEach((b) => expect(b).not.toBeChecked());
     expect(confirmBtn()).toBeDisabled();
+  });
+
+  const refuse = (missing: string[], items: Record<string, Array<{ key: string; text: string }>> = {}) => ({ status: 400, body: {
+    success: false,
+    error: 'Before confirming, reload the page and tick: …. Nothing was credited or deducted.',
+    details: { missingAcknowledgements: missing, items },
+  } });
+
+  it('UND14 (U2): a refusal with details.items re-shows the box WITH the server\'s row and sends its key', async () => {
+    // Locally nothing goes below zero; the server (under the wallet lock) finds BJ1's wallet will.
+    previewReplies = [previewOk([outletOk('BJ1', 5000), outletOk('BJ2', 5000)])];
+    confirmQueue = [refuse(['BELOW_ZERO'], { BELOW_ZERO: [{ key: 'P-BJ1|-150', text: 'Wallet of BJ1: 150 → -150' }] })];
+    await upload(MIXED);
+    await tickAll(2);
+    fireEvent.click(confirmBtn());
+    expect(await screen.findByText('Wallet of BJ1: 150 → -150')).toBeInTheDocument();
+    // …still there after the re-check the refusal started (that answer keeps the server's findings)
+    await waitFor(() => expect(previewBodies).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByText('Checking wallet balances…')).toBeNull());
+    expect(screen.getByText('Wallet of BJ1: 150 → -150')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('I understand some wallets will go below zero'));
+    const retry = screen.getByRole('button', { name: 'Retry confirm for CB-1' });
+    await waitFor(() => expect(retry).toBeEnabled());
+    fireEvent.click(retry);
+    await screen.findByText('Upload confirmed');
+    expect(JSON.parse(confirmBodies[1]).ackItems.BELOW_ZERO).toEqual(['P-BJ1|-150']);
+  });
+
+  it('UND15 (U1): a ticked below-zero box is cleared when a re-check changes its after-balance (same wording)', async () => {
+    previewReplies = [
+      previewOk([outletOk('BJ1', 100), outletOk('BJ2', 5000)]),
+      previewOk([outletOk('BJ1', 50), outletOk('BJ2', 5000)]),
+    ];
+    confirmQueue = [refuse(['ROUNDED'])]; // refuses ROUNDED only → the check re-runs
+    await upload(MIXED);
+    await tickAll(3);
+    fireEvent.click(confirmBtn());
+    expect(await screen.findByText('BJ1 · Balance will go below zero: 50 → −270 pts')).toBeInTheDocument();
+    const box = screen.getByLabelText('I understand 1 wallet will go below zero') as HTMLInputElement;
+    expect(box.checked).toBe(false);                                       // key changed → tick cleared
+    expect((screen.getByLabelText('I understand 1 row will not be credited (blank, zero or not applicable)') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('UND16 (U4): a SAVED batch whose re-check finds an unprepared wallet → resolve-without-re-upload advice; Retry stays pressable', async () => {
+    previewReplies = [
+      previewOk([outletOk('BJ1', 100), outletOk('BJ2', 5000)]),
+      previewOk([outletOk('BJ1', 100, { ready: false, reason: 'wallet not prepared' }), outletOk('BJ2', 5000)]),
+    ];
+    confirmQueue = [refuse(['ROUNDED'])];
+    await upload(MIXED);
+    await tickAll(3);
+    fireEvent.click(confirmBtn());
+    await screen.findByTestId('credits-deduction-blocked');
+    const reason = screen.getByTestId('credits-confirm-blocked');
+    expect(reason).toHaveTextContent('This batch is saved and waiting. Ask Gifsy to prepare the listed wallets, then press Retry confirm — no need to upload again.');
+    expect(reason.textContent).not.toMatch(/remove those rows|re-upload/);
+    fireEvent.click(screen.getByLabelText('I understand 1 row was rounded to whole units'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry confirm for CB-1' })).toBeEnabled());
+  });
+
+  it('UND17 (U4): a SAVED batch whose re-check fails → "press Check again, then Retry confirm"', async () => {
+    previewReplies = [previewOk([outletOk('BJ1', 100), outletOk('BJ2', 5000)]), 'reject'];
+    confirmQueue = [refuse(['ROUNDED'])];
+    await upload(MIXED);
+    await tickAll(3);
+    fireEvent.click(confirmBtn());
+    expect(await screen.findByTestId('credits-confirm-blocked'))
+      .toHaveTextContent('This batch is saved and waiting. The wallet check failed — press Check again, then Retry confirm.');
+    expect(screen.getByRole('button', { name: 'Retry confirm for CB-1' })).toBeDisabled();
+  });
+
+  it('UND18: a 409 wallet-not-ready confirm refusal re-runs the check at once and lists the wallets — saved-batch wording', async () => {
+    previewReplies = [
+      previewOk([outletOk('BJ1', 100), outletOk('BJ2', 5000)]),
+      previewOk([outletOk('BJ1', 100, { ready: false, reason: 'wallet not prepared for deductions' }), outletOk('BJ2', 5000)]),
+    ];
+    confirmQueue = [{ status: 409, body: {
+      success: false,
+      error: "Some outlets' wallets aren't ready for deductions yet — ask Gifsy to prepare them, then upload again. Outlets: BJ1.",
+    } }];
+    await upload(MIXED);
+    await tickAll(3);
+    fireEvent.click(confirmBtn());
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      "Batch CB-1 is saved and waiting — some outlets' wallets aren't ready for deductions yet (BJ1), so nothing was credited or deducted. Ask Gifsy to prepare the listed wallets, then press Retry confirm — no need to upload again.",
+    );
+    expect(alert.textContent).not.toMatch(/then upload again/);
+    expect(await screen.findByTestId('credits-deduction-blocked')).toHaveTextContent('BJ1 · wallet not prepared for deductions');
+    expect(previewBodies).toHaveLength(2);
+    expect(screen.getByTestId('credits-confirm-blocked'))
+      .toHaveTextContent('This batch is saved and waiting. Ask Gifsy to prepare the listed wallets, then press Retry confirm — no need to upload again.');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry confirm for CB-1' })).toBeEnabled());
   });
 });

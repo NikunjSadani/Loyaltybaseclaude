@@ -103,28 +103,35 @@ export function notAppliedRows(rows: CreditUploadRow[], d: UploadPreviewData): N
 const applies = (o: UploadPreviewOutlet | undefined): o is UploadPreviewOutlet => !!o && o.found && o.linked;
 
 export interface WalletLine {
+  /** The server's wallet key: the partnerId (one wallet per partner). */
   key:         string;
   outletCodes: string[];
-  /** balance − points expiring now + held opening balance (what the wallet holds when the rows apply). */
+  /** balance + held opening balance (held counted ONCE per wallet). */
   current:     number;
   held:        number | null;
-  /** Points expiring now (due, not yet swept) — already taken off `current`. */
-  dueExpiry:   number;
+  /** Points of due lots that expire before the deduction (clamped — see walletLines). */
+  expired:     number;
   after:       number;
 }
 
-/** The wallet a row lands in, as the server groups it: the wallet, else the partner (the wallet confirm creates). */
+/**
+ * The wallet a row lands in, as the server groups it: ONE wallet per PARTNER — the partnerId, stable even when the
+ * confirm creates the wallet (it is also the BELOW_ZERO ack key's first part). Fallbacks only for a malformed reply.
+ */
 const walletKey = (o: UploadPreviewOutlet) =>
-  o.walletId ? o.walletId : o.partnerId ? `partner:${o.partnerId}` : `outlet:${o.outletCode}`;
+  o.partnerId ? o.partnerId : o.walletId ? `wallet:${o.walletId}` : `outlet:${o.outletCode}`;
 
 /**
- * One line per WALLET that this file deducts from (outlets of one partner share a wallet; outlets without a wallet yet
- * group by partner — the wallet confirm will create — at 0). current = balance − points expiring now + the held opening
- * balance (partner-level, counted ONCE); after = current + the file's credits − its deductions for that wallet.
+ * One line per WALLET that this file deducts from — the SAME arithmetic as the server (its BELOW_ZERO keys use `after`):
+ *   start        = balance + held opening balance (partner-level, once per wallet)
+ *   beforeDeduct = start + Σ this file's credits on the wallet
+ *   expired      = min(dueExpiry, max(0, beforeDeduct))   — due lots expire AFTER the file's credits land
+ *   after        = beforeDeduct − expired − Σ this file's deductions on the wallet
+ * dueExpiry is the server's RAW figure (wallet-level, repeated per outlet → taken once).
  */
 export function walletLines(rows: CreditUploadRow[], d: UploadPreviewData): WalletLine[] {
   const byCode = outletMap(d);
-  type G = { codes: string[]; balance: number; held: number | null; dueExpiry: number; net: number; deducts: boolean };
+  type G = { codes: string[]; balance: number; held: number | null; dueExpiry: number; credits: number; deductions: number };
   const groups = new Map<string, G>();
   for (const r of rows.filter(isOkPointsRow)) {
     const o = byCode.get(r.outletId);
@@ -132,7 +139,7 @@ export function walletLines(rows: CreditUploadRow[], d: UploadPreviewData): Wall
     const key = walletKey(o);
     let g = groups.get(key);
     if (!g) {
-      g = { codes: [], balance: o.balance ?? 0, held: null, dueExpiry: 0, net: 0, deducts: false };
+      g = { codes: [], balance: o.balance ?? 0, held: null, dueExpiry: 0, credits: 0, deductions: 0 };
       groups.set(key, g);
     }
     if (!g.codes.includes(o.outletCode)) {
@@ -141,14 +148,15 @@ export function walletLines(rows: CreditUploadRow[], d: UploadPreviewData): Wall
       if (g.held == null && o.heldOpeningBalance != null) g.held = o.heldOpeningBalance;
       g.dueExpiry = Math.max(g.dueExpiry, Math.max(0, o.dueExpiry ?? 0));
     }
-    g.net += r.amount;
-    if (r.amount < 0) g.deducts = true;
+    if (r.amount < 0) g.deductions += -r.amount; else g.credits += r.amount;
   }
   const out: WalletLine[] = [];
   for (const [key, g] of groups) {
-    if (!g.deducts) continue;
-    const current = g.balance - g.dueExpiry + (g.held ?? 0);
-    out.push({ key, outletCodes: g.codes, current, held: g.held, dueExpiry: g.dueExpiry, after: current + g.net });
+    if (g.deductions === 0) continue;
+    const current = g.balance + (g.held ?? 0);
+    const beforeDeduct = current + g.credits;
+    const expired = Math.min(g.dueExpiry, Math.max(0, beforeDeduct));
+    out.push({ key, outletCodes: g.codes, current, held: g.held, expired, after: beforeDeduct - expired - g.deductions });
   }
   return out;
 }
@@ -159,8 +167,9 @@ export interface RepeatRow { row: CreditUploadRow; prior: PriorDeduction }
 export function repeatDeductionRows(rows: CreditUploadRow[], d: UploadPreviewData): RepeatRow[] {
   const out: RepeatRow[] = [];
   for (const r of rows.filter(isDeductionRow)) {
-    const prior = d.priorDeductions.find((p) => p.outletCode === r.outletId && p.fieldId === r.fieldId);
-    if (prior) out.push({ row: r, prior });
+    for (const prior of d.priorDeductions) {
+      if (prior.outletCode === r.outletId && prior.fieldId === r.fieldId) out.push({ row: r, prior });
+    }
   }
   return out;
 }
@@ -177,7 +186,15 @@ const n = (x: number) => x.toLocaleString('en-IN');
 const plural = (x: number, one: string, many: string) => `${n(x)} ${x === 1 ? one : many}`;
 const rowRef = (r: CreditUploadRow) => `Row ${r.rowNum} · ${r.outletId} · ${r.fieldName}`;
 
+/**
+ * `key` is the item's ACK KEY, built byte-identically to the server (sent in `ackItems` for a ticked category — the
+ * server refuses unless the set equals its own). SKIPPED is acknowledged as a category only (its keys stay local).
+ */
 export interface CategoryItem { key: string; text: string; detail?: string }
+
+/** ROUNDED: outletId|fieldId|awardType|amount (stored — paise for PAYOUT)|originalAmount (typed). */
+export const roundedKey = (r: CreditUploadRow) =>
+  `${r.outletId}|${r.fieldId}|${r.awardType}|${String(r.amount)}|${String(r.originalAmount)}`;
 export interface CategoryInfo {
   category:     AckCategory;
   count:        number;
@@ -214,7 +231,7 @@ export function presentCategories(pr: CreditParseResult, preview: UploadPreviewD
       title: `${plural(rounded.length, 'row', 'rows')} rounded to whole units`,
       description: ROUNDING_COPY,
       label: `I understand ${plural(rounded.length, 'row was', 'rows were')} rounded to whole units`,
-      items: rounded.map((r) => ({ key: `r|${r.rowNum}|${r.fieldId}`, text: rowRef(r), detail: roundedAmountText(r) })),
+      items: rounded.map((r) => ({ key: roundedKey(r), text: rowRef(r), detail: roundedAmountText(r) })),
     });
   }
   if (!preview) return out;
@@ -225,7 +242,7 @@ export function presentCategories(pr: CreditParseResult, preview: UploadPreviewD
       category: 'NOT_APPLIED', count: na.length,
       title: `${plural(na.length, 'row', 'rows')} won't be credited or deducted`,
       label: `I understand ${plural(na.length, 'row', 'rows')} won't be applied (outlet not found or not linked)`,
-      items: na.map(({ row, reason }) => ({ key: `n|${row.rowNum}|${row.fieldId}`, text: rowRef(row), detail: reason })),
+      items: na.map(({ row, reason }) => ({ key: `${row.outletId}|${row.fieldId}`, text: rowRef(row), detail: reason })),
     });
   }
   const below = walletLines(pr.rows, preview).filter((w) => w.after < 0);
@@ -236,23 +253,24 @@ export function presentCategories(pr: CreditParseResult, preview: UploadPreviewD
       description: "A wallet below zero is repaid from the outlet's future earnings; the outlet can't redeem until its balance is 0 or more.",
       label: `I understand ${plural(below.length, 'wallet', 'wallets')} will go below zero`,
       items: below.map((w) => ({
-        key: `z|${w.key}`,
+        key: `${w.key}|${String(w.after)}`,
         text: `${w.outletCodes.join(', ')} · Balance will go below zero: ${fmtSignedPts(w.current)} → ${fmtSignedPts(w.after)} pts`,
         detail: [
           w.held != null ? `(includes a held opening balance of ${fmtSignedPts(w.held)} that posts first)` : '',
-          w.dueExpiry > 0 ? `(includes ${n(w.dueExpiry)} points expiring now)` : '',
+          w.expired > 0 ? `(after ${n(w.expired)} points expiring now are taken off)` : '',
         ].filter(Boolean).join(' ') || undefined,
       })),
     });
   }
   const repeats = repeatDeductionRows(pr.rows, preview);
   if (repeats.length > 0) {
+    const rowsRepeated = new Set(repeats.map((x) => `${x.row.outletId}|${x.row.fieldId}`)).size;
     push({
-      category: 'REPEAT_DEDUCTION', count: repeats.length,
-      title: `${plural(repeats.length, 'deduction', 'deductions')} may be a repeat`,
-      label: `I understand ${plural(repeats.length, 'deduction', 'deductions')} may be a repeat`,
+      category: 'REPEAT_DEDUCTION', count: rowsRepeated,
+      title: `${plural(rowsRepeated, 'deduction', 'deductions')} may be a repeat`,
+      label: `I understand ${plural(rowsRepeated, 'deduction', 'deductions')} may be a repeat`,
       items: repeats.map(({ row, prior }) => ({
-        key: `p|${row.rowNum}|${row.fieldId}`,
+        key: `${prior.outletCode}|${prior.fieldId}|${prior.batchId}|${String(prior.points)}`,
         text: `${rowRef(row)} · ${deductionAmountText(row)}`,
         detail: `Already deducted on ${day(prior.confirmedAt)} in batch ${prior.batchCode} (${n(Math.abs(prior.points))} pts still deducted) — check this isn't a repeat.`,
       })),
@@ -269,23 +287,62 @@ const SERVER_ONLY_TEXT: Record<AckCategory, string> = {
   REPEAT_DEDUCTION: 'some deductions may be a repeat',
 };
 
+/** The items a refused confirm returned for a category (`details.items`). */
+export type ServerAckItems = Partial<Record<AckCategory, Array<{ key: string; text: string }>>>;
+
 /**
- * U1: after a refused confirm the server's `missingAcknowledgements` must each get a box — a present category is made
- * required; one this screen can't list (e.g. the server's balance moved) gets its own box with the server's finding.
+ * U1/U2: after a refused confirm each of the server's `missingAcknowledgements` must get a box WITH its rows. The
+ * server's items (from `details.items`) win over this screen's list when their keys differ (the server recomputed them
+ * under the wallet lock); a category this screen didn't list at all gets a block built from the server's items.
  */
-export function withServerRequired(categories: CategoryInfo[], serverRequired: AckCategory[]): CategoryInfo[] {
+export function withServerRequired(
+  categories: CategoryInfo[],
+  serverRequired: AckCategory[],
+  serverItems: ServerAckItems = {},
+): CategoryInfo[] {
   if (serverRequired.length === 0) return categories;
-  const out = categories.map((c) => (serverRequired.includes(c.category) ? { ...c, required: true } : c));
+  const fromServer = (cat: AckCategory) =>
+    (serverItems[cat] ?? []).filter((it) => it && typeof it.key === 'string').map((it) => ({ key: it.key, text: String(it.text ?? it.key) }));
+  const sameKeys = (a: CategoryItem[], b: CategoryItem[]) =>
+    a.length === b.length && a.every((x, i) => x.key === b[i].key);
+  const out = categories.map((c) => {
+    if (!serverRequired.includes(c.category)) return c;
+    const srv = fromServer(c.category);
+    if (c.category === 'SKIPPED' || srv.length === 0 || sameKeys(c.items, srv)) return { ...c, required: true };
+    return { ...c, required: true, items: srv, count: srv.length,
+      description: 'The confirm re-checked these rows — this is what the server found.' };
+  });
   for (const cat of ACK_ORDER) {
     if (!serverRequired.includes(cat) || out.some((c) => c.category === cat)) continue;
+    const srv = fromServer(cat);
     out.push({
-      category: cat, count: 0, required: true, items: [],
+      category: cat, count: srv.length, required: true, items: srv,
       title: `The server found that ${SERVER_ONLY_TEXT[cat]}`,
-      description: 'The confirm found this after the check above was made — see Payout Status after confirming for the rows.',
+      description: srv.length > 0
+        ? 'The confirm re-checked the file after the check above was made — this is what it found.'
+        : 'The confirm re-checked the file after the check above was made — press Check again to list the rows.',
       label: `I understand ${SERVER_ONLY_TEXT[cat]}`,
     });
   }
   return out.sort((a, b) => ACK_ORDER.indexOf(a.category) - ACK_ORDER.indexOf(b.category));
+}
+
+/**
+ * What a tick is bound to: the category's item KEYS (SKIPPED: its label — the count). A tick counts only while this is
+ * unchanged, so a re-check that changes the rows (e.g. a different after-balance) clears it (U1).
+ */
+export function ackSignature(c: CategoryInfo): string {
+  return c.category === 'SKIPPED' ? c.label : `${c.label}\u0001${c.items.map((i) => i.key).join('\u0001')}`;
+}
+
+/** The confirm's `ackItems`: for each acknowledged category (except SKIPPED) the exact keys the admin saw. */
+export function ackItemsFor(categories: CategoryInfo[], acknowledged: AckCategory[]): Partial<Record<AckCategory, string[]>> {
+  const out: Partial<Record<AckCategory, string[]>> = {};
+  for (const c of categories) {
+    if (c.category === 'SKIPPED' || !acknowledged.includes(c.category)) continue;
+    out[c.category] = c.items.map((i) => i.key);
+  }
+  return out;
 }
 
 // ─── UI ──────────────────────────────────────────────────────────────────────
@@ -383,7 +440,7 @@ export function BeforeYouConfirm({
               {c.items.length > 0 && (
               <ul className="divide-y divide-gray-100 border border-gray-100 rounded-lg max-h-52 overflow-y-auto">
                 {c.items.slice(0, PANEL_LIMIT).map((it) => (
-                  <li key={it.key} className="px-3 py-2" data-testid={`ack-item-${c.category}`}>
+                  <li key={`${c.category}|${it.key}`} className="px-3 py-2" data-testid={`ack-item-${c.category}`}>
                     <p className="text-xs font-medium text-gray-800 break-words">{it.text}</p>
                     {it.detail && <p className="text-xs text-amber-800 mt-0.5 break-words">{it.detail}</p>}
                   </li>

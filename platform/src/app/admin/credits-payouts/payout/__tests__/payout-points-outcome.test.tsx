@@ -279,7 +279,7 @@ describe('Reversal Report — an approved undo of an upload deduction (pointsOut
           success: true,
           data: {
             reversals: [
-              { ...base, id: 'r-undo-p', requestedPaise: 320, status: 'PENDING_GIFSY', kind: 'DEDUCTION_UNDO' },
+              { ...base, id: 'r-undo-p', requestedPaise: 320, status: 'PENDING_GIFSY', kind: 'DEDUCTION_UNDO', pastExpiryPoints: 45 },
               { ...base, id: 'r-credit-p', requestedPaise: 100, status: 'PENDING_GIFSY' },
             ],
             pagination: { page: 1, limit: 50, total: 2, pages: 1 },
@@ -293,6 +293,11 @@ describe('Reversal Report — an approved undo of an upload deduction (pointsOut
     expect((await screen.findByTestId('pending-deduction-undo-r-undo-p')).textContent).toBe('Undo of an upload deduction');
     expect(screen.queryByTestId('pending-deduction-undo-r-credit-p')).toBeNull();
     expect(screen.getAllByText('Points to give back')).toHaveLength(1);
+    // Never silent: a pending undo that would give back points already past their expiry says so on the card.
+    expect(screen.getByTestId('pending-undo-past-expiry-r-undo-p').textContent).toBe(
+      '45 pts would come back already past their expiry and will expire at the next sweep.',
+    );
+    expect(screen.queryByTestId('pending-undo-past-expiry-r-credit-p')).toBeNull();
   });
 });
 
