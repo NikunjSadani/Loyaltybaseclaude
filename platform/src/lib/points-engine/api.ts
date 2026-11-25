@@ -71,19 +71,28 @@ export function commitCompute(body: {
   program?: string | null;
   kpiCode?: string | null;
   expectedKey?: string | null;
-  /** §3a: the pending-visibility outlet count the admin accepted (server refuses a mismatch). */
-  acceptVisibilityPending?: number | null;
+  /** §3a: the pendingKey of the visibility-pending outlet set the admin accepted (server refuses a different set). */
+  acceptVisibilityPendingKey?: string | null;
 }): Promise<ApiResponse<ComputeCommitResult>> {
   return api.post<ComputeCommitResult>(`${COMPUTE}/commit`, body);
 }
 
 // ── Binary downloads (export credit-upload xlsx / review report) ──────────────────────
-type ComputeQ = { period: string; program?: string | null; kpiCode?: string | null; acceptVisibilityPending?: number | null };
+type ComputeQ = {
+  period: string;
+  program?: string | null;
+  kpiCode?: string | null;
+  /** §3a: the accepted pending-visibility outlet set (money files only). */
+  acceptVisibilityPendingKey?: string | null;
+  /** The run key the operator reviewed (sourceKey for the credit file, payoutKey for the payout report). */
+  expectedKey?: string | null;
+};
 function computeQs(q: ComputeQ): string {
   const params = new URLSearchParams({ period: q.period });
   if (q.program) params.set('program', q.program);
   if (q.kpiCode) params.set('kpiCode', q.kpiCode);
-  if (typeof q.acceptVisibilityPending === 'number') params.set('acceptVisibilityPending', String(q.acceptVisibilityPending));
+  if (q.acceptVisibilityPendingKey) params.set('acceptVisibilityPendingKey', q.acceptVisibilityPendingKey);
+  if (q.expectedKey) params.set('expectedKey', q.expectedKey);
   return params.toString();
 }
 /**

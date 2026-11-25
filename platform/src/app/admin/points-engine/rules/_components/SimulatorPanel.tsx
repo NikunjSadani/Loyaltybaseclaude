@@ -309,6 +309,14 @@ function OutcomeView({ result, awardType }: { result: SimulateResult; awardType?
         </div>
       )}
 
+      {result.warnings && result.warnings.length > 0 && (
+        <ul className="list-disc space-y-0.5 rounded-lg border border-amber-200 bg-amber-50 py-2 pl-6 pr-2 text-[11px] text-amber-800" data-testid="sim-warnings">
+          {result.warnings.map((w, i) => (
+            <li key={i}>{w}</li>
+          ))}
+        </ul>
+      )}
+
       {result.visibilityUsed && result.visibilityUsed.length > 0 && (
         <div className="rounded-lg border border-sky-100 bg-sky-50 p-2" data-testid="sim-visibility-used">
           <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-700">Visibility values used</p>

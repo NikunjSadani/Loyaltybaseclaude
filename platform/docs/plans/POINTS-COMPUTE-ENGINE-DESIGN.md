@@ -112,7 +112,7 @@ visibility (Bajaj SAMT) or to pay a visibility payout (Bajaj Unnati). Four NUMBE
 |---|---|---|
 | `visibility:approved` | Visibility approved this month (1/0) | 1 if ≥ 1 window of the month is approved, else 0 |
 | `visibility:approvedWindows` | Approved visibility windows this month | how many windows of the month are approved |
-| `visibility:windows` | Visibility windows in the month | windows of the month THIS OUTLET was in scope for (≤ the frequency's 1–4; 1 for AMOUNT_UPLOAD with a record; 0 out of scope) — for "every window approved" rules (`approvedWindows >= windows && windows > 0`) |
+| `visibility:windows` | Visibility windows in the month | in-scope outlet: the windows of the month it was in scope for (≤ the frequency's 1–4; 1 for AMOUNT_UPLOAD with a record). OUT-of-scope outlet: the MONTH's window count (1 for AMOUNT_UPLOAD) — never 0, so `approvedWindows >= windows` can never pay it; `inScope = 0` tells it apart. The builder + simulator warn (non-blocking, `ruleWarnings`) when a rule compares approvedWindows with windows without reading inScope |
 | `visibility:inScope` | Outlet in the visibility programme (1/0) | 1 when visibility applies to the outlet this month, else 0 — tells "not applicable" (e.g. a wholesaler) from "not approved" |
 
 `validateRule` rejects any other `visibility:<key>` and a non-`number` visibility input. Code:
@@ -122,35 +122,48 @@ visibility (Bajaj SAMT) or to pay a visibility payout (Bajaj Unnati). Four NUMBE
 **"Approved" (fix round 2026-11-25).** PHOTO_APPROVAL: a window counts when the capture's FINAL status is `APPROVED`
 and EITHER (a) the outlet is in that window's dated universe (`visibilityWindowUniverseWhere` — the Visibility
 report's per-window rule: a closed window = outlets live + KYC-approved during it, an open one = today's in-scope),
-OR (b) the outlet's TYPE / PROGRAMME is in the visibility programme — an approved capture is proof of the visit, so it
-counts even when the outlet's created / KYC dates put it outside the dated universe (an outlet loaded late). (b) is a
-deliberate difference from the report (which drops such captures as "not counted"); every such capture is reported
-(`preview.visibility.countedOutsideDatedScope`). Decided:
+OR (b) the outlet passes EVERY rule of `visibilityUniverseBase` TODAY except the dates — not removed / deactivated,
+KYC-approved (`isActive`), not PARKED / NOT_INTERESTED, type + programme in scope (`visibilityOutOfScopeReason` = null).
+An approved capture is proof of the visit, so ONLY the created / KYC-approval DATES are relaxed (an outlet loaded
+late). (b) is a deliberate difference from the report (which drops such captures as "not counted"); every such capture
+is reported (`preview.visibility.countedOutsideDatedScope` + the row note). An approved capture failing any other rule
+is excluded with its reason (`excluded.notInProgramme` / `excluded.notLive`). Decided:
 - **Per-photo review** rolls up server-side (all required photos approved → `APPROVED`), so a half-reviewed capture is not approved.
 - **Imported old-app captures** are stored `APPROVED` (the old app kept only approved visits) → they **count**. A closed
   window with no capture that was (partly) on the old app carries the report's marker in the row note
   ("P1: No approved record — part of this window was on the old app" / "Not tracked for imported months"), not a plain 0.
 - `SUBMITTED` (waiting for review), `CHANGES_REQUESTED`, `REJECTED` — open **or** closed window — **do not count**.
 - **NOT counted, always reported** (`preview.visibility.excluded` + the outlet's row note / `row.visibility.excludedApprovals`):
-  an APPROVED capture of an outlet whose type / programme is NOT in the programme (`notInProgramme`); an APPROVED
-  capture under an OLDER frequency's window key (e.g. `-P2` after a move to once a month — its day range is unknown;
-  `olderFrequency`).
+  an APPROVED capture of an outlet whose type / programme is NOT in the programme (`notInProgramme`); of an outlet
+  removed / deactivated / not KYC-approved / parked / not interested today (`notLive`); an APPROVED capture under an
+  OLDER frequency's window key (e.g. `-P2` after a move to once a month — its day range is unknown; `olderFrequency`).
+- **Every preview figure covers only the run** — the run's program / KPI filter, never deleted outlets (they are not in
+  a run): counts, the pending set, counted-late and excluded approvals.
 - Read AS OF the compute: an approval landing later changes the next run (the POINTS commit TOCTOU key catches it).
 
 **Pending reviews / open windows — never silent (money gate).** Per outlet the loader counts windows still WAITING FOR
 REVIEW and in-scope windows STILL OPEN without an approval (AMOUNT_UPLOAD: a `PENDING` / `UNDER_REVIEW` record = waiting).
 Those outlets read "not approved" for those windows NOW. The preview shows `outletsWaitingReview`, `outletsOpenWindow`,
-`openWindowsInMonth` and `outletsPending` (counted over the run's own outlets — a program filter narrows it). While
+`openWindowsInMonth`, `outletsPending`, the pending outlet codes (`waitingOutletCodes` / `openOutletCodes`, sorted,
+capped at 200 each — counts complete) and `pendingKey` = sha256 of the EXACT pending outlet sets. While
 `outletsPending > 0` the **credit-upload export, the payout report and direct credit are REFUSED (409)** unless the
-request carries `acceptVisibilityPending = outletsPending` (the admin ticks "I accept N outlets will read visibility =
-not approved…" on the compute screen; a changed count = re-confirm). Enforced server-side in
-`PointsComputeService.assertVisibilityPendingAccepted` (commit) and the export kinds (at file build). Each accepted
-action writes an `AuditLog` row (`action APPROVE`, `entityType POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED`, entityId =
-the batch id for commit / `<clientId>:<period>` for a file; metadata = the counts, route, filter, sourceKey). The
-review report is not gated (it is the review).
+request carries `acceptVisibilityPendingKey = pendingKey` (the admin ticks "I accept N outlets will read visibility =
+not approved…" on the compute screen, which lists the outlets); the server recomputes and refuses a different outlet
+set (re-accept). Enforced in `PointsComputeService.assertVisibilityPendingAccepted` (commit) and the export kinds at
+file build. The money files also take `expectedKey` like direct credit — the credit file is checked against
+`sourceKey`, the payout report against `payoutKey` (a hash of the OK PAYOUT rows) — a run that changed since review is
+refused. Refusals are `ExportRefusedException` (409); a background build that hits one is FAILED with THAT message on
+the Downloads page (opt-in — every other failure keeps the generic message). No synchronous pre-check before queueing:
+it would run the whole-tenant compute on the API a second time (the reason these kinds always build in the worker) —
+the screen blocks the buttons first, and the build refuses with the plain message. Each accepted action writes ONE
+`AuditLog` row (`action APPROVE`, `entityType POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED`; entityId = the batch id for
+commit — an idempotent repeat writes no second row and a repeat after a failed write fills it in; = the ExportRequest
+id for a file, also in `metadata.exportRequestId`); metadata = counts, capped outlet codes, pendingKey, route, filter,
+sourceKey, payoutKey. A failed audit write after the batch / file exists is logged, never a 500. The review report is
+not gated (it is the review).
 
 **AMOUNT_UPLOAD** tenants: the month's uploaded `OutletVisibilityRecord`; `APPROVED` → 1 of 1; `PENDING` /
-`UNDER_REVIEW` → 0 (pending); no record → 0, inScope 0 ("no visibility status uploaded"). Capture mode + master
+`UNDER_REVIEW` → 0 (pending); no record → 0, windows 1, inScope 0 ("no visibility status uploaded"). Capture mode + master
 switch come from `TenantService` (switch read uncached).
 
 **Missing vs zero.** An outlet **outside the visibility scope** gets real **0**s (inScope 0), and its row says "not in

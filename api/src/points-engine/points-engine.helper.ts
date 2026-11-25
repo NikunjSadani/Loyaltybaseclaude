@@ -1148,6 +1148,23 @@ function validateSlabBands(node: SlabNode, where: string, errs: string[]): void 
   }
 }
 
+/**
+ * NON-blocking authoring warnings (valid configs that are easy to get wrong). Surfaced by the simulator + builder;
+ * never stops a save. Today: a rule comparing approved visibility windows with the month's windows that does not read
+ * `visibility:inScope` — an outlet OUTSIDE the visibility programme reads approvedWindows 0 / windows = the month's
+ * count, so it never passes "every window approved", but the rule cannot tell "not applicable" from "not approved".
+ */
+export function ruleWarnings(rule: PointsRuleConfig): string[] {
+  const warns: string[] = [];
+  const srcs = new Set((Array.isArray(rule?.inputs) ? rule.inputs : []).map((i) => i?.source).filter((x): x is string => typeof x === 'string'));
+  if (srcs.has('visibility:approvedWindows') && srcs.has('visibility:windows') && !srcs.has('visibility:inScope')) {
+    warns.push(
+      'This rule compares approved visibility windows with the month’s windows but does not read “Outlet in the visibility programme (1/0)”. Outlets outside the programme never pass “every window approved” (they read 0 approved) — add the inScope input if they should be treated differently.',
+    );
+  }
+  return warns;
+}
+
 export function validateRule(rule: PointsRuleConfig): string[] {
   const errs: string[] = [];
   if (!isObj(rule)) return ['rule must be an object.'];

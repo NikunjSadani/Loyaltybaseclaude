@@ -421,6 +421,14 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
     }
   });
 
+  // §3a: "every window approved" without inScope — mirrors the backend ruleWarnings (non-blocking).
+  const srcs = new Set(draft.inputs.map((i) => i.source).filter((x): x is string => !!x));
+  if (srcs.has('visibility:approvedWindows') && srcs.has('visibility:windows') && !srcs.has('visibility:inScope')) {
+    warnings.push(
+      'This rule compares approved visibility windows with the month’s windows but does not read “Outlet in the visibility programme (1/0)”. Outlets outside the programme never pass (they read 0 approved) — add the inScope input if they should be treated differently.',
+    );
+  }
+
   // ── effective window ───────────────────────────────────────────────────────────
   if (draft.effectiveTo && draft.effectiveFrom && draft.effectiveTo < draft.effectiveFrom)
     blocking.push('Effective-to must be on or after effective-from.');

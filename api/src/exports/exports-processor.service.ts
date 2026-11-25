@@ -7,7 +7,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SQL_NOW_UTC } from '../sales-import/sql-time';
 import type { RunOutcome, WorkerStop } from '../sales-import/ingest/worker-stop';
 import { StorageService } from '../storage/storage.service';
-import type { AnyExportKind } from './export-kinds';
+import { ExportRefusedException, type AnyExportKind } from './export-kinds';
 import { userFromActor } from './exports-actor';
 import { claimNextExport } from './exports-claim';
 import { EXPORT_RETENTION_DAYS } from './exports.contract';
@@ -179,7 +179,7 @@ export class ExportsProcessorService {
     try {
       const out = abortableWriter(createXlsxStreamWriter(sink), () => state.aborted ?? state.uploadFailed);
       const { rowCount } = await def.run(
-        { prisma: this.prisma, moduleRef: this.moduleRef, clientId: row.clientId, user, now: row.createdAt },
+        { prisma: this.prisma, moduleRef: this.moduleRef, clientId: row.clientId, user, now: row.createdAt, requestId: row.id },
         params,
         out,
       );
@@ -210,6 +210,11 @@ export class ExportsProcessorService {
       if (why === 'stopping') {
         await this.release(row, Date.now() - claimedAt >= EXPORT_STOP_RESTORES_ATTEMPT_WITHIN_MS);
         return 'released';
+      }
+      // A kind's DELIBERATE refusal (ExportRefusedException) shows its own plain message on the Downloads page.
+      if (e instanceof ExportRefusedException) {
+        this.logger.warn(`export ${row.id} (${row.kind}) REFUSED: ${e.message}`);
+        return (await this.finish(row, { status: 'FAILED', error: e.message })) ? 'finished' : 'superseded';
       }
       this.logger.error(`export ${row.id} (${row.kind}) FAILED: ${(e as Error).stack ?? (e as Error).message}`);
       return (await this.finish(row, { status: 'FAILED', error: EXPORT_FAILED_MESSAGE })) ? 'finished' : 'superseded';

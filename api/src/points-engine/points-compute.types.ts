@@ -124,6 +124,8 @@ export interface ComputePreview {
   /** Deterministic content hash of this run's creditable rows — the UI passes it back as `expectedKey`
    *  on commit so a run that changed since it was previewed is rejected (review→commit TOCTOU guard). */
   sourceKey: string;
+  /** Content hash of the run's OK PAYOUT rows — passed back as `expectedKey` on the payout-report download. */
+  payoutKey: string;
   /** Only when a rule read visibility (design §3a): the month's visibility setup + headline counts. */
   visibility?: VisibilityPreviewSummary;
 }

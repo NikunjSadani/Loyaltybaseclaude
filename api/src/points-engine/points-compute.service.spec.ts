@@ -31,7 +31,7 @@ const mockPrisma = {
   visibilityCapture: { findMany: jest.fn() },
   outletVisibilityRecord: { findMany: jest.fn() },
   $queryRaw: jest.fn(),
-  auditLog: { create: jest.fn() },
+  auditLog: { create: jest.fn(), findFirst: jest.fn() },
   $transaction: jest.fn(),
 };
 
@@ -744,14 +744,14 @@ describe('PointsComputeService — visibility (POSM) inputs (§3a)', () => {
       { outletCode: 'W1', kpiValues: { TOTAL: 9000 } },
     ]);
     const computeOutlets = [
-      outlet('M1', 'Metro'), outlet('N1', 'Non Metro'), outlet('L1', 'Metro'), outlet('P1', 'Metro'), outlet('W1', 'Metro', 'WS'),
+      { ...outlet('M1', 'Metro'), programName: 'GOLD' }, outlet('N1', 'Non Metro'), outlet('L1', 'Metro'), outlet('P1', 'Metro'), outlet('W1', 'Metro', 'WS'),
     ];
     // outlet.findMany serves BOTH the compute universe and the per-window visibility universe (filters on outletType).
     mockPrisma.outlet.findMany.mockImplementation((args: { where: Record<string, unknown> }) =>
       Promise.resolve(
         'outletType' in args.where
           ? [{ outletCode: 'M1' }, { outletCode: 'N1' }, { outletCode: 'L1' }, { outletCode: 'P1' }]
-          : computeOutlets,
+          : computeOutlets.filter((o) => !args.where.programName || o.programName === args.where.programName),
       ),
     );
     // Old-app go-live lookups: portal live long before the month, no imported captures.
@@ -759,6 +759,7 @@ describe('PointsComputeService — visibility (POSM) inputs (§3a)', () => {
       Promise.resolve((q.strings ?? []).join('?').includes('MIN(') ? [{ goLive: new Date('2026-01-01T00:00:00.000Z') }] : []),
     );
     mockPrisma.auditLog.create.mockResolvedValue({});
+    mockPrisma.auditLog.findFirst.mockResolvedValue(null);
     mockPrisma.visibilityCapture.findMany.mockResolvedValue([
       { windowKey: '2026-10-P1', status: 'APPROVED', outlet: { outletCode: 'M1', outletType: { code: 'SSS' } } },
       { windowKey: '2026-10-P1', status: 'APPROVED', outlet: { outletCode: 'N1', outletType: { code: 'SSS' } } },
@@ -867,21 +868,54 @@ describe('PointsComputeService — visibility (POSM) inputs (§3a)', () => {
     mockSettings.getPointsEngineFlagsUncached.mockResolvedValue({ enabled: true, directCreditEnabled: true });
     mockCredits.createBatch.mockResolvedValue({ id: 'b1', batchCode: 'CB-1', status: 'PENDING_CONFIRM', period: '2026-10', totalPoints: 1, totalOutlets: 1 });
 
+    const preview = await service.previewCompute(bajajAdmin, { period: '2026-10' });
+    const key = preview.visibility!.pendingKey;
+    expect(key).toMatch(/^vp_/);
+    expect(preview.visibility!.waitingOutletCodes).toEqual(['P1']);
+
     await expect(service.commitCompute(bajajAdmin, { period: '2026-10' })).rejects.toThrow(/1 outlet will read visibility = NOT approved/);
-    await expect(service.commitCompute(bajajAdmin, { period: '2026-10', acceptVisibilityPending: 2 })).rejects.toThrow(/accepted 2, but the count is now 1/);
+    // A key for a DIFFERENT pending outlet set is refused (the set changed since acceptance).
+    await expect(
+      service.commitCompute(bajajAdmin, { period: '2026-10', acceptVisibilityPendingKey: 'vp_other' }),
+    ).rejects.toThrow(/outlets with pending visibility changed since you accepted/);
     expect(mockCredits.createBatch).not.toHaveBeenCalled();
 
-    await service.commitCompute(bajajAdmin, { period: '2026-10', acceptVisibilityPending: 1 });
+    await service.commitCompute(bajajAdmin, { period: '2026-10', acceptVisibilityPendingKey: key });
     expect(mockCredits.createBatch).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
     expect(mockPrisma.auditLog.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         action: 'APPROVE',
         entityType: 'POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED',
         entityId: 'b1',
         actorId: 'u_b',
-        metadata: expect.objectContaining({ outletsPending: 1, outletsWaitingReview: 1, route: 'commit', period: '2026-10' }),
+        metadata: expect.objectContaining({
+          outletsPending: 1, outletsWaitingReview: 1, route: 'commit', period: '2026-10', pendingKey: key,
+          waitingOutletCodes: ['P1'], openOutletCodes: [], outletCodesCapped: false,
+        }),
       }),
     });
+
+    // Idempotent repeat (same batch, acceptance already recorded) → NO second audit row.
+    mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1' });
+    mockPrisma.auditLog.findFirst.mockResolvedValue({ id: 'a1' });
+    const again = await service.commitCompute(bajajAdmin, { period: '2026-10', acceptVisibilityPendingKey: key });
+    expect(again.idempotentHit).toBe(true);
+    expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
+
+    // The audit write failing AFTER the batch exists never turns the commit into a 500; a repeat retries it.
+    mockPrisma.auditLog.findFirst.mockResolvedValue(null);
+    mockPrisma.auditLog.create.mockRejectedValueOnce(new Error('db blip'));
+    await expect(service.commitCompute(bajajAdmin, { period: '2026-10', acceptVisibilityPendingKey: key })).resolves.toMatchObject({ batchId: 'b1' });
+    await service.commitCompute(bajajAdmin, { period: '2026-10', acceptVisibilityPendingKey: key });
+    expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(3); // 1st ok, 2nd failed (logged), 3rd retried ok
+  });
+
+  it('preview figures cover only the run: a program filter excludes other programmes’ outlets from the pending set', async () => {
+    // Only M1 is in programme GOLD; P1 (waiting for review) is outside the run → nothing pending for THIS run.
+    const preview = await service.previewCompute(bajajAdmin, { period: '2026-10', program: 'GOLD' });
+    expect(preview.rows.map((r) => r.outletCode)).toEqual(['M1']);
+    expect(preview.visibility).toMatchObject({ outletsWithData: 1, outletsApproved: 1, outletsPending: 0, pendingKey: '' });
   });
 
   it('assertVisibilityPendingAccepted: nothing pending / no visibility → no gate', () => {

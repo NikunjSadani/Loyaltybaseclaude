@@ -124,4 +124,20 @@ describe('draftIssues — visibility inputs', () => {
     expect(bad).toMatch(/pick which visibility value/);
     expect(bad).toMatch(/visibility input must be a Number/);
   });
+
+  it('V4: warns (not blocks) when approvedWindows is compared with windows without reading inScope', () => {
+    const draft: RuleConfigDraft = {
+      ...UNNATI,
+      inputs: [
+        { ref: 'ok', source: 'visibility:approvedWindows', type: 'number', nullAs: 'reject' },
+        { ref: 'n', source: 'visibility:windows', type: 'number', nullAs: 'reject' },
+      ],
+      pipeline: [{ type: 'milestone', id: 'm', when: { op: 'gte', left: { var: 'ok' }, right: { var: 'n' } }, flat: 1 }],
+    };
+    const res = draftIssues(draft);
+    expect(res.blocking).toEqual([]);
+    expect(res.warnings.join(' ')).toMatch(/does not read “Outlet in the visibility programme/);
+    const withIn = draftIssues({ ...draft, inputs: [...draft.inputs, { ref: 'in', source: 'visibility:inScope', type: 'number', nullAs: 'reject' }] });
+    expect(withIn.warnings.join(' ')).not.toMatch(/Outlet in the visibility programme/);
+  });
 });

@@ -51,6 +51,7 @@ function samplePreview(overrides: Partial<ComputePreview> = {}): ComputePreview 
     engineDisabled: false,
     directCreditEnabled: false,
     sourceKey: 'pe_test',
+    payoutKey: 'pp_test',
     ruleVersionsUsed: [
       { ruleId: 'rule_cases_q3', version: 7 },
       { ruleId: 'rule_vis', version: 2 },

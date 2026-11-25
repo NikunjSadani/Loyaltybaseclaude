@@ -147,6 +147,8 @@ export interface SimulateResult {
   outcome?: EvalOutcome;
   /** The test visibility values the rule read (one per visibility input; null = blank → null policy). */
   visibilityUsed?: Array<{ ref: string; source: string; value: number | null }>;
+  /** Non-blocking authoring warnings from the backend. */
+  warnings?: string[];
 }
 
 // ── Compute preview + commit (Waves 1–2) ─────────────────────────────────────────
@@ -179,7 +181,7 @@ export interface ComputePreviewRow {
     scope: 'IN_SCOPE' | 'NOT_IN_SCOPE' | 'NO_RECORD';
     waitingWindows: number;
     openWindows: number;
-    excludedApprovals: { olderFrequency: number; notInProgramme: number };
+    excludedApprovals: { olderFrequency: number; notInProgramme: number; notLive: number };
     note: string;
   };
 }
@@ -198,6 +200,8 @@ export interface ComputePreview {
   ruleVersionsUsed: Array<{ ruleId: string; version: number }>;
   /** Content hash of this run — pass back as `expectedKey` on commit to guard the review→commit TOCTOU. */
   sourceKey: string;
+  /** Content hash of the run's PAYOUT rows — pass back as `expectedKey` on the payout-report download. */
+  payoutKey: string;
   /** Only when a rule read visibility this run: the month's visibility setup + headline counts. */
   visibility?: {
     month: string;
@@ -216,7 +220,12 @@ export interface ComputePreview {
     /** Approved captures counted although the outlet was outside the dated window scope (loaded late). */
     countedOutsideDatedScope: number;
     /** Approved captures NOT counted, by reason. */
-    excluded: { olderFrequency: number; notInProgramme: number };
+    excluded: { olderFrequency: number; notInProgramme: number; notLive: number };
+    /** The pending outlets (sorted, capped at 200 per list — the counts are complete). */
+    waitingOutletCodes: string[];
+    openOutletCodes: string[];
+    /** Hash of the exact pending outlet set — sent back as acceptVisibilityPendingKey. */
+    pendingKey: string;
   };
 }
 export interface ComputeCommitResult {

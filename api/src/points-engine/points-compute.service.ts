@@ -22,7 +22,8 @@
  * query count.
  */
 
-import { BadRequestException, ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { ExportRefusedException } from '../exports/export-kinds';
 import { createHash } from 'node:crypto';
 import { CreditAwardType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -30,7 +31,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { CreditsService } from '../credits/credits.service';
 import { PointsEngineService } from './points-engine.service';
-import { evaluateRule, isVisibilityInput, validateRule } from './points-engine.helper';
+import { evaluateRule, isVisibilityInput, ruleWarnings, validateRule } from './points-engine.helper';
 import type {
   AwardType,
   EvalContext,
@@ -155,6 +156,7 @@ export class PointsComputeService {
       directCreditEnabled,
       ruleVersionsUsed: [],
       sourceKey: computeSourceKey(clientId, period, { program: programFilter, kpiCode: kpiFilter }, [], []),
+      payoutKey: computePayoutKey(clientId, period, { program: programFilter, kpiCode: kpiFilter }, []),
     };
     if (activeKpiCodes.length === 0) return emptyPreview;
 
@@ -535,6 +537,7 @@ export class PointsComputeService {
       directCreditEnabled,
       ruleVersionsUsed,
       sourceKey: '', // set below
+      payoutKey: '', // set below
       // Present ONLY when a rule read visibility — the month's visibility setup + counts, shown on the preview so
       // an unusable setup (switched off / no scope) is loud. Absent for every run that never touches visibility.
       ...(visibilityLoad ? { visibility: summarizeVisibility(await visibilityLoad, visibilityOutletCodes) } : {}),
@@ -568,6 +571,9 @@ export class PointsComputeService {
       [...creditableVersions.values()],
       creditable,
     );
+    // The PAYOUT report's own content key (payouts are not in sourceKey — they are never credited): the UI passes it
+    // back as `expectedKey` on the payout-report download so a run that changed since review is refused.
+    preview.payoutKey = computePayoutKey(clientId, period, preview.filter, rows);
     return preview;
   }
 
@@ -593,8 +599,8 @@ export class PointsComputeService {
       program?: string | null;
       kpiCode?: string | null;
       expectedKey?: string | null;
-      /** The pending-visibility outlet count the admin accepted (must equal the fresh run's — §3a). */
-      acceptVisibilityPending?: number | null;
+      /** The pendingKey of the visibility-pending outlet set the admin accepted (must equal the fresh run's — §3a). */
+      acceptVisibilityPendingKey?: string | null;
     },
   ): Promise<ComputeCommitResult> {
     // MONEY GATE read UNCACHED + fail-closed: a Gifsy "turn it off" must take effect immediately across
@@ -612,7 +618,7 @@ export class PointsComputeService {
 
     const preview = await this.previewCompute(user, opts);
     // Visibility still pending (waiting for review / open window) must be explicitly accepted — never silent (§3a).
-    PointsComputeService.assertVisibilityPendingAccepted(preview, opts.acceptVisibilityPending);
+    PointsComputeService.assertVisibilityPendingAccepted(preview, opts.acceptVisibilityPendingKey);
     const uploadRows = PointsComputeService.mapPreviewToUploadRows(preview); // OK rows only, whole points
     if (uploadRows.length === 0) {
       throw new BadRequestException(
@@ -668,10 +674,13 @@ export class PointsComputeService {
       { kind: POINTS_ENGINE_SOURCE, key: sourceKey },
     );
 
-    // Record the admin's acceptance of pending visibility against the batch (audit trail; §3a).
+    // Record the admin's acceptance of pending visibility against the batch (audit trail; §3a). ONE row per batch:
+    // an idempotent repeat commit (same batch) writes no second row, and a repeat after a failed write fills it in.
+    // Never fails the commit — the batch already exists (logged; the next repeat retries the write).
     await PointsComputeService.recordVisibilityAcceptance(this.prisma, user, preview, {
       route: 'commit',
       entityId: batch.id,
+      onePerEntity: true,
     });
 
     // Count OTHER credit batches for this period — ANY source (engine OR manual upload) — so the UI can
@@ -730,6 +739,8 @@ export class PointsComputeService {
     outcome?: ReturnType<typeof evaluateRule>;
     /** The test visibility values the rule read (one per `visibility:*` input; null = left blank → nullAs). */
     visibilityUsed?: Array<{ ref: string; source: string; value: number | null }>;
+    /** Non-blocking authoring warnings (ruleWarnings) — a valid rule that is easy to get wrong. */
+    warnings?: string[];
   } {
     const config: PointsRuleConfig = {
       ruleId: 'simulation',
@@ -773,12 +784,14 @@ export class PointsComputeService {
       if (verrs.length > 0) return { valid: false, errors: verrs };
     }
     const outcome = evaluateRule(config, ctx);
-    if (visInputs.length === 0) return { valid: true, errors: [], outcome };
+    const warnings = ruleWarnings(config);
+    const warn = warnings.length > 0 ? { warnings } : {};
+    if (visInputs.length === 0) return { valid: true, errors: [], outcome, ...warn };
     const visibilityUsed = visInputs.map((inp) => {
       const key = (inp.source as string).slice('visibility:'.length) as 'approvedWindows' | 'approved' | 'windows' | 'inScope';
       return { ref: inp.ref, source: inp.source as string, value: visibility ? visibility[key] ?? null : null };
     });
-    return { valid: true, errors: [], outcome, visibilityUsed };
+    return { valid: true, errors: [], outcome, visibilityUsed, ...warn };
   }
 
   /**
@@ -786,17 +799,27 @@ export class PointsComputeService {
    * or STILL OPEN, those outlets read "not approved" for it now. Export (credit-upload + payout report) and direct
    * credit are REFUSED unless the admin accepted exactly that outlet count (a changed count = re-confirm). Throws 409.
    */
-  static assertVisibilityPendingAccepted(preview: ComputePreview, accepted: number | null | undefined): void {
+  static assertVisibilityPendingAccepted(preview: ComputePreview, acceptedKey: string | null | undefined): void {
     const v = preview.visibility;
     if (!v || !v.available || v.outletsPending <= 0) return;
-    if (accepted === v.outletsPending) return;
-    throw new ConflictException(
+    if (acceptedKey && acceptedKey === v.pendingKey) return;
+    // ExportRefusedException (a 409) — its message is shown as-is on the Downloads page for a background build.
+    throw new ExportRefusedException(
       `${v.outletsPending} outlet${v.outletsPending === 1 ? '' : 's'} will read visibility = NOT approved for ${preview.period} ` +
         `because a review is still pending (${v.outletsWaitingReview}) or a window is still open (${v.outletsOpenWindow}). ` +
-        (accepted == null
+        (!acceptedKey
           ? 'Tick "I accept" on the preview to continue, or wait until the reviews / windows are done.'
-          : `You accepted ${accepted}, but the count is now ${v.outletsPending} — re-preview and accept again.`),
+          : 'The outlets with pending visibility changed since you accepted them — re-run the preview and accept again.'),
     );
+  }
+
+  /** §3a: a money file built from a preview that changed since review (POINTS sourceKey / PAYOUT payoutKey) → 409. */
+  static assertExpectedKey(actual: string, expected: string | null | undefined, what: string): void {
+    if (expected && expected !== actual) {
+      throw new ExportRefusedException(
+        `The computation changed since you last previewed it (achievements, targets, visibility or a rule were updated). Re-run the preview and review the new result before downloading the ${what}.`,
+      );
+    }
   }
 
   /** Audit row for an accepted pending-visibility run (no-op when nothing was pending). */
@@ -804,29 +827,51 @@ export class PointsComputeService {
     prisma: Pick<PrismaService, 'auditLog'>,
     user: JwtPayload,
     preview: ComputePreview,
-    ctx: { route: string; entityId: string },
+    ctx: { route: string; entityId: string; exportRequestId?: string | null; onePerEntity?: boolean },
   ): Promise<void> {
     const v = preview.visibility;
     if (!v || !v.available || v.outletsPending <= 0) return;
-    await prisma.auditLog.create({
-      data: {
-        action: 'APPROVE',
-        entityType: 'POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED',
-        entityId: ctx.entityId,
-        actorId: user.sub,
-        metadata: {
-          clientId: user.clientId,
-          period: preview.period,
-          route: ctx.route,
-          filter: { program: preview.filter?.program ?? null, kpiCode: preview.filter?.kpiCode ?? null },
-          outletsPending: v.outletsPending,
-          outletsWaitingReview: v.outletsWaitingReview,
-          outletsOpenWindow: v.outletsOpenWindow,
-          openWindowsInMonth: v.openWindowsInMonth,
-          sourceKey: preview.sourceKey,
+    try {
+      if (ctx.onePerEntity) {
+        const existing = await prisma.auditLog.findFirst({
+          where: { entityType: VISIBILITY_ACCEPT_ENTITY, entityId: ctx.entityId },
+          select: { id: true },
+        });
+        if (existing) return;
+      }
+      await prisma.auditLog.create({
+        data: {
+          action: 'APPROVE',
+          entityType: VISIBILITY_ACCEPT_ENTITY,
+          entityId: ctx.entityId,
+          actorId: user.sub,
+          metadata: {
+            clientId: user.clientId,
+            period: preview.period,
+            route: ctx.route,
+            ...(ctx.exportRequestId ? { exportRequestId: ctx.exportRequestId } : {}),
+            filter: { program: preview.filter?.program ?? null, kpiCode: preview.filter?.kpiCode ?? null },
+            pendingKey: v.pendingKey,
+            outletsPending: v.outletsPending,
+            outletsWaitingReview: v.outletsWaitingReview,
+            outletsOpenWindow: v.outletsOpenWindow,
+            openWindowsInMonth: v.openWindowsInMonth,
+            // The accepted outlets (each list capped; the counts above are complete).
+            waitingOutletCodes: v.waitingOutletCodes,
+            openOutletCodes: v.openOutletCodes,
+            outletCodesCapped: v.outletsWaitingReview > v.waitingOutletCodes.length || v.outletsOpenWindow > v.openOutletCodes.length,
+            sourceKey: preview.sourceKey,
+            payoutKey: preview.payoutKey,
+          },
         },
-      },
-    });
+      });
+    } catch (e) {
+      // The money action already happened (batch created / file built) — never turn it into a 500. Logged loudly; a
+      // repeat of the same commit (idempotent) retries this write.
+      ACCEPT_LOGGER.error(
+        `visibility-pending acceptance audit write failed (${ctx.route} ${ctx.entityId}, ${user.clientId} ${preview.period}): ${(e as Error).message}`,
+      );
+    }
   }
 
   /**
@@ -963,6 +1008,9 @@ function computeSourceKey(
   return `pe_${createHash('sha256').update(payload).digest('hex')}`;
 }
 
+const VISIBILITY_ACCEPT_ENTITY = 'POINTS_ENGINE_VISIBILITY_PENDING_ACCEPTED';
+const ACCEPT_LOGGER = new Logger('PointsComputeVisibility');
+
 /** Impossible simulator visibility values (§3a) → plain errors. Blank (null) values are allowed (= missing). */
 function simulateVisibilityErrors(v: {
   approvedWindows: number | null;
@@ -994,6 +1042,26 @@ function simulateVisibilityErrors(v: {
     errs.push('An outlet outside the visibility programme has 0 windows and nothing approved.');
   }
   return errs;
+}
+
+/** Deterministic key over the OK PAYOUT rows (outlet × field × whole INR × rule version), tenant + period scoped. */
+function computePayoutKey(
+  clientId: string,
+  period: string,
+  filter: { program?: string | null; kpiCode?: string | null } | undefined,
+  rows: ComputePreviewRow[],
+): string {
+  const payout = rows
+    .filter((r) => r.status === 'OK' && r.awardType === 'PAYOUT')
+    .map((r) => `${r.outletCode}|${r.kpiCode}|${r.fieldId ?? ''}|${r.payoutRupees ?? 0}|${r.ruleId ?? ''}@${r.ruleVersion ?? ''}`)
+    .sort();
+  const payload = JSON.stringify({
+    clientId,
+    period,
+    filter: { program: filter?.program ?? null, kpiCode: filter?.kpiCode ?? null },
+    payout,
+  });
+  return `pp_${createHash('sha256').update(payload).digest('hex')}`;
 }
 
 /** A finite number, else null (the evaluator's "absent" that triggers each input's nullAs). */

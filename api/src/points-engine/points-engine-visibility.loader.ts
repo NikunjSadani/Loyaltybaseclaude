@@ -14,16 +14,21 @@
  * server-side: all required photos approved → APPROVED) and EITHER
  *   (a) the outlet is in THAT window's visibility universe (visibilityWindowUniverseWhere — the Visibility report's
  *       per-window rule: a closed window = outlets live + KYC-approved during it; an open one = today's in-scope), OR
- *   (b) the outlet's type / programme is in the visibility programme (an APPROVED capture is proof the visit
- *       happened — it counts even when the outlet's created / KYC dates put it outside the dated universe, e.g. an
- *       outlet loaded into the system after its window). These are counted and reported (`countedOutsideDatedScope`).
+ *   (b) the outlet is in the visibility programme TODAY by every rule of visibilityUniverseBase EXCEPT the dates —
+ *       not removed / deactivated, KYC-approved (isActive), not PARKED / NOT_INTERESTED, type + programme in scope
+ *       (visibilityOutOfScopeReason = null). An APPROVED capture is proof the visit happened, so ONLY the created /
+ *       KYC-approval DATES are relaxed (e.g. an outlet loaded into the system after its window). Counted and reported
+ *       (`countedOutsideDatedScope`); an approved capture failing any other rule is excluded with its reason.
  * Imported old-app captures are stored APPROVED → they count. SUBMITTED, CHANGES_REQUESTED, REJECTED never count.
  * NOT counted but always reported (summary + the outlet's row): an APPROVED capture of an outlet whose type /
- * programme is not in the visibility programme, and an APPROVED capture under an OLDER frequency's window key
- * (e.g. `-P2` after the tenant moved to once a month — its day range is unknown).
+ * programme is not in the visibility programme (`notInProgramme`), of an outlet that is removed / deactivated / not
+ * KYC-approved / parked / not interested today (`notLive`), and an APPROVED capture under an OLDER frequency's window
+ * key (e.g. `-P2` after the tenant moved to once a month — its day range is unknown; `olderFrequency`).
  *
- * `windows` per outlet = the windows of the month the outlet was actually in scope for (≤ the month's windows), so
- * "every window approved" (approvedWindows ≥ windows) is fair to an outlet that joined mid-month.
+ * `windows` per in-scope outlet = the windows of the month the outlet was actually in scope for (≤ the month's
+ * windows), so "every window approved" (approvedWindows ≥ windows) is fair to an outlet that joined mid-month. An
+ * OUT-of-scope outlet keeps the MONTH's window count (inScope 0 tells it apart) — never 0, or a rule
+ * `approvedWindows >= windows` would pay it.
  *
  * PENDING (never silent): per outlet, windows still WAITING FOR REVIEW (SUBMITTED) and windows STILL OPEN without an
  * approval. The preview counts the outlets affected; export / payout report / direct credit are refused until the
@@ -32,12 +37,17 @@
  * AMOUNT_UPLOAD: the month's uploaded OutletVisibilityRecord; APPROVED → 1 of 1. PENDING / UNDER_REVIEW → 0 and
  * counted as waiting for review. No record → 0, inScope 0 ("no status uploaded").
  */
+import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import type { PrismaService } from '../prisma/prisma.service';
 import type { EvalContext } from './points-engine.types';
 import { monthWindows } from '../visibility/visibility-metrics';
 import { windowRangeUtc } from '../visibility/visibility-report-scope';
-import { visibilityNotApplicable, visibilityWindowUniverseWhere } from '../visibility/visibility-scope.helper';
+import {
+  visibilityNotApplicable,
+  visibilityOutOfScopeReason,
+  visibilityWindowUniverseWhere,
+} from '../visibility/visibility-scope.helper';
 import {
   classifyWindowAgainstGoLive,
   importedWindowKeys,
@@ -64,10 +74,27 @@ export interface OutletVisibilityFacts {
   /** PHOTO_APPROVAL: windows with a re-take request / rejection. */
   notApprovedWindows: number;
   /** APPROVED captures of this outlet that were NOT counted, by reason. */
-  excludedApprovals: { olderFrequency: number; notInProgramme: number };
+  excludedApprovals: ExcludedApprovals;
+  /** APPROVED captures of this outlet counted although it was outside the dated window scope (loaded late). */
+  countedOutsideDatedScope: number;
   /** Plain one-liner for the explanation ("Visibility 2026-11: 1 of 2 windows approved … → approved=1"). */
   note: string;
 }
+
+/** APPROVED captures NOT counted, by reason. */
+export interface ExcludedApprovals {
+  /** A window key the current capture frequency does not have. */
+  olderFrequency: number;
+  /** The outlet's type / programme is not in the visibility programme. */
+  notInProgramme: number;
+  /** The outlet is removed / deactivated / not KYC-approved / parked / not interested today. */
+  notLive: number;
+}
+
+const noExclusions = (): ExcludedApprovals => ({ olderFrequency: 0, notInProgramme: 0, notLive: 0 });
+
+/** Cap on the outlet codes listed in the preview / audit row (the counts are always complete). */
+export const VISIBILITY_PENDING_CODES_CAP = 200;
 
 export interface VisibilityInputData {
   month: string;
@@ -80,11 +107,10 @@ export interface VisibilityInputData {
   /** Windows of the month not yet closed (PHOTO_APPROVAL). */
   openWindowsInMonth: number;
   byOutlet: Map<string, OutletVisibilityFacts>;
-  /** APPROVED captures counted although the outlet was outside the dated window universe (rule (b) above). */
-  countedOutsideDatedScope: number;
-  /** APPROVED captures NOT counted, by reason (outlet codes kept so out-of-scope rows can say so). */
-  excluded: { olderFrequency: number; notInProgramme: number };
-  excludedByOutlet: Map<string, { olderFrequency: number; notInProgramme: number }>;
+  /** outletCode → APPROVED captures counted although outside the dated window universe (rule (b) above). */
+  countedOutsideByOutlet: Map<string, number>;
+  /** outletCode → APPROVED captures NOT counted, by reason (so out-of-scope rows can say so). */
+  excludedByOutlet: Map<string, ExcludedApprovals>;
   scopeConfig?: { outletScope: string[]; programs: string[]; subPrograms: string[] };
 }
 
@@ -111,7 +137,15 @@ export interface VisibilityPreviewSummary {
    */
   outletsPending: number;
   countedOutsideDatedScope: number;
-  excluded: { olderFrequency: number; notInProgramme: number };
+  excluded: ExcludedApprovals;
+  /** The pending outlets by category (sorted, capped at VISIBILITY_PENDING_CODES_CAP — the counts are complete). */
+  waitingOutletCodes: string[];
+  openOutletCodes: string[];
+  /**
+   * Hash of the EXACT pending outlet sets (sorted codes per category). The admin's acceptance carries it back; the
+   * server recomputes and refuses a different set (a different outlet became pending → re-accept). '' = nothing pending.
+   */
+  pendingKey: string;
 }
 
 interface VisibilityConfigLike {
@@ -125,8 +159,8 @@ type LoaderPrisma = Pick<PrismaService, 'visibilityCapture' | 'outlet' | 'outlet
 
 function emptyData(month: string, mode: VisibilityInputData['mode'], windows: number): VisibilityInputData {
   return {
-    month, mode, available: true, windows, openWindowsInMonth: 0, byOutlet: new Map(), countedOutsideDatedScope: 0,
-    excluded: { olderFrequency: 0, notInProgramme: 0 }, excludedByOutlet: new Map(),
+    month, mode, available: true, windows, openWindowsInMonth: 0, byOutlet: new Map(),
+    countedOutsideByOutlet: new Map(), excludedByOutlet: new Map(),
   };
 }
 
@@ -166,7 +200,8 @@ export async function loadVisibilityInputs(
         waitingWindows: ok ? 0 : 1, // PENDING / UNDER_REVIEW = not decided yet
         openWindows: 0,
         notApprovedWindows: 0,
-        excludedApprovals: { olderFrequency: 0, notInProgramme: 0 },
+        excludedApprovals: noExclusions(),
+        countedOutsideDatedScope: 0,
         note: ok
           ? `Visibility ${month} (uploaded status): APPROVED → approved=1`
           : `Visibility ${month} (uploaded status): ${r.status} — not approved yet → approved=0`,
@@ -203,7 +238,19 @@ export async function loadVisibilityInputs(
       select: {
         windowKey: true,
         status: true,
-        outlet: { select: { outletCode: true, programName: true, programCategory: true, outletType: { select: { code: true } } } },
+        outlet: {
+          select: {
+            outletCode: true,
+            programName: true,
+            programCategory: true,
+            outletType: { select: { code: true } },
+            // visibilityOutOfScopeReason inputs — the today's-state rules an approved late capture must still pass.
+            deletedAt: true,
+            deactivatedAt: true,
+            isActive: true,
+            kycIntent: true,
+          },
+        },
       },
     }),
     Promise.all(
@@ -243,9 +290,8 @@ export async function loadVisibilityInputs(
     scopeWindowsBy.set(code, s);
   };
   for (const [wk, codes] of universeByKey) for (const code of codes) addScope(code, wk);
-  const excludeFor = (code: string, reason: 'olderFrequency' | 'notInProgramme') => {
-    data.excluded[reason] += 1;
-    const e = data.excludedByOutlet.get(code) ?? { olderFrequency: 0, notInProgramme: 0 };
+  const excludeFor = (code: string, reason: keyof ExcludedApprovals) => {
+    const e = data.excludedByOutlet.get(code) ?? noExclusions();
     e[reason] += 1;
     data.excludedByOutlet.set(code, e);
   };
@@ -261,12 +307,13 @@ export async function loadVisibilityInputs(
     }
     if (!universeByKey.get(c.windowKey)?.has(code)) {
       if (c.status !== 'APPROVED') continue; // not in this window's scope and not proven → not a visit due
-      if (visibilityNotApplicable(o, scopeCfg)) {
-        excludeFor(code, 'notInProgramme');
+      // ONLY the created / KYC-approval DATES are relaxed: every other in-scope rule (visibilityUniverseBase) holds.
+      if (visibilityOutOfScopeReason(o, scopeCfg) !== null) {
+        excludeFor(code, visibilityNotApplicable(o, scopeCfg) ? 'notInProgramme' : 'notLive');
         continue;
       }
-      // An approved capture of an in-programme outlet is proof — counted despite its created / KYC dates.
-      data.countedOutsideDatedScope += 1;
+      // An approved capture of a live in-programme outlet is proof — counted despite its created / KYC dates.
+      data.countedOutsideByOutlet.set(code, (data.countedOutsideByOutlet.get(code) ?? 0) + 1);
       addScope(code, c.windowKey);
     }
     const m = statusBy.get(code) ?? new Map<string, string>();
@@ -297,13 +344,15 @@ export async function loadVisibilityInputs(
     }
     const n = scopeWindows.size;
     const approved: 0 | 1 = approvedWindows >= 1 ? 1 : 0;
-    const excl = data.excludedByOutlet.get(code) ?? { olderFrequency: 0, notInProgramme: 0 };
+    const excl = data.excludedByOutlet.get(code) ?? noExclusions();
     const extras: string[] = [];
     if (waitingWindows) extras.push(`${waitingWindows} waiting for review`);
     if (openWindows) extras.push(`${plural(openWindows, 'window')} still open`);
     if (notApprovedWindows) extras.push(`${notApprovedWindows} re-take requested / rejected`);
     extras.push(...oldAppNotes);
     if (excl.olderFrequency) extras.push(`${plural(excl.olderFrequency, 'approval')} under an older capture frequency not counted`);
+    const late = data.countedOutsideByOutlet.get(code) ?? 0;
+    if (late) extras.push(`${plural(late, 'approval')} counted although the outlet was added / KYC-approved after the window`);
     data.byOutlet.set(code, {
       approvedWindows,
       approved,
@@ -314,6 +363,7 @@ export async function loadVisibilityInputs(
       openWindows,
       notApprovedWindows,
       excludedApprovals: excl,
+      countedOutsideDatedScope: late,
       note:
         `Visibility ${month}: ${approvedWindows} of ${plural(n, 'window')} approved` +
         (extras.length ? ` (${extras.join('; ')})` : '') +
@@ -334,10 +384,12 @@ export function visibilityFactsFor(
   if (!data.available) return null;
   const hit = data.byOutlet.get(outlet.outletCode);
   if (hit) return hit;
-  const excl = data.excludedByOutlet.get(outlet.outletCode) ?? { olderFrequency: 0, notInProgramme: 0 };
+  const excl = data.excludedByOutlet.get(outlet.outletCode) ?? noExclusions();
+  // An out-of-scope outlet keeps the MONTH's window count (never 0 — `approvedWindows >= windows` must not pay it);
+  // inScope 0 is what tells it apart.
   const base = {
-    approvedWindows: 0, approved: 0 as const, windows: 0, inScope: 0 as const, waitingWindows: 0, openWindows: 0,
-    notApprovedWindows: 0, excludedApprovals: excl,
+    approvedWindows: 0, approved: 0 as const, windows: data.windows, inScope: 0 as const, waitingWindows: 0, openWindows: 0,
+    notApprovedWindows: 0, excludedApprovals: excl, countedOutsideDatedScope: 0,
   };
   if (data.mode === 'AMOUNT_UPLOAD') {
     return { ...base, scope: 'NO_RECORD', note: `Visibility ${data.month}: no visibility status uploaded for this outlet → approved=0, inScope=0` };
@@ -348,6 +400,7 @@ export function visibilityFactsFor(
       : 'the outlet was not live and KYC-approved during this month’s windows';
   const lost: string[] = [];
   if (excl.notInProgramme) lost.push(`${plural(excl.notInProgramme, 'approved capture')} not counted — outlet not in the visibility programme`);
+  if (excl.notLive) lost.push(`${plural(excl.notLive, 'approved capture')} not counted — outlet removed / deactivated / not KYC-approved / parked`);
   if (excl.olderFrequency) lost.push(`${plural(excl.olderFrequency, 'approval')} under an older capture frequency not counted`);
   return {
     ...base,
@@ -364,22 +417,33 @@ export function visibilityContext(facts: OutletVisibilityFacts | null): EvalCont
 
 /**
  * Run-level summary for the preview. `outletCodes` = the outlets of THIS run whose rule read visibility (a program /
- * KPI filter narrows it) — the outlet counts (incl. the pending count the admin must accept) cover only those.
- * Omitted → every outlet with data. The excluded / counted-outside-scope figures are tenant-month wide.
+ * KPI filter narrows it; deleted outlets are never in a run) — EVERY figure, incl. the pending set the admin must
+ * accept and the counted / excluded approvals, covers only those. Omitted → every outlet with data.
  */
 export function summarizeVisibility(data: VisibilityInputData, outletCodes?: ReadonlySet<string>): VisibilityPreviewSummary {
+  const inRun = (code: string) => !outletCodes || outletCodes.has(code);
   let outletsApproved = 0;
-  let outletsWaitingReview = 0;
-  let outletsOpenWindow = 0;
-  let outletsPending = 0;
   let outletsWithData = 0;
+  const waiting: string[] = [];
+  const open: string[] = [];
   for (const [code, f] of data.byOutlet) {
-    if (outletCodes && !outletCodes.has(code)) continue;
+    if (!inRun(code)) continue;
     outletsWithData += 1;
     if (f.approved === 1) outletsApproved += 1;
-    if (f.waitingWindows > 0) outletsWaitingReview += 1;
-    if (f.openWindows > 0) outletsOpenWindow += 1;
-    if (f.waitingWindows > 0 || f.openWindows > 0) outletsPending += 1;
+    if (f.waitingWindows > 0) waiting.push(code);
+    if (f.openWindows > 0) open.push(code);
+  }
+  waiting.sort();
+  open.sort();
+  const pendingSet = new Set([...waiting, ...open]);
+  let countedOutsideDatedScope = 0;
+  for (const [code, n] of data.countedOutsideByOutlet) if (inRun(code)) countedOutsideDatedScope += n;
+  const excluded = noExclusions();
+  for (const [code, e] of data.excludedByOutlet) {
+    if (!inRun(code)) continue;
+    excluded.olderFrequency += e.olderFrequency;
+    excluded.notInProgramme += e.notInProgramme;
+    excluded.notLive += e.notLive;
   }
   return {
     month: data.month,
@@ -390,10 +454,19 @@ export function summarizeVisibility(data: VisibilityInputData, outletCodes?: Rea
     openWindowsInMonth: data.openWindowsInMonth,
     outletsApproved,
     outletsWithData,
-    outletsWaitingReview,
-    outletsOpenWindow,
-    outletsPending,
-    countedOutsideDatedScope: data.countedOutsideDatedScope,
-    excluded: { ...data.excluded },
+    outletsWaitingReview: waiting.length,
+    outletsOpenWindow: open.length,
+    outletsPending: pendingSet.size,
+    countedOutsideDatedScope,
+    excluded,
+    waitingOutletCodes: waiting.slice(0, VISIBILITY_PENDING_CODES_CAP),
+    openOutletCodes: open.slice(0, VISIBILITY_PENDING_CODES_CAP),
+    pendingKey: pendingSet.size === 0 ? '' : visibilityPendingKey(data.month, waiting, open),
   };
+}
+
+/** Deterministic hash of the exact pending outlet sets (month + sorted codes per category). */
+export function visibilityPendingKey(month: string, waiting: string[], open: string[]): string {
+  const payload = JSON.stringify({ month, waiting: [...waiting].sort(), open: [...open].sort() });
+  return `vp_${createHash('sha256').update(payload).digest('hex')}`;
 }

@@ -7,7 +7,7 @@
  * whitelist rejections, the formula divide-by-zero guard, and trace-step chain correctness.
  */
 
-import { evaluateRule, validateRule } from './points-engine.helper';
+import { evaluateRule, ruleWarnings, validateRule } from './points-engine.helper';
 import {
   PointsRuleConfig,
   PipelineNode,
@@ -952,6 +952,22 @@ describe('visibility inputs (§3a)', () => {
     });
     expect(expectOk(evaluateRule(all, visCtx({ approvedWindows: 2, approved: 1, windows: 2 }))).points).toBe(100);
     expect(expectOk(evaluateRule(all, visCtx({ approvedWindows: 1, approved: 1, windows: 2 }))).points).toBe(0);
+  });
+
+  it('ruleWarnings: approvedWindows vs windows without inScope → a (non-blocking) warning; with inScope → none', () => {
+    const base = (withInScope: boolean) =>
+      rule({
+        inputs: [
+          { ref: 'ok', source: 'visibility:approvedWindows', type: 'number', nullAs: 'reject' },
+          { ref: 'n', source: 'visibility:windows', type: 'number', nullAs: 'reject' },
+          ...(withInScope ? [{ ref: 'in', source: 'visibility:inScope', type: 'number' as const, nullAs: 'reject' as const }] : []),
+        ],
+        pipeline: [{ type: 'milestone', id: 'm', when: { op: 'gte', left: { var: 'ok' }, right: { var: 'n' } }, flat: 1 }],
+      });
+    expect(validateRule(base(false))).toEqual([]); // valid — only a warning
+    expect(ruleWarnings(base(false)).join(' ')).toMatch(/does not read “Outlet in the visibility programme/);
+    expect(ruleWarnings(base(true))).toEqual([]);
+    expect(ruleWarnings(samt)).toEqual([]);
   });
 
   it('inScope tells "not applicable" from "not approved"', () => {

@@ -54,7 +54,8 @@ function vis(over: Partial<NonNullable<ComputePreview['visibility']>> = {}): Non
   return {
     month: '2026-10', mode: 'PHOTO_APPROVAL', available: true, windows: 2, openWindowsInMonth: 0,
     outletsApproved: 3, outletsWithData: 5, outletsWaitingReview: 0, outletsOpenWindow: 0, outletsPending: 0,
-    countedOutsideDatedScope: 0, excluded: { olderFrequency: 0, notInProgramme: 0 },
+    countedOutsideDatedScope: 0, excluded: { olderFrequency: 0, notInProgramme: 0, notLive: 0 },
+    waitingOutletCodes: [], openOutletCodes: [], pendingKey: '',
     ...over,
   };
 }
@@ -69,6 +70,7 @@ function makePreview(over: Partial<ComputePreview> = {}): ComputePreview {
     engineDisabled: false,
     directCreditEnabled: true,
     sourceKey: 'deoleo|2026-09|cf_x|v7',
+    payoutKey: 'pp_x',
     ruleVersionsUsed: [{ ruleId: 'rule_cases_q3', version: 7 }],
     rows: [
       {
@@ -206,7 +208,7 @@ describe('Points Engine compute page', () => {
     previewMock.mockResolvedValue({
       success: true,
       data: makePreview({
-        visibility: vis({ countedOutsideDatedScope: 2, excluded: { olderFrequency: 1, notInProgramme: 0 } }),
+        visibility: vis({ countedOutsideDatedScope: 2, excluded: { olderFrequency: 1, notInProgramme: 0, notLive: 3 } }),
       }),
     });
     render(<ComputePage />);
@@ -215,6 +217,7 @@ describe('Points Engine compute page', () => {
     const exc = (await screen.findByTestId('visibility-exceptions')).textContent ?? '';
     expect(exc).toMatch(/2 approved capture\(s\) counted for outlets added or KYC-approved after their window/);
     expect(exc).toMatch(/1 approved capture\(s\) NOT counted — taken under an older capture frequency/);
+    expect(exc).toMatch(/3 approved capture\(s\) NOT counted — the outlet is removed, deactivated/);
     expect(screen.queryByTestId('visibility-pending')).not.toBeInTheDocument();
   });
 
@@ -237,7 +240,12 @@ describe('Points Engine compute page', () => {
   it('PE-C2d: pending visibility blocks Export / Credit until the admin ticks "I accept N", then sends N', async () => {
     previewMock.mockResolvedValue({
       success: true,
-      data: makePreview({ visibility: vis({ outletsWaitingReview: 2, outletsOpenWindow: 3, outletsPending: 4, openWindowsInMonth: 1 }) }),
+      data: makePreview({
+        visibility: vis({
+          outletsWaitingReview: 2, outletsOpenWindow: 3, outletsPending: 4, openWindowsInMonth: 1,
+          waitingOutletCodes: ['A', 'B'], openOutletCodes: ['B', 'C', 'D'], pendingKey: 'vp_set1',
+        }),
+      }),
     });
     render(<ComputePage />);
     await runPreview();
@@ -253,7 +261,8 @@ describe('Points Engine compute page', () => {
     expect(creditBtn).not.toBeDisabled();
     fireEvent.click(creditBtn);
     await waitFor(() => expect(commitMock).toHaveBeenCalledTimes(1));
-    expect(commitMock).toHaveBeenCalledWith(expect.objectContaining({ acceptVisibilityPending: 4 }));
+    expect(commitMock).toHaveBeenCalledWith(expect.objectContaining({ acceptVisibilityPendingKey: 'vp_set1' }));
+    expect(screen.getByTestId('visibility-pending-codes').textContent).toBe('Outlets: A, B, C, D');
   });
 
   it('PE-C2e: an OK row that paid 0 shows its reason', async () => {

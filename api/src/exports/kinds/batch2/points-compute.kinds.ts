@@ -36,8 +36,10 @@ export interface PointsComputeParams {
   period: string;
   program: string | null;
   kpiCode: string | null;
-  /** §3a: the pending-visibility outlet count the admin accepted (money files only). */
-  acceptVisibilityPending?: number | null;
+  /** §3a: the pendingKey of the visibility-pending outlet set the admin accepted (money files only). */
+  acceptVisibilityPendingKey?: string | null;
+  /** The run key the operator reviewed (sourceKey for the credit file, payoutKey for the payout report). */
+  expectedKey?: string | null;
 }
 
 /** Same as every points-compute download route: @Roles('GIFSY_ADMIN','CLIENT_ADMIN') + points_rules:read. */
@@ -52,7 +54,8 @@ function parse(raw: unknown): PointsComputeParams {
     period: q.period,
     program: q.program ?? null,
     kpiCode: q.kpiCode ?? null,
-    ...(q.acceptVisibilityPending !== undefined ? { acceptVisibilityPending: q.acceptVisibilityPending } : {}),
+    ...(q.acceptVisibilityPendingKey !== undefined ? { acceptVisibilityPendingKey: q.acceptVisibilityPendingKey } : {}),
+    ...(q.expectedKey !== undefined ? { expectedKey: q.expectedKey } : {}),
   };
 }
 
@@ -81,6 +84,8 @@ function pointsKind(opts: {
    * the pending outlet count; the acceptance is written to the audit log. The review report is not gated.
    */
   requiresVisibilityAcceptance?: boolean;
+  /** Which preview key `expectedKey` is checked against (a money file must match the run the operator reviewed). */
+  expectedKeyOf?: (preview: ComputePreview) => string;
 }): ExportKindDef<PointsComputeParams> {
   return {
     kind: opts.kind,
@@ -105,14 +110,16 @@ function pointsKind(opts: {
         program: p.program,
         kpiCode: p.kpiCode,
       });
+      if (opts.expectedKeyOf) PointsComputeService.assertExpectedKey(opts.expectedKeyOf(preview), p.expectedKey, opts.label.toLowerCase());
       if (opts.requiresVisibilityAcceptance) {
-        PointsComputeService.assertVisibilityPendingAccepted(preview, p.acceptVisibilityPending ?? null);
+        PointsComputeService.assertVisibilityPendingAccepted(preview, p.acceptVisibilityPendingKey ?? null);
       }
       const rowCount = await opts.write(preview, out);
       if (opts.requiresVisibilityAcceptance) {
         await PointsComputeService.recordVisibilityAcceptance(ctx.prisma, ctx.user, preview, {
           route: opts.route,
-          entityId: `${ctx.clientId}:${p.period}`,
+          entityId: ctx.requestId ?? `${ctx.clientId}:${p.period}`,
+          exportRequestId: ctx.requestId ?? null,
         });
       }
       // Recorded once the file has been built (the guard records a route download on a 2xx response).
@@ -130,6 +137,7 @@ export const POINTS_CREDIT_UPLOAD_KIND = pointsKind({
   write: writeCreditUploadXlsx,
   requiresEngineEnabled: true,
   requiresVisibilityAcceptance: true,
+  expectedKeyOf: (p) => p.sourceKey,
 });
 
 export const POINTS_PREVIEW_REPORT_KIND = pointsKind({
@@ -147,6 +155,7 @@ export const POINTS_PAYOUT_REPORT_KIND = pointsKind({
   fileName: (period) => `points-payout-report-${period}.xlsx`,
   write: writePayoutReportXlsx,
   requiresVisibilityAcceptance: true,
+  expectedKeyOf: (p) => p.payoutKey,
 });
 
 export const POINTS_COMPUTE_KINDS = [POINTS_CREDIT_UPLOAD_KIND, POINTS_PREVIEW_REPORT_KIND, POINTS_PAYOUT_REPORT_KIND];

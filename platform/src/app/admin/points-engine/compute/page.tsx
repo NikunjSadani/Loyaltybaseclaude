@@ -374,7 +374,10 @@ export default function PointsComputePage() {
   const handleExport = async () => {
     if (!applied || fileAction.blocked) return;
     setExportMsg(null);
-    showOutcome(await fileAction.run(() => downloadExport({ ...applied, ...visAccept })), 'Credit-upload file downloaded.');
+    showOutcome(
+      await fileAction.run(() => downloadExport({ ...applied, ...visAccept, expectedKey: preview?.sourceKey ?? null })),
+      'Credit-upload file downloaded.',
+    );
   };
 
   const handleReport = async () => {
@@ -386,7 +389,10 @@ export default function PointsComputePage() {
   const handlePayoutReport = async () => {
     if (!applied || payoutAction.blocked) return;
     setExportMsg(null);
-    showOutcome(await payoutAction.run(() => downloadPayoutReport({ ...applied, ...visAccept })), 'Payout report downloaded.');
+    showOutcome(
+      await payoutAction.run(() => downloadPayoutReport({ ...applied, ...visAccept, expectedKey: preview?.payoutKey ?? null })),
+      'Payout report downloaded.',
+    );
   };
 
   const handleCommit = async () => {
@@ -428,7 +434,9 @@ export default function PointsComputePage() {
   // payout report, direct credit) need the explicit acceptance; the server refuses them otherwise.
   const visPending = preview?.visibility?.available ? preview.visibility.outletsPending : 0;
   const visBlocked = visPending > 0 && !visAccepted;
-  const visAccept = visPending > 0 && visAccepted ? { acceptVisibilityPending: visPending } : {};
+  // The acceptance is bound to the EXACT pending outlet set (the server recomputes the key and refuses a different set).
+  const visAccept =
+    visPending > 0 && visAccepted && preview?.visibility ? { acceptVisibilityPendingKey: preview.visibility.pendingKey } : {};
   const errorRows = preview?.rows.filter((r) => r.status === 'ERROR') ?? [];
   const skipRows = preview?.rows.filter((r) => r.status === 'SKIP') ?? [];
   const noRuleRows = preview?.rows.filter((r) => r.status === 'NO_RULE') ?? [];
@@ -608,6 +616,7 @@ export default function PointsComputePage() {
                 . Each row's explanation shows that outlet's visibility.
                 {(preview.visibility.countedOutsideDatedScope > 0 ||
                   preview.visibility.excluded.notInProgramme > 0 ||
+                  preview.visibility.excluded.notLive > 0 ||
                   preview.visibility.excluded.olderFrequency > 0) && (
                   <ul className="mt-1 list-disc pl-5" data-testid="visibility-exceptions">
                     {preview.visibility.countedOutsideDatedScope > 0 && (
@@ -620,6 +629,12 @@ export default function PointsComputePage() {
                       <li>
                         {preview.visibility.excluded.notInProgramme} approved capture(s) NOT counted — the outlet&apos;s type /
                         programme is not in the visibility programme.
+                      </li>
+                    )}
+                    {preview.visibility.excluded.notLive > 0 && (
+                      <li>
+                        {preview.visibility.excluded.notLive} approved capture(s) NOT counted — the outlet is removed,
+                        deactivated, not KYC-approved, parked or not interested.
                       </li>
                     )}
                     {preview.visibility.excluded.olderFrequency > 0 && (
@@ -655,6 +670,16 @@ export default function PointsComputePage() {
                 {preview.visibility.windows === 1 ? '' : 's'} of the month still open). If you go ahead now, they are paid as
                 not approved. Wait for the reviews / windows to finish, or accept below.
               </p>
+              {(() => {
+                const codes = [...new Set([...preview.visibility.waitingOutletCodes, ...preview.visibility.openOutletCodes])].sort();
+                const shown = codes.slice(0, 20);
+                return (
+                  <p className="mt-1 text-[11px] text-amber-700" data-testid="visibility-pending-codes">
+                    Outlets: {shown.join(', ')}
+                    {visPending > shown.length ? ` (+${(visPending - shown.length).toLocaleString('en-IN')} more — in the review report)` : ''}
+                  </p>
+                );
+              })()}
               <label className="mt-2 flex items-start gap-2 text-xs font-semibold text-amber-900">
                 <input
                   type="checkbox"

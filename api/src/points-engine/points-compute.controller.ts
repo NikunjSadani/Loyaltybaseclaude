@@ -66,7 +66,7 @@ export class PointsComputeController {
       program: dto.program ?? null,
       kpiCode: dto.kpiCode ?? null,
       expectedKey: dto.expectedKey ?? null,
-      acceptVisibilityPending: dto.acceptVisibilityPending ?? null,
+      acceptVisibilityPendingKey: dto.acceptVisibilityPendingKey ?? null,
     });
   }
 
