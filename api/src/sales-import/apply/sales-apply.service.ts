@@ -54,6 +54,7 @@ import {
   focusFingerprintMatches,
   lazyCatalogue,
   reconcileMonth,
+  notCalculatedCodes,
   runMonthFocus,
   type MonthFocusRun,
 } from './month-focus';
@@ -700,9 +701,11 @@ export class SalesApplyService {
       blockedReasonFor({ month, defsCount: defs.length, mappingChanged: false, state }) ??
       set.blocked ??
       focusBlockedReason(month, focus.resolution.blockers);
+    const reconciliation = reconcileMonth(focus, comp, owned, last?.at ?? null, existing);
+    const ncCodes = notCalculatedCodes(reconciliation);
     return {
       month,
-      reconciliation: reconcileMonth(focus, comp, owned, last?.at ?? null),
+      reconciliation,
       monthState: state.state,
       canApply: blockedReason === null,
       ...(blockedReason ? { blockedReason } : {}),
@@ -731,6 +734,7 @@ export class SalesApplyService {
           delta: Math.round((newTotal - currentTotal) * 1e6) / 1e6,
           outletsNonZero: comp.stats[i].outletsNonZero,
           outletsNegative: comp.stats[i].outletsNegative,
+          ...(ncCodes.has(d.kpiCode) ? { notCalculated: true as const } : {}),
         };
       }),
     };

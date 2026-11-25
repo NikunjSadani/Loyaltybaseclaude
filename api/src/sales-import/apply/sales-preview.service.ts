@@ -26,7 +26,7 @@ import { monthLabel, resolveMonthState } from '../months/month-state';
 import { computeMonthRows, sumOwnedValues, unitsToNumber, type MonthRosterSplit } from './month-compute';
 import { loadLastApplied } from './last-applied';
 import { loadFocusCatalogue } from '../kpi/focus-data';
-import { focusBlockedReason, lazyCatalogue, reconcileMonth, runMonthFocus } from './month-focus';
+import { focusBlockedReason, lazyCatalogue, notCalculatedCodes, reconcileMonth, runMonthFocus } from './month-focus';
 import type { FocusCatalogue } from '../kpi/focus-products';
 import { isOlderThanLastApplied, partialMonthWarnings, replacesManualValues } from './warnings';
 import { activeJobsByMonth, busyText, lastJobsByMonth } from './apply-jobs-data';
@@ -190,6 +190,8 @@ export class SalesPreviewService {
     }
     if (comp.stats.some((s) => s.outletsNegative > 0)) warnings.push('NEGATIVE_VALUES');
 
+    const reconciliation = reconcileMonth(focus, comp, owned, last?.at ?? null, existing);
+    const ncCodes = notCalculatedCodes(reconciliation);
     const activeJob = ctx.activeJob ?? null;
     const blockedReason =
       (activeJob ? `${busyText(month, activeJob)}. Wait for it to finish.` : null) ??
@@ -222,10 +224,11 @@ export class SalesPreviewService {
           delta: Math.round((newTotal - currentTotal) * 1e6) / 1e6,
           outletsNonZero: comp.stats[i].outletsNonZero,
           outletsNegative: comp.stats[i].outletsNegative,
+          ...(ncCodes.has(d.kpiCode) ? { notCalculated: true as const } : {}),
         };
       }),
       lastApplied,
-      reconciliation: reconcileMonth(focus, comp, owned, last?.at ?? null),
+      reconciliation,
       activeJob,
       lastJob: ctx.lastJob ?? null,
     };

@@ -78,6 +78,8 @@ export function reconcileMonth(
   comp: MonthComputation,
   ownedKpiCodes: readonly string[],
   lastAppliedAt: Date | null,
+  /** The month's CURRENT records (FOCUS-NAMES-FROM-KPI: values a not-calculated KPI would lose). */
+  existing: ReadonlyArray<{ kpiValues: unknown }> = [],
 ): MonthReconciliation {
   const rec = buildMonthReconciliation({
     input: run.input,
@@ -88,10 +90,31 @@ export function reconcileMonth(
   });
   // B-M1: only a TARGET_NAMES tenant's figures depend on the targets, so only then can "targets changed" be true.
   const focusOn = hasTargetNamesDef(run.input.defs);
-  return {
+  const out: MonthReconciliation = {
     ...rec,
     targets: { ...rec.targets, newerThanLastApply: targetsNewerThanApply(run.targetUploadedAt, lastAppliedAt, focusOn) },
   };
+  if (rec.notCalculated && rec.notCalculated.length > 0) {
+    out.notCalculated = rec.notCalculated.map((n) => {
+      const held = existing.filter((r) => {
+        const v = r.kpiValues;
+        return !!v && typeof v === 'object' && !Array.isArray(v) && Object.prototype.hasOwnProperty.call(v, n.kpiCode);
+      }).length;
+      if (held === 0) return n;
+      const label = (run.input.labelOf.get(n.kpiCode) ?? '').trim() || n.kpiCode;
+      return {
+        ...n,
+        existingOutlets: held,
+        message: `${n.message} Existing ${label} values for ${held} outlet${held === 1 ? '' : 's'} will be REMOVED.`,
+      };
+    });
+  }
+  return out;
+}
+
+/** FOCUS-NAMES-FROM-KPI: the KPI codes a month leaves not calculated (for the per-KPI preview rows). */
+export function notCalculatedCodes(rec: MonthReconciliation): Set<string> {
+  return new Set((rec.notCalculated ?? []).map((n) => n.kpiCode));
 }
 
 /** blockedReason for a month with focus blockers (null = none). Comes AFTER the existing reasons in precedence. */

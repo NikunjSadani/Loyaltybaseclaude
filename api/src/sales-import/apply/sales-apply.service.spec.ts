@@ -1068,6 +1068,29 @@ describe('FOCUS-FROM-TARGETS: preview / apply / recalculate with products from t
       expect(w.O1.FOCUS).toBe(100);
     });
 
+    it('existing values of the not-calculated KPI: the warning says they will be REMOVED (import + recalculate preview); the KPI row says not calculated', async () => {
+      const existing = [
+        { outletCode: 'O1', kpiValues: { OWN_AMT: 1, FOCUS_CASES: 3 }, batch: { status: 'SALES_IMPORT', createdAt: AT } },
+        { outletCode: 'O2', kpiValues: { OWN_AMT: 1, FOCUS_CASES: 0 }, batch: { status: 'SALES_IMPORT', createdAt: AT } },
+        { outletCode: 'O3', kpiValues: { OWN_AMT: 1 }, batch: { status: 'SALES_IMPORT', createdAt: AT } },
+      ];
+      const want = {
+        kpiCode: 'FOCUS_CASES', namesFromKpi: 'FOCUS', existingOutlets: 2,
+        message: `${MSG} Existing Focus Cases values for 2 outlets will be REMOVED.`,
+      };
+      const db = bdb({ existing, history: HIST, historyCombos: HIST_COMBOS });
+      const m = (await services(db).preview.preview('t1', 'imp1')).months[0];
+      expect(m.reconciliation.notCalculated).toEqual([want]);
+      expect(m.kpis.find((k) => k.kpiCode === 'FOCUS_CASES')).toEqual(expect.objectContaining({ notCalculated: true, currentTotal: 3 }));
+      expect(m.kpis.find((k) => k.kpiCode === 'FOCUS')).not.toHaveProperty('notCalculated');
+      const rp = await services(db).apply.recalcPreview('t1', PREV);
+      expect(rp.reconciliation.notCalculated).toEqual([want]);
+      expect(rp.kpis.find((k) => k.kpiCode === 'FOCUS_CASES')).toEqual(expect.objectContaining({ notCalculated: true }));
+      // nothing held → no REMOVED sentence, no existingOutlets
+      const clean = (await services(bdb()).preview.preview('t1', 'imp1')).months[0];
+      expect(clean.reconciliation.notCalculated).toEqual([{ kpiCode: 'FOCUS_CASES', namesFromKpi: 'FOCUS', message: MSG }]);
+    });
+
     it('a tenant without a borrowing KPI: no notCalculated key, no acknowledgement needed (unchanged)', async () => {
       const db = fdb({ targets: [], targetBatches: [] });
       const p = await services(db).preview.preview('t1', 'imp1');

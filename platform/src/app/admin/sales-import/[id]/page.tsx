@@ -390,10 +390,14 @@ function MonthRow({
                       {m.kpis.map((k) => (
                         <tr key={k.kpiCode} className="border-t border-gray-100">
                           <td className="py-1 pr-3 text-gray-800">{k.label || k.kpiCode}</td>
-                          <td className="py-1 pr-3 text-right">{formatKpiValue(k.newTotal, k.measure)}</td>
+                          {k.notCalculated ? (
+                            <td className="py-1 pr-3 text-right font-semibold text-red-700" data-testid={`month-not-calculated-${k.kpiCode}`}>not calculated</td>
+                          ) : (
+                            <td className="py-1 pr-3 text-right">{formatKpiValue(k.newTotal, k.measure)}</td>
+                          )}
                           <td className="py-1 pr-3 text-right text-gray-500">{formatKpiValue(k.currentTotal, k.measure)}</td>
-                          <td className={`py-1 pr-3 text-right ${k.delta < 0 ? 'text-red-600' : k.delta > 0 ? 'text-emerald-700' : 'text-gray-500'}`}>
-                            {formatSigned(k.delta, (n) => formatKpiValue(n, k.measure))}
+                          <td className={`py-1 pr-3 text-right ${k.notCalculated ? 'text-red-700' : k.delta < 0 ? 'text-red-600' : k.delta > 0 ? 'text-emerald-700' : 'text-gray-500'}`}>
+                            {k.notCalculated ? (k.currentTotal !== 0 ? 'removed' : '—') : formatSigned(k.delta, (n) => formatKpiValue(n, k.measure))}
                           </td>
                           <td className="py-1 pr-3 text-right">{formatCount(k.outletsNonZero)}</td>
                           <td className={`py-1 text-right ${k.outletsNegative > 0 ? 'text-amber-700' : ''}`}>{formatCount(k.outletsNegative)}</td>
@@ -488,6 +492,8 @@ function PreviewSection({
     if (r.success) {
       setError(null);
       setPreview(r.data);
+      // A reloaded preview may list different not-calculated KPIs: the acceptance never carries over.
+      setNcAcks(new Set());
       // Drop selections that are no longer applicable after a refresh.
       const ok = new Set(r.data.months.filter((m) => m.canApply).map((m) => m.month));
       setSelected((prev) => new Set([...prev].filter((m) => ok.has(m))));

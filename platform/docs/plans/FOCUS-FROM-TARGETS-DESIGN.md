@@ -181,3 +181,6 @@ in the same `resolveMonthFocus` pass, so e.g. `FB1 CASES` (QUANTITY) gets exactl
   month's target file — <KPI> not calculated". Apply needs `acknowledgeNotCalculatedMonths` (400 before any write;
   re-checked under the month lock), recalculate needs `confirmNotCalculated: true`; both are recorded on the month's
   audit row (`notCalculated: { kpiCodes, acceptedById, messages }`). Uploading the targets and recalculating fills them.
+  When the month already holds values for such a KPI, the warning (and the tick) says "Existing <KPI> values for N outlets
+  will be REMOVED" (`existingOutlets`); its per-KPI preview row says "not calculated" (`MonthPreviewKpi.notCalculated`).
+  The tick is cleared whenever the preview reloads.

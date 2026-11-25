@@ -363,6 +363,8 @@ export interface MonthPreviewKpi {
   delta: number;
   outletsNonZero: number;
   outletsNegative: number;
+  /** FOCUS-NAMES-FROM-KPI: the KPI is NOT calculated this month (see MonthReconciliation.notCalculated) — `newTotal` is not a 0. */
+  notCalculated?: true;
 }
 
 /**
@@ -782,6 +784,8 @@ export interface FocusNotCalculated {
   namesFromKpi: string;
   /** Red warning text, e.g. "No focus names in this month's target file — FB1 CASES not calculated". */
   message: string;
+  /** Outlets that hold a value for this KPI in the month NOW — removed by the apply / recalculate (absent when 0). */
+  existingOutlets?: number;
 }
 
 /** POST admin/sales-months/:month/focus-acceptances (targets:upload; month OPEN): accept an UNMATCHED token as "not sold yet". */

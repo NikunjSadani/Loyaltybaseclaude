@@ -84,7 +84,8 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, 
     const seq = ++seqRef.current;
     const r = await salesImportApi.recalcPreview(month);
     if (!mountedRef.current || seq !== seqRef.current) return true;
-    if (r.success) { setPreview(r.data); setError(null); return true; }
+    // A reloaded preview may list different not-calculated KPIs: the acceptance never carries over.
+    if (r.success) { setPreview(r.data); setError(null); setNcAck(false); return true; }
     setError(r.status === 404
       ? `${label} has no stored history yet — it is saved each time a sales file is applied to the month.`
       : failureReason(r));
@@ -354,10 +355,14 @@ export function RecalculatePanel({ month, onClose, onApplied, activeJob = null, 
                 {preview.kpis.map((k) => (
                   <tr key={k.kpiCode} className="border-t border-gray-100">
                     <td className="py-1 pr-3 text-gray-800">{k.label || k.kpiCode}</td>
-                    <td className="py-1 pr-3 text-right">{formatKpiValue(k.newTotal, k.measure)}</td>
+                    {k.notCalculated ? (
+                      <td className="py-1 pr-3 text-right font-semibold text-red-700" data-testid={`recalc-not-calculated-${k.kpiCode}`}>not calculated</td>
+                    ) : (
+                      <td className="py-1 pr-3 text-right">{formatKpiValue(k.newTotal, k.measure)}</td>
+                    )}
                     <td className="py-1 pr-3 text-right text-gray-500">{formatKpiValue(k.currentTotal, k.measure)}</td>
-                    <td className={`py-1 pr-3 text-right ${k.delta < 0 ? 'text-red-600' : k.delta > 0 ? 'text-emerald-700' : 'text-gray-500'}`}>
-                      {formatSigned(k.delta, (n) => formatKpiValue(n, k.measure))}
+                    <td className={`py-1 pr-3 text-right ${k.notCalculated ? 'text-red-700' : k.delta < 0 ? 'text-red-600' : k.delta > 0 ? 'text-emerald-700' : 'text-gray-500'}`}>
+                      {k.notCalculated ? (k.currentTotal !== 0 ? 'removed' : '—') : formatSigned(k.delta, (n) => formatKpiValue(n, k.measure))}
                     </td>
                     <td className="py-1 pr-3 text-right">{formatCount(k.outletsNonZero)}</td>
                     <td className={`py-1 text-right ${k.outletsNegative > 0 ? 'text-amber-700' : ''}`}>{formatCount(k.outletsNegative)}</td>

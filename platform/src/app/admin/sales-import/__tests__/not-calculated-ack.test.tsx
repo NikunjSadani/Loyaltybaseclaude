@@ -28,6 +28,15 @@ describe('not-calculated KPIs (no focus names this month)', () => {
     expect(onChange).toHaveBeenCalledWith(true);
   });
 
+  it('existing values: the tick names the values that will be REMOVED', () => {
+    const items = [{ ...NC[0], existingOutlets: 12, message: `${NC[0].message} Existing FB1 CASES values for 12 outlets will be REMOVED.` }];
+    render(<NotCalculatedAck month="2026-11" label="November 2026" items={items} checked={false} onChange={vi.fn()} />);
+    expect(screen.getByTestId('not-calculated-2026-11')).toHaveTextContent('Existing FB1 CASES values for 12 outlets will be REMOVED.');
+    expect(screen.getByRole('checkbox', {
+      name: 'I accept that FB1 CASES is not calculated for November 2026 and that the existing FB1 CASES values for 12 outlets will be REMOVED',
+    })).toBeInTheDocument();
+  });
+
   it('renders nothing without items; no tick for a viewer who cannot act', () => {
     const { container } = render(<NotCalculatedAck month="2026-11" label="November 2026" items={undefined} checked={false} onChange={vi.fn()} />);
     expect(container).toBeEmptyDOMElement();
