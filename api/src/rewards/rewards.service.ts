@@ -3641,6 +3641,7 @@ export class RewardsService {
         partner: {
           select: {
             ...ORDER_PARTNER_CONTACT_SELECT,
+            clientId: true,
             businessName: true,
             ownerName: true,
             outlets: {
@@ -3655,6 +3656,24 @@ export class RewardsService {
     // Delivery address = shipping PII: only a caller who may manage orders (the SAME predicate as the
     // full voucher code). The route already requires rewards:manage_orders — defence in depth.
     const showDelivery = await this.canSeeFullVoucherCode(user);
+    // Client column: display name (branding.displayName → internalName → clientId) — an un-assumed
+    // owner's sheet mixes tenants. One batched read.
+    const clientIds = [...new Set(orders.map((o) => o.partner?.clientId).filter((c): c is string => !!c))];
+    const clientRows = clientIds.length
+      ? ((await this.prisma.client.findMany({
+          where: { id: { in: clientIds } },
+          select: { id: true, internalName: true, branding: true },
+        })) ?? [])
+      : [];
+    const clientName = new Map<string, string>(
+      clientRows.map((c) => {
+        const b = c.branding && typeof c.branding === 'object' && !Array.isArray(c.branding)
+          ? (c.branding as Record<string, unknown>)
+          : null;
+        const display = typeof b?.displayName === 'string' && b.displayName.trim() ? b.displayName.trim() : null;
+        return [c.id, display ?? (c.internalName?.trim() || c.id)];
+      }),
+    );
 
     // Audit 6: orders handed to Hubble with no code are NOT in the sheet — the upload would refuse any
     // manual move on them (HUBBLE_FORWARD_BLOCK_MESSAGE); Hubble delivers them, or ops use Retry /
@@ -3664,8 +3683,10 @@ export class RewardsService {
       sheetOrders.map((o) => {
         const contact = orderPartnerContact(o.partner);
         const outlet = o.partner?.outlets?.[0];
+        const cid = o.partner?.clientId ?? '';
         return {
           orderNumber: o.orderNumber,
+          client: (cid && clientName.get(cid)) || cid,
           reward: o.reward?.name ?? '',
           outletCode: contact.outletCode ?? '',
           phone: contact.phone ?? '',

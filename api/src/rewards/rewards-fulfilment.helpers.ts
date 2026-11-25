@@ -8,7 +8,7 @@
  * guarded `transitionOrder` (one call per row) so no status logic lives here.
  *
  * Layout (single header row, then one row per order):
- *   Order Number | Reward | Outlet ID | Phone | Redeemed on (IST) | Outlet name | Owner name |
+ *   Order Number | Client | Reward | Outlet ID | Phone | Redeemed on (IST) | Outlet name | Owner name |
  *   Deliver to (name) | Delivery phone | Address line 1 | Address line 2 | City | State | PIN code |
  *   Mode | Current Status |
  *   Voucher Code | Voucher PIN | Voucher Provider | Tracking Number | Tracking URL | New Status
@@ -22,7 +22,11 @@
  * Outlet name / Owner name + the seven DELIVERY columns (added 2026-11-24, between Redeemed on and
  * Mode) are READ-ONLY info for shipping physical gifts — never read on upload. Delivery cells are
  * filled for PHYSICAL_GIFT rows only (blank for voucher / cash rows) and only for a caller who may
- * manage orders. Phone / Delivery phone / PIN code are TEXT cells (leading zeros survive).
+ * manage orders. Phone / Delivery phone / PIN code are TEXT cells (leading zeros survive). A physical
+ * order with neither an address line nor a PIN gets MISSING_ADDRESS_TEXT in Address line 1.
+ * `Client` (read-only, right after Order Number) names the tenant — an un-assumed owner's sheet
+ * mixes tenants. A second "Read me" sheet says which columns are applied; the parser reads only
+ * the FIRST sheet.
  */
 
 import * as XLSX from 'xlsx';
@@ -35,6 +39,7 @@ export const FULFILMENT_KEY_COL = 'Order Number';
 
 export const FULFILMENT_COLS = [
   'Order Number',
+  'Client',
   'Reward',
   'Outlet ID',
   'Phone',
@@ -75,6 +80,22 @@ export interface FulfilmentDelivery {
   pincode?: string | null;
 }
 
+/** Written in Address line 1 for a PHYSICAL_GIFT order with neither an address line nor a PIN. */
+export const MISSING_ADDRESS_TEXT = 'MISSING — no delivery address on file';
+
+/** The "Read me" sheet (second sheet — the parser only reads the FIRST sheet). */
+export const FULFILMENT_README_SHEET = 'Read me';
+export const FULFILMENT_README_LINES = [
+  'How this sheet works',
+  '',
+  'Only these columns are SAVED when you upload: Voucher Code, Voucher PIN, Voucher Provider, Tracking Number, Tracking URL, New Status.',
+  'Order Number identifies the order — do not change it.',
+  'Every other column (Client, Reward, Outlet ID, Phone, Redeemed on, Outlet name, Owner name, Deliver to, Delivery phone, Address lines, City, State, PIN code, Mode, Current Status) is INFORMATION ONLY.',
+  'Edits to the information columns are NOT saved. To correct a delivery address, fix it on the order, not in this sheet.',
+  `"${MISSING_ADDRESS_TEXT}" in Address line 1 means the physical-gift order has no address — contact the outlet before shipping.`,
+  'Keep the first sheet ("Fulfilment") first — only the first sheet is read on upload.',
+] as const;
+
 /** Row error for a Voucher Code / PIN cell Excel stored as a number. */
 export const VOUCHER_CELL_NUMBER_MESSAGE =
   'Voucher Code/PIN must be entered as text — format the column as Text and re-type it';
@@ -84,6 +105,8 @@ export const VOUCHER_CELL_NUMBER_MESSAGE =
 /** Minimal order shape the template needs (the locked context columns). */
 export interface FulfilmentTemplateRow {
   orderNumber: string;
+  /** Client display name (falls back to the clientId) — an un-assumed owner's sheet mixes tenants. */
+  client?: string;
   reward: string;
   /** The partner's primary outlet code ('' when none). Read-only context. */
   outletCode?: string;
@@ -112,6 +135,7 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
   const header: string[] = [...FULFILMENT_COLS];
   const dataRows = orders.map((o) => [
     o.orderNumber,
+    o.client ?? '',
     o.reward,
     o.outletCode ?? '',
     o.phone ?? '',
@@ -120,7 +144,10 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
     o.ownerName ?? '',
     o.delivery?.name ?? '',
     o.delivery?.phone ?? '',
-    o.delivery?.addressLine1 ?? '',
+    // No silent missing address: a physical order (delivery set) with neither a line nor a PIN.
+    o.delivery && !o.delivery.addressLine1?.trim() && !o.delivery.pincode?.trim()
+      ? MISSING_ADDRESS_TEXT
+      : (o.delivery?.addressLine1 ?? ''),
     o.delivery?.addressLine2 ?? '',
     o.delivery?.city ?? '',
     o.delivery?.state ?? '',
@@ -148,6 +175,7 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
   }
   ws['!cols'] = [
     { wch: 22 }, // Order Number
+    { wch: 18 }, // Client
     { wch: 28 }, // Reward
     { wch: 16 }, // Outlet ID
     { wch: 14 }, // Phone
@@ -173,6 +201,10 @@ export function buildFulfilmentTemplateBuffer(orders: FulfilmentTemplateRow[]): 
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Fulfilment');
+  // SECOND sheet (never parsed — parseFulfilmentUploadBuffer reads only SheetNames[0]).
+  const readme = aoaToSheetSafe(FULFILMENT_README_LINES.map((l) => [l]));
+  readme['!cols'] = [{ wch: 120 }];
+  XLSX.utils.book_append_sheet(wb, readme, FULFILMENT_README_SHEET);
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
 

@@ -71,7 +71,7 @@ const mockPrisma = {
   redemptionStatusHistory: { create: jest.fn() },
   payoutTransaction: { create: jest.fn() },
   // clients.features read for the Hubble feature flag (default OFF via beforeEach).
-  client: { findFirst: jest.fn() },
+  client: { findFirst: jest.fn(), findMany: jest.fn() },
   // Tenant order-number generation (order-number.helper) runs raw SQL inside the
   // redeem tx: an advisory xact lock + a max-suffix scan. Default: lock ok, no prior
   // rows → sequence starts at 1.
@@ -5448,8 +5448,8 @@ describe('RewardsService', () => {
         mockPrisma.redemptionOrder.findMany.mockResolvedValue(sheetRows());
         const { XLSX, ws, aoa, h } = readSheet(await service.getFulfilmentTemplate(assumedGifsy, {}));
 
-        expect(h.slice(0, 15)).toEqual([
-          'Order Number', 'Reward', 'Outlet ID', 'Phone', 'Redeemed on (IST)',
+        expect(h.slice(0, 16)).toEqual([
+          'Order Number', 'Client', 'Reward', 'Outlet ID', 'Phone', 'Redeemed on (IST)',
           'Outlet name', 'Owner name', ...DELIVERY_COLS, 'Mode',
         ]);
         const phy = aoa[1];
@@ -5490,6 +5490,32 @@ describe('RewardsService', () => {
         mockPrisma.redemptionOrder.findMany.mockResolvedValue(rows);
         const { aoa, h } = readSheet(await service.getFulfilmentTemplate(assumedGifsy, {}));
         expect(aoa[1][h.indexOf('Address line 1')]).toBe('\'=HYPERLINK("http://x")');
+      });
+
+      it('physical order with no address line AND no PIN → "MISSING — no delivery address on file"; voucher row stays blank', async () => {
+        const rows = sheetRows();
+        Object.assign(rows[0], { deliveryAddressLine1: null, deliveryPincode: '  ' });
+        Object.assign(rows[1], { deliveryAddressLine1: null, deliveryPincode: null });
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue(rows);
+        const { aoa, h } = readSheet(await service.getFulfilmentTemplate(assumedGifsy, {}));
+        expect(aoa[1][h.indexOf('Address line 1')]).toBe('MISSING — no delivery address on file');
+        expect(aoa[2][h.indexOf('Address line 1')]).toBe('');
+      });
+
+      it('Client column = display name (branding.displayName → internalName → clientId); mixed tenants on an un-assumed sheet', async () => {
+        const rows = sheetRows();
+        (rows[0].partner as Record<string, unknown>).clientId = 'bajaj';
+        (rows[1].partner as Record<string, unknown>).clientId = 'deoleo';
+        const third = { ...sheetRows()[1], orderNumber: 'GC-2', partner: { ...sheetRows()[1].partner, clientId: 'ghost' } };
+        mockPrisma.redemptionOrder.findMany.mockResolvedValue([...rows, third]);
+        mockPrisma.client.findMany.mockResolvedValue([
+          { id: 'bajaj', internalName: 'Bajaj Consumer Care', branding: { displayName: 'Bajaj Almond Drops' } },
+          { id: 'deoleo', internalName: 'Deoleo India', branding: {} },
+        ]);
+        const { aoa, h } = readSheet(await service.getFulfilmentTemplate(gifsyHomeForSheet, {}));
+        expect(h[1]).toBe('Client');
+        expect(aoa.slice(1).map((r) => r[h.indexOf('Client')])).toEqual(['Bajaj Almond Drops', 'Deoleo India', 'ghost']);
+        expect(mockPrisma.client.findMany.mock.calls[0][0].where).toEqual({ id: { in: ['bajaj', 'deoleo', 'ghost'] } });
       });
     });
 

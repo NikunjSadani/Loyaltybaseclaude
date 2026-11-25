@@ -10,7 +10,9 @@
 import * as XLSX from 'xlsx';
 import {
   buildFulfilmentTemplateBuffer,
+  FULFILMENT_README_SHEET,
   FulfilmentTemplateRow,
+  MISSING_ADDRESS_TEXT,
   parseFulfilmentUploadBuffer,
 } from './rewards-fulfilment.helpers';
 
@@ -68,12 +70,12 @@ describe('buildFulfilmentTemplateBuffer — Outlet ID + Phone context columns', 
         { orderNumber: 'ORD-2', reward: 'R', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
       ]),
     );
-    expect(aoa[0].slice(0, 5)).toEqual(['Order Number', 'Reward', 'Outlet ID', 'Phone', 'Redeemed on (IST)']);
-    expect(aoa[1][2]).toBe('BJ-0042');
-    expect(String(aoa[1][3])).toBe('9811111111');
+    expect(aoa[0].slice(0, 6)).toEqual(['Order Number', 'Client', 'Reward', 'Outlet ID', 'Phone', 'Redeemed on (IST)']);
+    expect(aoa[1][3]).toBe('BJ-0042');
+    expect(String(aoa[1][4])).toBe('9811111111');
     // Not recorded → blank cells, never "undefined".
-    expect(aoa[2][2] ?? '').toBe('');
     expect(aoa[2][3] ?? '').toBe('');
+    expect(aoa[2][4] ?? '').toBe('');
   });
 
   it('Redeemed on = the order createdAt in IST (YYYY-MM-DD HH:mm, sortable); blank when unknown', () => {
@@ -113,8 +115,8 @@ describe('fulfilment sheet — outlet / owner + delivery address columns (2026-1
         { orderNumber: 'GC-1', reward: 'Amazon', outletName: 'Outlet Two', ownerName: 'Asha', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
       ]),
     );
-    expect(aoa[0].slice(0, 15)).toEqual([
-      'Order Number', 'Reward', 'Outlet ID', 'Phone', 'Redeemed on (IST)',
+    expect(aoa[0].slice(0, 16)).toEqual([
+      'Order Number', 'Client', 'Reward', 'Outlet ID', 'Phone', 'Redeemed on (IST)',
       'Outlet name', 'Owner name', ...DELIVERY_COLS, 'Mode',
     ]);
     const col = (h: string) => aoa[0].indexOf(h);
@@ -158,8 +160,9 @@ describe('fulfilment sheet — outlet / owner + delivery address columns (2026-1
     ]), { type: 'buffer' });
     const ws = wb.Sheets.Fulfilment;
     const h = (XLSX.utils.sheet_to_json<string[]>(ws, { header: 1 })[0]) as string[];
-    // The ops user edits an address cell (ignored) and fills tracking + New Status.
+    // The ops user edits an address cell + the Client cell (ignored) and fills tracking + New Status.
     ws[XLSX.utils.encode_cell({ r: 1, c: h.indexOf('Address line 1') })] = { t: 's', v: 'EDITED' };
+    ws[XLSX.utils.encode_cell({ r: 1, c: h.indexOf('Client') })] = { t: 's', v: 'other-tenant' };
     ws[XLSX.utils.encode_cell({ r: 1, c: h.indexOf('Tracking Number') })] = { t: 's', v: 'TRK-9' };
     ws[XLSX.utils.encode_cell({ r: 1, c: h.indexOf('New Status') })] = { t: 's', v: 'DISPATCHED' };
     const { rows } = parseFulfilmentUploadBuffer(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer);
@@ -167,6 +170,46 @@ describe('fulfilment sheet — outlet / owner + delivery address columns (2026-1
       rowIndex: 2, orderNumber: 'PHY-1', voucherCode: undefined, voucherPin: undefined, voucherProvider: undefined,
       trackingNumber: 'TRK-9', trackingUrl: undefined, newStatus: 'DISPATCHED',
     }]);
+  });
+
+  it('Client column sits right after Order Number and is filled', () => {
+    const aoa = readAoa(buildFulfilmentTemplateBuffer([
+      { orderNumber: 'O-1', client: 'Bajaj Almond Drops', reward: 'R', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+    ]));
+    expect(aoa[0][1]).toBe('Client');
+    expect(aoa[1][1]).toBe('Bajaj Almond Drops');
+  });
+
+  it('MISSING marker only when a physical order has neither an address line nor a PIN; partial addresses are written as-is', () => {
+    const aoa = readAoa(buildFulfilmentTemplateBuffer([
+      { orderNumber: 'P-NONE', reward: 'C', mode: 'PHYSICAL_GIFT', currentStatus: 'CONFIRMED', delivery: { name: 'N', addressLine1: ' ', pincode: null } },
+      { orderNumber: 'P-NOPIN', reward: 'C', mode: 'PHYSICAL_GIFT', currentStatus: 'CONFIRMED', delivery: { addressLine1: '12 MG Road' } },
+      { orderNumber: 'P-NOLINE', reward: 'C', mode: 'PHYSICAL_GIFT', currentStatus: 'CONFIRMED', delivery: { pincode: '411001' } },
+      { orderNumber: 'GC', reward: 'C', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+    ]));
+    const a1 = aoa[0].indexOf('Address line 1');
+    const pin = aoa[0].indexOf('PIN code');
+    expect(aoa[1][a1]).toBe(MISSING_ADDRESS_TEXT);
+    expect(aoa[2][a1]).toBe('12 MG Road');
+    expect(aoa[2][pin] ?? '').toBe('');
+    expect(aoa[3][a1] ?? '').toBe('');
+    expect(aoa[3][pin]).toBe('411001');
+    expect(aoa[4][a1] ?? '').toBe('');
+  });
+
+  it('adds a second "Read me" sheet; the parser reads ONLY the first sheet', () => {
+    const buf = buildFulfilmentTemplateBuffer([
+      { orderNumber: 'O-1', reward: 'R', mode: 'GIFT_CARD', currentStatus: 'CONFIRMED' },
+    ]);
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    expect(wb.SheetNames).toEqual(['Fulfilment', FULFILMENT_README_SHEET]);
+    const text = JSON.stringify(XLSX.utils.sheet_to_json(wb.Sheets[FULFILMENT_README_SHEET], { header: 1 }));
+    expect(text).toMatch(/NOT saved/);
+    expect(text).toMatch(/Tracking Number, Tracking URL, New Status/);
+    // Put an "Order Number" table on the Read me sheet — it must never be parsed.
+    XLSX.utils.sheet_add_aoa(wb.Sheets[FULFILMENT_README_SHEET], [['Order Number', 'New Status'], ['EVIL-1', 'CANCELLED']], { origin: 'A20' });
+    const { rows } = parseFulfilmentUploadBuffer(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer);
+    expect(rows.map((r) => r.orderNumber)).toEqual(['O-1']);
   });
 
   it('a sheet downloaded BEFORE this change (old 13-column layout) still uploads unchanged', () => {

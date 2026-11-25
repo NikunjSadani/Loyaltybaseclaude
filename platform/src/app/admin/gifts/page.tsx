@@ -162,43 +162,78 @@ function deliveryAddressLines(o: OrderItem): string[] {
   ].map((s) => (s ?? '').trim()).filter(Boolean);
 }
 
-/** Compact delivery block + "Copy address" for a physical-gift order row (operators who ship). */
+/** True when the server sent this order's delivery fields (it OMITS them for viewers who can't manage orders). */
+function deliverySent(o: OrderItem): boolean {
+  return 'deliveryAddressLine1' in o || 'deliveryPincode' in o || 'deliveryName' in o;
+}
+
+/**
+ * Compact delivery block + "Copy address" for a physical-gift order row (operators who ship).
+ * Never silent about a gap: no line AND no PIN → a red "No delivery address on file" (no Copy);
+ * a partial address shows what exists plus a red "PIN code missing" / "Address missing".
+ * Renders nothing when the server withheld the fields (viewer can't manage orders).
+ */
 function DeliveryBlock({ order }: { order: OrderItem }) {
   const [copied, setCopied] = useState<'idle' | 'ok' | 'fail'>('idle');
-  const hasAddress = !!(order.deliveryAddressLine1 || order.deliveryAddressLine2 || order.deliveryCity || order.deliveryPincode);
-  if (!hasAddress && !order.deliveryName) return null;
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
+
+  if (!deliverySent(order)) return null;
+  const line1 = order.deliveryAddressLine1?.trim() || '';
+  const pin = order.deliveryPincode?.trim() || '';
+  if (!line1 && !pin) {
+    return (
+      <p className="mt-1.5 max-w-[16rem] break-words text-[11px] font-semibold text-red-600" data-testid="order-delivery-missing">
+        No delivery address on file
+      </p>
+    );
+  }
+
   const lines = deliveryAddressLines(order);
   const copy = async () => {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     try {
       await navigator.clipboard.writeText(lines.join('\n'));
       setCopied('ok');
     } catch {
       setCopied('fail');
     }
-    setTimeout(() => setCopied('idle'), 2000);
+    resetTimer.current = setTimeout(() => setCopied('idle'), 2000);
   };
   const cityLine = [order.deliveryCity, order.deliveryState].filter(Boolean).join(', ');
+  const orderLabel = order.orderNumber ?? order.id.slice(-8);
   return (
-    <div className="mt-1.5 rounded-md border border-gray-100 bg-gray-50 px-2 py-1.5 text-[11px] leading-snug text-gray-700" data-testid="order-delivery">
+    <div
+      className="mt-1.5 max-w-[16rem] break-words rounded-md border border-gray-100 bg-gray-50 px-2 py-1.5 text-[11px] leading-snug text-gray-700"
+      data-testid="order-delivery"
+    >
       <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Deliver to</p>
       {order.deliveryName && <p className="font-medium text-gray-900">{order.deliveryName}</p>}
       {order.deliveryPhone && <p className="font-mono">{order.deliveryPhone}</p>}
-      {order.deliveryAddressLine1 && <p>{order.deliveryAddressLine1}</p>}
+      {line1 ? <p>{order.deliveryAddressLine1}</p> : (
+        <p className="font-semibold text-red-600" data-testid="order-delivery-address-missing">Address missing</p>
+      )}
       {order.deliveryAddressLine2 && <p>{order.deliveryAddressLine2}</p>}
-      {(cityLine || order.deliveryPincode) && (
+      {(cityLine || pin) && (
         <p>
           {cityLine}
-          {order.deliveryPincode && <> {cityLine ? '· ' : ''}PIN <span className="font-mono">{order.deliveryPincode}</span></>}
+          {pin && <> {cityLine ? '· ' : ''}PIN <span className="font-mono">{pin}</span></>}
         </p>
+      )}
+      {!pin && (
+        <p className="font-semibold text-red-600" data-testid="order-delivery-pin-missing">PIN code missing</p>
       )}
       <button
         type="button"
         onClick={copy}
         className="mt-1 text-[10px] font-semibold text-blue-600 hover:underline"
-        aria-label={`Copy delivery address for order ${order.orderNumber ?? order.id.slice(-8)}`}
+        data-testid="order-delivery-copy"
       >
-        {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed — select the text' : 'Copy address'}
+        Copy address<span className="sr-only"> for order {orderLabel}</span>
       </button>
+      <span role="status" aria-live="polite" className="ml-1.5 text-[10px] text-gray-500" data-testid="order-delivery-copy-status">
+        {copied === 'ok' ? 'Copied' : copied === 'fail' ? 'Copy failed — select the text' : ''}
+      </span>
     </div>
   );
 }

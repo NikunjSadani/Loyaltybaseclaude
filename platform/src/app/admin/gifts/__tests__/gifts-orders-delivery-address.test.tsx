@@ -47,6 +47,33 @@ const ORDERS = [
     partner: { id: 'p3', businessName: 'Store Three', outletCode: 'BJ-0044', phone: null },
     redemptionMode: 'PHYSICAL_GIFT',
   },
+  {
+    // Server sent the fields (manager) but nothing is on file → red "No delivery address on file".
+    ...BASE, id: 'o4', orderNumber: 'RDM-PHY-NONE',
+    reward: { id: 'r1', name: 'Pressure Cooker', redemptionMode: 'PHYSICAL_GIFT' },
+    partner: { id: 'p4', businessName: 'Store Four', outletCode: 'BJ-0045', phone: null },
+    redemptionMode: 'PHYSICAL_GIFT',
+    deliveryName: 'Asha', deliveryPhone: null, deliveryAddressLine1: null, deliveryAddressLine2: null,
+    deliveryCity: null, deliveryState: null, deliveryPincode: null,
+  },
+  {
+    // Line 1 but no PIN.
+    ...BASE, id: 'o5', orderNumber: 'RDM-PHY-NOPIN',
+    reward: { id: 'r1', name: 'Pressure Cooker', redemptionMode: 'PHYSICAL_GIFT' },
+    partner: { id: 'p5', businessName: 'Store Five', outletCode: 'BJ-0046', phone: null },
+    redemptionMode: 'PHYSICAL_GIFT',
+    deliveryName: 'Meena', deliveryPhone: null, deliveryAddressLine1: '4 Park Street', deliveryAddressLine2: null,
+    deliveryCity: 'Kolkata', deliveryState: null, deliveryPincode: null,
+  },
+  {
+    // PIN but no line 1.
+    ...BASE, id: 'o6', orderNumber: 'RDM-PHY-NOLINE',
+    reward: { id: 'r1', name: 'Pressure Cooker', redemptionMode: 'PHYSICAL_GIFT' },
+    partner: { id: 'p6', businessName: 'Store Six', outletCode: 'BJ-0047', phone: null },
+    redemptionMode: 'PHYSICAL_GIFT',
+    deliveryName: 'Kiran', deliveryPhone: null, deliveryAddressLine1: null, deliveryAddressLine2: null,
+    deliveryCity: null, deliveryState: null, deliveryPincode: '560001',
+  },
 ];
 
 function jsonOk(data: unknown) {
@@ -87,11 +114,14 @@ describe('Redemption orders — delivery address block', () => {
     expect(block).toHaveTextContent('Pune, Maharashtra');
     expect(block).toHaveTextContent('011001');
 
-    await user.click(within(block).getByRole('button', { name: /copy delivery address/i }));
+    await user.click(within(block).getByRole('button', { name: /copy address for order RDM-PHY/i }));
     expect(writeText).toHaveBeenCalledWith(
       'Ravi Kumar\n9822222222\n12 MG Road\nNear Clock Tower\nPune, Maharashtra - 011001',
     );
-    await waitFor(() => expect(within(block).getByRole('button')).toHaveTextContent('Copied'));
+    await waitFor(() => expect(within(block).getByRole('status')).toHaveTextContent('Copied'));
+    expect(within(block).getByRole('status')).toHaveAttribute('aria-live', 'polite');
+    expect(within(block).queryByTestId('order-delivery-pin-missing')).toBeNull();
+    expect(within(block).queryByTestId('order-delivery-address-missing')).toBeNull();
   });
 
   it('shows no delivery block on a voucher row or when the server sent no address', async () => {
@@ -103,6 +133,38 @@ describe('Redemption orders — delivery address block', () => {
     expect(within(gc).queryByTestId('order-delivery')).toBeNull();
     const hidden = screen.getByText('RDM-PHY-HIDDEN').closest('tr') as HTMLElement;
     expect(within(hidden).queryByTestId('order-delivery')).toBeNull();
+    // Withheld by the server ≠ missing: no false "No delivery address" either.
+    expect(within(hidden).queryByTestId('order-delivery-missing')).toBeNull();
     expect(hidden.textContent).not.toMatch(/null|undefined/);
+  });
+
+  it('no address line AND no PIN → red "No delivery address on file", no block, no Copy button', async () => {
+    installFetch();
+    render(<AdminGiftsPage />);
+    await userEvent.click(await screen.findByRole('button', { name: /fulfilment/i }));
+
+    const row = (await screen.findByText('RDM-PHY-NONE')).closest('tr') as HTMLElement;
+    const missing = within(row).getByTestId('order-delivery-missing');
+    expect(missing).toHaveTextContent('No delivery address on file');
+    expect(missing.className).toMatch(/text-red-600/);
+    expect(within(row).queryByTestId('order-delivery')).toBeNull();
+    expect(within(row).queryByRole('button', { name: /copy address/i })).toBeNull();
+  });
+
+  it('partial address shows what exists plus a red "PIN code missing" / "Address missing"', async () => {
+    installFetch();
+    render(<AdminGiftsPage />);
+    await userEvent.click(await screen.findByRole('button', { name: /fulfilment/i }));
+
+    const noPin = within((await screen.findByText('RDM-PHY-NOPIN')).closest('tr') as HTMLElement).getByTestId('order-delivery');
+    expect(noPin).toHaveTextContent('4 Park Street');
+    expect(noPin).toHaveTextContent('Kolkata');
+    expect(within(noPin).getByTestId('order-delivery-pin-missing')).toHaveTextContent('PIN code missing');
+    expect(within(noPin).queryByTestId('order-delivery-address-missing')).toBeNull();
+
+    const noLine = within(screen.getByText('RDM-PHY-NOLINE').closest('tr') as HTMLElement).getByTestId('order-delivery');
+    expect(noLine).toHaveTextContent('560001');
+    expect(within(noLine).getByTestId('order-delivery-address-missing')).toHaveTextContent('Address missing');
+    expect(within(noLine).queryByTestId('order-delivery-pin-missing')).toBeNull();
   });
 });
