@@ -138,6 +138,9 @@ export class GstReimbursementService {
         select: { status: true, gstPaise: true },
       });
       if (!existing) throw new NotFoundException('GST reimbursement not found');
+      if (existing.status === 'VOID') {
+        throw new ConflictException('Nothing to release: the invoice was voided (its payouts were cancelled before payment).');
+      }
       if (existing.status === 'HELD') {
         throw new ConflictException(
           'Nothing to release: this held GST is ₹0 (the invoice was regenerated without GST). It is kept only for the record.',

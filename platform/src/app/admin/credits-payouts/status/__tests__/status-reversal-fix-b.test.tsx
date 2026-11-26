@@ -24,6 +24,13 @@ vi.mock('@/lib/admin-session', async (importOriginal) => {
   return { ...actual, useAdminSession: vi.fn() };
 });
 
+// The payout status / cancellation panel (own tests in _components/__tests__) is not under test here — its own
+// alerts would collide with this file's `findByRole('alert')` on the reversal modal.
+vi.mock('../_components/BatchPayoutPanel', () => ({
+  default: () => null,
+  useCanCancelPayouts: () => false,
+}));
+
 import { useAdminSession } from '@/lib/admin-session';
 import PayoutStatusPage from '../page';
 

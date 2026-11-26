@@ -3789,7 +3789,7 @@ export class CreditsService {
           // A-M4/B-M2: lock the self-billed SERVICE invoice of a payout settled here — the same lock a
           // UTR PAID applies (D12): it is final, its number can no longer be edited.
           await tx.autoInvoice.updateMany({
-            where: { clientId: user.clientId, outletCode: { in: fullyWithheldCodes }, period, invoiceKind: 'SERVICE', lockedAt: null },
+            where: { clientId: user.clientId, outletCode: { in: fullyWithheldCodes }, period, invoiceKind: 'SERVICE', lockedAt: null, voidedAt: null },
             data: { lockedAt: runAt },
           });
           // Nothing left for the bank at all → the download is already fully settled.
@@ -4501,6 +4501,8 @@ export class CreditsService {
             period: download.period,
             invoiceKind: 'SERVICE',
             lockedAt: null,
+            // A VOID invoice (payouts cancelled) is history — never locked as if paid.
+            voidedAt: null,
           },
           data: { lockedAt: now },
         });
@@ -5191,7 +5193,10 @@ export class CreditsService {
             if (cur.status === 'PAID') {
               // The fully-withheld flip lost a race — fall through to the fresh re-read below.
             } else if (cur.status === 'PROCESSING') throw sentToBank();
-            else {
+            else if (cur.status === 'CANCELLED') {
+              // Defensive: a pending reversal blocks a cancellation, so this cannot normally happen — never re-flip it.
+              throw new ConflictException(`Payout entry ${payoutEntry.id} was cancelled by Gifsy — reject this reversal instead.`);
+            } else {
               // PENDING / FAILED — guarded on the status (and withholding stamp) we read, so a
               // concurrent bank-file download / UTR apply can't be overwritten.
               const offsetIt = cur.tdsDeductedPaise > 0n && !!payoutEntry.tdsSection;

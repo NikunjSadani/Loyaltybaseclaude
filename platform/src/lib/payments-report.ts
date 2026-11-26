@@ -98,7 +98,7 @@ export interface PaymentsReportParams {
   from?: string;
   /** ISO date (YYYY-MM-DD) inclusive upper bound. */
   to?: string;
-  /** PAID | FAILED | REVERSED — omitted means all statuses. */
+  /** PAID | FAILED | REVERSED | CANCELLED — omitted means all statuses. */
   status?: string;
   /** GIFSY-only tenant filter; ignored for CLIENT_ADMIN (server pins scope). */
   clientId?: string;

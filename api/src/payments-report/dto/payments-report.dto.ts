@@ -41,10 +41,10 @@ export class PaymentsReportQueryDto {
   @IsDateString()
   to?: string;
 
-  /** Restrict to a single payment status (PENDING | PROCESSING | PAID | FAILED | REVERSED). */
+  /** Restrict to a single payment status (PENDING | PROCESSING | PAID | FAILED | REVERSED | CANCELLED). */
   @IsOptional()
   @IsEnum(CreditEntryStatus, {
-    message: 'status must be one of PENDING, PROCESSING, PAID, FAILED, REVERSED',
+    message: 'status must be one of PENDING, PROCESSING, PAID, FAILED, REVERSED, CANCELLED',
   })
   status?: CreditEntryStatus;
 }

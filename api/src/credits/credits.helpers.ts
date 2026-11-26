@@ -319,6 +319,9 @@ export const UTR_NOTICE_PAID_BUT_FAILED_ROW =
 export type FormerOutletFate = 'REBANKED' | 'REVERSED' | 'HELD';
 export const UTR_NOTICE_REBANKED = 'Re-banked in a later payout file — no change.';
 export const UTR_NOTICE_REVERSED = 'Reversed — no change.';
+export const UTR_NOTICE_CANCELLED = 'Cancelled by Gifsy after the bank failure — no change.';
+export const UTR_ERROR_CANCELLED_SUCCESS =
+  "This payout failed and was then cancelled by Gifsy — it can't be marked paid from this file. Remove this row; if it was actually paid, contact Gifsy tech.";
 export const UTR_ERROR_HELD_AT_DOWNLOAD =
   'This outlet was held at download (e.g. KYC) — it was not in this bank file. Remove this row; if it was paid by hand, contact Gifsy ops before it is released.';
 export const UTR_ERROR_REBANKED_SUCCESS =
@@ -370,9 +373,10 @@ export function groupUtrBatchRows(
     else byOutlet.set(e.outletId, [e]);
   }
   return [...byOutlet.entries()].map(([outletId, group]) => {
-    const live = group.filter((e) => e.status !== 'REVERSED');
+    // CANCELLED (a FAILED payout Gifsy cancelled — it keeps this bank file as history) is settled like REVERSED.
+    const live = group.filter((e) => e.status !== 'REVERSED' && e.status !== 'CANCELLED');
     let utrStatus: UtrBatchRow['utrStatus'];
-    if (live.length === 0) utrStatus = 'REVERSED';
+    if (live.length === 0) utrStatus = group.some((e) => e.status === 'CANCELLED') ? 'CANCELLED' : 'REVERSED';
     else if (live.some((e) => e.status !== 'PAID' && e.status !== 'FAILED')) utrStatus = 'PENDING';
     else if (live.every((e) => e.status === 'PAID')) utrStatus = 'PAID';
     else if (live.every((e) => e.status === 'FAILED')) utrStatus = 'FAILED';
@@ -392,7 +396,7 @@ export interface UtrBatchRow {
    * The outlet's recorded outcome across ALL its entries in this download (see groupUtrBatchRows).
    * REVERSED = clawed back; MIXED = settled partly PAID / partly FAILED. Neither can be applied.
    */
-  utrStatus: 'PENDING' | 'PAID' | 'FAILED' | 'REVERSED' | 'MIXED';
+  utrStatus: 'PENDING' | 'PAID' | 'FAILED' | 'REVERSED' | 'CANCELLED' | 'MIXED';
   /** Outcome already recorded on the outlet's settled entries (see groupUtrBatchRows); absent = none. */
   settled?: 'PAID' | 'FAILED' | 'MIXED' | null;
   utr?: string;
@@ -569,6 +573,9 @@ export function parseUtrUpload(
       skipNotice = UTR_NOTICE_PAID_BUT_FAILED_ROW;
     } else if (batchRow?.utrStatus === 'FAILED' && outcome === 'FAILURE') {
       skipNotice = UTR_NOTICE_ALREADY_FAILED;
+    } else if (batchRow?.utrStatus === 'CANCELLED' && outcome === 'FAILURE') {
+      // Re-upload of the original file: the payout failed, then Gifsy cancelled it — nothing to change.
+      skipNotice = UTR_NOTICE_CANCELLED;
     }
     if (skipNotice) {
       rows.push({
@@ -615,6 +622,9 @@ export function parseUtrUpload(
     // formerOutlets below instead). Kept for legacy rows only.
     if (batchRow?.utrStatus === 'REVERSED') {
       errors.push('Entry has been reversed — it can\'t be paid or failed from this file. Remove this row.');
+    }
+    if (batchRow?.utrStatus === 'CANCELLED') {
+      errors.push(UTR_ERROR_CANCELLED_SUCCESS);
     }
 
     // An outlet recorded on this download whose entries have since left it. Only a FAILED row on a

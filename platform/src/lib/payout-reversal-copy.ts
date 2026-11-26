@@ -14,6 +14,7 @@ export const ENTRY_STATUS_TEXT: Record<string, string> = {
   FAILED:     'Bank payment failed — will be cancelled',
   PROCESSING: 'With the bank now — approval waits for the bank result (record the UTR or the failure first)',
   PAID:       'Already paid — becomes owed (net of TDS withheld) · withheld TDS becomes a TDS credit',
+  CANCELLED:  'Cancelled by Gifsy (never paid)',
 };
 
 const plural = (count: number, one: string, many: string) => (count === 1 ? one : many);

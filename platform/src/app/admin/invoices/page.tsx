@@ -34,6 +34,7 @@ import {
   Loader2,
   X,
   AlertTriangle,
+  XCircle,
 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { api, authHeader } from '@/lib/api-client';
@@ -80,7 +81,7 @@ interface BackendInvoice {
   outletCode: string;
   period: string;
   invoiceDate: string;
-  status: 'GENERATED' | 'PAID';
+  status: 'GENERATED' | 'PAID' | 'VOID';
   subtotalPaise: number;
   gstPaise: number;
   gstType: 'CGST_SGST' | 'IGST' | null;
@@ -130,7 +131,7 @@ interface InvoiceRow {
   retailerState: string;
   period: string;
   periodLabel: string;
-  status: 'GENERATED' | 'PAID';
+  status: 'GENERATED' | 'PAID' | 'VOID';
   subtotalPaise: number;
   gstPaise: number;
   gstType: 'CGST_SGST' | 'IGST' | null;
@@ -159,10 +160,12 @@ function mapBackend(b: BackendInvoice): InvoiceRow {
 const STATUS_STYLES: Record<InvoiceRow['status'], string> = {
   GENERATED: 'bg-amber-50 text-amber-700 border border-amber-200',
   PAID:      'bg-green-50 text-green-700 border border-green-200',
+  VOID:      'bg-gray-100 text-gray-600 border border-gray-300 line-through',
 };
 const STATUS_ICONS: Record<InvoiceRow['status'], React.ReactNode> = {
   GENERATED: <Clock className="w-3 h-3" />,
   PAID:      <CheckCircle className="w-3 h-3" />,
+  VOID:      <XCircle className="w-3 h-3" />,
 };
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -179,7 +182,7 @@ export default function AdminInvoiceListPage() {
   const [page, setPage]         = useState(1);
 
   const [search, setSearch]             = useState('');
-  const [statusFilter, setStatusFilter] = useState<'ALL' | 'GENERATED' | 'PAID'>('ALL');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'GENERATED' | 'PAID' | 'VOID'>('ALL');
   const [periodFilter, setPeriodFilter] = useState('ALL');
   // Available periods for the dropdown — fetched ONCE (unpaginated, all statuses)
   // so the option list is complete regardless of the current page/filters.
@@ -507,6 +510,8 @@ export default function AdminInvoiceListPage() {
           <option value="ALL">All Statuses</option>
           <option value="GENERATED">Generated</option>
           <option value="PAID">Paid</option>
+          {/* Void = voided when its payout was cancelled by Gifsy; the list hides them unless asked. */}
+          <option value="VOID">Void</option>
         </select>
         <select
           value={periodFilter}

@@ -4327,7 +4327,8 @@ describe('CreditsService', () => {
           expect(res.noBankFileMessage).toMatch(/No bank file — every payout in this run was fully withheld as TDS/);
           // A-M4/B-M2: the self-billed SERVICE invoice is locked at settle time (same as a UTR PAID).
           expect(mockTx.autoInvoice.updateMany).toHaveBeenCalledWith({
-            where: { clientId: 'deoleo', outletCode: { in: ['O1'] }, period: '2026-05', invoiceKind: 'SERVICE', lockedAt: null },
+            // voidedAt null: a VOID invoice (its payouts cancelled) is history, never locked as paid.
+            where: { clientId: 'deoleo', outletCode: { in: ['O1'] }, period: '2026-05', invoiceKind: 'SERVICE', lockedAt: null, voidedAt: null },
             data: { lockedAt: expect.any(Date) },
           });
           // Listed loudly in the result.

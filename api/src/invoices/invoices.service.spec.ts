@@ -1219,6 +1219,49 @@ describe('InvoicesService', () => {
 
   // ── list ─────────────────────────────────────────────────────────────────────
 
+  describe('VOID invoices (payout cancellation, owner 2026-11-25)', () => {
+    it('lists hide VOID by default (admin + partner); an admin can ask for them; a partner never sees one', async () => {
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.autoInvoice.count.mockResolvedValue(0);
+      await service.list(admin, {});
+      expect(mockPrisma.autoInvoice.findMany.mock.calls[0][0].where.status).toEqual({ not: 'VOID' });
+      await service.list(admin, { status: 'VOID' });
+      expect(mockPrisma.autoInvoice.findMany.mock.calls[1][0].where.status).toBe('VOID');
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'p1' });
+      const r = await service.list(partnerUser, { status: 'VOID' });
+      expect(r.invoices).toEqual([]);
+    });
+
+    it('a VOID invoice cannot be marked paid or renumbered', async () => {
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({ id: 'inv1', clientId: 'deoleo', status: 'VOID', invoiceKind: 'SERVICE', lockedAt: null });
+      await expect(service.markPaid(gifsy, 'inv1')).rejects.toThrow(/voided/);
+      await expect(service.updateInvoiceNumber(admin, 'inv1', { invoiceNumber: 'X-1' })).rejects.toThrow(/voided/);
+      expect(mockPrisma.autoInvoice.update).not.toHaveBeenCalled();
+    });
+
+    it('generateForBatch: only a LIVE invoice is reused — a later upload for an outlet+month whose invoice is VOID gets a NEW one', async () => {
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ id: 'e9', outletId: 'O1', outletName: 'Test Store', amountPaise: 300000n }]);
+      mockTx.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'O1', name: 'Test Store', state: 'West Bengal',
+          partner: {
+            id: 'p1', businessName: 'Test Enterprises', ownerName: 'Rajesh', phone: '9999999999', panNumber: 'ABCDE1234F',
+            gstNumber: null, entityType: 'INDIVIDUAL', gstRegistrationType: 'UNREGISTERED', bankName: 'SBI',
+            bankAccountNumber: '123', ifscCode: 'SBIN0001234', kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      mockTx.autoInvoice.findFirst.mockResolvedValue(null); // the VOID one is filtered out by voidedAt: null
+      mockTx.autoInvoice.count.mockResolvedValue(1);
+      mockTx.autoInvoice.create.mockResolvedValue({ id: 'inv-new' });
+      const res = await service.generateForBatch(mockTx as never, { clientId: 'deoleo', period: '2026-05', batchId: 'b2', visibilityFieldIds: ['f-vis'] });
+      expect(mockTx.autoInvoice.findFirst.mock.calls[0][0].where).toMatchObject({ outletCode: 'O1', invoiceKind: 'SERVICE', voidedAt: null });
+      expect(res.generated).toBe(1);
+      expect(res.skipped).toEqual([]);
+      expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['e9'] } }, data: { autoInvoiceId: 'inv-new' } });
+    });
+  });
+
   describe('list', () => {
     it('scopes to the tenant clientId for admin', async () => {
       mockPrisma.autoInvoice.findMany.mockResolvedValue([]);

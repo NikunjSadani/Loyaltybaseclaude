@@ -46,7 +46,7 @@ export class ListInvoicesQueryDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['GENERATED', 'PAID'])
+  @IsIn(['GENERATED', 'PAID', 'VOID'])
   status?: string;
 
   @IsOptional()

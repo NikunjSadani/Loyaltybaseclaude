@@ -17,6 +17,8 @@ import { downloadBlob } from '@/lib/download';
 import BatchEvidencePanel from './_components/BatchEvidencePanel';
 import ReversalEngineAttentionBanner from './_components/ReversalEngineAttentionBanner';
 import WalletsInDebtSection from './_components/WalletsInDebtSection';
+import BatchPayoutPanel, { useCanCancelPayouts } from './_components/BatchPayoutPanel';
+import CancelPayoutsFileSection from './_components/CancelPayoutsFileSection';
 import { formatInrPaise } from '@/lib/money-format';
 import { ENTRY_STATUS_TEXT } from '@/lib/payout-reversal-copy';
 
@@ -166,15 +168,16 @@ interface PayoutReversalEntry {
   id:          string;
   /** Integer paise. */
   amountPaise: number;
-  status:      'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED' | 'REVERSED' | string;
+  status:      'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED' | 'REVERSED' | 'CANCELLED' | string;
   period:      string;
   createdAt:   string;
   selectable:  boolean;
-  blockedBy:   'REVERSED' | 'RESERVED' | 'CONSUMED' | 'ZERO' | 'PAID_194C' | null;
+  blockedBy:   'REVERSED' | 'CANCELLED' | 'RESERVED' | 'CONSUMED' | 'ZERO' | 'PAID_194C' | null;
 }
 
 const ENTRY_BLOCK_TEXT: Record<string, string> = {
   REVERSED: 'Already reversed',
+  CANCELLED: 'Cancelled by Gifsy (never paid)',
   RESERVED: 'Held by another pending reversal',
   CONSUMED: 'Already covered by an approved reversal',
   ZERO:     'No amount',
@@ -197,6 +200,8 @@ const inr = formatInrPaise;
 
 export default function PayoutStatusPage() {
   const session = useAdminSession();
+  // Payout cancellation: GIFSY_ADMIN working inside the client only (the server re-checks).
+  const canCancelPayouts = useCanCancelPayouts();
 
   const [batches,      setBatches]      = useState<BatchSummary[]>([]);
   const [batchDetails, setBatchDetails] = useState<Record<string, BatchDetail>>({});
@@ -595,6 +600,9 @@ export default function PayoutStatusPage() {
           reversal(s) behind it when there are any. Renders nothing when no wallet is below zero. */}
       <WalletsInDebtSection />
 
+      {/* Owner 2026-11-25: bulk cancel of unpaid / failed payouts by Excel — client-wide. */}
+      {canCancelPayouts && <CancelPayoutsFileSection />}
+
       {/* Filter */}
       {periods.length > 1 && (
         <div className="flex items-center gap-3">
@@ -696,6 +704,12 @@ export default function PayoutStatusPage() {
                         <span>Confirmed: <strong className="text-gray-700">{new Date(batch.confirmedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</strong></span>
                       )}
                     </div>
+
+                    {/* Payout status breakdown, row drill-down, cancellations (confirmed uploads only — an
+                        unconfirmed upload has no payout rows yet). */}
+                    {isConfirmed && (
+                      <BatchPayoutPanel batchId={batch.id} batchCode={batch.batchCode} canCancel={canCancelPayouts} />
+                    )}
 
                     {detail && detail.rows.some(isDeductionRow) && (() => {
                       const ok = detail.rows.filter((r) => r.status === 'OK' && r.awardType === 'POINTS');

@@ -2430,13 +2430,20 @@ model AutoInvoice {
   // TDS invoices (invoiceKind=TDS): the retailer PAN + FY they settle (one per client/PAN/FY).
   linkedPanNumber     String?
   linkedFyLabel       String?
+  // VOID (owner 2026-11-25): every payout the SERVICE invoice covered was cancelled before payment.
+  voidedAt            DateTime?
+  voidedById          String?
+  voidReason          String?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
   creditEntries CreditPayoutEntry[]
   reimbursement GstReimbursement?
 
-  @@unique([clientId, outletCode, period, invoiceKind]) // one SERVICE invoice per outlet/month; a TDS row can coexist
+  // One LIVE invoice per (client, outlet, month, kind): a MIGRATION-ONLY partial unique index
+  // `auto_invoices_live_outlet_period_kind_key` … WHERE "voidedAt" IS NULL (20261125140000_payout_cancellation). A VOID
+  // invoice (its payouts were cancelled) stays in history and a later upload for that outlet + month gets a NEW invoice.
+  @@index([clientId, outletCode, period, invoiceKind])
   @@index([clientId])
   @@index([partnerId])
   @@index([invoiceDate])
@@ -2447,6 +2454,7 @@ model AutoInvoice {
 enum AutoInvoiceStatus {
   GENERATED // editable (incl. invoice number); not yet paid
   PAID // locked — invoice number can no longer change
+  VOID // every payout it covered was cancelled before payment (voidedAt / voidReason) — out of invoice lists + reports
 }
 
 enum AutoInvoiceKind {
@@ -2483,6 +2491,7 @@ model GstReimbursement {
 enum GstReimbursementStatus {
   HELD // GST withheld pending the retailer's deposit proof
   RELEASED // reimbursed to the retailer after proof
+  VOID // its invoice was voided (the payouts were cancelled before payment) — nothing to release
 }
 
 // ============================================================
@@ -3883,6 +3892,10 @@ enum CreditEntryStatus {
   // payability. Distinct from FAILED (a bank-rejected disbursement, which GLM-2 RE-banks);
   // keeping them separate prevents a reversed award from being resurrected into a download.
   REVERSED
+  // CANCELLED = a Gifsy admin cancelled a payout that was never paid (PENDING, never in a bank file — or FAILED at
+  // the bank) — terminal; never re-banked, never paid, outside every TDS base / fund commitment / partner view.
+  // Owner-approved 2026-11-25 (all clients). cancelledAt / cancelledById / cancelReason say who, when and why.
+  CANCELLED
 }
 
 /// Classifies a credit field's payout stream. VISIBILITY = 194C-eligible marketing/support
@@ -4006,6 +4019,11 @@ model CreditPayoutEntry {
   // which MUST stay null for a non-success row so it never leaks into the default/PAID report view).
   failureReason  String?
   attemptedAt    DateTime?
+  // Payout cancellation (status CANCELLED, owner 2026-11-25). Null for every other entry. A cancelled FAILED entry
+  // keeps its failureReason / attemptedAt / downloadId (its bank-file history).
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancelReason   String?
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 

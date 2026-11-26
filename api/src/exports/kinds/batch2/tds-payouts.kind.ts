@@ -34,7 +34,8 @@ const inr = (paise: bigint) => Number(paise) / 100;
 
 async function run(ctx: ExportRunContext, p: TdsPayoutsParams, out: XlsxStreamWriter): Promise<{ rowCount: number }> {
   const clientId = scopeOf(ctx.user, p.clientId);
-  const where: Prisma.CreditPayoutEntryWhereInput = { tdsSection: { not: null } };
+  // Cancelled payouts (owner 2026-11-25) were never paid and carry no TDS — same rule as the on-screen report.
+  const where: Prisma.CreditPayoutEntryWhereInput = { tdsSection: { not: null }, status: { not: 'CANCELLED' } };
   if (clientId) where.clientId = clientId;
   if (p.period) where.period = p.period;
 

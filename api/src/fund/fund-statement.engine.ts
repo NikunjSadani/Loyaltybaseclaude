@@ -47,6 +47,7 @@ export type FundFlag =
   | 'NO_FEE_RATE' // payout with no agency fee set → no fee charged
   | 'HUBBLE_NEEDS_RECONCILE' // Hubble outcome unknown — counted as committed
   | 'FAILED_AWAITING_REBANK' // credit payout failed at the bank, not reversed — still committed (re-banked later)
+  | 'PAYOUT_CANCELLED' // credit payout cancelled by Gifsy before payment — not charged (returned on the cancel day)
   | 'FACE_RECOMPUTED' // the order's frozen value was zeroed by the refund; face re-derived from the order snapshot
   | 'FACE_UNKNOWN' // no face value could be derived (₹0 charged) — check the source record
   | 'DATE_ESTIMATED' // the source has no event timestamp for the paid / return date (never updatedAt): a return is

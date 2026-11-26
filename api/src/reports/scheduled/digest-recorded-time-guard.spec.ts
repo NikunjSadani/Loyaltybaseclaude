@@ -71,6 +71,18 @@ const CREDIT_ENTRY_SITES: Site[] = [
       'branches before this; guarded on the status read under the entry row lock)',
   },
   {
+    file: 'credits/payout-cancel.ts',
+    fingerprint: /^[^\n]*updateMany\(\{ where: \{ clientId, id: \{ in: g\.ids \}, status: 'PENDING', downloadId: null \}/,
+    reason: 'payout cancellation: PENDING (never in a bank file) → CANCELLED — a status change, guarded under the row lock',
+  },
+  {
+    file: 'credits/payout-cancel.ts',
+    fingerprint: /^[^\n]*updateMany\(\{ where: \{ clientId, id: \{ in: g\.ids \}, status: 'FAILED' \}/,
+    reason:
+      'payout cancellation: FAILED → CANCELLED — a status change (leaves the digest FAILED counts, never touches PAID), ' +
+      'guarded under the row lock',
+  },
+  {
     file: 'invoices/invoices.service.ts',
     fingerprint: /where: \{ id: \{ in: info\.entryIds \} \},\s*data: \{ autoInvoiceId: existing\.id \}/,
     reason: 'generateForBatch: links entries created moments ago in the same confirm tx (PENDING)',
