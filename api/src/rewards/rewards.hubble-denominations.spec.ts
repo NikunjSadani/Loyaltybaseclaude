@@ -394,7 +394,7 @@ describe('Hubble per-brand amounts + whole-rupee redemption amounts', () => {
 
     it('amounts without Hubble (flag OFF) → 400', async () => {
       await expect(service.createCatalogItem(bajajAdmin, { ...base, hubbleProductId: 'fk-1', hubbleDenominations: [150] }))
-        .rejects.toThrow(/only be chosen for a Hubble gift card/);
+        .rejects.toThrow(/only be chosen for an API gift card/);
     });
 
     it('amounts list but Hubble NOT configured → 503 (cannot verify); no list → saved unchecked (as before)', async () => {
@@ -675,7 +675,7 @@ describe('Hubble per-brand amounts + whole-rupee redemption amounts', () => {
       await expect(service.createCatalogItem(bajajAdmin, { ...base, code: 'FK2', hubbleDenominations: [175] }))
         .rejects.toThrow(/below this program's minimum/);
       await expect(service.createCatalogItem(bajajAdmin, { ...base, code: 'FK3', minRedemptionPoints: 100, maxRedemptionPoints: 1000 }))
-        .rejects.toThrow(/enter the amounts Hubble shows/);
+        .rejects.toThrow(/enter the amounts the API shows/);
     });
 
     it('L4: PATCH with min/max explicitly null + a selling value (no amounts field) clears the list → fixed price', async () => {

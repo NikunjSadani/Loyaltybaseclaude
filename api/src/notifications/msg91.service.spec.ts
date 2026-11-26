@@ -516,21 +516,6 @@ describe('Msg91Service.sendEmail (SMTP relay)', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  // OWNER RULE (2026-11-26): every e-mail can be forwarded to a client — the fulfiller is never named.
-  it('never sends the fulfiller name ("Hubble" → "Via API"); link targets are left intact', async () => {
-    const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'secret-pw' }));
-    await service.sendEmail({
-      to: ['ops@gifsy.in'],
-      subject: 'Digest — Hubble: 2 vouchers failed',
-      html: '<div data-section="Vouchers (Hubble)" title="Hubble"><p>2 redemptions failed, 2 via Hubble</p><a href="https://x.test/a">open</a></div>',
-    });
-    const sent = sendMail.mock.calls[0][0];
-    expect(JSON.stringify(sent)).not.toMatch(/hubble/i);
-    expect(sent.subject).toBe('Digest — Via API: 2 vouchers failed');
-    expect(sent.html).toContain('2 via API');
-    expect(sent.html).toContain('href="https://x.test/a"');
-  });
-
   it('cc: one message with a real Cc; returns the relay-rejected addresses (partial accept)', async () => {
     sendMail.mockResolvedValue({ messageId: '<x>', accepted: ['a@acme.com'], rejected: ['Bad@acme.com'] });
     const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'secret-pw' }));

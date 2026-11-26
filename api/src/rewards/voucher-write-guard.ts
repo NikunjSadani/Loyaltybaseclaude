@@ -75,8 +75,8 @@ export const VOUCHER_BLANK_MESSAGE =
 export const VOUCHER_STATUS_MESSAGE =
   'A voucher code can only be issued on a confirmed, paid order (CONFIRMED / PROCESSING / DISPATCHED).';
 export const HUBBLE_PROVIDER_MESSAGE =
-  "This order was sent to the Hubble integration — retry with Hubble, or a Gifsy admin can 'Fulfil manually' with a reason.";
-export const HUBBLE_HAND_SET_MESSAGE = "The 'Hubble' provider is set by the integration only.";
+  "This order was sent for issuance via API — retry via API, or a Gifsy admin can 'Fulfil manually' with a reason.";
+export const HUBBLE_HAND_SET_MESSAGE = 'The API provider is set by the integration only.';
 export const VOUCHER_CASH_MESSAGE = 'A cash redemption cannot carry a voucher code.';
 export const VOUCHER_REUSED_MESSAGE =
   "This voucher code was cancelled with the vendor and can't be reused.";
@@ -180,7 +180,7 @@ export function isHubbleHandedOff(order: { voucherProvider?: string | null; meta
 
 /** 400 for a manual forward move on a Hubble-handed order that has no code (owner 2026-11-24). */
 export const HUBBLE_FORWARD_BLOCK_MESSAGE =
-  "This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.";
+  "This voucher is being issued via API — a Gifsy admin can retry via API to fetch the code, or 'Fulfil manually'.";
 
 /** The order was handed to Hubble (placeOrder / markHubbleProcessing / reconcile flags). */
 export function hasHubbleMarkers(order: { voucherProvider?: string | null; metadata?: Prisma.JsonValue | null }): boolean {

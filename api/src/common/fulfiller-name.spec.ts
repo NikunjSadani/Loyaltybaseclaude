@@ -1,4 +1,4 @@
-import { neutralFulfillerDeep, neutralFulfillerHtml, neutralFulfillerKey, neutralFulfillerText, VIA_API } from './fulfiller-name';
+import { neutralFulfillerText, neutralRefundNarration, VIA_API } from './fulfiller-name';
 
 /** OWNER RULE (2026-11-26): "Hubble" never reaches a client surface or a downloaded file. */
 describe('fulfiller name neutralisation', () => {
@@ -32,31 +32,9 @@ describe('fulfiller name neutralisation', () => {
     expect(neutralFulfillerText(s)).toBe(s);
   });
 
-  it('keys: hubbleNeedsReconcile → apiNeedsReconcile', () => {
-    expect(neutralFulfillerKey('hubbleNeedsReconcile')).toBe('apiNeedsReconcile');
-    expect(neutralFulfillerKey('lastHubbleCheck')).toBe('lastApiCheck');
-  });
-
-  it('deep: values always, keys only on request; non-plain values untouched', () => {
-    const d = new Date();
-    const input = { a: 'Hubble', n: 1, d, big: BigInt(3), list: [{ voucherProvider: 'Hubble', hubbleHanded: true }] };
-    const vOnly = neutralFulfillerDeep(input);
-    expect(vOnly.a).toBe(VIA_API);
-    expect(vOnly.d).toBe(d);
-    expect(vOnly.big).toBe(BigInt(3));
-    expect(Object.keys(vOnly.list[0])).toContain('hubbleHanded');
-    const all = neutralFulfillerDeep(input, { keys: true });
-    expect(JSON.stringify(all, (_k, v) => (typeof v === 'bigint' ? String(v) : v))).not.toMatch(NO_NAME);
-    // Unchanged subtrees keep their reference.
-    const clean = { x: [{ y: 'ok' }] };
-    expect(neutralFulfillerDeep(clean)).toBe(clean);
-  });
-
-  it('html: text + titles neutralised, links untouched', () => {
-    const html = '<p title="Hubble">Vouchers (Hubble)</p><a href="https://x.test/hubble-x">open</a>';
-    const out = neutralFulfillerHtml(html);
-    expect(out).toContain('href="https://x.test/hubble-x"');
-    expect(out).toContain('Vouchers (Via API)');
-    expect(out).toContain('title="Via API"');
+  it('ledger: only the exact old refund narration is reworded; any other narration passes through', () => {
+    expect(neutralRefundNarration('Refund BAJAJ-26-000050 (Hubble failed)')).toBe('Refund BAJAJ-26-000050 (voucher could not be issued)');
+    expect(neutralRefundNarration('Bonus for Hubble Traders')).toBe('Bonus for Hubble Traders');
+    expect(neutralRefundNarration(null)).toBeNull();
   });
 });

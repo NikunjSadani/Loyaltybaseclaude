@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { CreditAttribution, Prisma, PointsLedgerType, Wallet, WalletTransactionType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { neutralRefundNarration } from '../common/fulfiller-name';
 import { POINTS_REVERSAL_PAUSE_SETTING_KEY, TenantSettingsService } from '../tenant/tenant-settings.service';
 import {
   BACKFILL_NEXT_STEP,
@@ -1514,7 +1515,8 @@ export class WalletService {
     const passbook = transactions.map((t) => ({
       id: t.id,
       transactionType: t.transactionType,
-      description: t.description ?? this.getDefaultDescription(t.transactionType),
+      // Owner rule 2026-11-26: the old fulfiller-refund narration is shown in neutral words (exact match only).
+      description: neutralRefundNarration(t.description) ?? this.getDefaultDescription(t.transactionType),
       points: t.points,
       date: t.createdAt,
       balanceType: t.balanceType,
@@ -1525,7 +1527,7 @@ export class WalletService {
       fieldName: fieldNameByTxId.get(t.id) ?? null,
       // RAW upload narration (BEFORE the getDefaultDescription fallback) — null/empty
       // when the upload carried no narration, so the FE only shows a real note.
-      narration: t.description,
+      narration: neutralRefundNarration(t.description),
     }));
 
     return {

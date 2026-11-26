@@ -1,8 +1,8 @@
 /// <reference types="vitest/globals" />
 /**
  * GIFNF — OWNER RULE (2026-11-26, all clients): a CLIENT admin never sees that vouchers come from Hubble.
- * The server hands a non-Gifsy viewer the order with neutral values AND keys (voucherProvider "Via API",
- * apiNeedsReconcile / API_* reason codes — see api TransformInterceptor). The view-only Redemption orders list
+ * The server hands a non-Gifsy viewer the order with neutral VALUES (voucherProvider "Via API", API_* reason
+ * codes — rewards.service clientSafeOrderFulfiller; field names unchanged). The view-only Redemption orders list
  * still shows every signal ("Needs reconcile", the waiting line), in neutral words, and no "Hubble" anywhere —
  * not in text, not in a tooltip.
  */
@@ -25,15 +25,15 @@ const base = {
   redemptionMode: 'GIFT_CARD', totalPointsCost: 500,
   createdAt: '2026-11-24T05:10:00.000Z', updatedAt: '2026-11-24T05:15:00.000Z',
 };
-/** Exactly what the API returns to a CLIENT_ADMIN (neutralised keys + values). */
+/** Exactly what the API returns to a CLIENT_ADMIN (neutral values; field names unchanged). */
 const CLIENT_ORDERS = [
   { ...base, id: 'w', orderNumber: 'WAITING', status: 'PROCESSING', voucherProvider: 'Via API',
-    apiHanded: true, apiWaitingSince: '2026-11-24T05:15:00.000Z', apiLastCheckedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
-    apiNeedsReconcile: false, apiReconcileReason: null },
+    hubbleHanded: true, hubbleWaitingSince: '2026-11-24T05:15:00.000Z', hubbleLastCheckedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+    hubbleNeedsReconcile: false, hubbleReconcileReason: null },
   { ...base, id: 's', orderNumber: 'STUCK', status: 'PROCESSING', voucherProvider: 'Via API',
-    apiHanded: true, apiNeedsReconcile: true, apiReconcileReason: 'API_INDETERMINATE',
-    apiLatestReason: 'API_WEBHOOK_BUT_NOT_FOUND',
-    apiNoOrderUnverifiedWhy: 'no delivered API order on this API account to verify against' },
+    hubbleHanded: true, hubbleNeedsReconcile: true, hubbleReconcileReason: 'API_INDETERMINATE',
+    hubbleLatestReason: 'API_WEBHOOK_BUT_NOT_FOUND',
+    hubbleNoOrderUnverifiedWhy: 'no delivered API order on this API account to verify against' },
   { ...base, id: 'd', orderNumber: 'DONE-1', status: 'DELIVERED', voucherProvider: 'Via API', voucherIssued: true, voucherCodeMasked: true, voucherCode: null },
 ];
 

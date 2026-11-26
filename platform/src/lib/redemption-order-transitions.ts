@@ -56,35 +56,6 @@ export function isApiFulfillerProvider(provider: string | null | undefined): boo
   return p === 'hubble' || p === 'via api';
 }
 
-/**
- * A non-Gifsy viewer's order arrives with the fulfiller's name neutralised in KEYS and codes too
- * (apiNeedsReconcile / API_INDETERMINATE). Map those back onto the console's field names so one rendering
- * path serves both audiences. A Gifsy operator's order (hubble* keys) passes through unchanged.
- */
-export function withConsoleFulfillerFields<T extends object>(order: T): T {
-  const o = order as Record<string, unknown>;
-  const pairs: Array<[string, string]> = [
-    ['apiNeedsReconcile', 'hubbleNeedsReconcile'],
-    ['apiReconcileReason', 'hubbleReconcileReason'],
-    ['apiLatestReason', 'hubbleLatestReason'],
-    ['apiNoOrderUnverifiedWhy', 'hubbleNoOrderUnverifiedWhy'],
-    ['apiHanded', 'hubbleHanded'],
-    ['apiWaitingSince', 'hubbleWaitingSince'],
-    ['apiLastCheckedAt', 'hubbleLastCheckedAt'],
-  ];
-  if (!pairs.some(([from]) => from in o)) return order;
-  const out: Record<string, unknown> = { ...o };
-  for (const [from, to] of pairs) {
-    if (from in out) {
-      const v = out[from];
-      delete out[from];
-      // Reason CODES come back as API_X — the console's label map is keyed HUBBLE_X.
-      out[to] = typeof v === 'string' && /^API_/.test(v) && /Reason$/.test(to) ? `HUBBLE_${v.slice(4)}` : v;
-    }
-  }
-  return out as T;
-}
-
 /** Mirrors the backend `hasIssuedVoucher` (null / '' / whitespace-only = none). */
 export function hasIssuedVoucher(code: string | null | undefined): boolean {
   return typeof code === 'string' && code.trim() !== '';

@@ -49,7 +49,7 @@ import { usePermissions } from '@/lib/use-permissions';
 import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
 import {
   nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS,
-  isApiFulfillerProvider, withConsoleFulfillerFields,
+  isApiFulfillerProvider,
 } from '@/lib/redemption-order-transitions';
 import { neutralFulfillerText } from '@/lib/fulfiller-name';
 import type { GifsySettings } from '@/types';
@@ -1712,8 +1712,12 @@ function relativeAgo(iso: string | null | undefined, nowMs: number = Date.now())
 const HUBBLE_POST_REFUND_FLAGS = new Set(['HUBBLE_ISSUED_AFTER_REFUND', 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND']);
 /** Terminal, points-returned order statuses: any Hubble flag on one is cleared by "Acknowledge". */
 const TERMINAL_REFUND_STATUSES = new Set(['FAILED', 'CANCELLED', 'RETURNED']);
-const hubbleReasonLabel = (r?: string | null) =>
-  !r ? 'Needs review' : HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown API status' : neutralFulfillerText(r));
+/** A non-Gifsy viewer receives the reason CODE as API_X (owner rule 2026-11-26) — same label either way. */
+const hubbleReasonLabel = (raw?: string | null) => {
+  if (!raw) return 'Needs review';
+  const r = raw.replace(/^API_/, 'HUBBLE_');
+  return HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown API status' : neutralFulfillerText(r));
+};
 
 /** Human copy for the "Retry with Hubble" outcome (fallback: the raw outcome code). */
 const HUBBLE_RETRY_OUTCOME_LABEL: Record<string, string> = {
@@ -2589,7 +2593,7 @@ function FulfilmentQueue({
     try {
       const data = await apiJson<OrdersPage>(ordersUrl(status, limit, null, queryRef.current));
       if (gen !== genRef.current) return;
-      setOrders((data.orders ?? []).map(withConsoleFulfillerFields));
+      setOrders(data.orders ?? []);
       setLoadedAtMs(Date.now());
       setTotal(data.pagination?.total ?? null);
       setNextCursor(data.nextCursor ?? null);
@@ -2612,7 +2616,7 @@ function FulfilmentQueue({
       const data = await apiJson<OrdersPage>(ordersUrl(statusFilter, ORDERS_PAGE_SIZE, nextCursor, queryRef.current));
       if (gen !== genRef.current) return;
       const seen = new Set(ordersRef.current.map((o) => o.id));
-      const fresh = (data.orders ?? []).map(withConsoleFulfillerFields).filter((o) => !seen.has(o.id));
+      const fresh = (data.orders ?? []).filter((o) => !seen.has(o.id));
       focusOrderIdRef.current = fresh[0]?.id ?? null;
       setOrders((prev) => {
         const have = new Set(prev.map((o) => o.id));

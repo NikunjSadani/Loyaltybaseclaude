@@ -1,5 +1,4 @@
 import * as XLSX from 'xlsx';
-import { neutralFulfillerText } from './fulfiller-name';
 
 /**
  * Shared multi-sheet xlsx builder — used by any domain that streams an xlsx
@@ -54,10 +53,7 @@ export function isHyperlinkCell(v: unknown): v is HyperlinkCell {
  * are unaffected). Mirrors the proven `cellSafe` in tds/invoice helpers.
  */
 export function cellSafe(v: string): string {
-  // OWNER RULE (2026-11-26): a downloaded file never names the voucher fulfiller ("Hubble" → "Via API"),
-  // whoever generated it — files get forwarded to clients. Every string cell + header passes here.
-  const s = neutralFulfillerText(v);
-  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+  return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
 }
 
 /**

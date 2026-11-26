@@ -1,5 +1,6 @@
 /**
  * FE MIRROR of api/src/common/fulfiller-name.ts — keep the two in step (a spec in each pins the rules).
+ * DISPLAY ONLY: use it on the specific fields / labels that carry the fulfiller's name, never on whole payloads.
  */
 /**
  * OWNER RULE (2026-11-26, all clients): a client must never see that e-vouchers are procured from Hubble.
@@ -81,73 +82,16 @@ export function neutralFulfillerText(v: string): string {
   return s;
 }
 
-/** An object KEY with the name swapped (hubbleNeedsReconcile → apiNeedsReconcile, HUBBLE_X → API_X). */
-export function neutralFulfillerKey(k: string): string {
-  if (!HAS_NAME.test(k)) return k;
-  return k
-    .replace(/HUBBLE/g, 'API')
-    .replace(/Hubble/g, 'Api')
-    .replace(/hubble/gi, 'api');
-}
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  if (v === null || typeof v !== 'object') return false;
-  const proto = Object.getPrototypeOf(v);
-  return proto === Object.prototype || proto === null;
-}
+/** The wording a fulfiller-failure refund carries in the points ledger (partner passbook / statements). */
+export const FULFILLER_REFUND_SUFFIX = '(voucher could not be issued)';
 
 /**
- * Deep copy of a JSON-ish response with every string VALUE neutralised; with `keys: true` object KEYS too.
- * Only plain objects and arrays are walked — Dates, BigInts, Buffers, Decimals, class instances (e.g. a
- * StreamableFile) are returned as-is. Values without the name keep their reference (cheap on big lists).
+ * The ONE platform-written ledger narration that named the fulfiller — `Refund <order> (Hubble failed)`
+ * (rewards.service refundAndFailHubble, rows written before 2026-11-26) — in neutral words. Field-level and
+ * exact: any other narration (uploaded / typed text) is returned unchanged.
  */
-export function neutralFulfillerDeep<T>(value: T, opts: { keys?: boolean } = {}): T {
-  const walk = (v: unknown, depth: number): unknown => {
-    if (typeof v === 'string') return neutralFulfillerText(v);
-    if (depth > 64) return v;
-    if (Array.isArray(v)) {
-      let changed = false;
-      const out = v.map((x) => {
-        const y = walk(x, depth + 1);
-        if (y !== x) changed = true;
-        return y;
-      });
-      return changed ? out : v;
-    }
-    if (isPlainObject(v)) {
-      let changed = false;
-      const out: Record<string, unknown> = {};
-      for (const [k, x] of Object.entries(v)) {
-        const nk = opts.keys ? neutralFulfillerKey(k) : k;
-        const y = walk(x, depth + 1);
-        if (nk !== k || y !== x) changed = true;
-        out[nk] = y;
-      }
-      return changed ? out : v;
-    }
-    return v;
-  };
-  return walk(value, 0) as T;
-}
-
-/**
- * Neutral version of an HTML e-mail body: the TEXT between tags and every attribute value are neutralised
- * (a forwarded e-mail's source is readable too); only link targets (href / src / action) are left untouched
- * so a link is never broken.
- */
-const LINK_ATTRS: ReadonlySet<string> = new Set(['href', 'src', 'action', 'srcset']);
-export function neutralFulfillerHtml(html: string): string {
-  if (!HAS_NAME.test(html)) return html;
-  return html
-    .split(/(<[^>]*>)/)
-    .map((part) =>
-      part.startsWith('<')
-        ? part.replace(
-            /(\s([\w:-]+)\s*=\s*)(["'])(.*?)\3/g,
-            (m, pre: string, name: string, q: string, val: string) =>
-              LINK_ATTRS.has(name.toLowerCase()) ? m : `${pre}${q}${neutralFulfillerText(val)}${q}`,
-          )
-        : neutralFulfillerText(part),
-    )
-    .join('');
+export function neutralRefundNarration<T extends string | null | undefined>(d: T): T {
+  if (typeof d !== 'string') return d;
+  return d.replace(/^(Refund \S+) \(Hubble failed\)$/, `$1 ${FULFILLER_REFUND_SUFFIX}`) as T;
 }

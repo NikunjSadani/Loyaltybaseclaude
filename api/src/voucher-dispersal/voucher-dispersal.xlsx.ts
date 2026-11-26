@@ -2,6 +2,7 @@ import ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
 import { istDateTimeCell } from '../common/ist-date';
 import { cellSafe } from '../common/xlsx';
+import { neutralFulfillerText } from '../common/fulfiller-name';
 import { DISPERSAL_MAX_ROWS, DISPERSAL_NAME_MAX, DispersalBrandLimits, describeBrandAmounts } from './voucher-dispersal.parse';
 
 /**
@@ -55,11 +56,11 @@ export async function buildDispersalTemplate(brands: DispersalBrandLimits[]): Pr
     '7. Each phone may appear only ONCE per campaign — a repeated phone is marked DUPLICATE and gets no voucher.',
     '8. After upload you will see a preview with every invalid / duplicate row and the total against the budget. Nothing is bought until you confirm.',
     '',
-    'Brands and the amounts they can issue (live from Hubble when this template was downloaded):',
+    'Brands and the amounts they can issue (live via API when this template was downloaded):',
     ...brands.map((b) =>
       b.available && b.product
         ? `  • ${b.label}: ${describeBrandAmounts(b.product)}`
-        : `  • ${b.label}: limits unavailable right now (${b.unavailableReason ?? 'unknown'}) — rows for it will be rejected until Hubble answers`,
+        : `  • ${b.label}: limits unavailable right now (${neutralFulfillerText(b.unavailableReason ?? 'unknown')}) — rows for it will be rejected until the API answers`,
     ),
   ];
   lines.forEach((l, i) => {
@@ -122,11 +123,12 @@ export function buildDispersalReport(rows: DispersalReportRow[]): Buffer {
       safe(r.name),
       r.amountRupees ?? '',
       safe(r.brand),
-      safe(r.voucherStatus),
+      r.voucherStatus,
       safe(r.hubbleReference),
       ist(r.boughtAt),
-      safe(r.failureReason),
-      safe(r.whatsappStatus),
+      // Owner rule 2026-11-26: failure reasons can carry the fulfiller's name — this column says "Via API".
+      safe(r.failureReason == null ? null : neutralFulfillerText(r.failureReason)),
+      r.whatsappStatus,
       ist(r.sentAt),
       ist(r.deliveredAt),
       ist(r.readAt),

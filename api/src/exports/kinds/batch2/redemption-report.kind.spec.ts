@@ -477,8 +477,8 @@ describe('redemption report — never-exported data', () => {
       hist(w, failed, [['CONFIRMED', 'FAILED', 4, null, 'Hubble failed — points refunded: HUBBLE timeout']]);
       const noOrder = addOrder(w, 'bajaj', { redemptionMode: 'GIFT_CARD', voucherProvider: null, status: 'FAILED', pointsDeducted: 0, cancelReason: HUBBLE_NO_ORDER_REFUND_REASON });
       hist(w, noOrder, [['CONFIRMED', 'FAILED', 5, null, `Hubble issuance failed: ${HUBBLE_NO_ORDER_REFUND_REASON}`]]);
-      // Typed text that names the fulfiller (a reward named by an operator, an ops note) is neutralised too.
-      const typed = addOrder(w, 'bajaj', { reward: { name: 'Hubble Amazon Pay', metadata: null, category: { name: 'Hubble cards' } } });
+      // A typed REASON / note that names the fulfiller is reason text → neutral words too.
+      const typed = addOrder(w, 'bajaj', { status: 'CANCELLED', pointsDeducted: 0, cancelReason: 'Checked with Hubble — cancelled' });
       hist(w, typed, [['PENDING', 'CANCELLED', 6, 'u-op', 'Checked with Hubble — cancelled']]);
       const params = REDEMPTION_REPORT_KIND.parseParams(user === GIFSY ? { ...NOV, clientId: 'bajaj' } : NOV, user);
       const { prisma } = prismaFor(w);
@@ -493,6 +493,20 @@ describe('redemption report — never-exported data', () => {
     },
     30_000,
   );
+
+  it('real data that merely CONTAINS the word (a reward / outlet / category name) passes through UNCHANGED', async () => {
+    const w = emptyWorld();
+    const o = addOrder(w, 'bajaj', { reward: { name: 'Hubble Amazon Pay', metadata: null, category: { name: 'Hubble cards' } } }, { name: 'Hubble Traders' });
+    const params = REDEMPTION_REPORT_KIND.parseParams(NOV, BAJAJ_ADMIN);
+    const { prisma } = prismaFor(w);
+    const { buffer } = await renderKind(REDEMPTION_REPORT_KIND, ctxFor(BAJAJ_ADMIN, prisma, [], at(24 * 40)), params);
+    const book = readBook(buffer);
+    const head = book.sheets.Redemptions.aoa[0] as string[];
+    const row = book.sheets.Redemptions.aoa.find((r) => r[0] === o.orderNumber)!;
+    expect(row[head.indexOf('Reward')]).toBe('Hubble Amazon Pay');
+    expect(JSON.stringify(row)).toContain('Hubble Traders');
+    expect(JSON.stringify(row)).toContain('Hubble cards');
+  }, 30_000);
 
   it('a real workbook builds (all four sheets, POD hyperlink, formula-safe text)', async () => {
     const w = emptyWorld();

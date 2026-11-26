@@ -6,9 +6,7 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
-import { Request, Response } from 'express';
-import { neutralFulfillerDeep, neutralFulfillerText } from '../fulfiller-name';
-import { isNonGifsyRequest } from '../interceptors/transform.interceptor';
+import { Response } from 'express';
 
 /**
  * Formats every thrown exception as the platform's standard error envelope:
@@ -20,8 +18,6 @@ import { isNonGifsyRequest } from '../interceptors/transform.interceptor';
  *
  * - `HttpException` → its status + message (class-validator arrays are joined).
  * - Anything else  → 500 + a generic message (real error logged, not leaked).
- * - OWNER RULE (2026-11-26): a NON-Gifsy caller never reads the voucher fulfiller's name ("Hubble") in an
- *   error — it is presented as "Via API" / neutral words (Gifsy operators get the message unchanged).
  */
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -51,15 +47,6 @@ export class AllExceptionsFilter implements ExceptionFilter {
     } else {
       // Unexpected error — log the real thing, return a safe generic message.
       this.logger.error(exception instanceof Error ? exception.stack : String(exception));
-    }
-
-    const http = host.switchToHttp();
-    const req = typeof http.getRequest === 'function'
-      ? http.getRequest<Request & { user?: { role?: string | null } }>()
-      : undefined;
-    if (isNonGifsyRequest(req)) {
-      error = neutralFulfillerText(error);
-      if (details) details = neutralFulfillerDeep(details);
     }
 
     res.status(status).json(details ? { success: false, error, details } : { success: false, error });

@@ -1,5 +1,4 @@
 import * as XLSX from 'xlsx';
-import { neutralFulfillerText } from '@/lib/fulfiller-name';
 
 /**
  * Spreadsheet formula-injection guard for CLIENT-SIDE xlsx generation.
@@ -17,10 +16,7 @@ import { neutralFulfillerText } from '@/lib/fulfiller-name';
  * an injection sink. Reading/parsing uploads (`XLSX.read`) is unaffected.
  */
 export function cellSafe(v: string): string {
-  // OWNER RULE (2026-11-26): a downloaded file never names the voucher fulfiller ("Hubble" → "Via API"),
-  // whoever downloads it — files get forwarded to clients.
-  const s = neutralFulfillerText(v);
-  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+  return /^[=+\-@\t\r]/.test(v) ? `'${v}` : v;
 }
 
 /** cellSafe every string cell of an array-of-arrays, then aoa_to_sheet. */

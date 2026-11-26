@@ -3,7 +3,6 @@ import { RewardsService } from './rewards.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { NeutralFulfillerKeys } from '../common/interceptors/transform.interceptor';
 import {
   ListCatalogQueryDto,
   ListOrdersQueryDto,
@@ -44,10 +43,6 @@ const SALES_ROLES = [
  * `rewards:manage_orders`.
  */
 @Controller('rewards')
-// OWNER RULE (2026-11-26): a non-Gifsy caller (partner / sales / client admin) reads NO trace of the voucher
-// fulfiller here — values AND keys (hubbleNeedsReconcile → apiNeedsReconcile). Nothing here is written back
-// key-for-key by a non-Gifsy client (catalogue editing lives on /admin/rewards, which keeps its keys).
-@NeutralFulfillerKeys()
 export class RewardsController {
   constructor(private readonly rewards: RewardsService) {}
 
