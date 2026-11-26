@@ -47,6 +47,7 @@ import type {
 } from '@/lib/points-engine/types';
 import { latestEndedQuarterKey, parseQuarterKey, previousQuarterKey, quarterKeyForMonth } from '@/lib/points-engine/types';
 import { SearchableSelect } from '@/components/ui/searchable-select';
+import { useAdminSession } from '@/lib/admin-session';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import type { DownloadOutcome } from '@/lib/exports/download';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
@@ -354,6 +355,8 @@ export default function PointsComputePage() {
   const [visAccepted, setVisAccepted] = useState(false);
   // Imported-months guard: the Gifsy admin's explicit confirmation for THIS preview (server-enforced + audited).
   const [importedConfirmed, setImportedConfirmed] = useState(false);
+  const session = useAdminSession();
+  const isGifsyAdmin = session?.role === 'GIFSY_ADMIN';
 
   // EXPORT
   // One shared button state per file (useDownloadAction): "Preparing…" while in flight; a big file is
@@ -691,8 +694,9 @@ export default function PointsComputePage() {
                 <input
                   type="checkbox"
                   checked={importedConfirmed}
+                  disabled={!isGifsyAdmin}
                   onChange={(e) => setImportedConfirmed(e.target.checked)}
-                  className="mt-0.5 accent-red-600"
+                  className="mt-0.5 accent-red-600 disabled:cursor-not-allowed"
                   data-testid="imported-months-confirm"
                 />
                 <span>
@@ -702,6 +706,12 @@ export default function PointsComputePage() {
                   {preview.ruleVersionsUsed.map((v) => `${v.ruleId} v${v.version}`).join(', ') || '—'}). Gifsy admin only.
                 </span>
               </label>
+              {!isGifsyAdmin && (
+                <p className="pl-8 text-xs font-semibold text-red-700" data-testid="imported-months-gifsy-only">
+                  Only a Gifsy admin can confirm imported months. Ask Gifsy to review this run — until then the credit file,
+                  payout report and in-portal credit stay blocked.
+                </p>
+              )}
             </div>
           )}
 

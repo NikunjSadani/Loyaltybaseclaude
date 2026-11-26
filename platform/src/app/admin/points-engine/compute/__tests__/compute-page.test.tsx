@@ -39,6 +39,10 @@ vi.mock('next/link', () => ({
   ),
 }));
 
+// Session role (the imported-months confirmation is Gifsy-admin only). Default: Gifsy admin.
+const sessionRole = vi.hoisted(() => ({ role: 'GIFSY_ADMIN' as string }));
+vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => ({ role: sessionRole.role }) }));
+
 // Program options come from the tenant's configured programs (same source as the rule builder).
 vi.mock('@/lib/gifsy-settings', () => ({
   useGifsySettings: () => ({ outletPrograms: ['BSC', 'Unnati', 'SAMT'] }),
@@ -673,5 +677,21 @@ describe('PE-Q: empty quarter run reason', () => {
     fireEvent.click(screen.getByLabelText('Quarter run (quarterly rules only)'));
     fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
     expect((await screen.findByTestId('empty-reason')).textContent).toMatch(/No published quarterly rule is effective/);
+  });
+});
+describe('PE-Q: imported months — non-Gifsy admins', () => {
+  afterEach(() => { sessionRole.role = 'GIFSY_ADMIN'; });
+  it('PE-Q8: a client admin sees the confirmation DISABLED with an explanation; actions stay blocked', async () => {
+    sessionRole.role = 'CLIENT_ADMIN';
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({ importedMonths: { firstLiveMonth: '2026-11', months: ['2026-09'], monthLabels: ['Sep 2026'], confirmKey: 'im_k' } }),
+    });
+    render(<ComputePage />);
+    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+    const box = (await screen.findByTestId('imported-months-confirm')) as HTMLInputElement;
+    expect(box.disabled).toBe(true);
+    expect(screen.getByTestId('imported-months-gifsy-only').textContent).toMatch(/Only a Gifsy admin can confirm imported months/);
+    expect((screen.getByRole('button', { name: /Credit in portal/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

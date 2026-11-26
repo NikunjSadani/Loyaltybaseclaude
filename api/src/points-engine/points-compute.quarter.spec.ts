@@ -124,7 +124,7 @@ describe('PointsEngineService — quarterly rule store (audit fixes)', () => {
     expect(prisma.pointsRule.update).not.toHaveBeenCalled();
   });
 
-  it('AUDIT 5: a quarterly version applies when its window overlaps the quarter; two overlapping versions → conflict text', async () => {
+  it('OWNER DECISION: a quarterly version pays a quarter only if it covers the WHOLE quarter; mid-quarter starts say exactly why', async () => {
     const v1 = bscRow({ version: 1, effectiveFrom: new Date('2026-04-01T00:00:00.000Z'), effectiveTo: new Date('2026-11-14T00:00:00.000Z') });
     const v2 = bscRow({ id: 'r2', version: 2, effectiveFrom: new Date('2026-11-15T00:00:00.000Z') });
     const prisma = { pointsRule: { findMany: jest.fn(async (_a?: { where: unknown }) => [v2, v1]) } };
@@ -133,10 +133,21 @@ describe('PointsEngineService — quarterly rule store (audit fixes)', () => {
     const qe = new Date('2026-12-31T00:00:00.000Z');
     const res = await svc.getQuarterRuleForAttachment('bajaj', 'BSC', null, 'BSC_CASES', qs, qe);
     expect(res.rule).toBeNull();
-    expect(res.conflict).toMatch(/rule_bsc_q v2 \(2026-11-15 → open-ended\); rule_bsc_q v1 \(2026-04-01 → 2026-11-14\)/);
+    expect(res.conflict).toBeUndefined();
+    expect(res.notCovering).toBe(
+      'Rule rule_bsc_q v2 starts 15 Nov 2026, after the quarter began 1 Oct 2026 — back-date its effective-from to 1 Oct 2026 to cover this quarter. · ' +
+        'Rule rule_bsc_q v1 ends 14 Nov 2026, before the quarter ends 31 Dec 2026 — a quarterly rule must be effective for the whole quarter.',
+    );
     expect(prisma.pointsRule.findMany.mock.calls[0][0]!.where).toEqual(expect.objectContaining({ evaluationBasis: 'QUARTER', effectiveFrom: { lte: qe } }));
-    prisma.pointsRule.findMany.mockResolvedValue([v2]);
-    expect((await svc.getQuarterRuleForAttachment('bajaj', 'BSC', null, 'BSC_CASES', qs, qe)).rule?.version).toBe(2); // starts mid-quarter, still overlaps
+    // Back-dated to the quarter's first day → it pays the quarter.
+    const back = bscRow({ id: 'r3', version: 3, effectiveFrom: qs });
+    prisma.pointsRule.findMany.mockResolvedValue([back]);
+    expect((await svc.getQuarterRuleForAttachment('bajaj', 'BSC', null, 'BSC_CASES', qs, qe)).rule?.version).toBe(3);
+    // Two versions that BOTH cover the whole quarter (same specificity) → conflict naming them.
+    prisma.pointsRule.findMany.mockResolvedValue([back, bscRow({ id: 'r4', ruleId: 'rule_other', version: 1, effectiveFrom: new Date('2026-04-01T00:00:00.000Z') })]);
+    const both = await svc.getQuarterRuleForAttachment('bajaj', 'BSC', null, 'BSC_CASES', qs, qe);
+    expect(both.rule).toBeNull();
+    expect(both.conflict).toMatch(/More than one published quarterly rule version covers this whole quarter.*rule_bsc_q v3 \(1 Oct 2026 → open-ended\); rule_other v1 \(1 Apr 2026 → open-ended\)/);
   });
 });
 
@@ -308,7 +319,7 @@ describe('PointsComputeService — QUARTER runs', () => {
     load({ W1: [[1000, 1000, 10], [1000, 1000, 10], [1000, 1000, 10]] });
     const p = await service.previewCompute(admin, { period: '2026-Q3' });
     expect(p.rows).toEqual([]);
-    expect(p.emptyReason).toMatch(/No published quarterly rule is effective during Oct–Dec 2026.*BSC_CASES \(rule_bsc_q v1: 2027-01-01 → open-ended\).*on or before the quarter's first day/);
+    expect(p.emptyReason).toBe('No published quarterly rule covers Oct–Dec 2026. BSC_CASES: Rule rule_bsc_q v1 starts 1 Jan 2027, after the quarter began 1 Oct 2026 — back-date its effective-from to 1 Oct 2026 to cover this quarter.');
   });
 
   it('AUDIT 4: prior batches are named + classified; only the same quarter crediting the same field is a likely duplicate', async () => {
@@ -328,5 +339,25 @@ describe('PointsComputeService — QUARTER runs', () => {
       { batchCode: 'CB-2026-12-003', kind: 'QUARTER_ENGINE', quarter: 'Oct–Dec 2026', likelyDuplicate: true },
     ]);
     expect(r.quarter).toEqual({ key: '2026-Q3', label: 'Oct–Dec 2026' });
+  });
+  it('AUDIT-2 (3): a failed batch create after the confirmation → NOT_RELEASED row (the log never overstates)', async () => {
+    mockSettings.getEffectiveSettings.mockResolvedValue({ pointsEngine: { enabled: true, directCreditEnabled: true, firstLiveMonth: '2026-11' } });
+    mockSettings.getPointsEngineFirstLiveMonthUncached.mockResolvedValue('2026-11');
+    mockCredits.createBatch.mockRejectedValueOnce(new Error('cap exceeded'));
+    load({ W1: [[1000, 1000, 10], [1600, 1000, 20], [1150, 1000, 30]] });
+    const gifsy = { ...admin, role: 'GIFSY_ADMIN', assumed: true } as JwtPayload;
+    const p = await service.previewCompute(gifsy, { period: '2026-Q3' });
+    await expect(service.commitCompute(gifsy, { period: '2026-Q3', confirmImportedMonthsKey: p.importedMonths!.confirmKey })).rejects.toThrow(/cap exceeded/);
+    const stages = mockPrisma.auditLog.create.mock.calls.map((c) => c[0].data.metadata.stage);
+    expect(stages).toEqual(['CONFIRMED', 'NOT_RELEASED']);
+    expect(mockPrisma.auditLog.create.mock.calls[1][0].data).toEqual(expect.objectContaining({ action: 'REJECT', metadata: expect.objectContaining({ error: 'cap exceeded' }) }));
+  });
+
+  it('OWNER DECISION: a quarterly rule starting mid-quarter → NO_RULE row with the exact reason (never paid)', async () => {
+    mockEngine.getQuarterRuleForAttachment.mockResolvedValue({ rule: null, notCovering: 'Rule rule_bsc_q v2 starts 15 Nov 2026, after the quarter began 1 Oct 2026 — back-date its effective-from to 1 Oct 2026 to cover this quarter.' });
+    load({ W1: [[1000, 1000, 10], [1000, 1000, 10], [1000, 1000, 10]] });
+    const p = await service.previewCompute(admin, { period: '2026-Q3' });
+    expect(p.rows[0]).toMatchObject({ status: 'NO_RULE', reason: expect.stringMatching(/starts 15 Nov 2026, after the quarter began 1 Oct 2026 — back-date/) });
+    expect(p.totalPoints).toBe(0);
   });
 });

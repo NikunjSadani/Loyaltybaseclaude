@@ -30,7 +30,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { CreditsService } from '../credits/credits.service';
-import { PointsEngineService } from './points-engine.service';
+import { PointsEngineService, notCoveringReason } from './points-engine.service';
 import { evaluateRule, isVisibilityInput, ruleWarnings, validateRule } from './points-engine.helper';
 import {
   QUARTER_BATCH_SOURCE_PREFIX,
@@ -320,6 +320,8 @@ export class PointsComputeService {
     const ruleCache = new Map<string, PointsRule | null>();
     /** Quarter only: attachment key → the "more than one version covers this quarter" text (row becomes ERROR). */
     const ruleConflicts = new Map<string, string>();
+    /** Quarter only: attachment key → why the overlapping version(s) do not cover the whole quarter (NO_RULE reason). */
+    const ruleNotCovering = new Map<string, string>();
     const resolveRule = async (
       program: string | null,
       programCategory: string | null,
@@ -333,6 +335,7 @@ export class PointsComputeService {
         const res = await this.pointsEngine.getQuarterRuleForAttachment(clientId, program, programCategory, kpiCode, periodDate, quarterEnd!);
         rule = res.rule;
         if (res.conflict) ruleConflicts.set(key, res.conflict);
+        if (res.notCovering) ruleNotCovering.set(key, res.notCovering);
       } else {
         rule = await this.pointsEngine.getActiveForAttachment(clientId, program, programCategory, kpiCode, periodDate);
       }
@@ -400,6 +403,11 @@ export class PointsComputeService {
         const conflict = !rule ? conflictFor(program, programCategory, kpiCode) : undefined;
         if (conflict) {
           rows.push({ ...base, status: 'ERROR', reason: conflict });
+          continue;
+        }
+        const notCovering = !rule ? ruleNotCovering.get(`${program ?? ''}||${programCategory ?? ''}||${kpiCode}`) : undefined;
+        if (!rule && notCovering) {
+          rows.push({ ...base, status: 'NO_RULE', reason: notCovering });
           continue;
         }
         if (!rule) {
@@ -711,7 +719,6 @@ export class PointsComputeService {
 
   /** Why a quarter run computed nothing — names the quarter and any quarterly rule whose window misses it. */
   private async quarterEmptyReason(clientId: string, label: string, qStart: Date, qEnd: Date): Promise<string> {
-    const day = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : 'open-ended');
     try {
       const quarterly = await this.prisma.pointsRule.findMany({
         where: { clientId, status: 'published', evaluationBasis: 'QUARTER' },
@@ -720,14 +727,9 @@ export class PointsComputeService {
       if (!quarterly || quarterly.length === 0) {
         return `No published QUARTERLY rule exists — a quarter run computes quarterly rules only. Monthly rules run in a monthly run.`;
       }
-      const outside = quarterly.filter((r) => r.effectiveFrom > qEnd || (r.effectiveTo !== null && r.effectiveTo < qStart));
       return (
-        `No published quarterly rule is effective during ${label}. ` +
-        (outside.length > 0
-          ? `Their effective dates do not cover the quarter: ${outside
-              .map((r) => `${r.kpiCode} (${r.ruleId} v${r.version}: ${day(r.effectiveFrom)} → ${day(r.effectiveTo)})`)
-              .join('; ')}. A quarterly rule must start on or before the quarter's first day.`
-          : '')
+        `No published quarterly rule covers ${label}. ` +
+        quarterly.map((r) => `${r.kpiCode}: ${notCoveringReason(r, qStart, qEnd)}`).join(' ')
       ).trim();
     } catch {
       return `No published quarterly rule is effective during ${label}.`;
@@ -769,33 +771,72 @@ export class PointsComputeService {
     user: JwtPayload,
     preview: ComputePreview,
     ctx: { route: string; entityId: string },
-  ): Promise<void> {
+  ): Promise<string | null> {
     const imp = preview.importedMonths;
-    if (!imp) return;
-    // Written BEFORE the money action and NOT swallowed: an imported-months release without its audit row never happens.
-    {
+    if (!imp) return null;
+    // Written BEFORE the money action and NOT swallowed (a release without its audit row never happens). It records only
+    // the CONFIRMATION (stage CONFIRMED, release pending); the outcome is a second, append-only row (RELEASED / NOT
+    // RELEASED — recordImportedMonthsOutcome), so the log never claims a release that did not happen.
+    const row = await prisma.auditLog.create({
+      data: {
+        action: 'APPROVE',
+        entityType: IMPORTED_MONTHS_CONFIRM_ENTITY,
+        entityId: ctx.entityId,
+        actorId: user.sub,
+        metadata: {
+          stage: 'CONFIRMED',
+          clientId: user.clientId,
+          period: preview.period,
+          route: ctx.route,
+          months: imp.months,
+          firstLiveMonth: imp.firstLiveMonth,
+          ruleVersions: preview.ruleVersionsUsed.map((v) => `${v.ruleId}@${v.version}`),
+          confirmKey: imp.confirmKey,
+          sourceKey: preview.sourceKey,
+          statement: `Confirmed ${imp.monthLabels.join(', ')} were imported from the old system and have not been paid on the portal or the old system for these rules. Release pending.`,
+        },
+      },
+    });
+    return (row as { id?: string } | undefined)?.id ?? null;
+  }
+
+  /**
+   * The OUTCOME of an imported-months release (append-only, linked to the confirmation row): RELEASED (the batch / file
+   * exists — its id) or NOT_RELEASED (the action failed — the error). Best effort: never turns the outcome into a 500,
+   * but a failed write is logged loudly (the CONFIRMED row then reads "release pending").
+   */
+  static async recordImportedMonthsOutcome(
+    prisma: Pick<PrismaService, 'auditLog'>,
+    user: JwtPayload,
+    preview: ComputePreview,
+    confirmationId: string | null,
+    o: { route: string; entityId: string; released: boolean; detail: Record<string, unknown> },
+  ): Promise<void> {
+    if (!preview.importedMonths) return;
+    try {
       await prisma.auditLog.create({
         data: {
-          action: 'APPROVE',
+          action: o.released ? 'APPROVE' : 'REJECT',
           entityType: IMPORTED_MONTHS_CONFIRM_ENTITY,
-          entityId: ctx.entityId,
+          entityId: o.entityId,
           actorId: user.sub,
           metadata: {
+            stage: o.released ? 'RELEASED' : 'NOT_RELEASED',
+            confirmationAuditId: confirmationId,
             clientId: user.clientId,
             period: preview.period,
-            route: ctx.route,
-            months: imp.months,
-            firstLiveMonth: imp.firstLiveMonth,
-            ruleVersions: preview.ruleVersionsUsed.map((v) => `${v.ruleId}@${v.version}`),
-            confirmKey: imp.confirmKey,
-            sourceKey: preview.sourceKey,
-            statement: `Confirmed ${imp.monthLabels.join(', ')} were imported from the old system and have not been paid on the portal or the old system for these rules.`,
+            route: o.route,
+            months: preview.importedMonths.months,
+            ...o.detail,
           },
         },
       });
+    } catch (e) {
+      ACCEPT_LOGGER.error(
+        `imported-months ${o.released ? 'RELEASED' : 'NOT_RELEASED'} audit write failed (${o.route} ${o.entityId}, confirmation ${confirmationId}): ${(e as Error).message}`,
+      );
     }
   }
-
   /**
    * Wave 2 DIRECT-CREDIT commit: compute a run and create a PENDING_CONFIRM CreditBatch from its OK
    * rows through the EXISTING credits rail (so safety caps, confirm-to-credit, and maker-checker
@@ -894,21 +935,34 @@ export class PointsComputeService {
     // A quarter batch's sourceKind names its quarter, so every month of the quarter can find it (reopen warnings).
     const batchKind = preview.quarter ? quarterSourceKind(preview.quarter.key) : POINTS_ENGINE_SOURCE;
     // Imported months: the confirmation is audited BEFORE any batch exists (fail closed if the audit cannot be written).
-    await PointsComputeService.recordImportedMonthsConfirmation(this.prisma, user, preview, {
+    const importedEntity = `${user.clientId}:${preview.period}:${sourceKey}`;
+    const confirmationId = await PointsComputeService.recordImportedMonthsConfirmation(this.prisma, user, preview, {
       route: 'commit',
-      entityId: `${user.clientId}:${preview.period}:${sourceKey}`,
+      entityId: importedEntity,
     });
-    const batch = await this.credits.createBatch(
-      user,
-      {
-        period: batchPeriod,
-        totalOutlets,
-        totalPoints,
-        totalPayoutPaise: 0,
-        rows: creditableRows,
-      } as never,
-      { kind: batchKind, key: sourceKey },
-    );
+    let batch: Awaited<ReturnType<CreditsService['createBatch']>>;
+    try {
+      batch = await this.credits.createBatch(
+        user,
+        {
+          period: batchPeriod,
+          totalOutlets,
+          totalPoints,
+          totalPayoutPaise: 0,
+          rows: creditableRows,
+        } as never,
+        { kind: batchKind, key: sourceKey },
+      );
+    } catch (e) {
+      await PointsComputeService.recordImportedMonthsOutcome(this.prisma, user, preview, confirmationId, {
+        route: 'commit', entityId: importedEntity, released: false, detail: { error: (e as Error)?.message ?? String(e) },
+      });
+      throw e;
+    }
+    await PointsComputeService.recordImportedMonthsOutcome(this.prisma, user, preview, confirmationId, {
+      route: 'commit', entityId: importedEntity, released: true,
+      detail: { batchId: batch.id, batchCode: batch.batchCode, idempotentHit: !!existingBefore, totalPoints },
+    });
 
     // Record the admin's acceptance of pending visibility against the batch (audit trail; §3a). ONE row per batch:
     // an idempotent repeat commit (same batch) writes no second row, and a repeat after a failed write fills it in.

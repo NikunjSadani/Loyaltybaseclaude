@@ -410,8 +410,11 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
     // Carry the same ruleId → the backend mints version+1 as a fresh draft. Default the new version's
     // effective-from to TODAY (the author can change it) so publishing it doesn't collapse the prior
     // published version to a 1-day window by reusing its effectiveFrom.
+    // A QUARTERLY version pays a quarter only if it starts on or before the quarter's first day, so it defaults to the
+    // current quarter's first day (back-dating is allowed; the author can change it).
     const today = new Date().toISOString().slice(0, 10);
-    const res = await createRule({ ...draft, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: today });
+    const from = draft.evaluationBasis === 'QUARTER' ? currentQuarterStart() : today;
+    const res = await createRule({ ...draft, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: from });
     if (res.success) {
       router.push(`/admin/points-engine/rules/${res.data.id}`);
       return;
@@ -671,7 +674,11 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                 <Field
                   label="Effective from"
                   required
-                  hint={quarterly ? "Must start on or before the quarter's first day (1 Apr / 1 Jul / 1 Oct / 1 Jan). Only one version may cover a quarter." : undefined}
+                  hint={
+                    quarterly
+                      ? "A quarterly rule pays a quarter only if it starts on or before the quarter's first day (1 Apr / 1 Jul / 1 Oct / 1 Jan) and runs to its end — a version starting mid-quarter does NOT pay that quarter. Back-dating is allowed."
+                      : undefined
+                  }
                 >
                   <input
                     type="date"

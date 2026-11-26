@@ -115,18 +115,36 @@ function pointsKind(opts: {
         program: p.program,
         kpiCode: p.kpiCode,
       });
+      const importedEntity = ctx.requestId ?? `${ctx.clientId}:${p.period}`;
+      let confirmationId: string | null = null;
       if (opts.expectedKeyOf) PointsComputeService.assertExpectedKey(opts.expectedKeyOf(preview), p.expectedKey, opts.label.toLowerCase());
       if (opts.requiresVisibilityAcceptance) {
         // Money files: quarter must be over; imported months need the Gifsy confirmation (uncached first-live month).
         await serviceOf(ctx, PointsComputeService).refreshImportedMonths(ctx.clientId, preview);
         PointsComputeService.assertMoneyRunAllowed(preview, ctx.user, p.confirmImportedMonthsKey ?? null);
         PointsComputeService.assertVisibilityPendingAccepted(preview, p.acceptVisibilityPendingKey ?? null);
-        await PointsComputeService.recordImportedMonthsConfirmation(ctx.prisma, ctx.user, preview, {
+        confirmationId = await PointsComputeService.recordImportedMonthsConfirmation(ctx.prisma, ctx.user, preview, {
           route: opts.route,
-          entityId: ctx.requestId ?? `${ctx.clientId}:${p.period}`,
+          entityId: importedEntity,
         });
       }
-      const rowCount = await opts.write(preview, out);
+      let rowCount: number;
+      try {
+        rowCount = await opts.write(preview, out);
+      } catch (e) {
+        if (opts.requiresVisibilityAcceptance) {
+          await PointsComputeService.recordImportedMonthsOutcome(ctx.prisma, ctx.user, preview, confirmationId, {
+            route: opts.route, entityId: importedEntity, released: false, detail: { error: (e as Error)?.message ?? String(e) },
+          });
+        }
+        throw e;
+      }
+      if (opts.requiresVisibilityAcceptance) {
+        await PointsComputeService.recordImportedMonthsOutcome(ctx.prisma, ctx.user, preview, confirmationId, {
+          route: opts.route, entityId: importedEntity, released: true,
+          detail: { exportRequestId: ctx.requestId ?? null, rowCount, sourceKey: preview.sourceKey, payoutKey: preview.payoutKey },
+        });
+      }
       if (opts.requiresVisibilityAcceptance) {
         await PointsComputeService.recordVisibilityAcceptance(ctx.prisma, ctx.user, preview, {
           route: opts.route,

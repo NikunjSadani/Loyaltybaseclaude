@@ -226,9 +226,13 @@ No schema change (`evaluationBasis` is an existing string column). Code: `points
 - **Versions never change kind** (audit fix): createDraft / updateDraft / publish refuse a version whose monthly ↔
   quarterly kind differs from the rule's other versions ("Create a new rule for a quarterly bonus"); the builder locks
   the switch on v2+. Switching a draft's period never strips settings — `draftIssues` blocks save instead.
-- **Version selection.** A published quarterly version applies to a quarter when its window OVERLAPS the quarter; two
-  overlapping versions at the same specificity → ERROR row naming them (`getQuarterRuleForAttachment`). An empty quarter
-  run says why (`preview.emptyReason`). Builder: a new quarterly rule defaults to the current quarter's first day.
+- **Version selection (OWNER DECISION 2026-11-26).** A published quarterly version pays a quarter ONLY if it covers the
+  WHOLE quarter: `effectiveFrom ≤` the quarter's first day AND `effectiveTo` open or `≥` its last day. A version starting
+  (or ending) mid-quarter does NOT pay that quarter — the row is NO_RULE with the exact reason ("Rule … starts 15 Nov 2026,
+  after the quarter began 1 Oct 2026 — back-date its effective-from to 1 Oct 2026 to cover this quarter"); back-dating is
+  allowed. Two versions that BOTH cover the whole quarter (same specificity) → ERROR row naming them
+  (`getQuarterRuleForAttachment`). An empty quarter run says why (`preview.emptyReason`). Builder: a new quarterly rule /
+  a new quarterly version defaults to the current quarter's first day.
 - **Prior batches** on commit are named + classified (`priorBatches`: quarterly / monthly engine / upload);
   `likelyDuplicate` = same kind (same quarter) crediting a same credit field — shown in red.
 - **Reasons.** A later skip gate keeps every earlier failing month in the reason; a segment filter on a quarterly rule
@@ -241,15 +245,20 @@ for every tenant). A run covering a month BEFORE it (data imported from the old 
 (`preview.importedMonths` {firstLiveMonth, months, monthLabels, confirmKey}); the credit-upload file, the payout report
 and direct credit are REFUSED (409) unless a **GIFSY_ADMIN** sends `confirmImportedMonthsKey = confirmKey` (a hash of
 tenant + period + months + rule versions — a changed run must be re-confirmed). The confirmation ticks "I confirm
-<months> were imported from the old system and have not been paid on the portal / old system for <rules>"; it is
-written to `AuditLog` (`APPROVE`, `POINTS_ENGINE_IMPORTED_MONTHS_CONFIRMED`) BEFORE the batch / file exists, and a
-failed audit write refuses the action. The money gate reads the month UNCACHED. Omitting `firstLiveMonth` on a settings
-PUT keeps the stored value. (Owner has not decided how Oct 2026 BSC cases are handled — this allows a deliberate,
+<months> were imported from the old system and have not been paid on the portal / old system for <rules>" (the tick is
+disabled for non-Gifsy-admins, with an explanation). Audit is append-only, two rows on
+`POINTS_ENGINE_IMPORTED_MONTHS_CONFIRMED`: `stage: CONFIRMED` ("release pending") written BEFORE the batch / file
+(a failed write refuses the action), then `stage: RELEASED` (batch id/code, or export request + row count) or
+`NOT_RELEASED` (`REJECT`, with the error) — the log never claims a release that did not happen. The money gate reads the
+month UNCACHED. The settings page sends `firstLiveMonth` ONLY when the admin changed it there; omitted → the server keeps
+the stored value (a stale page never overwrites it). (Owner has not decided how Oct 2026 BSC cases are handled — this allows a deliberate,
 recorded override, never a silent pass.)
 
 **Monthly runs unchanged** — `points-compute.monthly-snapshot.spec.ts` replays, against the pre-quarter service, every
 query of a monthly preview + direct credit, the batch period, the createBatch call and the prior-batch count (the only
-intentional difference — the active-rule lookup also selects `evaluationBasis` — is asserted separately).
+intentional difference — the active-rule lookup also selects `evaluationBasis` — is asserted separately). Proven
+2026-11-26: both monthly snapshot specs + their `.snap` files replayed with `--ci` (no writes) in a scratch worktree of
+`b4ef3c24` (the pre-quarter code) — 5/5 snapshots pass — and on this branch.
 - **Builder / compute UI.** Rule period Monthly / Quarterly; per-input "Which month of the quarter"; a narration field;
   the simulator takes 3 months per KPI; the compute screen offers a quarter run with a quarter banner.
 

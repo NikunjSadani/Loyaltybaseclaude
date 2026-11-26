@@ -57,6 +57,8 @@ export default function PointsEngineSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  /** True only after the admin edits the first live month on this page (else it is never sent). */
+  const [firstLiveChanged, setFirstLiveChanged] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -87,11 +89,13 @@ export default function PointsEngineSettingsPage() {
       enabled: settings.enabled,
       // Direct credit can only be on when the engine itself is on (UI guard; backend is source of truth).
       directCreditEnabled: settings.enabled && settings.directCreditEnabled,
-      // undefined (never loaded) → the server keeps the stored month; '' cleared → null (no guard).
-      firstLiveMonth: settings.firstLiveMonth === undefined ? undefined : settings.firstLiveMonth || null,
+      // Sent ONLY when the admin changed it on this page — otherwise omitted, so the server keeps the stored month and a
+      // stale page can never overwrite a newer value set elsewhere. Cleared → null (no guard).
+      ...(firstLiveChanged ? { firstLiveMonth: settings.firstLiveMonth || null } : {}),
     });
     if (res.success) {
       setSettingsState(res.data);
+      setFirstLiveChanged(false);
       setSaved(true);
     } else {
       setSaveError(res.error ?? 'Failed to save settings');
@@ -201,7 +205,10 @@ export default function PointsEngineSettingsPage() {
             type="month"
             value={settings.firstLiveMonth ?? ''}
             disabled={!canEdit || saving}
-            onChange={(e) => patch({ firstLiveMonth: e.target.value || null })}
+            onChange={(e) => {
+              patch({ firstLiveMonth: e.target.value || null });
+              setFirstLiveChanged(true);
+            }}
             className="w-40 shrink-0 rounded-xl border border-gray-200 px-3 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-400"
           />
         </div>

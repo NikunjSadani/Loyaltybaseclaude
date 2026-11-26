@@ -383,7 +383,7 @@ export class PointsEngineService {
     kpiCode: string,
     qStart: Date,
     qEnd: Date,
-  ): Promise<{ rule: PointsRule | null; conflict?: string }> {
+  ): Promise<{ rule: PointsRule | null; conflict?: string; notCovering?: string }> {
     const all = await this.prisma.pointsRule.findMany({
       where: {
         clientId,
@@ -399,18 +399,24 @@ export class PointsEngineService {
       },
       orderBy: [{ effectiveFrom: 'desc' }, { version: 'desc' }, { ruleId: 'asc' }],
     });
-    const candidates = (all ?? []).filter((r) => isQuarterBasis(r.evaluationBasis));
-    if (candidates.length === 0) return { rule: null };
-    const top = Math.max(...candidates.map(specificity));
-    const best = candidates.filter((r) => specificity(r) === top);
+    const overlapping = (all ?? []).filter((r) => isQuarterBasis(r.evaluationBasis));
+    if (overlapping.length === 0) return { rule: null };
+    // OWNER DECISION (2026-11-26): a quarterly version pays a quarter only if it covers the WHOLE quarter —
+    // effectiveFrom ≤ the quarter's first day AND (effectiveTo open or ≥ the quarter's last day). A version starting
+    // (or ending) mid-quarter does NOT pay that quarter; the row says exactly why and how to fix it.
+    const covering = overlapping.filter((r) => r.effectiveFrom <= qStart && (r.effectiveTo === null || r.effectiveTo >= qEnd));
+    if (covering.length === 0) {
+      return { rule: null, notCovering: overlapping.map((r) => notCoveringReason(r, qStart, qEnd)).join(' · ') };
+    }
+    const top = Math.max(...covering.map(specificity));
+    const best = covering.filter((r) => specificity(r) === top);
     if (best.length === 1) return { rule: best[0] };
-    const day = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : 'open-ended');
     return {
       rule: null,
       conflict:
-        `More than one published quarterly rule version covers this quarter for ${kpiCode}: ` +
-        best.map((r) => `${r.ruleId} v${r.version} (${day(r.effectiveFrom)} → ${day(r.effectiveTo)})`).join('; ') +
-        ' — set the effective dates so exactly one version covers the whole quarter.',
+        `More than one published quarterly rule version covers this whole quarter for ${kpiCode}: ` +
+        best.map((r) => `${r.ruleId} v${r.version} (${longDay(r.effectiveFrom)} → ${r.effectiveTo ? longDay(r.effectiveTo) : 'open-ended'})`).join('; ') +
+        ' — archive one so exactly one version covers the quarter.',
     };
   }
 
@@ -630,6 +636,21 @@ export class PointsEngineService {
 }
 
 // ─── pure helpers ───────────────────────────────────────────────────────────────
+
+const MONTH_LONG = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/** "15 Nov 2026" (UTC calendar day of a @db.Date). */
+export function longDay(d: Date): string {
+  return `${d.getUTCDate()} ${MONTH_LONG[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+/** Why an overlapping quarterly version does not pay a quarter (it starts after / ends before it), with the fix. */
+export function notCoveringReason(r: Pick<PointsRule, 'ruleId' | 'version' | 'effectiveFrom' | 'effectiveTo'>, qStart: Date, qEnd: Date): string {
+  const who = `${r.ruleId} v${r.version}`;
+  if (r.effectiveFrom > qStart) {
+    return `Rule ${who} starts ${longDay(r.effectiveFrom)}, after the quarter began ${longDay(qStart)} — back-date its effective-from to ${longDay(qStart)} to cover this quarter.`;
+  }
+  return `Rule ${who} ends ${longDay(r.effectiveTo!)}, before the quarter ends ${longDay(qEnd)} — a quarterly rule must be effective for the whole quarter.`;
+}
 
 /** Refuse a version whose monthly/quarterly kind differs from the rule's other versions. */
 function assertSameBasis(
