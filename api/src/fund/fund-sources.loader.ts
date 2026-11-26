@@ -296,6 +296,8 @@ export interface TdsRecoveryRow {
   tenantSharePaise: bigint;
   /** The bank run (CreditPayoutDownload.id) whose transaction wrote the row — NULL for rows before 2026-11-24. */
   downloadId: string | null;
+  /** 'PAID' = raised when the payout was PAID (owner 2026-11-25); null/absent = raised at the bank file (old timing). */
+  raisedOn?: string | null;
   createdAt: Date;
 }
 
@@ -413,8 +415,12 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
 
     // ── Which run ──
     let run: TdsRun | null = null;
-    let kind: 'matched' | 'reversed' | 'rebanked' | 'other-client' | 'unmatched';
-    if (r.downloadId) {
+    let kind: 'matched' | 'reversed' | 'rebanked' | 'other-client' | 'unmatched' | 'paid';
+    if (r.raisedOn === 'PAID') {
+      // Owner 2026-11-25: raised when its payouts were PAID → charged (paid) on that day, with the run they came from.
+      run = r.downloadId ? (runById.get(r.downloadId) ?? null) : null;
+      kind = run ? 'paid' : 'other-client';
+    } else if (r.downloadId) {
       run = runById.get(r.downloadId) ?? null;
       if (!run) kind = 'other-client';
       else if (inRun(run).length) kind = 'matched';
@@ -454,6 +460,19 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
       }
     }
     const tail = () => (notes.length ? ` — ${notes.join('; ')}` : '');
+
+    if (kind === 'paid') {
+      out.push({
+        ...base,
+        ref: `TDS 194C · ${run!.downloadCode}`,
+        description: `TDS 194C borne by Gifsy — raised when payouts of bank run ${run!.downloadCode} were paid — ${who}${tail()}`,
+        status: 'PAID',
+        committedAt: r.createdAt,
+        paidAt: r.createdAt,
+        flags,
+      });
+      continue;
+    }
 
     if (kind === 'other-client' || kind === 'unmatched') {
       if (kind === 'other-client') {
@@ -680,7 +699,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
   const recoveries = await allPages((p) =>
     db.tdsRecoveryEntry.findMany({
       where: { clientId, section: 'SEC_194C' },
-      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, downloadId: true, createdAt: true },
+      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, downloadId: true, raisedOn: true, createdAt: true },
       orderBy: { id: 'asc' },
       ...p,
     }),

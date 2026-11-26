@@ -20,6 +20,8 @@ import { streamObjectResponse } from '../common/stream-object';
 import { CreditsService } from './credits.service';
 import { CreditEvidenceService } from './credit-evidence.service';
 import { PayoutCancelService } from './payout-cancel.service';
+import { oldTimingTdsCheck } from './tds-old-timing-check';
+import { PrismaService } from '../prisma/prisma.service';
 import { CancelPayoutsDto, CancelPreviewDto, CancelTemplateQueryDto, PayoutEntriesQueryDto } from './dto/payout-cancel.dto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -64,6 +66,7 @@ export class CreditsController {
     private readonly evidence: CreditEvidenceService,
     private readonly wallet: WalletService,
     private readonly cancels: PayoutCancelService,
+    private readonly prismaForChecks: PrismaService,
   ) {}
 
   // ─── Payout Status breakdown + row drill-down (owner 2026-11-25) ──────────────────────────────
@@ -86,6 +89,15 @@ export class CreditsController {
   @RequirePermission('credits:read')
   batchCancellations(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
     return this.cancels.listCancellations(user, id);
+  }
+
+  // One-off READ-ONLY owner check (2026-11-25 "TDS invoice only on success"): old-timing 194C TDS recovery rows whose
+  // payee has failed / cancelled / reversed payouts that year. Assumed → that client; un-assumed Gifsy → every client.
+  @Get('tds-recovery/old-timing-check')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  oldTimingTdsCheck(@CurrentUser() user: JwtPayload) {
+    return oldTimingTdsCheck(this.prismaForChecks, user.assumed ? user.clientId : null);
   }
 
   // ─── Payout cancellation — GIFSY_ADMIN working inside the client ONLY (re-checked in the service) ─────

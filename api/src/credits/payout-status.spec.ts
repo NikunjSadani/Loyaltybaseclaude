@@ -3,7 +3,7 @@
  * bank files, the bank-result upload, the reversal picker and Fund Reconciliation's charge.
  */
 import { buildPayoutStatus, type StatusEntryRow } from './payout-status';
-import { creditItem } from '../fund/fund-sources.loader';
+import { creditItem, tdsItems } from '../fund/fund-sources.loader';
 import { classifyPayoutCandidates } from './payout-reversal-v2';
 import { groupUtrBatchRows } from './credits.helpers';
 
@@ -82,6 +82,21 @@ describe('buildPayoutStatus', () => {
     const s = buildPayoutStatus({ batch: batch({ rows }), entries: [], visibilityFieldIds: new Set(), notApplied: [{ points: 50 }] });
     expect(s.points).toEqual({ creditedRows: 1, creditedPoints: 100, notCreditedRows: 1, notCreditedPoints: 50, deductedRows: 1, deductedPoints: 20 });
     expect(s.overall.total.paise).toBe(0);
+  });
+});
+
+describe('Fund Reconciliation 194C TDS line — "TDS invoice only on success" (owner 2026-11-25)', () => {
+  const run = { id: 'd1', downloadCode: 'PD-2026-10-001', downloadedAt: new Date(Date.now() - 5 * 86_400_000), period: '2026-10', fieldId: null };
+  const failedItem = creditItem(row('FAILED', 4000), new Set());
+  const entries = [{ id: 'x', outletId: 'O1', period: '2026-10', status: 'FAILED', amountPaise: 4000n, payeePan: 'PAN1', downloadId: 'd1', item: failedItem! }];
+  it('a row raised when payouts were PAID is charged as paid on that day, with its run', () => {
+    const at = new Date(Date.now() - 86_400_000);
+    const [line] = tdsItems([{ id: 'r1', panNumber: 'PAN1', fyLabel: '2026-27', tenantSharePaise: 500n, downloadId: 'd1', raisedOn: 'PAID', createdAt: at }], [run], entries);
+    expect(line).toMatchObject({ status: 'PAID', paidAt: at, committedAt: at, ref: 'TDS 194C · PD-2026-10-001' });
+  });
+  it('an OLD-timing row (raised at the bank file) keeps its old treatment — committed while a payout of its run is unpaid', () => {
+    const [line] = tdsItems([{ id: 'r0', panNumber: 'PAN1', fyLabel: '2026-27', tenantSharePaise: 500n, downloadId: 'd1', createdAt: run.downloadedAt }], [run], entries);
+    expect(line.status).toBe('COMMITTED');
   });
 });
 

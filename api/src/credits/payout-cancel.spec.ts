@@ -223,10 +223,13 @@ describe('cancel failed — bank-file side effects', () => {
         failed({ id: 'ok', outletId: 'O7', tdsSection: 'SEC_194C', payeePan: 'ZZZZZ1111Z' }),
       ],
       recovery: [
-        { clientId: 'other-client', section: 'SEC_194C', panNumber: 'PQRST9876K', fyLabel: fy, createdAt: daysAgo(2) },
-        { clientId: 'bajaj', section: 'SEC_194C', panNumber: '__NO_PAN__:O9', fyLabel: fy, createdAt: daysAgo(2) },
+        // Old timing (raised at the bank file, raisedOn NULL) — may hold the failed payout's base.
+        { clientId: 'other-client', section: 'SEC_194C', panNumber: 'PQRST9876K', fyLabel: fy, createdAt: daysAgo(2), raisedOn: null },
+        { clientId: 'bajaj', section: 'SEC_194C', panNumber: '__NO_PAN__:O9', fyLabel: fy, createdAt: daysAgo(2), raisedOn: null },
         // Recorded BEFORE this row existed → it cannot include this row's base.
-        { clientId: 'bajaj', section: 'SEC_194C', panNumber: 'ZZZZZ1111Z', fyLabel: fy, createdAt: daysAgo(30) },
+        { clientId: 'bajaj', section: 'SEC_194C', panNumber: 'ZZZZZ1111Z', fyLabel: fy, createdAt: daysAgo(30), raisedOn: null },
+        // New timing (raised when OTHER payouts were PAID) — never includes a failed payout → never blocks.
+        { clientId: 'bajaj', section: 'SEC_194C', panNumber: 'ZZZZZ1111Z', fyLabel: fy, createdAt: daysAgo(1), raisedOn: 'PAID' },
       ],
     };
     const { tx } = fake(w);

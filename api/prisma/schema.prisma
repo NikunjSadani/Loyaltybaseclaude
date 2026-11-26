@@ -2392,6 +2392,9 @@ model TdsRecoveryEntry {
   /// NULL for rows written before 2026-11-24 (no backfill). No FK on purpose (additive; a download row is never
   /// deleted). Read by the fund statement to date the TDS line with its own run exactly.
   downloadId       String?
+  /// 'PAID' = raised when the payout was PAID (owner 2026-11-25 "TDS invoice only on success"). NULL = raised at the
+  /// bank file under the old timing (every row before that change) — kept as history, never rewritten.
+  raisedOn         String?
   createdAt        DateTime   @default(now())
 
   @@index([clientId, fyLabel])
@@ -2440,9 +2443,11 @@ model AutoInvoice {
   creditEntries CreditPayoutEntry[]
   reimbursement GstReimbursement?
 
-  // One LIVE invoice per (client, outlet, month, kind): a MIGRATION-ONLY partial unique index
-  // `auto_invoices_live_outlet_period_kind_key` … WHERE "voidedAt" IS NULL (20261125140000_payout_cancellation). A VOID
-  // invoice (its payouts were cancelled) stays in history and a later upload for that outlet + month gets a NEW invoice.
+  // One LIVE SERVICE invoice per (client, outlet, month): a MIGRATION-ONLY partial unique index
+  // `auto_invoices_live_service_outlet_period_key` … WHERE "voidedAt" IS NULL AND "invoiceKind" = 'SERVICE'
+  // (20261126100000_tds_invoice_on_paid). A VOID invoice (its payouts were cancelled) stays in history and a later
+  // upload for that outlet + month gets a NEW invoice. 194C TDS top-ups (raised per bank result since 2026-11-25) are
+  // unique by their TGSL-TDS-<PAN>-<FY>-<seq> number (+ the anchor partial unique `auto_invoices_tds_pan_fy_key`).
   @@index([clientId, outletCode, period, invoiceKind])
   @@index([clientId])
   @@index([partnerId])

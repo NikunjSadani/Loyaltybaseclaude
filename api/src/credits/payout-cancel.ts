@@ -18,10 +18,11 @@
  *    TDS_LEDGER_OPEN) — never silently left.
  *  - TDS credit applied at the bank file: released when marked FAILED → any still-live application is REFUSED
  *    (TDS_CREDIT_APPLIED).
- *  - 194C GROSS-UP TDS invoice + TdsRecoveryEntry (and the 194C no-PAN recovery): written at the bank file and NOT
- *    unwound by a FAILED result (they telescope on re-bank). They cannot be safely unwound here (the TDS invoice is a
- *    deposited-tax artefact shared by the PAN's year) → a FAILED 194C row whose PAN / outlet has recovery recorded in
- *    its financial year since the row was created is REFUSED (GROSS_UP_TDS_RECORDED), naming the reason.
+ *  - 194C GROSS-UP TDS invoice + TdsRecoveryEntry (and the 194C no-PAN recovery): since 2026-11-25 raised only when a
+ *    payout is PAID (raisedOn 'PAID'), so a FAILED row never has any → nothing to unwind. Rows raised at the bank file
+ *    under the OLD timing (raisedOn NULL) may include a failed payout's base and cannot be safely unwound (a
+ *    deposited-tax artefact shared by the PAN's year) → a FAILED 194C row whose PAN / outlet has such an old-timing row
+ *    in its financial year since the row was created is REFUSED (GROSS_UP_TDS_RECORDED), naming the reason.
  *  - SERVICE invoice (+ GST holdback): VOIDED in the same transaction when every payout it covers ends up cancelled /
  *    reversed; refused when it also covers payouts that stay payable (INVOICE_SHARED), is locked / paid
  *    (INVOICE_LOCKED) or its GST was already released (GST_RELEASED).
@@ -139,7 +140,7 @@ export function cancelBlockText(code: CancelBlockCode, extra?: string): string {
     TDS_LEDGER_OPEN: 'Its TDS ledger is not settled to zero — contact Gifsy tech',
     TDS_CREDIT_APPLIED: 'A TDS credit is still applied to it — contact Gifsy tech',
     GROSS_UP_TDS_RECORDED:
-      '194C TDS (gross-up / no-PAN) was already recorded for this payee this financial year when the bank file was made — cancelling would leave TDS charged on a payout that is never paid; contact Gifsy tech',
+      '194C TDS (gross-up / no-PAN) for this payee was raised at the bank file under the old timing (before TDS was invoiced only on payment) and may include this payout — cancelling would leave TDS charged on a payout that is never paid; contact Gifsy tech',
     INVOICE_LOCKED: 'Its self-billed invoice is locked or paid — it cannot be voided',
     INVOICE_SHARED: 'Its self-billed invoice also covers payouts that stay payable — cancel those too, or contact Gifsy tech',
     GST_RELEASED: 'The GST held on its invoice was already released — it cannot be voided',
@@ -275,8 +276,10 @@ export async function evaluateCancellation(db: Db, clientId: string, items: Canc
       if (k.pan) ors.push({ panNumber: k.pan, fyLabel: fy, createdAt: { gte: e.createdAt } });
       ors.push({ clientId, panNumber: k.noPan, fyLabel: fy, createdAt: { gte: e.createdAt } });
     }
+    // Only rows raised at the BANK FILE (old timing, raisedOn NULL) can hold a never-paid payout's base. Since
+    // 2026-11-25 the 194C TDS is raised only when a payout is PAID (raisedOn 'PAID'), so it never includes a FAILED one.
     const rec = await db.tdsRecoveryEntry.findMany({
-      where: { section: 'SEC_194C', OR: ors },
+      where: { section: 'SEC_194C', raisedOn: null, OR: ors },
       select: { panNumber: true, fyLabel: true, createdAt: true, clientId: true },
     });
     for (const e of failed194c) {
