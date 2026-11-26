@@ -70,6 +70,22 @@ describe('target upload — focus names that are numbers', () => {
     expect(screen.queryByTestId('numeric-focus-names')).not.toBeInTheDocument();
   });
 
+  it('old duplicate-header layout: the preview says which column was read as names', async () => {
+    const TOKEN = `${'a'.repeat(64)}.${'b'.repeat(32)}.${'1'.repeat(13)}.${'c'.repeat(64)}`;
+    stub({ success: true, data: {
+      month: '2026-12', monthsInBatch: ['2026-12'], writableMonths: ['2026-12'], skippedLockedMonths: [], totalRows: 1,
+      acceptedCount: 1, rejectedCount: 0, problemRows: [], problemRowCount: 0, problemRowsTruncated: false, warningRows: [],
+      warningRowCount: 0, warningRowsTruncated: false, skippedBlankCount: 0, preview: true, previewToken: TOKEN,
+      willSaveCount: 1, newCount: 1, overwriteCount: 0, perMonth: [{ month: '2026-12', newCount: 1, overwriteCount: 0 }],
+      overwriteExamples: [], overwriteExamplesSampled: 0, notApplied: [], previewExpiresAt: '2026-11-26T07:00:00.000Z',
+      layoutNotes: ['Read column F as Focus Brand 1 names (old template layout).'],
+    } }, 200);
+    render(<TargetUploadPage />);
+    await pick();
+    expect(await screen.findByTestId('target-upload-layout-notes'))
+      .toHaveTextContent('Read column F as Focus Brand 1 names (old template layout).');
+  });
+
   it('CSV quotes names with commas / quotes', () => {
     expect(numericFocusNamesCsv([{ outletCode: 'O1', month: '2026-12', column: 'C', value: '1', name: '1,011 & "X"' }]))
       .toBe('Outlet ID,Month,Column,Number found,Name as written\r\nO1,2026-12,C,1,"1,011 & ""X"""\r\n');

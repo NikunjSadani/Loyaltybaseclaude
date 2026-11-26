@@ -56,7 +56,11 @@ The preview also says until when it can be confirmed (**This preview can be conf
    - If the preview is older than 30 minutes, **nothing is saved** and the file is checked again the same way.
 3. The green **Targets submitted successfully** box shows how many outlet-month targets were saved (new and overwritten), and **Not applied as typed** lists what was not saved. Check the stored targets anytime with **Download Final Targets**.
 
+**Product-name columns:** a KPI with per-outlet product names (e.g. Focus Brand 1) has a second column for them. Its heading is the KPI's name label, or **"<KPI> Name"** (e.g. "Focus Brand 1 Name") when that label is the same as the KPI's own label. An older file with the same heading twice is still read — the first column is the target, the second the names — and the preview says **"Read column F as Focus Brand 1 names (old template layout)."** **Download Final Targets** also has these name columns.
+
 **A file that is refused (nothing saved):**
+
+- **"… the two "Focus Brand 1" columns look swapped …"** In an older file with the same heading twice, the first column had product names and the second only numbers. Swap the two columns (target first, names second), or download the current template.
 
 - **"Focus brand names must be product names, not numbers — check column …"** A focus brand name has a number in it (e.g. **"1011.2697 & ADHO500"** — a ₹ figure typed into the name). The table under the message shows the outlet, month, column and number for the first 20; **Download the full list** gives every one. Fix those names in the file and upload it again.
 

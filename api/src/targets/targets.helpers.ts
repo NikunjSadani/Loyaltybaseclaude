@@ -158,6 +158,11 @@ export interface ParseResult {
     excludedValues?: Record<string, number>;
     /** Only with `opts.excludedKpis`: KPI code → non-blank cells typed under that excluded KPI's "<KPI> Name" column. */
     excludedNames?: Record<string, number>;
+    /**
+     * Only when present: name columns read from the OLD duplicate-header layout (the KPI's label written twice in a month
+     * block — the 2nd occurrence is the per-outlet name). The preview / result say so.
+     */
+    legacyNameColumns?: Array<{ kpiCode: string; label: string; month: string; column: string }>;
   };
 }
 
@@ -184,6 +189,34 @@ export function parseMonthHeader(raw: string): string | null {
 /** Returns only enabled KPIs sorted by order. */
 export function getEnabledKpis(kpis: KpiDefLike[]): KpiDefLike[] {
   return [...kpis].filter((k) => k.enabled).sort((a, b) => a.order - b.order);
+}
+
+/** Case / surrounding-space insensitive label comparison key. */
+export function labelKey(s: string | null | undefined): string {
+  return String(s ?? '').toLowerCase().trim();
+}
+
+/**
+ * The header of a KPI's per-outlet NAME column (template + Final Targets export), or null when the KPI has none.
+ * Normally its nameOverrideLabel; when that equals the KPI's own label (Bajaj prod: FOCUS BRAND "Focus Brand 1" with
+ * name label "Focus Brand 1") the sheet would show the same header twice, so the name column is "<label> Name".
+ * The parser still reads the old duplicate-header layout (2nd occurrence in the month block = names).
+ */
+export function nameColumnHeader(k: Pick<KpiDefLike, 'label' | 'hasNameOverride' | 'nameOverrideLabel'>): string | null {
+  if (!k.hasNameOverride || !k.nameOverrideLabel || k.nameOverrideLabel.trim() === '') return null;
+  return labelKey(k.nameOverrideLabel) === labelKey(k.label) ? `${k.label.trim()} Name` : k.nameOverrideLabel;
+}
+
+/** 0-based column index → spreadsheet letters (0 → A, 26 → AA). */
+export function columnLetter(ci: number): string {
+  let n = ci + 1;
+  let out = '';
+  while (n > 0) {
+    const r = (n - 1) % 26;
+    out = String.fromCharCode(65 + r) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
 }
 
 // ── Month-lock helpers ────────────────────────────────────────────────────────
@@ -278,7 +311,7 @@ export function targetTemplateLayout(
 
   // A KPI emits a "name override" column (a per-outlet custom display name) ONLY when it is explicitly configured
   // with hasNameOverride + a nameOverrideLabel. KPIs without an override keep their single value column.
-  const hasOverrideCol = (k: KpiDefLike): boolean => !!(k.hasNameOverride && k.nameOverrideLabel);
+  const hasOverrideCol = (k: KpiDefLike): boolean => nameColumnHeader(k) !== null;
 
   // Per-month block width = one value column per enabled KPI, PLUS one name column per KPI with an override.
   const overrideCount = enabled.filter(hasOverrideCol).length;
@@ -295,7 +328,7 @@ export function targetTemplateLayout(
   for (let mi = 0; mi < months.length; mi++) {
     for (const kpi of enabled) {
       headerRow.push(kpi.label);
-      if (hasOverrideCol(kpi)) headerRow.push(kpi.nameOverrideLabel as string);
+      if (hasOverrideCol(kpi)) headerRow.push(nameColumnHeader(kpi) as string);
     }
   }
 
@@ -359,24 +392,46 @@ export interface ResolvedTargetRow {
 export function resolvedTargetsLayout(month: string, kpis: KpiDefLike[]): MonthBlockSheetLayout<ResolvedTargetRow> {
   const enabled = getEnabledKpis(kpis);
   const identityCols = [...FIXED_COLS, PROGRAM_NAME_COL];
+  // Owner 2026-11-26: a KPI with a per-outlet name (hasNameOverride + nameOverrideLabel) gets its NAME column right
+  // after its value column — same header as the template (nameColumnHeader), so the export re-uploads with the names.
+  // No KPI with a name override (Deoleo) → exactly the previous layout.
+  const nameHeader = new Map(enabled.map((k) => [k.code, nameColumnHeader(k)]));
+  const headers: string[] = [];
+  const kpiWidths: number[] = [];
+  for (const k of enabled) {
+    headers.push(k.label);
+    kpiWidths.push(16);
+    const nh = nameHeader.get(k.code);
+    if (nh) {
+      headers.push(nh);
+      kpiWidths.push(22);
+    }
+  }
+  const blockWidth = headers.length;
   const monthRow: (string | number)[] = Array(identityCols.length).fill('');
   monthRow.push(monthGroupLabel(month));
-  for (let i = 1; i < enabled.length; i++) monthRow.push('');
+  for (let i = 1; i < blockWidth; i++) monthRow.push('');
   return {
     // Sheet names cap at 31 chars and disallow some punctuation — month is safe.
     sheetName: `Final Targets ${month}`,
     monthRow,
-    headerRow: [...identityCols, ...enabled.map((k) => k.label)],
-    widths: [16, 24, 16, 20, ...enabled.map(() => 16)],
-    merges: enabled.length > 0
-      ? [{ s: { r: 0, c: identityCols.length }, e: { r: 0, c: identityCols.length + enabled.length - 1 } }]
+    headerRow: [...identityCols, ...headers],
+    widths: [16, 24, 16, 20, ...kpiWidths],
+    merges: blockWidth > 0
+      ? [{ s: { r: 0, c: identityCols.length }, e: { r: 0, c: identityCols.length + blockWidth - 1 } }]
       : [],
     row: (r) => {
       const vals = (r.targetValues ?? {}) as Record<string, unknown>;
+      const rawNames = vals[NAMES_KEY];
+      const names = rawNames && typeof rawNames === 'object' ? (rawNames as Record<string, unknown>) : {};
       const out: (string | number)[] = [r.outletCode, r.outletName ?? '', r.outletType ?? '', r.programName ?? ''];
       for (const k of enabled) {
         const v = vals[k.code];
         out.push(typeof v === 'number' ? v : ''); // blank = not configured
+        if (nameHeader.get(k.code)) {
+          const n = names[k.code];
+          out.push(typeof n === 'string' ? n : ''); // the writer formula-guards every string (cellSafe)
+        }
       }
       return out;
     },
@@ -550,7 +605,10 @@ export function parseTargetUploadBuffer(
   const excludedNameLabelToCode = new Map<string, string>();
   for (const k of opts?.excludedKpis ?? []) {
     excludedLabelToCode.set(k.label.toLowerCase().trim(), k.code);
-    if (k.hasNameOverride && k.nameOverrideLabel) excludedNameLabelToCode.set(k.nameOverrideLabel.toLowerCase().trim(), k.code);
+    if (k.hasNameOverride && k.nameOverrideLabel) {
+      excludedNameLabelToCode.set(k.nameOverrideLabel.toLowerCase().trim(), k.code);
+      excludedNameLabelToCode.set(labelKey(nameColumnHeader(k)), k.code);
+    }
   }
   const excludedValues: Record<string, number> = {};
   const excludedNames: Record<string, number> = {};
@@ -565,11 +623,19 @@ export function parseTargetUploadBuffer(
   // that sits adjacent to a KPI's value column when hasNameOverride is set). The
   // string typed under this column is stored at targetValues.__names[code].
   const overrideLabelToCode = new Map<string, string>();
+  // KPIs whose nameOverrideLabel equals their own label (the old duplicate-header layout is possible for them).
+  const duplicateLabelCodes = new Set<string>();
   for (const kpi of enabled) {
     if (kpi.hasNameOverride && kpi.nameOverrideLabel) {
+      // The legacy header (the nameOverrideLabel itself) AND the current one ("<label> Name" when they collide).
       overrideLabelToCode.set(kpi.nameOverrideLabel.toLowerCase().trim(), kpi.code);
+      overrideLabelToCode.set(labelKey(nameColumnHeader(kpi)), kpi.code);
+      if (labelKey(kpi.nameOverrideLabel) === labelKey(kpi.label)) duplicateLabelCodes.add(kpi.code);
     }
   }
+  const legacyNameColumns: Array<{ kpiCode: string; label: string; month: string; column: string }> = [];
+  /** Per month block: the KPIs read from the old duplicate-header layout — [value column, name column]. */
+  const legacyPairs: Array<Array<{ code: string; valueCol: number; nameCol: number }>> = [];
 
   const rawAoa = readFirstSheetAoa(buffer);
 
@@ -641,6 +707,9 @@ export function parseTargetUploadBuffer(
     const cols: KpiColumn[] = [];
     const seen = new Set<string>();       // KPI value columns already matched
     const seenNames = new Set<string>();  // KPI name-override columns already matched
+    const seenExcluded = new Set<string>();
+    const pairs: Array<{ code: string; valueCol: number; nameCol: number }> = [];
+    legacyPairs.push(pairs);
     for (let ci = blockStart; ci < blockEnd && ci < headerRow2.length; ci++) {
       const label = headerRow2[ci].toLowerCase().trim();
       // Match KPI VALUE labels FIRST, override labels SECOND, so a string that is
@@ -656,10 +725,23 @@ export function parseTargetUploadBuffer(
       if (nameCode && !seenNames.has(nameCode)) {
         seenNames.add(nameCode);
         cols.push({ colIndex: ci, code: nameCode, kind: 'name' });
+        // OLD duplicate-header layout: this header is the KPI's own label written a 2nd time → read as its names.
+        if (duplicateLabelCodes.has(nameCode) && labelToCode.get(label) === nameCode) {
+          const kpi = enabled.find((k) => k.code === nameCode)!;
+          const valueCol = cols.find((c) => c.kind === 'value' && c.code === nameCode)!.colIndex;
+          pairs.push({ code: nameCode, valueCol, nameCol: ci });
+          legacyNameColumns.push({ kpiCode: nameCode, label: kpi.label, month: block.month, column: columnLetter(ci) });
+        }
         continue;
       }
-      // An excluded KPI's column (e.g. achievement-only on a target upload): read only to count typed values.
+      // An excluded KPI's column (e.g. achievement-only on a target upload): read only to count typed values. Its
+      // label written a 2nd time (old duplicate-header layout) is its NAME column.
       const excludedCode = excludedLabelToCode.get(label);
+      if (excludedCode && seenExcluded.has(excludedCode) && excludedNameLabelToCode.get(label) === excludedCode) {
+        cols.push({ colIndex: ci, code: excludedCode, kind: 'excludedName' });
+        continue;
+      }
+      if (excludedCode) seenExcluded.add(excludedCode);
       if (excludedCode) {
         cols.push({ colIndex: ci, code: excludedCode, kind: 'excluded' });
         continue;
@@ -690,6 +772,49 @@ export function parseTargetUploadBuffer(
         `Template KPI columns don't match the configured KPIs for "${monthBlocks[bi].month}" ` +
           `(missing: ${missing.join(', ') || '(none resolved)'}) — re-download the template`,
       );
+    }
+  }
+
+  // ── Swapped columns in the OLD duplicate-header layout ─────────────────────
+  // Both columns carry the same header, so only their order says which is which. If the 1st (read as the target) holds
+  // text and the 2nd (read as the names) holds only numbers, they were swapped: refuse rather than store names as
+  // targets / numbers as names.
+  const strictNumber = (v: unknown): boolean => {
+    if (typeof v === 'number') return Number.isFinite(v);
+    const t = String(v ?? '').trim().replace(/,/g, '');
+    return t !== '' && Number.isFinite(Number(t));
+  };
+  const isBlank = (v: unknown) => v === null || v === undefined || String(v).trim() === '';
+  for (let bi = 0; bi < monthBlocks.length; bi++) {
+    for (const p of legacyPairs[bi]) {
+      let valueText = 0;
+      let nameNonBlank = 0;
+      let nameNumeric = 0;
+      let textSample = '';
+      for (let ri = 2; ri < rawAoa.length; ri++) {
+        const row = (rawAoa[ri] ?? []) as unknown[];
+        const v = row[p.valueCol];
+        if (!isBlank(v) && String(v).trim().toUpperCase() !== OUT_OF_SCOPE_CELL.toUpperCase() && !strictNumber(v)) {
+          valueText++;
+          if (!textSample) textSample = String(v).trim();
+        }
+        const n = row[p.nameCol];
+        if (!isBlank(n)) {
+          nameNonBlank++;
+          if (strictNumber(n)) nameNumeric++;
+        }
+      }
+      if (valueText > 0 && nameNonBlank > 0 && nameNumeric === nameNonBlank) {
+        const kpi = enabled.find((k) => k.code === p.code)!;
+        const header = headerRow2[p.valueCol];
+        throw new TemplateFormatError(
+          `In the "${headerRow1[monthBlocks[bi].startCol]}" block the two "${header}" columns look swapped: column ` +
+            `${columnLetter(p.valueCol)} (read as the ${kpi.label} target) has text such as "${textSample}" and column ` +
+            `${columnLetter(p.nameCol)} (read as the ${kpi.label} names) has only numbers. In this old layout the FIRST ` +
+            `"${header}" column is the target and the SECOND is the product names — swap them, or download the current ` +
+            `template (its name column is "${nameColumnHeader(kpi)}")`,
+        );
+      }
     }
   }
 
@@ -845,6 +970,7 @@ export function parseTargetUploadBuffer(
       rejected,
       ignoredOutOfScope,
       ...(opts?.excludedKpis ? { excludedValues, excludedNames } : {}),
+      ...(legacyNameColumns.length > 0 ? { legacyNameColumns } : {}),
     },
   };
 }

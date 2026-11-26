@@ -81,6 +81,8 @@ interface UploadSummaryData {
   ignoredOutOfScope?: number;
   /** FOCUS-FROM-TARGETS §7: early, NON-blocking check of the focus product names (absent on older API builds). */
   focusCheck?:   TargetUploadFocusCheck;
+  /** Owner 2026-11-26: e.g. "Read column F as Focus Brand 1 names (old template layout)." (absent when none). */
+  layoutNotes?:  string[];
   /**
    * Memory-safety (2026-11-13): the API no longer echoes every parsed row. It returns the
    * REJECTED rows (problemRows) and the saved rows whose values were partly ignored
@@ -1051,6 +1053,14 @@ function UploadSummary({ data, mode, badge, errorReportName }: {
         rows={data.warningRows
           .map(r => ({ rowIndex: r.rowIndex, outletCode: r.outletCode ?? r.outletId, remarks: r.remarks }))}
       />
+
+      {data.layoutNotes && data.layoutNotes.length > 0 && (
+        <div role="status" data-testid="target-upload-layout-notes"
+          className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-900 space-y-0.5">
+          {data.layoutNotes.map((n) => <p key={n}>{n}</p>)}
+          <p className="text-blue-800">Download the current template next time — its name columns have their own headings.</p>
+        </div>
+      )}
 
       <TargetFocusCheckNotice check={data.focusCheck} />
 

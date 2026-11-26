@@ -372,6 +372,39 @@ describe('TargetsService', () => {
       expect(arg.create.code).toBe('MONTH_TGT');
     });
 
+    describe('owner 2026-11-26: a name column label equal to ANY KPI label is refused (template would show it twice)', () => {
+      const bajaj = [
+        { code: 'FOCUS BRAND', label: 'Focus Brand 1', hasNameOverride: true, nameOverrideLabel: 'Focus Brand 1' },
+        { code: 'FOCUS BRAND 2', label: 'Focus Brand 2', hasNameOverride: true, nameOverrideLabel: 'Focus Brand 2 Name' },
+        { code: 'MONTH_TGT', label: 'Month Target', hasNameOverride: false, nameOverrideLabel: null },
+      ];
+      beforeEach(() => mockPrisma.kpiDef.findMany.mockResolvedValue(bajaj));
+      afterEach(() => mockPrisma.kpiDef.findMany.mockReset());
+
+      it('its OWN label (case / space insensitive) → 400, nothing saved, suggests "<label> Name"', async () => {
+        await expect(service.upsertKpi(admin, { code: 'FOCUS BRAND', label: 'Focus Brand 1', hasNameOverride: true, nameOverrideLabel: ' focus BRAND 1 ' }))
+          .rejects.toThrow(/name column label "focus BRAND 1" is the same as the label of KPI itself \("Focus Brand 1"\).*e\.g\. "Focus Brand 1 Name"\. Nothing was saved\./);
+        expect(mockTx.kpiDef.upsert).not.toHaveBeenCalled();
+      });
+
+      it('ANOTHER KPI\'s label → 400 naming it', async () => {
+        await expect(service.upsertKpi(admin, { code: 'FOCUS BRAND 2', label: 'Focus Brand 2', hasNameOverride: true, nameOverrideLabel: 'Month Target' }))
+          .rejects.toThrow(/same as the label of KPI "MONTH_TGT" \("Month Target"\)/);
+      });
+
+      it('a label equal to another KPI\'s name column label → 400', async () => {
+        await expect(service.upsertKpi(admin, { code: 'NEW', label: 'focus brand 2 name' }))
+          .rejects.toThrow(/already the name column label of KPI "FOCUS BRAND 2"/);
+      });
+
+      it('a distinct name label saves; a KPI without a name column is never checked against its name label', async () => {
+        mockTx.kpiDef.upsert.mockResolvedValue(kpiRow);
+        await service.upsertKpi(admin, { code: 'FOCUS BRAND', label: 'Focus Brand 1', hasNameOverride: true, nameOverrideLabel: 'Focus Brand 1 Name' });
+        await service.upsertKpi(admin, { code: 'X', label: 'X', hasNameOverride: false, nameOverrideLabel: 'X' });
+        expect(mockTx.kpiDef.upsert).toHaveBeenCalledTimes(2);
+      });
+    });
+
     it('sets enabled=true by default when not supplied', async () => {
       mockTx.kpiDef.upsert.mockResolvedValue(kpiRow);
       const dto: UpsertKpiDefDto = { code: 'NEW_KPI', label: 'New KPI' };
@@ -1477,6 +1510,39 @@ describe('TargetsService', () => {
           expect(mockPrisma.salesKpiDefinition.findMany).not.toHaveBeenCalledWith(
             expect.objectContaining({ select: expect.objectContaining({ focusNamesFromKpi: true }) }),
           );
+        });
+      });
+
+      describe('OLD duplicate-header layout (owner 2026-11-26: "Focus Brand 1" written twice)', () => {
+        const dupKpi = { ...kpiRow2, label: 'Focus Pack - 1', hasNameOverride: true, nameOverrideLabel: 'Focus Pack - 1' };
+        const file = (rows: (string | number | null)[][], second = 'Focus Pack - 1') => {
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+            ['', '', '', WRITABLE_MONTH.label, '', ''],
+            ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', second],
+            ...rows,
+          ]), 'Targets');
+          return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+        };
+        beforeEach(() => mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, dupKpi]));
+
+        it('preview AND result say "Read column F as Focus Pack - 1 names (old template layout)."; the names are saved', async () => {
+          const b = file([['O001', 'Outlet One', 'RETAIL', 10, 5, 'Diwali Combo']]);
+          const p = await service.previewTargetUpload(admin, xfile(b));
+          expect(p.layoutNotes).toEqual(['Read column F as Focus Pack - 1 names (old template layout).']);
+          const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
+          expect(r.layoutNotes).toEqual(['Read column F as Focus Pack - 1 names (old template layout).']);
+          expect(writtenTargets()[0].targetValues).toEqual({ MONTH_TGT: 10, FOCUS_PACK_1: 5, __names: { FOCUS_PACK_1: 'Diwali Combo' } });
+        });
+
+        it('the current template ("Focus Pack - 1 Name") → no note', async () => {
+          const p = await service.previewTargetUpload(admin, xfile(file([['O001', 'Outlet One', 'RETAIL', 10, 5, 'Diwali']], 'Focus Pack - 1 Name')));
+          expect(p).not.toHaveProperty('layoutNotes');
+        });
+
+        it('swapped columns → 400 naming the columns, nothing saved', async () => {
+          await expect(service.previewTargetUpload(admin, xfile(file([['O001', 'Outlet One', 'RETAIL', 10, 'Diwali Combo', 5]]))))
+            .rejects.toThrow(/columns look swapped: column E .* column F .*Nothing was saved\./);
         });
       });
 

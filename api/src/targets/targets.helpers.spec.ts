@@ -22,6 +22,9 @@ import {
   resolvedTargetsLayout,
   salesDataLayout,
   parseTargetUploadBuffer,
+  nameColumnHeader,
+  columnLetter,
+  TemplateFormatError,
   KpiDefLike,
   OutletLike,
   TemplateScopeOptions,
@@ -562,8 +565,8 @@ describe('buildResolvedTargetsBuffer ↔ parseTargetUploadBuffer round-trip', ()
   });
 
   it('does NOT surface the reserved __names key as a column in the export', () => {
-    // A stored row whose targetValues carries a __names override must export only
-    // KPI-value columns — __names is read by code, never enumerated as a column.
+    // __names is read by code, never enumerated as a "__names" column. (Since 2026-11-26 a KPI with a name override
+    // gets its own "<name label>" column whose CELLS hold the stored names — never the header.)
     const buf = buildResolvedTargetsBuffer('2026-07', ENABLED_KPIS, [
       {
         outletCode: 'O001',
@@ -861,5 +864,93 @@ describe('formula-injection sanitisation (AF-5)', () => {
     expect(aoa[2][2]).toBe('\'-type'); // Outlet type
     expect(aoa[2][3]).toBe(''); // Program Name (none on this row)
     expect(aoa[2][4]).toBe('5'); // numeric target survives (raw:false → string "5"), shifted
+  });
+});
+
+
+// ─── Duplicate labels: nameOverrideLabel == its KPI label (owner 2026-11-26, Bajaj prod) ─────────────────────────────
+
+describe('a name column label equal to its KPI label (Bajaj "Focus Brand 1" twice)', () => {
+  const FB: KpiDefLike = {
+    code: 'FOCUS BRAND', label: 'Focus Brand 1', isPrimary: false, hasNameOverride: true, nameOverrideLabel: 'Focus Brand 1',
+    order: 2, enabled: true,
+  };
+  const KPIS = [KPI_A, FB];
+  const R1 = ['', '', '', "Dec '26 Target", '', ''];
+
+  it('nameColumnHeader: "<label> Name" only when they collide (case / space insensitive); null without a name column', () => {
+    expect(nameColumnHeader(FB)).toBe('Focus Brand 1 Name');
+    expect(nameColumnHeader({ ...FB, nameOverrideLabel: ' focus brand 1 ' })).toBe('Focus Brand 1 Name');
+    expect(nameColumnHeader(KPI_B)).toBe('Focus Pack 1 Name');
+    expect(nameColumnHeader(KPI_A)).toBeNull();
+    expect(columnLetter(0)).toBe('A');
+    expect(columnLetter(26)).toBe('AA');
+  });
+
+  it('the template no longer shows the header twice: the name column is "Focus Brand 1 Name"', () => {
+    const buf = generateTargetTemplateBuffer(KPIS, ['2026-12'], OUTLETS);
+    const row2 = (XLSX.utils.sheet_to_json<string[]>(XLSX.read(buf, { type: 'buffer' }).Sheets.Targets, { header: 1, defval: '' })[1]);
+    expect(row2).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1 Name']);
+  });
+
+  it('NEW layout ("Focus Brand 1 Name"): values + names read, no old-layout note', () => {
+    const r = parseTargetUploadBuffer(makeXlsx([
+      R1,
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1 Name'],
+      ['O001', 'A', 'RETAIL', 10, 1011.2697, 'CNO & ADHO500'],
+    ]), KPIS, KNOWN_CODES);
+    expect(r.acceptedTargets['2026-12'].O001).toEqual({ MONTH_TGT: 10, 'FOCUS BRAND': 1011.2697, __names: { 'FOCUS BRAND': 'CNO & ADHO500' } });
+    expect(r.summary.legacyNameColumns).toBeUndefined();
+  });
+
+  it('OLD duplicate-header layout: 1st "Focus Brand 1" = target, 2nd = names; the column is reported', () => {
+    const r = parseTargetUploadBuffer(makeXlsx([
+      [...R1, "Jan '27 Target", '', ''],
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1', 'Month Target', 'Focus Brand 1', 'Focus Brand 1'],
+      ['O001', 'A', 'RETAIL', 10, 1011.2697, 'CNO & ADHO500', 11, 900, 'ADHO500'],
+      ['O002', 'B', 'RETAIL', 5, 200, 'CNO', 6, null, null],
+    ]), KPIS, KNOWN_CODES);
+    expect(r.acceptedTargets['2026-12'].O001).toEqual({ MONTH_TGT: 10, 'FOCUS BRAND': 1011.2697, __names: { 'FOCUS BRAND': 'CNO & ADHO500' } });
+    expect(r.acceptedTargets['2027-01'].O001).toEqual({ MONTH_TGT: 11, 'FOCUS BRAND': 900, __names: { 'FOCUS BRAND': 'ADHO500' } });
+    expect(r.summary.legacyNameColumns).toEqual([
+      { kpiCode: 'FOCUS BRAND', label: 'Focus Brand 1', month: '2026-12', column: 'F' },
+      { kpiCode: 'FOCUS BRAND', label: 'Focus Brand 1', month: '2027-01', column: 'I' },
+    ]);
+  });
+
+  it('OLD layout with the two columns SWAPPED (names under the target, numbers under the names) → refused, naming the columns', () => {
+    let err: unknown;
+    try {
+      parseTargetUploadBuffer(makeXlsx([
+        R1,
+        ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1'],
+        ['O001', 'A', 'RETAIL', 10, 'CNO & ADHO500', 1011.2697],
+        ['O002', 'B', 'RETAIL', 5, 'ADHO500', '200'],
+      ]), KPIS, KNOWN_CODES);
+    } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(TemplateFormatError);
+    expect((err as Error).message).toMatch(
+      /the two "Focus Brand 1" columns look swapped: column E \(read as the Focus Brand 1 target\) has text such as "CNO & ADHO500" and column F \(read as the Focus Brand 1 names\) has only numbers.*"Focus Brand 1 Name"/,
+    );
+  });
+
+  it('not a swap: a numeric-looking name among real names, or N/A in the target column, is accepted', () => {
+    const r = parseTargetUploadBuffer(makeXlsx([
+      R1,
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1'],
+      ['O001', 'A', 'RETAIL', 10, 'N/A', '500'],
+      ['O002', 'B', 'RETAIL', 5, 200, 'CNO'],
+    ]), KPIS, KNOWN_CODES);
+    expect(r.acceptedTargets['2026-12'].O002).toEqual({ MONTH_TGT: 5, 'FOCUS BRAND': 200, __names: { 'FOCUS BRAND': 'CNO' } });
+  });
+
+  it('a KPI with a DIFFERENT name label (Deoleo "Focus Pack 1 Name") is unchanged: no old-layout note', () => {
+    const r = parseTargetUploadBuffer(makeXlsx([
+      ['', '', '', "Dec '26 Target", '', ''],
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'Focus Pack 1 Name'],
+      ['O001', 'A', 'RETAIL', 10, 5, 'Diwali'],
+    ]), ENABLED_KPIS, KNOWN_CODES);
+    expect(r.acceptedTargets['2026-12'].O001).toEqual({ MONTH_TGT: 10, FOCUS_PACK_1: 5, __names: { FOCUS_PACK_1: 'Diwali' } });
+    expect(r.summary.legacyNameColumns).toBeUndefined();
   });
 });
