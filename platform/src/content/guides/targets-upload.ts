@@ -58,6 +58,10 @@ The preview also says until when it can be confirmed (**This preview can be conf
 
 **Product-name columns:** a KPI with per-outlet product names (e.g. Focus Brand 1) has a second column for them. Its heading is the KPI's name label, or **"<KPI> Name"** (e.g. "Focus Brand 1 Name") when that label is the same as the KPI's own label. An older file with the same heading twice is still read — the first column is the target, the second the names — and the preview says **"Read column F as Focus Brand 1 names (old template layout)."** **Download Final Targets** also has these name columns.
 
+**Text in a target cell:** a target must be a number. A row with text in a target cell (e.g. "R3TEST Brand" under Focus Brand 1) is a **rejected row** — "Focus Brand 1 target must be a number — got 'R3TEST Brand'" — and none of its values are saved; it is listed under **Rejected rows** and needs the "I understand…" tick like any rejected row.
+
+**Columns the portal does not recognise:** an empty column with an unknown heading inside a month is listed as **"Column G "…" was not recognised and was ignored — re-download the template."** If such a column has anything in it, the file is refused.
+
 **A file that is refused (nothing saved):**
 
 - **"… the two "Focus Brand 1" columns look swapped …"** In an older file with the same heading twice, the first column had product names and the second only numbers. Swap the two columns (target first, names second), or download the current template.

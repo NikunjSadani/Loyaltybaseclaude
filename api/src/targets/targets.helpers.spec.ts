@@ -954,3 +954,89 @@ describe('a name column label equal to its KPI label (Bajaj "Focus Brand 1" twic
     expect(r.summary.legacyNameColumns).toBeUndefined();
   });
 });
+
+// ─── strict (target upload): never silent (owner 2026-11-26, staging Release 3) ─────────────────────────────────────
+
+describe('parseTargetUploadBuffer strict: text in a target cell / unrecognised columns', () => {
+  const FB: KpiDefLike = {
+    code: 'FOCUS BRAND', label: 'Focus Brand 1', isPrimary: false, hasNameOverride: true, nameOverrideLabel: 'Focus Brand 1',
+    order: 2, enabled: true,
+  };
+  const KPIS = [KPI_A, FB];
+  const R1 = ['', '', '', "Dec '26 Target", '', ''];
+  const parse = (aoa: (string | number | null)[][], strict = true) =>
+    parseTargetUploadBuffer(makeXlsx(aoa), KPIS, KNOWN_CODES, strict ? { strict: true } : undefined);
+
+  it('TEXT in a target cell rejects THAT row with the reason; other rows are saved', () => {
+    const r = parse([
+      R1,
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1 Name'],
+      ['O001', 'A', 'RETAIL', 10, 'R3TEST Brand', 'CNO'],
+      ['O002', 'B', 'RETAIL', 5, '1,200', 'ADHO500'],
+    ]);
+    const o1 = r.rows.find((x) => x.outletCode === 'O001')!;
+    expect(o1.status).toBe('rejected_kpi');
+    expect(o1.remarks).toBe("Focus Brand 1 target must be a number — got 'R3TEST Brand' — row rejected");
+    expect(r.acceptedTargets['2026-12'].O001).toBeUndefined();
+    expect(r.acceptedTargets['2026-12'].O002).toEqual({ MONTH_TGT: 5, 'FOCUS BRAND': 1200, __names: { 'FOCUS BRAND': 'ADHO500' } });
+    expect(r.summary.rejected).toBe(1);
+  });
+
+  it('"12abc" / "1011.2697 & ADHO500" are NOT read as 12 / 1011.2697 (strict); without strict the old reading stays', () => {
+    const aoa = [
+      R1,
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1 Name'],
+      ['O001', 'A', 'RETAIL', '12abc', '1011.2697 & ADHO500', null],
+    ];
+    const r = parse(aoa);
+    expect(r.rows[0].status).toBe('rejected_kpi');
+    expect(r.rows[0].remarks).toContain("Month Target target must be a number — got '12abc'");
+    expect(r.rows[0].remarks).toContain("Focus Brand 1 target must be a number — got '1011.2697 & ADHO500'");
+    expect(parse(aoa, false).acceptedTargets['2026-12'].O001).toEqual({ MONTH_TGT: 12, 'FOCUS BRAND': 1011.2697 });
+  });
+
+  it('the legacy duplicate-header layout still parses (2nd "Focus Brand 1" = names) — the names are not "text in a target"', () => {
+    const r = parse([
+      R1,
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1'],
+      ['O001', 'A', 'RETAIL', 10, 1011.2697, 'CNO & ADHO500'],
+    ]);
+    expect(r.rows[0].status).toBe('accepted');
+    expect(r.acceptedTargets['2026-12'].O001).toEqual({ MONTH_TGT: 10, 'FOCUS BRAND': 1011.2697, __names: { 'FOCUS BRAND': 'CNO & ADHO500' } });
+    expect(r.summary.legacyNameColumns).toHaveLength(1);
+    expect(r.summary.ignoredColumns).toBeUndefined();
+  });
+
+  it('an unrecognised EMPTY column in the month block is reported as ignored', () => {
+    const r = parse([
+      [...R1, ''],
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1 Name', 'Remarks'],
+      ['O001', 'A', 'RETAIL', 10, 5, 'CNO', null],
+    ]);
+    expect(r.summary.ignoredColumns).toEqual([{ column: 'G', header: 'Remarks', month: '2026-12' }]);
+  });
+
+  it('an unrecognised FILLED column refuses the file — incl. a 3rd "Focus Brand 1" (unrecognised layout)', () => {
+    expect(() => parse([
+      [...R1, ''],
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1', 'Focus Brand 1'],
+      ['O001', 'A', 'RETAIL', 10, 5, 'CNO', 7],
+      ['O002', 'B', 'RETAIL', 10, 5, 'CNO', 8],
+    ])).toThrow(/A column was not recognised, so its values would be ignored: column G "Focus Brand 1" \(Dec '26 Target\) — 2 filled cells\..*re-download the template/);
+    // without strict (achievement upload) the old behaviour: ignored
+    expect(() => parse([
+      [...R1, ''],
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1', 'Focus Brand 1'],
+      ['O001', 'A', 'RETAIL', 10, 5, 'CNO', 7],
+    ], false)).not.toThrow();
+  });
+
+  it('the template N/A marker reads as blank, not as text', () => {
+    const r = parse([
+      R1,
+      ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Brand 1', 'Focus Brand 1 Name'],
+      ['O001', 'A', 'RETAIL', 10, 'N/A', null],
+    ]);
+    expect(r.acceptedTargets['2026-12'].O001).toEqual({ MONTH_TGT: 10 });
+  });
+});

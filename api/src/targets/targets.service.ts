@@ -1053,12 +1053,13 @@ export class TargetsService {
     const parseOpts = {
       ...(parseScope ? { scope: parseScope } : {}),
       ...(excludedKpis.length > 0 ? { excludedKpis } : {}),
+      // NO SILENT FAILURE (owner 2026-11-26): text in a target cell rejects its row; an unknown column is reported /
+      // refused when filled.
+      strict: true,
     };
     let parseResult: ReturnType<typeof parseTargetUploadBuffer>;
     try {
-      parseResult = Object.keys(parseOpts).length > 0
-        ? parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes, parseOpts)
-        : parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes);
+      parseResult = parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes, parseOpts);
     } catch (e) {
       throw uploadParseError(e);
     }
@@ -1251,7 +1252,17 @@ export class TargetsService {
       ...(p.scopeEnforced ? { ignoredOutOfScope: p.parseResult.summary.ignoredOutOfScope } : {}),
       // Owner 2026-11-26: name columns read from the OLD duplicate-header layout — said in words (absent otherwise).
       ...(TargetsService.legacyLayoutNotes(p).length > 0 ? { layoutNotes: TargetsService.legacyLayoutNotes(p) } : {}),
+      // Unrecognised, EMPTY month-block columns — said loudly (a filled one refuses the file in the parser).
+      ...TargetsService.ignoredColumnNotesOf(p.parseResult),
     };
+  }
+
+  /** { ignoredColumnNotes } for unrecognised EMPTY month-block columns, or {} (absent key) when there are none. */
+  static ignoredColumnNotesOf(r: { summary: { ignoredColumns?: Array<{ column: string; header: string }> } }): { ignoredColumnNotes?: string[] } {
+    const cols = r.summary.ignoredColumns ?? [];
+    return cols.length > 0
+      ? { ignoredColumnNotes: cols.map((c) => `Column ${c.column} "${c.header}" was not recognised and was ignored — re-download the template.`) }
+      : {};
   }
 
   /** "Read column F as Focus Brand 1 names (old template layout)." — one line per KPI, every month block's column. */
@@ -2059,9 +2070,16 @@ export class TargetsService {
 
     let parseResult: ReturnType<typeof parseTargetUploadBuffer>;
     try {
-      parseResult = parseScope
-        ? parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes, { scope: parseScope })
-        : parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes);
+      parseResult = parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes, {
+        ...(parseScope ? { scope: parseScope } : {}),
+        // Importer-owned KPI columns are RECOGNISED (never written; reported as skippedImporterOwnedKpis) — so the
+        // strict check below does not mistake them for unknown columns.
+        ...(owned.length > 0 ? { excludedKpis: kpis.filter((k) => owned.includes(k.code)) } : {}),
+        // NO SILENT FAILURE (owner 2026-11-26): text in a number cell rejects its row; an unknown column with data
+        // refuses the file, an empty one is reported.
+        strict: true,
+        valueNoun: 'value',
+      });
     } catch (e) {
       throw uploadParseError(e);
     }
@@ -2176,6 +2194,7 @@ export class TargetsService {
       ...targetUploadRowsEcho(parseResult.rows),
       // Additive, ONLY for tenants with importer-owned KPIs (absent otherwise → Deoleo response unchanged).
       ...(skippedImporterOwnedKpis !== undefined ? { skippedImporterOwnedKpis } : {}),
+      ...TargetsService.ignoredColumnNotesOf(parseResult),
     };
   }
 

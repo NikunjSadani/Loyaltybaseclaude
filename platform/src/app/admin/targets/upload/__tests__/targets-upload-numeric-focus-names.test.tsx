@@ -70,7 +70,7 @@ describe('target upload — focus names that are numbers', () => {
     expect(screen.queryByTestId('numeric-focus-names')).not.toBeInTheDocument();
   });
 
-  it('old duplicate-header layout: the preview says which column was read as names', async () => {
+  it('old duplicate-header layout + an ignored empty column: the preview says both loudly', async () => {
     const TOKEN = `${'a'.repeat(64)}.${'b'.repeat(32)}.${'1'.repeat(13)}.${'c'.repeat(64)}`;
     stub({ success: true, data: {
       month: '2026-12', monthsInBatch: ['2026-12'], writableMonths: ['2026-12'], skippedLockedMonths: [], totalRows: 1,
@@ -79,11 +79,14 @@ describe('target upload — focus names that are numbers', () => {
       willSaveCount: 1, newCount: 1, overwriteCount: 0, perMonth: [{ month: '2026-12', newCount: 1, overwriteCount: 0 }],
       overwriteExamples: [], overwriteExamplesSampled: 0, notApplied: [], previewExpiresAt: '2026-11-26T07:00:00.000Z',
       layoutNotes: ['Read column F as Focus Brand 1 names (old template layout).'],
+      ignoredColumnNotes: ['Column G "Notes" was not recognised and was ignored — re-download the template.'],
     } }, 200);
     render(<TargetUploadPage />);
     await pick();
     expect(await screen.findByTestId('target-upload-layout-notes'))
       .toHaveTextContent('Read column F as Focus Brand 1 names (old template layout).');
+    expect(screen.getByTestId('target-upload-ignored-columns'))
+      .toHaveTextContent('Column G "Notes" was not recognised and was ignored — re-download the template.');
   });
 
   it('CSV quotes names with commas / quotes', () => {
