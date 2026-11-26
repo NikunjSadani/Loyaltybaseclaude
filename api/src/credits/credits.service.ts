@@ -1303,7 +1303,7 @@ export class CreditsService {
       });
       // Off-portal no-PAN 194C payments to these outlets (this client, FY of the payout period): treated like portal no-PAN
       // payouts (owner 2026-11-26) — no-PAN 194C is never withheld, only RECOVERED from the client — so they count in
-      // the threshold AND the recovery base: this outlet's next portal run records the recovery on them too (the ledger
+      // the threshold AND the recovery base: this outlet's next portal payment records the recovery on them too (the ledger
       // telescopes, never twice). Not a TDS shortfall.
       const opNoPan = new Map<string, { total: bigint; max: bigint }>(); // `<OUTLETKEY>|<section>`
       if (offPortalDb) {

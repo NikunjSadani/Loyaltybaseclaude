@@ -685,7 +685,7 @@ describe('owner 2026-11-26 — threshold yes, catch-up withholding never', () =>
     expect((await tds.compute194C(prevFyLabel))[0]).toMatchObject({ offPortalPaidPaise: 100_000n });
   });
 
-  it('#4: no-PAN 194C Deduct is NOT a shortfall — recovered from the client with the outlet\'s next portal run (report, preview, export agree)', async () => {
+  it('#4: no-PAN 194C Deduct is NOT a shortfall — recovered from the client with the outlet\'s next portal payment (report, preview, export agree)', async () => {
     const { svc, db, credits } = setup({ section: 'SEC_194C', methodology: 'DEDUCT' });
     const f = fileOf([{ id: 'OUT2', name: 'Gupta Traders', amount: 120_000, date: fyDay(3), utr: 'N7', type: 'Visibility' }]);
     const p = await svc.preview(gifsy(), f);
@@ -695,14 +695,22 @@ describe('owner 2026-11-26 — threshold yes, catch-up withholding never', () =>
     const [r] = await tds.compute194C(FY.fyLabel);
     expect(r.offPortalNotWithheldPaise).toBeUndefined();
     expect(r.offPortalShortfallTdsPaise).toBeUndefined();
-    expect(r.note).toMatch(/recovered from the client with this outlet's next portal payout run \(not a shortfall\)/);
+    expect(r.note).toMatch(/recovered from the client with this outlet's next portal payment \(not a shortfall\)/);
     expect(r.note).not.toMatch(/SHORTFALL/);
-    // The next portal no-PAN run for OUT2 records recovery on portal + off-portal (₹1,20,000 + ₹5,000 at 20/80).
-    const plan = await (credits as any).buildPayoutTdsPlan(db, {
+    // The outlet's next portal no-PAN payout: nothing at its BANK FILE (owner 2026-11-25 "TDS only on success")…
+    const entry = { id: 'e3', outletId: 'OUT2', amountPaise: 500_000n, tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT' };
+    const atFile = await (credits as any).buildPayoutTdsPlan(db, {
       clientId: CLIENT, period: p.rows[0].period, outletTaxMap: new Map(), runAt: NOW, currentMethodology: 'DEDUCT', importedCountFrom: null,
-      engineEntries: [{ id: 'e3', outletId: 'OUT2', amountPaise: 500_000n, tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT' }],
+      engineEntries: [entry],
     });
-    expect(plan.noPanRecovery).toEqual([expect.objectContaining({ outletCode: 'OUT2', cumulativeBasePaise: 12_500_000n, tenantSharePaise: 3_125_000n })]);
+    expect(atFile.noPanRecovery).toEqual([]);
+    // …and when it is PAID the recovery is recorded on portal + off-portal (₹5,000 + ₹1,20,000 at 20/80) — the
+    // off-portal no-PAN base is part of the PAID event's recovery base.
+    const atPaid = await (credits as any).buildPayoutTdsPlan(db, {
+      clientId: CLIENT, period: p.rows[0].period, outletTaxMap: new Map(), runAt: NOW, currentMethodology: 'DEDUCT', importedCountFrom: null,
+      engineEntries: [entry], basis: 'PAID', excludeEntryIds: ['e3'],
+    });
+    expect(atPaid.noPanRecovery).toEqual([expect.objectContaining({ outletCode: 'OUT2', cumulativeBasePaise: 12_500_000n, tenantSharePaise: 3_125_000n })]);
     const x = await svc.exportXlsx(gifsy(), {});
     const XLSXr = await import('xlsx');
     const sheet = XLSXr.read(x.buffer, { type: 'buffer' }).Sheets['Off-portal payments'];

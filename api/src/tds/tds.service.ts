@@ -1116,7 +1116,7 @@ export class TdsService {
           cur.paid += p.amountPaise;
           cur.count += 1;
           // #4: only a PAN holder's Deduct amount is a shortfall — no-PAN 194C is never withheld; it is recovered from the
-          // client with the outlet's next portal payout run (the engine's per-outlet recovery base includes it).
+          // client with the outlet's next portal payment (the engine's per-outlet recovery base includes it).
           if (p.tdsMethodology === 'DEDUCT' && hasPan) cur.notWithheld += p.amountPaise;
           else if (!hasPan) cur.noPanRecovered = (cur.noPanRecovered ?? 0n) + p.amountPaise;
           offPortalPaid.set(key, cur);
@@ -1368,7 +1368,7 @@ export class TdsService {
       const notes = [`Includes ${formatINR(op.paid)} paid off-portal in full (${op.count} payment${op.count === 1 ? '' : 's'}) — no TDS was withheld on it.`];
       if ((op.noPanRecovered ?? 0n) > 0n) {
         notes.push(
-          `No PAN: 194C is never withheld here — the TDS on ${formatINR(op.noPanRecovered!)} off-portal is recovered from the client with this outlet's next portal payout run (not a shortfall).`,
+          `No PAN: 194C is never withheld here — the TDS on ${formatINR(op.noPanRecovered!)} off-portal is recovered from the client with this outlet's next portal payment (not a shortfall).`,
         );
       }
       if (op.notWithheld > 0n) {

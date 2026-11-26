@@ -32,7 +32,7 @@ consumer ignores a void row (fund shows it returned). Register list / export: th
   SHORTFALL (amount on the row + summary). Nothing is invoiced (the client is the deductor).
 - **194C** (visibility of a 194C client): only allowed on **DEDUCT** clients. Counted by payout PERIOD; the engine
   counts them for the threshold only (PAN), the 194C report shows the shortfall. Without a PAN: 194C no-PAN is never
-  withheld — the outlet's next portal payout run records the client recovery on portal + off-portal (not a shortfall).
+  withheld — the outlet's next portal payment records the client recovery on portal + off-portal (not a shortfall).
 - A **GROSS-UP 194C client's** visibility rows are **refused** (whole file, rows listed).
 
 ## Owner decisions

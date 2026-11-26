@@ -95,7 +95,7 @@ export const OFF_PORTAL_CATEGORY_LABEL: Record<OffPortalCategory, string> = {
   TDS_NOT_WITHHELD:
     'The client is on the Deduct method — these were paid in full with NO TDS withheld. They count toward the yearly threshold, ' +
     'but NO TDS is ever withheld for them from later portal payouts: visibility TDS on them (with a PAN) is reported as a SHORTFALL; ' +
-    'incentive / gift TDS is borne by the client (194R liability); 194C without a PAN is recovered from the client with the outlet\'s next portal payout run (not a shortfall)',
+    'incentive / gift TDS is borne by the client (194R liability); 194C without a PAN is recovered from the client with the outlet\'s next portal payment (not a shortfall)',
 };
 
 /** Owner decision 2026-11-26: a gross-up client's visibility (194C, TDS paid on top) must go through the portal. */
@@ -429,7 +429,7 @@ export class OffPortalPaymentsService {
         // 194C rows are always Deduct here (a gross-up client's visibility is refused — owner 2026-11-26).
         tdsTreatment = panNumber
           ? `194C · Deduct: counts toward the threshold; TDS NOT withheld — shortfall (never withheld from later payouts) · ${keyWords}`
-          : `194C · no PAN: never withheld; recovered from the client with this outlet's next portal payout run (not a shortfall) · ${keyWords}`;
+          : `194C · no PAN: never withheld; recovered from the client with this outlet's next portal payment (not a shortfall) · ${keyWords}`;
       }
       if (policy.methodology === 'DEDUCT') flags.push('TDS_NOT_WITHHELD');
       rows.push({
@@ -918,7 +918,7 @@ export class OffPortalPaymentsService {
         Narration: s.narration ?? '',
         'TDS section': s.tdsSection,
         // B6: "not withheld — shortfall" only on rows that carry TDS_NOT_WITHHELD and are on the Deduct method.
-        // #4: a no-PAN 194C payment is recovered from the client with the outlet's next portal run — not a shortfall.
+        // #4: a no-PAN 194C payment is recovered from the client with the outlet's next portal payment — not a shortfall.
         'TDS method':
           r.tdsMethodology === 'DEDUCT'
             ? r.tdsSection === 'SEC_194C' && !r.panNumber
