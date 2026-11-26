@@ -46,8 +46,8 @@ export class CreatePointsRuleDto {
 
   @IsString()
   @IsOptional()
-  @IsIn(['PERIOD_AGGREGATE'], { message: 'evaluationBasis must be PERIOD_AGGREGATE' })
-  evaluationBasis?: 'PERIOD_AGGREGATE';
+  @IsIn(['PERIOD_AGGREGATE', 'QUARTER'], { message: 'evaluationBasis must be PERIOD_AGGREGATE (monthly) or QUARTER (quarterly)' })
+  evaluationBasis?: 'PERIOD_AGGREGATE' | 'QUARTER';
 
   // The nested config objects/arrays are passed THROUGH untouched (validateRule is the authority) —
   // @Allow() whitelists them without constraints. @IsObject()/@IsArray() here is unsafe: the global pipe
@@ -91,8 +91,8 @@ export class UpdatePointsRuleDto {
 
   @IsString()
   @IsOptional()
-  @IsIn(['PERIOD_AGGREGATE'], { message: 'evaluationBasis must be PERIOD_AGGREGATE' })
-  evaluationBasis?: 'PERIOD_AGGREGATE';
+  @IsIn(['PERIOD_AGGREGATE', 'QUARTER'], { message: 'evaluationBasis must be PERIOD_AGGREGATE (monthly) or QUARTER (quarterly)' })
+  evaluationBasis?: 'PERIOD_AGGREGATE' | 'QUARTER';
 
   // Free-form config: @Allow() + `unknown` (see header) — validateRule is the authority.
   @Allow()

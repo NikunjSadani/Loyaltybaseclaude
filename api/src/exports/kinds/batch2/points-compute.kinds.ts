@@ -31,6 +31,7 @@ import { TenantSettingsService } from '../../../tenant/tenant-settings.service';
 import type { ExportAccess, ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { monthWords, parseQueryDto, serviceOf } from './kind-support';
+import { parseQuarter } from '../../../points-engine/points-engine.quarter';
 
 export interface PointsComputeParams {
   period: string;
@@ -40,6 +41,8 @@ export interface PointsComputeParams {
   acceptVisibilityPendingKey?: string | null;
   /** The run key the operator reviewed (sourceKey for the credit file, payoutKey for the payout report). */
   expectedKey?: string | null;
+  /** preview.importedMonths.confirmKey — a Gifsy admin's confirmation for a run covering imported months. */
+  confirmImportedMonthsKey?: string | null;
 }
 
 /** Same as every points-compute download route: @Roles('GIFSY_ADMIN','CLIENT_ADMIN') + points_rules:read. */
@@ -56,6 +59,7 @@ function parse(raw: unknown): PointsComputeParams {
     kpiCode: q.kpiCode ?? null,
     ...(q.acceptVisibilityPendingKey !== undefined ? { acceptVisibilityPendingKey: q.acceptVisibilityPendingKey } : {}),
     ...(q.expectedKey !== undefined ? { expectedKey: q.expectedKey } : {}),
+    ...(q.confirmImportedMonthsKey !== undefined ? { confirmImportedMonthsKey: q.confirmImportedMonthsKey } : {}),
   };
 }
 
@@ -94,7 +98,8 @@ function pointsKind(opts: {
     parseParams: (raw: unknown) => parse(raw),
     // The whole-tenant compute runs on every download → always in the background worker.
     isHeavy: () => true,
-    describeParams: (p) => [monthWords(p.period), ...(p.program ? [p.program] : []), ...(p.kpiCode ? [p.kpiCode] : [])].join(' · '),
+    describeParams: (p) =>
+      [parseQuarter(p.period)?.label ?? monthWords(p.period), ...(p.program ? [p.program] : []), ...(p.kpiCode ? [p.kpiCode] : [])].join(' · '),
     fileName: (p) => opts.fileName(p.period),
     async run(ctx: ExportRunContext, p: PointsComputeParams, out: XlsxStreamWriter) {
       const guard = new SalesMonthClosedGuard(ctx.prisma);
@@ -110,11 +115,36 @@ function pointsKind(opts: {
         program: p.program,
         kpiCode: p.kpiCode,
       });
+      const importedEntity = ctx.requestId ?? `${ctx.clientId}:${p.period}`;
+      let confirmationId: string | null = null;
       if (opts.expectedKeyOf) PointsComputeService.assertExpectedKey(opts.expectedKeyOf(preview), p.expectedKey, opts.label.toLowerCase());
       if (opts.requiresVisibilityAcceptance) {
+        // Money files: quarter must be over; imported months need the Gifsy confirmation (uncached first-live month).
+        await serviceOf(ctx, PointsComputeService).refreshImportedMonths(ctx.clientId, preview);
+        PointsComputeService.assertMoneyRunAllowed(preview, ctx.user, p.confirmImportedMonthsKey ?? null);
         PointsComputeService.assertVisibilityPendingAccepted(preview, p.acceptVisibilityPendingKey ?? null);
+        confirmationId = await PointsComputeService.recordImportedMonthsConfirmation(ctx.prisma, ctx.user, preview, {
+          route: opts.route,
+          entityId: importedEntity,
+        });
       }
-      const rowCount = await opts.write(preview, out);
+      let rowCount: number;
+      try {
+        rowCount = await opts.write(preview, out);
+      } catch (e) {
+        if (opts.requiresVisibilityAcceptance) {
+          await PointsComputeService.recordImportedMonthsOutcome(ctx.prisma, ctx.user, preview, confirmationId, {
+            route: opts.route, entityId: importedEntity, released: false, detail: { error: (e as Error)?.message ?? String(e) },
+          });
+        }
+        throw e;
+      }
+      if (opts.requiresVisibilityAcceptance) {
+        await PointsComputeService.recordImportedMonthsOutcome(ctx.prisma, ctx.user, preview, confirmationId, {
+          route: opts.route, entityId: importedEntity, released: true,
+          detail: { exportRequestId: ctx.requestId ?? null, rowCount, sourceKey: preview.sourceKey, payoutKey: preview.payoutKey },
+        });
+      }
       if (opts.requiresVisibilityAcceptance) {
         await PointsComputeService.recordVisibilityAcceptance(ctx.prisma, ctx.user, preview, {
           route: opts.route,

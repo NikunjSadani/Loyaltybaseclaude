@@ -352,7 +352,7 @@ function preview(n: number, over: Partial<ComputePreview> = {}): ComputePreview 
 }
 
 function setup(p: ComputePreview, opts: { engineEnabled?: boolean } = {}) {
-  const compute = { previewCompute: jest.fn().mockResolvedValue(p) };
+  const compute = { previewCompute: jest.fn().mockResolvedValue(p), refreshImportedMonths: jest.fn().mockResolvedValue(undefined) };
   const settings = { getPointsEngineFlagsUncached: jest.fn().mockResolvedValue({ enabled: opts.engineEnabled ?? true }) };
   const prisma = {
     client: { findUnique: jest.fn().mockResolvedValue({ features: {}, status: 'ACTIVE' }) },

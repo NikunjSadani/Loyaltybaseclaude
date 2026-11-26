@@ -18,11 +18,11 @@ import {
   getRule, createRule, updateRule, publishRule, archiveRule,
 } from '@/lib/points-engine/api';
 import type {
-  RuleConfigDraft, PipelineNode, NodeType, RuleStatus, RuleInput, AwardType, RoundingSpec,
+  RuleConfigDraft, PipelineNode, NodeType, RuleStatus, RuleInput, AwardType, RoundingSpec, EvaluationBasis,
 } from '@/lib/points-engine/types';
 import { NODE_META } from '@/lib/points-engine/types';
 import {
-  Field, NumberField, SelectField, StatusBadge, cardCls,
+  Field, NumberField, SelectField, TextField, StatusBadge, cardCls,
   blankDraft, rowToDraft, defaultNode, firstNumericVar, draftIssues, inputCls,
 } from './kit';
 import { InputsCard } from './InputsCard';
@@ -61,6 +61,14 @@ export function ruleKpiScopeWarning(
     return `KPI ${kpiCode} does not apply to this rule's ${parts.join(' or ')}. Outlets there are skipped in compute, and publishing will be refused until the rule and the KPI scope overlap.`;
   }
   return `KPI ${kpiCode} does not apply to this rule's ${parts.join(' or ')}. Outlets there are skipped in compute; the rest can earn.`;
+}
+
+/** First day (YYYY-MM-DD) of the FY quarter containing today — the default effective-from of a new quarterly rule. */
+function currentQuarterStart(): string {
+  const now = new Date();
+  const m = now.getMonth() + 1;
+  const first = m >= 4 ? 4 + Math.floor((m - 4) / 3) * 3 : 1;
+  return `${now.getFullYear()}-${String(first).padStart(2, '0')}-01`;
 }
 
 // Node types grouped by disclosure level for the "Add step" menu.
@@ -292,6 +300,22 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
 
   const setInputs = (inputs: RuleInput[]) => patch({ inputs });
 
+  // Monthly ↔ quarterly. Nothing is stripped silently: quarter-only settings (per-input month, narration, {m1}…
+  // placeholders) stay on the draft and "Fix these before saving" lists each one while the rule is Monthly.
+  // A brand-new quarterly rule defaults its effective-from to the first day of the current FY quarter.
+  // The period is fixed once a rule has more than one version (publishing a version retires the earlier ones).
+  const quarterly = draft.evaluationBasis === 'QUARTER';
+  const basisLocked = version !== null && version > 1;
+  const setBasis = (evaluationBasis: EvaluationBasis) => {
+    setDraft((d) => ({
+      ...d,
+      evaluationBasis,
+      ...(evaluationBasis === 'QUARTER' && isNew ? { effectiveFrom: currentQuarterStart() } : {}),
+    }));
+    setSaved(false);
+    setDirty(true);
+  };
+
   const setNode = (i: number, node: PipelineNode) =>
     patch({ pipeline: draft.pipeline.map((n, idx) => (idx === i ? node : n)) });
 
@@ -386,8 +410,11 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
     // Carry the same ruleId → the backend mints version+1 as a fresh draft. Default the new version's
     // effective-from to TODAY (the author can change it) so publishing it doesn't collapse the prior
     // published version to a 1-day window by reusing its effectiveFrom.
+    // A QUARTERLY version pays a quarter only if it starts on or before the quarter's first day, so it defaults to the
+    // current quarter's first day (back-dating is allowed; the author can change it).
     const today = new Date().toISOString().slice(0, 10);
-    const res = await createRule({ ...draft, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: today });
+    const from = draft.evaluationBasis === 'QUARTER' ? currentQuarterStart() : today;
+    const res = await createRule({ ...draft, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: from });
     if (res.success) {
       router.push(`/admin/points-engine/rules/${res.data.id}`);
       return;
@@ -623,8 +650,36 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                   onChange={(v) => setAttach({ kpiCode: v })}
                 />
               </Field>
+              <Field
+                label="Rule period"
+                hint={
+                  basisLocked
+                    ? 'Fixed: a rule cannot switch between monthly and quarterly across versions. Create a new rule for a quarterly bonus.'
+                    : quarterly
+                      ? 'Computed only in a quarter run (FY quarters Apr–Jun, Jul–Sep, Oct–Dec, Jan–Mar). Inputs read month 1 / 2 / 3 of the quarter or the quarter total.'
+                      : 'Computed in each monthly run.'
+                }
+              >
+                <SelectField<EvaluationBasis>
+                  value={draft.evaluationBasis ?? 'PERIOD_AGGREGATE'}
+                  disabled={readOnly || basisLocked}
+                  onChange={setBasis}
+                  options={[
+                    { value: 'PERIOD_AGGREGATE', label: 'Monthly' },
+                    { value: 'QUARTER', label: 'Quarterly (financial-year quarter)' },
+                  ]}
+                />
+              </Field>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Effective from" required>
+                <Field
+                  label="Effective from"
+                  required
+                  hint={
+                    quarterly
+                      ? "A quarterly rule pays a quarter only if it starts on or before the quarter's first day (1 Apr / 1 Jul / 1 Oct / 1 Jan) and runs to its end — a version starting mid-quarter does NOT pay that quarter. Back-dating is allowed."
+                      : undefined
+                  }
+                >
                   <input
                     type="date"
                     value={draft.effectiveFrom}
@@ -655,7 +710,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
 
           {/* Inputs */}
           <SectionCard title="Inputs" subtitle="The variables the pipeline can read. The null policy decides what happens when a value is missing.">
-            <InputsCard inputs={draft.inputs} disabled={readOnly} onChange={setInputs} />
+            <InputsCard inputs={draft.inputs} disabled={readOnly} onChange={setInputs} quarterly={quarterly} />
           </SectionCard>
 
           {/* Pipeline */}
@@ -742,6 +797,20 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                 })()}
               </Field>
 
+              {(quarterly || !!draft.output.narration) && (
+                <Field
+                  label="Credit narration"
+                  className="sm:col-span-2"
+                  hint="Shown on each credit; the quarter is added automatically, e.g. “Consistency bonus” → “Consistency bonus Oct–Dec 2026”. Blank = “Quarterly points Oct–Dec 2026”."
+                >
+                  <TextField
+                    value={draft.output.narration ?? ''}
+                    disabled={readOnly}
+                    placeholder="Consistency bonus"
+                    onChange={(v) => setOutput({ narration: v === '' ? undefined : v.slice(0, 100) })}
+                  />
+                </Field>
+              )}
               {draft.output.awardType === 'PAYOUT' && (
                 <div className="sm:col-span-2 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
                   <AlertCircle className="h-4 w-4 shrink-0" />

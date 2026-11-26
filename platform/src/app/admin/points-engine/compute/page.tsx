@@ -45,7 +45,9 @@ import type {
   ComputePreviewRow,
   PreviewRowStatus,
 } from '@/lib/points-engine/types';
+import { latestEndedQuarterKey, parseQuarterKey, previousQuarterKey, quarterKeyForMonth } from '@/lib/points-engine/types';
 import { SearchableSelect } from '@/components/ui/searchable-select';
+import { useAdminSession } from '@/lib/admin-session';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import type { DownloadOutcome } from '@/lib/exports/download';
 import { DownloadActionStatus } from '@/components/exports/download-action-status';
@@ -62,7 +64,27 @@ function getPreviousMonth(): string {
   return `${y}-${String(m).padStart(2, '0')}`;
 }
 
+/**
+ * The quarter picker: the latest FULLY ENDED FY quarter first (the default), then the 7 before it — plus, last, the
+ * quarter in progress (so it can be previewed; export / credit stay refused until it ends). Date-relative.
+ */
+function recentQuarters(n = 8): string[] {
+  const now = new Date();
+  const current = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const out: string[] = [];
+  let key = latestEndedQuarterKey(current);
+  for (let i = 0; i < n; i++) {
+    out.push(key);
+    key = previousQuarterKey(key);
+  }
+  out.push(quarterKeyForMonth(current)); // in progress — preview only
+  return out;
+}
+
 function monthLabel(yyyyMm: string): string {
+  // A quarter run (YYYY-Qn) names its months: "Oct–Dec 2026 (Q3 FY2026-27)".
+  const q = parseQuarterKey(yyyyMm);
+  if (q) return `${q.label} (${q.fyLabel})`;
   const [y, m] = yyyyMm.split('-').map(Number);
   if (!y || !m) return yyyyMm;
   return new Date(y, m - 1, 1).toLocaleDateString('en-IN', {
@@ -202,6 +224,9 @@ function OkGroup({ rows, engineDisabled }: { rows: ComputePreviewRow[]; engineDi
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.target)}</td>
                 <td className="px-2 py-2.5 text-right font-semibold text-gray-900">{num(r.points)}</td>
                 <td className="px-4 py-2.5 text-xs text-gray-500">
+                  {r.narration && (
+                    <span className="mb-0.5 block font-semibold text-violet-700" data-testid="row-narration">Credit narration: {r.narration}</span>
+                  )}
                   {r.reason && <span className="mr-1 font-semibold text-amber-700" data-testid="row-reason">{r.reason} —</span>}
                   {r.explanation ?? '—'}
                 </td>
@@ -256,6 +281,9 @@ function PayoutOkGroup({ rows }: { rows: ComputePreviewRow[] }) {
                 <td className="px-2 py-2.5 text-right text-gray-700">{num(r.target)}</td>
                 <td className="px-2 py-2.5 text-right font-semibold text-indigo-700">₹{num(r.payoutRupees)}</td>
                 <td className="px-4 py-2.5 text-xs text-gray-500">
+                  {r.narration && (
+                    <span className="mb-0.5 block font-semibold text-violet-700" data-testid="row-narration">Credit narration: {r.narration}</span>
+                  )}
                   {r.reason && <span className="mr-1 font-semibold text-amber-700" data-testid="row-reason">{r.reason} —</span>}
                   {r.explanation ?? '—'}
                 </td>
@@ -280,7 +308,12 @@ export default function PointsComputePage() {
   const [step, setStep] = useState<Step>('select');
 
   // SELECT inputs
-  const [period, setPeriod] = useState<string>(getPreviousMonth());
+  // Monthly run (YYYY-MM → monthly rules) or quarter run (YYYY-Qn → quarterly rules only).
+  const [runKind, setRunKind] = useState<'MONTH' | 'QUARTER'>('MONTH');
+  const [month, setPeriod] = useState<string>(getPreviousMonth());
+  const quarterOptions = recentQuarters();
+  const [quarterKey, setQuarterKey] = useState<string>(quarterOptions[0]);
+  const period = runKind === 'QUARTER' ? quarterKey : month;
   const [program, setProgram] = useState('');
   const [kpiCode, setKpiCode] = useState('');
 
@@ -320,6 +353,10 @@ export default function PointsComputePage() {
   const [appliedSourceKey, setAppliedSourceKey] = useState<string | null>(null);
   // §3a: the admin's explicit "I accept N outlets will read visibility = not approved" for THIS preview.
   const [visAccepted, setVisAccepted] = useState(false);
+  // Imported-months guard: the Gifsy admin's explicit confirmation for THIS preview (server-enforced + audited).
+  const [importedConfirmed, setImportedConfirmed] = useState(false);
+  const session = useAdminSession();
+  const isGifsyAdmin = session?.role === 'GIFSY_ADMIN';
 
   // EXPORT
   // One shared button state per file (useDownloadAction): "Preparing…" while in flight; a big file is
@@ -352,6 +389,7 @@ export default function PointsComputePage() {
     setCommitResult(null);
     setCommitError(null);
     setVisAccepted(false);
+    setImportedConfirmed(false);
     resetExports();
 
     const filter: AppliedFilter = {
@@ -375,7 +413,7 @@ export default function PointsComputePage() {
     if (!applied || fileAction.blocked) return;
     setExportMsg(null);
     showOutcome(
-      await fileAction.run(() => downloadExport({ ...applied, ...visAccept, expectedKey: preview?.sourceKey ?? null })),
+      await fileAction.run(() => downloadExport({ ...applied, ...visAccept, ...importedAccept, expectedKey: preview?.sourceKey ?? null })),
       'Credit-upload file downloaded.',
     );
   };
@@ -390,7 +428,7 @@ export default function PointsComputePage() {
     if (!applied || payoutAction.blocked) return;
     setExportMsg(null);
     showOutcome(
-      await payoutAction.run(() => downloadPayoutReport({ ...applied, ...visAccept, expectedKey: preview?.payoutKey ?? null })),
+      await payoutAction.run(() => downloadPayoutReport({ ...applied, ...visAccept, ...importedAccept, expectedKey: preview?.payoutKey ?? null })),
       'Payout report downloaded.',
     );
   };
@@ -407,6 +445,7 @@ export default function PointsComputePage() {
       kpiCode: applied.kpiCode,
       expectedKey: appliedSourceKey,
       ...visAccept,
+      ...importedAccept,
     });
     if (res.success) {
       setCommitResult(res.data);
@@ -437,6 +476,11 @@ export default function PointsComputePage() {
   // The acceptance is bound to the EXACT pending outlet set (the server recomputes the key and refuses a different set).
   const visAccept =
     visPending > 0 && visAccepted && preview?.visibility ? { acceptVisibilityPendingKey: preview.visibility.pendingKey } : {};
+  // Quarter not over yet / imported months not confirmed → money actions blocked (the server refuses them too).
+  const quarterOpen = preview?.quarter?.openMonths ?? [];
+  const imported = preview?.importedMonths;
+  const moneyBlocked = quarterOpen.length > 0 || (!!imported && !importedConfirmed);
+  const importedAccept = imported && importedConfirmed ? { confirmImportedMonthsKey: imported.confirmKey } : {};
   const errorRows = preview?.rows.filter((r) => r.status === 'ERROR') ?? [];
   const skipRows = preview?.rows.filter((r) => r.status === 'SKIP') ?? [];
   const noRuleRows = preview?.rows.filter((r) => r.status === 'NO_RULE') ?? [];
@@ -511,18 +555,48 @@ export default function PointsComputePage() {
       {/* ─── SELECT ─────────────────────────────────────────────────────────── */}
       <div className="space-y-4 rounded-2xl border border-gray-200 bg-white p-5">
         <h2 className="text-sm font-semibold text-gray-900">Step 1 — Choose what to compute</h2>
+        <div className="flex flex-wrap items-center gap-4 text-sm" role="radiogroup" aria-label="Run type">
+          {([
+            ['MONTH', 'Monthly run (monthly rules)'],
+            ['QUARTER', 'Quarter run (quarterly rules only)'],
+          ] as const).map(([v, l]) => (
+            <label key={v} className="flex items-center gap-1.5 text-gray-700">
+              <input
+                type="radio"
+                name="pe-run-kind"
+                checked={runKind === v}
+                onChange={() => setRunKind(v)}
+                className="accent-[var(--brand-primary)]"
+              />
+              {l}
+            </label>
+          ))}
+        </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <div>
             <label htmlFor="pe-period" className="mb-1 block text-xs font-semibold text-gray-500">
-              Period *
+              {runKind === 'QUARTER' ? 'Quarter *' : 'Period *'}
             </label>
-            <input
-              id="pe-period"
-              type="month"
-              value={period}
-              onChange={(e) => setPeriod(e.target.value)}
-              className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
-            />
+            {runKind === 'QUARTER' ? (
+              <select
+                id="pe-period"
+                value={quarterKey}
+                onChange={(e) => setQuarterKey(e.target.value)}
+                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
+              >
+                {quarterOptions.map((k) => (
+                  <option key={k} value={k}>{monthLabel(k)}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                id="pe-period"
+                type="month"
+                value={month}
+                onChange={(e) => setPeriod(e.target.value)}
+                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
+              />
+            )}
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-500">
@@ -588,6 +662,75 @@ export default function PointsComputePage() {
           <h2 className="text-sm font-semibold text-gray-900">
             Step 2 — Preview for {monthLabel(applied.period)}
           </h2>
+
+          {quarterOpen.length > 0 && (
+            <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4" data-testid="quarter-open-months" role="alert">
+              <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-500" />
+              <div className="text-xs text-red-800">
+                <p className="text-sm font-semibold">
+                  {preview.quarter!.label} is not finished — {quarterOpen.join(', ')} {quarterOpen.length === 1 ? 'has' : 'have'} not ended yet.
+                </p>
+                <p className="mt-0.5">This preview is for checking only. Export and in-portal credit open once all three months are over.</p>
+              </div>
+            </div>
+          )}
+
+          {imported && (
+            <div className="space-y-2 rounded-xl border border-red-300 bg-red-50 p-4" data-testid="imported-months" role="alert">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+                <div className="text-xs text-red-800">
+                  <p className="text-sm font-semibold">
+                    {imported.monthLabels.join(', ')} {imported.monthLabels.length === 1 ? 'is' : 'are'} before this programme&apos;s first live
+                    month on the portal ({monthLabel(imported.firstLiveMonth)}) — the data was imported from the old system.
+                  </p>
+                  <p className="mt-0.5">
+                    Points for these months may already have been paid on the old system. Export and in-portal credit are blocked
+                    until a Gifsy admin confirms below (recorded in the audit log; anyone else is refused).
+                  </p>
+                </div>
+              </div>
+              <label className="flex items-start gap-2 pl-8 text-xs font-medium text-red-900">
+                <input
+                  type="checkbox"
+                  checked={importedConfirmed}
+                  disabled={!isGifsyAdmin}
+                  onChange={(e) => setImportedConfirmed(e.target.checked)}
+                  className="mt-0.5 accent-red-600 disabled:cursor-not-allowed"
+                  data-testid="imported-months-confirm"
+                />
+                <span>
+                  I confirm {imported.monthLabels.join(', ')} {imported.monthLabels.length === 1 ? 'was' : 'were'} imported from the old system and
+                  {' '}{imported.monthLabels.length === 1 ? 'has' : 'have'} not been paid on the portal or the old system for{' '}
+                  {preview.ruleVersionsUsed.length === 1 ? 'this rule' : 'these rules'} (
+                  {preview.ruleVersionsUsed.map((v) => `${v.ruleId} v${v.version}`).join(', ') || '—'}). Gifsy admin only.
+                </span>
+              </label>
+              {!isGifsyAdmin && (
+                <p className="pl-8 text-xs font-semibold text-red-700" data-testid="imported-months-gifsy-only">
+                  Only a Gifsy admin can confirm imported months. Ask Gifsy to review this run — until then the credit file,
+                  payout report and in-portal credit stay blocked.
+                </p>
+              )}
+            </div>
+          )}
+
+          {preview.quarter && (
+            <div className="flex items-start gap-3 rounded-xl border border-violet-200 bg-violet-50 p-4" data-testid="quarter-run">
+              <Info className="mt-0.5 h-5 w-5 shrink-0 text-violet-600" />
+              <div className="text-xs text-violet-800">
+                <p className="text-sm font-semibold">
+                  Quarter run — {preview.quarter.label} ({preview.quarter.fyLabel})
+                </p>
+                <p className="mt-0.5">
+                  Only QUARTERLY rules are computed, over {preview.quarter.monthLabels.join(', ')} (all three months must be
+                  closed in Sales Import). Each credit&apos;s narration names the quarter. Credits are filed under{' '}
+                  <strong>{monthLabel(preview.quarter.creditPeriod)}</strong> (the quarter&apos;s last month) — upload the
+                  credit file under that month; it never merges with that month&apos;s monthly run.
+                </p>
+              </div>
+            </div>
+          )}
 
           {preview.engineDisabled && (
             <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4" data-testid="engine-disabled">
@@ -747,6 +890,9 @@ export default function PointsComputePage() {
                 {applied.program ? ` · ${applied.program}` : ''}
                 {applied.kpiCode ? ` · ${applied.kpiCode}` : ''}.
               </p>
+              {preview.emptyReason && (
+                <p className="max-w-xl text-xs font-medium text-amber-700" data-testid="empty-reason">{preview.emptyReason}</p>
+              )}
             </div>
           ) : (
             <div className="space-y-3">
@@ -782,7 +928,7 @@ export default function PointsComputePage() {
               <div className="flex flex-wrap gap-3">
                 <button
                   onClick={() => void handleExport()}
-                  disabled={fileAction.blocked || preview.engineDisabled || !hasPointsOkRows || filtersChanged || visBlocked}
+                  disabled={fileAction.blocked || preview.engineDisabled || !hasPointsOkRows || filtersChanged || visBlocked || moneyBlocked}
                   title={
                     preview.engineDisabled
                       ? 'Unavailable while the engine is disabled'
@@ -806,7 +952,7 @@ export default function PointsComputePage() {
                 {hasPayoutRows && (
                   <button
                     onClick={() => void handlePayoutReport()}
-                    disabled={payoutAction.blocked || filtersChanged || visBlocked}
+                    disabled={payoutAction.blocked || filtersChanged || visBlocked || moneyBlocked}
                     className="inline-flex items-center gap-2 rounded-xl border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-40"
                   >
                     {payoutAction.busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
@@ -843,7 +989,7 @@ export default function PointsComputePage() {
                 </div>
                 <button
                   onClick={() => void handleCommit()}
-                  disabled={committing || filtersChanged || visBlocked}
+                  disabled={committing || filtersChanged || visBlocked || moneyBlocked}
                   className="inline-flex items-center gap-2 rounded-xl border-2 border-[var(--brand-primary)] px-4 py-2.5 text-sm font-semibold text-[var(--brand-primary)] transition hover:bg-[var(--brand-primary)]/5 disabled:opacity-40"
                 >
                   {committing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet className="h-4 w-4" />}
@@ -892,17 +1038,43 @@ export default function PointsComputePage() {
                   </div>
                 </div>
 
-                {commitResult.priorBatchesThisPeriod > 0 && (
-                  <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                    <span>
-                      There {commitResult.priorBatchesThisPeriod === 1 ? 'is' : 'are'} already{' '}
-                      {commitResult.priorBatchesThisPeriod} credit batch
-                      {commitResult.priorBatchesThisPeriod !== 1 ? 'es' : ''} for this period (review before
-                      confirming to avoid double-crediting).
-                    </span>
-                  </div>
-                )}
+                {commitResult.priorBatchesThisPeriod > 0 && (() => {
+                  const list = commitResult.priorBatches ?? [];
+                  const dups = list.filter((b) => b.likelyDuplicate);
+                  const kindWords = (b: (typeof list)[number]) =>
+                    b.kind === 'QUARTER_ENGINE' ? `quarterly bonus ${b.quarter ?? ''}`.trim()
+                      : b.kind === 'MONTHLY_ENGINE' ? 'monthly engine run'
+                        : b.kind === 'UPLOAD' ? 'manual upload' : 'other';
+                  return (
+                    <div
+                      className={`flex items-start gap-2 rounded-xl border p-3 text-xs ${dups.length > 0 ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}
+                      data-testid="prior-batches"
+                    >
+                      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span>
+                        {dups.length > 0 ? (
+                          <>
+                            <strong>Possible double credit:</strong>{' '}
+                            {dups.map((b) => `${b.batchCode} (${kindWords(b)})`).join(', ')} already credit{dups.length === 1 ? 's' : ''} the same
+                            {commitResult.quarter ? ` quarter (${commitResult.quarter.label})` : ' month'} into the same credit field. Review before confirming.
+                          </>
+                        ) : list.length > 0 ? (
+                          <>
+                            Other batches filed under {monthLabel(commitResult.period)} (not the same run):{' '}
+                            {list.map((b) => `${b.batchCode} (${kindWords(b)})`).join(', ')}.
+                          </>
+                        ) : (
+                          <>
+                            There {commitResult.priorBatchesThisPeriod === 1 ? 'is' : 'are'} already{' '}
+                            {commitResult.priorBatchesThisPeriod} credit batch
+                            {commitResult.priorBatchesThisPeriod !== 1 ? 'es' : ''} for this period (review before
+                            confirming to avoid double-crediting).
+                          </>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })()}
 
                 <Link
                   href="/admin/credits-payouts/status"

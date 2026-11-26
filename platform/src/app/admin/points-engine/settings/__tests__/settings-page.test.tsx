@@ -93,3 +93,21 @@ describe('Points Engine settings page', () => {
     expect(await screen.findByText(/^saved$/i)).toBeInTheDocument();
   });
 });
+
+describe('Points Engine settings — first live month (imported-months guard)', () => {
+  it('PE-S6: an untouched first live month is NOT sent (a stale page never overwrites it); an edit is sent', async () => {
+    asGifsy();
+    (getSettings as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true, data: { clientId: 'bajaj', enabled: true, directCreditEnabled: false, firstLiveMonth: '2026-11' },
+    });
+    render(<SettingsPage />);
+    const save = await screen.findByRole('button', { name: /save changes/i });
+    fireEvent.click(save);
+    await waitFor(() => expect(setSettings).toHaveBeenCalledTimes(1));
+    expect((setSettings as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]).not.toHaveProperty('firstLiveMonth');
+    fireEvent.change(screen.getByLabelText('Points engine first live month'), { target: { value: '2026-12' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(setSettings).toHaveBeenCalledTimes(2));
+    expect((setSettings as unknown as ReturnType<typeof vi.fn>).mock.calls[1][0]).toEqual(expect.objectContaining({ firstLiveMonth: '2026-12' }));
+  });
+});

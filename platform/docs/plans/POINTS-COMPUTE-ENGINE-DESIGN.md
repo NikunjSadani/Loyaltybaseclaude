@@ -193,6 +193,84 @@ Unnati worked example (PAYOUT, formula `set`): inputs `TOTAL` (kpi TOTAL, `zero`
 `if(visApproved == 1 && TOTAL >= 4000, if(metro == 'Metro', 500, 250), 0)`. SAMT gate:
 `{ gate, when: visApproved eq 1, onFail: zero }` before the accrual nodes.
 
+### 3b. Quarterly rules — `evaluationBasis: 'QUARTER'` (owner-approved 2026-11-25, shared engine, OPT-IN)
+
+A rule with `evaluationBasis: 'QUARTER'` is computed ONLY in a **quarter run** (`period: 'YYYY-Qn'`, YYYY = FY start
+year: Q1 Apr–Jun · Q2 Jul–Sep · Q3 Oct–Dec · Q4 Jan–Mar of the next calendar year; `2026-Q3` = Oct–Dec 2026). A monthly
+run (`YYYY-MM`) never resolves a quarterly rule and a quarter run never resolves a monthly one (filtered in
+`getActiveForAttachment` + the active-KPI list; publish clashes only within the same kind). Monthly rules evaluate
+byte-identically (snapshot `points-engine.monthly-snapshot.spec.ts`, recorded against the pre-change evaluator).
+No schema change (`evaluationBasis` is an existing string column). Code: `points-engine.quarter.ts` (FY helpers),
+`resolveQuarterRaw` / `bindInputs` in `points-engine.helper.ts`, `PointsComputeService` (quarter load).
+
+- **Inputs.** `RuleInput.month: 1 | 2 | 3` reads that month of the quarter (any `kpiCode` / `achievement:` / `target:` /
+  `pct:` source). No `month` = the **quarter total** (sum of the 3 months; `pct:` = Σ ach ÷ Σ tgt × 100), ABSENT if any
+  month is blank — never a partial sum. `segment:` as always. `visibility:` is refused on a quarterly rule (monthly data).
+- **Missing data names the month.** A `reject` input → SKIP "Missing data: Nov 2026: no TOTAL target (tot_tgt_m2)";
+  `skipRule` → "Nov 2026: no TOTAL target".
+- **Gate reasons.** `failReason` may use `{m1} {m2} {m3}` (→ "Oct 2026"…) and `{quarter}` (→ "Oct–Dec 2026"). In a
+  quarterly rule EVERY failing hard gate is reported (joined by "; "), so every month that broke a condition is named.
+- **Rounding** stays single and final (a per-month cap inside the formula is NOT rounded per month).
+- **Output.** `output.narration` (quarterly only, ≤ 100 chars) + the quarter → each row's `narration`
+  ("Consistency bonus Oct–Dec 2026"; default "Quarterly points …"), carried into the credit-upload file's narration cell
+  and the direct-credit batch rows. `preview.quarter` = {key, label, fyLabel, months, monthLabels, creditPeriod}.
+- **Credits are month-keyed** (batch code, upload window, TDS FY parse YYYY-MM): a quarter's direct-credit batch is filed
+  under the quarter's LAST month (`creditPeriod`); its `sourceKey` hashes `YYYY-Qn`, so it never dedups against / collides
+  with that month's monthly run. The credit-upload file's title says "… — upload under Dec 2026".
+- **D-1 guard.** Every month of the quarter must be CLOSED in Sales Import (409 names the open month); an export is
+  recorded on each month. Independently of Sales Import, a quarter's export / credit is refused while any of its months
+  has not ENDED (`preview.quarter.openMonths`, red banner; the picker defaults to the latest fully-ended quarter).
+- **Quarter credits count for all three months.** A quarter batch's `sourceKind` is `POINTS_ENGINE_QUARTER:<YYYY-Qn>`;
+  `downstreamArtifacts` lists it on EVERY month of the quarter (`downstream.quarterCreditBatches`), so reopening Oct,
+  Nov or Dec warns "QUARTERLY credit batch CB-… (Oct–Dec 2026) …" and needs the acknowledgement.
+- **Versions never change kind** (audit fix): createDraft / updateDraft / publish refuse a version whose monthly ↔
+  quarterly kind differs from the rule's other versions ("Create a new rule for a quarterly bonus"); the builder locks
+  the switch on v2+. Switching a draft's period never strips settings — `draftIssues` blocks save instead.
+- **Version selection (OWNER DECISION 2026-11-26).** A published quarterly version pays a quarter ONLY if it covers the
+  WHOLE quarter: `effectiveFrom ≤` the quarter's first day AND `effectiveTo` open or `≥` its last day. A version starting
+  (or ending) mid-quarter does NOT pay that quarter — the row is NO_RULE with the exact reason ("Rule … starts 15 Nov 2026,
+  after the quarter began 1 Oct 2026 — back-date its effective-from to 1 Oct 2026 to cover this quarter"); back-dating is
+  allowed. Two versions that BOTH cover the whole quarter (same specificity) → ERROR row naming them
+  (`getQuarterRuleForAttachment`). An empty quarter run says why (`preview.emptyReason`). Builder: a new quarterly rule /
+  a new quarterly version defaults to the current quarter's first day.
+- **Prior batches** on commit are named + classified (`priorBatches`: quarterly / monthly engine / upload);
+  `likelyDuplicate` = same kind (same quarter) crediting a same credit field — shown in red.
+- **Reasons.** A later skip gate keeps every earlier failing month in the reason; a segment filter on a quarterly rule
+  may carry its own `failReason` ("Not a wholesaler outlet"), else plain words are generated.
+
+### 3c. Imported-months guard — "points engine first live month" (audit fix 2026-11-26; monthly AND quarterly runs)
+
+`pointsEngine.firstLiveMonth` (YYYY-MM, Gifsy-set on the Points Engine settings page; **null = no guard**, the default
+for every tenant). A run covering a month BEFORE it (data imported from the old system) shows a red banner
+(`preview.importedMonths` {firstLiveMonth, months, monthLabels, confirmKey}); the credit-upload file, the payout report
+and direct credit are REFUSED (409) unless a **GIFSY_ADMIN** sends `confirmImportedMonthsKey = confirmKey` (a hash of
+tenant + period + months + rule versions — a changed run must be re-confirmed). The confirmation ticks "I confirm
+<months> were imported from the old system and have not been paid on the portal / old system for <rules>" (the tick is
+disabled for non-Gifsy-admins, with an explanation). Audit is append-only, two rows on
+`POINTS_ENGINE_IMPORTED_MONTHS_CONFIRMED`: `stage: CONFIRMED` ("release pending") written BEFORE the batch / file
+(a failed write refuses the action), then `stage: RELEASED` (batch id/code, or export request + row count) or
+`NOT_RELEASED` (`REJECT`, with the error) — the log never claims a release that did not happen. The money gate reads the
+month UNCACHED. The settings page sends `firstLiveMonth` ONLY when the admin changed it there; omitted → the server keeps
+the stored value (a stale page never overwrites it). (Owner has not decided how Oct 2026 BSC cases are handled — this allows a deliberate,
+recorded override, never a silent pass.)
+
+**Monthly runs unchanged** — `points-compute.monthly-snapshot.spec.ts` replays, against the pre-quarter service, every
+query of a monthly preview + direct credit, the batch period, the createBatch call and the prior-batch count (the only
+intentional difference — the active-rule lookup also selects `evaluationBasis` — is asserted separately). Proven
+2026-11-26: both monthly snapshot specs + their `.snap` files replayed with `--ci` (no writes) in a scratch worktree of
+`b4ef3c24` (the pre-quarter code) — 5/5 snapshots pass — and on this branch.
+- **Builder / compute UI.** Rule period Monthly / Quarterly; per-input "Which month of the quarter"; a narration field;
+  the simulator takes 3 months per KPI; the compute screen offers a quarter run with a quarter banner.
+
+**Bajaj BSC consistency bonus (worked example).** Wholesalers; per month m (1–3) inputs `tot_ach_m{m}`
+(`achievement:TOTAL`, month m, reject), `tot_tgt_m{m}` (`target:TOTAL`, month m, reject), `cases_m{m}`
+(`achievement:BSC_CASES`, month m, reject) + `cases_q` (`achievement:BSC_CASES`, quarter total, reject). Pipeline:
+segmentFilter outletType ∈ {wholesaler code} (onFail zero, failReason "Not a wholesaler outlet"); per month gate `tot_tgt_m{m} > 0` failAs zero "{m{m}}: TOTAL
+target is 0" and gate `tot_ach_m{m} ≥ tot_tgt_m{m}` failAs zero "{m{m}}: TOTAL below target"; gate `cases_q > 0` failAs
+zero "No BSC cases in {quarter}"; formula add
+`5 * (cases_m1 * min(1, 1.2 * tot_tgt_m1 / tot_ach_m1) + cases_m2 * min(1, 1.2 * tot_tgt_m2 / tot_ach_m2) + cases_m3 * min(1, 1.2 * tot_tgt_m3 / tot_ach_m3))`
+(120% cap applied PER MONTH, owner 2026-11-25); rounding half_up scale 0; narration "Consistency bonus".
+
 ---
 
 ## 4. Evaluation pipeline (fixed, documented order)

@@ -10,7 +10,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 
 const mockAdminCore = { upsertSetting: jest.fn() };
-const mockTenantSettings = { getEffectiveSettings: jest.fn() };
+const mockTenantSettings = { getEffectiveSettings: jest.fn(), getPointsEngineFirstLiveMonthUncached: jest.fn().mockResolvedValue(null) };
 
 /** An un-assumed GIFSY owner (platform-wide). */
 const unassumedOwner: JwtPayload = { sub: 'u_owner', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '1', name: 'Owner' };
@@ -31,7 +31,7 @@ describe('PointsEngineSettingsController.set (per-tenant flag write guard)', () 
 
   it('UN-ASSUMED owner may target any tenant via dto.clientId', async () => {
     const res = await controller.set(unassumedOwner, { clientId: 'bajaj', enabled: true, directCreditEnabled: false });
-    expect(res).toEqual({ clientId: 'bajaj', enabled: true, directCreditEnabled: false });
+    expect(res).toEqual({ clientId: 'bajaj', enabled: true, directCreditEnabled: false, firstLiveMonth: null });
     expect(mockAdminCore.upsertSetting).toHaveBeenCalledTimes(1);
     const [callUser, dto, opts] = mockAdminCore.upsertSetting.mock.calls[0];
     expect(callUser.clientId).toBe('bajaj'); // write targets the TARGET tenant
@@ -51,5 +51,20 @@ describe('PointsEngineSettingsController.set (per-tenant flag write guard)', () 
       controller.set(assumedIntoBajaj, { clientId: 'deoleo', enabled: true, directCreditEnabled: true }),
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+  });
+});
+
+describe('PointsEngineSettingsController — first live month (imported-months guard)', () => {
+  it('omitted → the stored month is KEPT (toggling the flags never wipes it); null → cleared; a value is stored', async () => {
+    const adminCore = { upsertSetting: jest.fn() };
+    const ts = { getEffectiveSettings: jest.fn(), getPointsEngineFirstLiveMonthUncached: jest.fn(async () => '2026-11') };
+    const c = new PointsEngineSettingsController(adminCore as never, ts as never);
+    const owner = { sub: 'g', role: 'GIFSY_ADMIN', clientId: 'gifsy', phone: '', name: 'G' } as never;
+    await c.set(owner, { clientId: 'bajaj', enabled: true, directCreditEnabled: true });
+    expect(adminCore.upsertSetting.mock.calls[0][1].value).toEqual({ enabled: true, directCreditEnabled: true, firstLiveMonth: '2026-11' });
+    await c.set(owner, { clientId: 'bajaj', enabled: true, directCreditEnabled: true, firstLiveMonth: null });
+    expect(adminCore.upsertSetting.mock.calls[1][1].value).toEqual({ enabled: true, directCreditEnabled: true });
+    await c.set(owner, { clientId: 'bajaj', enabled: true, directCreditEnabled: true, firstLiveMonth: '2026-12' });
+    expect(adminCore.upsertSetting.mock.calls[2][1].value).toEqual({ enabled: true, directCreditEnabled: true, firstLiveMonth: '2026-12' });
   });
 });

@@ -16,6 +16,51 @@ export interface RuleInput {
   type: 'number' | 'enum';
   nullAs: NullPolicy;
   values?: string[];
+  /** QUARTERLY rules only: read month 1 / 2 / 3 of the quarter; omitted = the quarter total (sum of the 3 months). */
+  month?: 1 | 2 | 3;
+}
+
+/** PERIOD_AGGREGATE = monthly rule (YYYY-MM runs); QUARTER = quarterly rule (YYYY-Qn FY-quarter runs only). */
+export type EvaluationBasis = 'PERIOD_AGGREGATE' | 'QUARTER';
+
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * FY quarter key `YYYY-Qn` (YYYY = FY start year) → its months + labels. Mirrors api/src/points-engine/points-engine.quarter.ts:
+ * Q1 Apr–Jun · Q2 Jul–Sep · Q3 Oct–Dec (same year) · Q4 Jan–Mar of the NEXT calendar year. Null when not a quarter key.
+ */
+export function parseQuarterKey(key: string): { months: string[]; monthLabels: string[]; label: string; fyLabel: string } | null {
+  const m = /^(\d{4})-Q([1-4])$/.exec(key);
+  if (!m) return null;
+  const fy = Number(m[1]);
+  const q = Number(m[2]);
+  const first = q === 4 ? 1 : 1 + q * 3;
+  const year = q === 4 ? fy + 1 : fy;
+  const months = [0, 1, 2].map((i) => `${year}-${String(first + i).padStart(2, '0')}`);
+  return {
+    months,
+    monthLabels: months.map((_, i) => `${MONTH_SHORT[first - 1 + i]} ${year}`),
+    label: `${MONTH_SHORT[first - 1]}–${MONTH_SHORT[first + 1]} ${year}`,
+    fyLabel: `Q${q} FY${fy}-${String((fy + 1) % 100).padStart(2, '0')}`,
+  };
+}
+
+/** The FY quarter key before `key` ("2026-Q1" → "2025-Q4"). */
+export function previousQuarterKey(key: string): string {
+  const y = Number(key.slice(0, 4));
+  const q = Number(key.slice(6));
+  return q === 1 ? `${y - 1}-Q4` : `${y}-Q${q - 1}`;
+}
+
+/** The latest FY quarter whose 3 months have all ENDED (the quarter holding `currentMonth` has not). */
+export function latestEndedQuarterKey(currentMonth: string): string {
+  return previousQuarterKey(quarterKeyForMonth(currentMonth));
+}
+
+/** The FY quarter key a YYYY-MM month falls in ("2026-11" → "2026-Q3"; "2027-02" → "2026-Q4"). */
+export function quarterKeyForMonth(ym: string): string {
+  const [y, mo] = ym.split('-').map(Number);
+  return mo >= 4 ? `${y}-Q${Math.floor((mo - 4) / 3) + 1}` : `${y - 1}-Q4`;
 }
 
 // ── Operands & predicates ───────────────────────────────────────────────────────
@@ -55,7 +100,11 @@ export interface GateNode {
   /** Opt-in: 'zero' = pay 0 with the reason; 'skip' = skip + flag the row. Absent = onFail decides (today). */
   failAs?: 'zero' | 'skip';
 }
-export interface SegmentFilterNode { type: 'segmentFilter'; id: string; field: string; allow: string[]; onFail: OnFail }
+export interface SegmentFilterNode {
+  type: 'segmentFilter'; id: string; field: string; allow: string[]; onFail: OnFail;
+  /** Quarterly rules only (onFail zero): the plain reason on a row the filter zeroed ("Not a wholesaler outlet"). */
+  failReason?: string;
+}
 export interface MilestoneNode { type: 'milestone'; id: string; when: Predicate; flat: number }
 export interface FloorNode { type: 'floor'; id: string; min: number }
 export interface CapNode { type: 'cap'; id: string; max: number }
@@ -75,14 +124,15 @@ export interface RuleAttachment {
   programCategory?: string | null;
   kpiCode: string;
 }
-export interface RuleOutput { awardType: AwardType; fieldId: string }
+/** `narration` (quarterly rules only): credit narration prefix — the quarter is appended ("Consistency bonus Oct–Dec 2026"). */
+export interface RuleOutput { awardType: AwardType; fieldId: string; narration?: string }
 
 /** The authoring fields a draft create/update sends (server owns identity/version/status). */
 export interface RuleConfigDraft {
   ruleId?: string;
   effectiveFrom: string; // YYYY-MM-DD
   effectiveTo?: string | null;
-  evaluationBasis?: 'PERIOD_AGGREGATE';
+  evaluationBasis?: EvaluationBasis;
   attachsTo: RuleAttachment;
   output: RuleOutput;
   rounding: RoundingSpec;
@@ -99,7 +149,7 @@ export interface PointsRuleRow {
   status: RuleStatus;
   effectiveFrom: string;
   effectiveTo: string | null;
-  evaluationBasis: 'PERIOD_AGGREGATE';
+  evaluationBasis: EvaluationBasis;
   attachsTo: RuleAttachment;
   output: RuleOutput;
   rounding: RoundingSpec;
@@ -174,6 +224,8 @@ export interface ComputePreviewRow {
   /** Structured skip category — 'KPI_SCOPE' = outside the KPI's scope (never match the reason text). */
   skipKind?: 'KPI_SCOPE';
   explanation?: string;
+  /** Quarter runs only: the credit narration naming the quarter ("Consistency bonus Oct–Dec 2026"). */
+  narration?: string;
   /** The outlet's visibility values the rule read (only when the rule has a visibility input). */
   visibility?: {
     approvedWindows: number;
@@ -189,7 +241,18 @@ export interface ComputePreviewRow {
 }
 export interface ComputePreview {
   clientId: string;
+  /** YYYY-MM, or YYYY-Qn for a quarter run (see `quarter`). */
   period: string;
+  /** Quarter runs only. `creditPeriod` = the last month — the month a direct-credit batch is filed under. */
+  quarter?: {
+    key: string; label: string; fyLabel: string; months: string[]; monthLabels: string[]; creditPeriod: string;
+    /** Months not ended yet — export / credit refused while any. */
+    openMonths: string[];
+  };
+  /** Months before the tenant's first live month (imported from the old system) — red banner + Gifsy confirmation. */
+  importedMonths?: { firstLiveMonth: string; months: string[]; monthLabels: string[]; confirmKey: string };
+  /** Quarter runs with nothing to compute: why. */
+  emptyReason?: string;
   filter?: { program?: string | null; kpiCode?: string | null };
   counts: { total: number; ok: number; skip: number; error: number; noRule: number };
   totalPoints: number;
@@ -242,6 +305,9 @@ export interface ComputeCommitResult {
   idempotentHit: boolean;
   /** Count of OTHER credit batches (engine OR manual) already in this period — the UI warns (Option A). */
   priorBatchesThisPeriod: number;
+  /** The other batches of the period, named; `likelyDuplicate` = same kind of engine run crediting a same field. */
+  priorBatches?: Array<{ batchCode: string; kind: 'QUARTER_ENGINE' | 'MONTHLY_ENGINE' | 'UPLOAD' | 'OTHER'; quarter?: string; likelyDuplicate: boolean }>;
+  quarter?: { key: string; label: string };
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────────
@@ -249,6 +315,8 @@ export interface PointsEngineSettings {
   clientId: string;
   enabled: boolean;
   directCreditEnabled: boolean;
+  /** Gifsy-set "points engine first live month" (YYYY-MM) — earlier months were imported; null = no guard. */
+  firstLiveMonth?: string | null;
 }
 
 /** Node-type UI metadata (label + the disclosure level, for the "Add step" menu). */

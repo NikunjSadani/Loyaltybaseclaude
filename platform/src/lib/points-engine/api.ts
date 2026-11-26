@@ -12,6 +12,7 @@ import { downloadOrQueue, type DownloadOutcome } from '../exports/download';
 import type {
   ComputeCommitResult,
   ComputePreview,
+  EvaluationBasis,
   PointsEngineSettings,
   PointsRuleRow,
   RuleConfigDraft,
@@ -52,11 +53,15 @@ export function simulate(body: {
   pipeline: RuleConfigDraft['pipeline'];
   effectiveFrom?: string;
   effectiveTo?: string | null;
+  /** 'QUARTER' simulates a quarterly rule on `context.months` (3 months of values). Omitted = monthly (unchanged). */
+  evaluationBasis?: EvaluationBasis;
   context: {
     achievements?: Record<string, number | null>;
     targets?: Record<string, number | null>;
     segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
     visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null };
+    quarterLabel?: string;
+    months?: Array<{ label?: string; achievements?: Record<string, number | null>; targets?: Record<string, number | null> }>;
   };
 }): Promise<ApiResponse<SimulateResult>> {
   return api.post<SimulateResult>(`${COMPUTE}/simulate`, body);
@@ -73,6 +78,8 @@ export function commitCompute(body: {
   expectedKey?: string | null;
   /** §3a: the pendingKey of the visibility-pending outlet set the admin accepted (server refuses a different set). */
   acceptVisibilityPendingKey?: string | null;
+  /** preview.importedMonths.confirmKey — a Gifsy admin's confirmation for imported months (server-enforced). */
+  confirmImportedMonthsKey?: string | null;
 }): Promise<ApiResponse<ComputeCommitResult>> {
   return api.post<ComputeCommitResult>(`${COMPUTE}/commit`, body);
 }
@@ -86,6 +93,8 @@ type ComputeQ = {
   acceptVisibilityPendingKey?: string | null;
   /** The run key the operator reviewed (sourceKey for the credit file, payoutKey for the payout report). */
   expectedKey?: string | null;
+  /** preview.importedMonths.confirmKey (money files only). */
+  confirmImportedMonthsKey?: string | null;
 };
 function computeQs(q: ComputeQ): string {
   const params = new URLSearchParams({ period: q.period });
@@ -93,6 +102,7 @@ function computeQs(q: ComputeQ): string {
   if (q.kpiCode) params.set('kpiCode', q.kpiCode);
   if (q.acceptVisibilityPendingKey) params.set('acceptVisibilityPendingKey', q.acceptVisibilityPendingKey);
   if (q.expectedKey) params.set('expectedKey', q.expectedKey);
+  if (q.confirmImportedMonthsKey) params.set('confirmImportedMonthsKey', q.confirmImportedMonthsKey);
   return params.toString();
 }
 /**

@@ -22,7 +22,7 @@ const mockPrisma = {
   outlet: { findMany: jest.fn() },
   outletSalesRecord: { findMany: jest.fn() },
   outletTarget: { findMany: jest.fn() },
-  creditBatch: { create: jest.fn(), update: jest.fn(), findFirst: jest.fn(), count: jest.fn() },
+  creditBatch: { create: jest.fn(), update: jest.fn(), findFirst: jest.fn(), count: jest.fn(), findMany: jest.fn().mockResolvedValue([]) },
   wallet: { update: jest.fn() },
   creditField: { findMany: jest.fn() },
   // APPLIES-TO KPI scope lookup (D5). Default [] = no scoped KPI → pre-scope behaviour.
@@ -36,7 +36,7 @@ const mockPrisma = {
 };
 
 const mockEngine = { getActiveForAttachment: jest.fn() };
-const mockSettings = { getEffectiveSettings: jest.fn(), getPointsEngineFlagsUncached: jest.fn() };
+const mockSettings = { getEffectiveSettings: jest.fn(), getPointsEngineFlagsUncached: jest.fn(), getPointsEngineFirstLiveMonthUncached: jest.fn().mockResolvedValue(null) };
 // CreditsService.createBatch is the existing credits rail the commit path reuses (NOT re-implemented).
 const mockCredits = { createBatch: jest.fn() };
 // TenantService — read ONLY when a rule declares a visibility:* input (visibility master switch + capture mode).

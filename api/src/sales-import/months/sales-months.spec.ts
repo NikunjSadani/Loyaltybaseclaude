@@ -13,6 +13,7 @@ import { SalesImportConfigController } from '../sales-import-config.controller';
 import { SalesImportApplyController } from '../sales-import-apply.controller';
 import { REBUILD_PRODUCT_LIST_STATEMENT_TIMEOUT_MS, REBUILD_PRODUCT_LIST_TX_TIMEOUT_MS, SalesMonthsService } from './sales-months.service';
 import { SalesMonthClosedGuard } from './sales-month-closed.guard';
+import { parseQuarter, quarterKeyForMonth } from '../../points-engine/points-engine.quarter';
 import { monthLabel, shiftMonthKey } from './month-state';
 import { historyCutoffMonth } from '../retention-window';
 import { withRetentionV2 } from '../retention-env.testspec';
@@ -38,6 +39,8 @@ function db(
     /** Background jobs: active job rows (activeJobsByMonth shape). */
     activeJobs?: Array<Record<string, unknown>>;
     lastJobs?: Array<Record<string, unknown>>;
+    /** Points-engine QUARTER credit batches (sourceKind POINTS_ENGINE_QUARTER:<key>). */
+    quarterBatches?: Array<{ batchCode: string; sourceKind: string }>;
   } = {},
 ) {
   const log: string[] = [];
@@ -55,7 +58,10 @@ function db(
       create: jest.fn(async () => { log.push('audit'); return {}; }),
       groupBy: jest.fn(async () => (downstream.exports ?? []).map((e) => ({ entityId: `t1:${e.month}`, _count: { _all: e.n } }))),
     },
-    creditBatch: { groupBy: jest.fn(async () => (downstream.batches ?? []).map((b) => ({ period: b.period, _count: { _all: b.n } }))) },
+    creditBatch: {
+      groupBy: jest.fn(async () => (downstream.batches ?? []).map((b) => ({ period: b.period, _count: { _all: b.n } }))),
+      findMany: jest.fn(async () => (downstream.quarterBatches ?? []) as Array<{ batchCode: string; sourceKind: string }>),
+    },
     salesMonthHistorySet: { findMany: jest.fn(async () => (downstream.history ?? []) as Array<Record<string, unknown>>) },
     // the LINE table must never be read for month lists (final check H1)
     salesMonthHistory: { findMany: jest.fn(() => { throw new Error('month lists must not read history lines'); }) },
@@ -201,6 +207,18 @@ describe('SalesMonthsService (K-4)', () => {
     // the downstream lookup is tenant-scoped
     expect(d.creditBatch.groupBy.mock.calls[0][0].where).toEqual({ clientId: 't1', period: { in: [OLD] } });
     expect(d.auditLog.groupBy.mock.calls[0][0].where).toEqual({ entityType: 'SALES_MONTH', action: 'EXPORT', entityId: { in: [`t1:${OLD}`] } });
+  });
+
+  it('quarter credit: reopening ANY month of a quarter that was credited quarterly warns, naming the batch (needs ack)', async () => {
+    const qKey = quarterKeyForMonth(OLD);
+    const q = parseQuarter(qKey)!;
+    const d = db([], { quarterBatches: [{ batchCode: 'CB-QX-001', sourceKind: `POINTS_ENGINE_QUARTER:${qKey}` }] });
+    const s = new SalesMonthsService(d as never);
+    await expect(s.reopen(gifsyAssumed, OLD)).rejects.toThrow(new RegExp(`QUARTERLY credit batch CB-QX-001 \\(${q.label}\\)`));
+    expect(d.creditBatch.findMany.mock.calls[0][0].where).toEqual({ clientId: 't1', sourceKind: { in: [`POINTS_ENGINE_QUARTER:${qKey}`] } });
+    const r = await s.reopen(gifsyAssumed, OLD, { acknowledgeDownstream: true });
+    expect(r.downstream.quarterCreditBatches).toEqual([{ batchCode: 'CB-QX-001', quarter: qKey, label: q.label }]);
+    expect(r.warnings.join(' ')).toMatch(/QUARTERLY credit batch CB-QX-001/);
   });
 
   it('M5: no downstream artefacts → reopen needs no ack and returns no warnings', async () => {

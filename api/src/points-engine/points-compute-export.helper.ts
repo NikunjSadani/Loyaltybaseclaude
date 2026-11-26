@@ -85,6 +85,8 @@ export async function writeCreditUploadXlsx(preview: ComputePreview, out: XlsxSt
   const outletName = new Map<string, string>();
   // (outletCode → header → summed whole points).
   const cell = new Map<string, Map<string, number>>();
+  // (outletCode → header → narration) — quarter rows only; monthly narration cells stay blank (unchanged).
+  const narr = new Map<string, Map<string, string>>();
 
   for (const r of okRows) {
     const header = fieldHeader(r);
@@ -108,11 +110,21 @@ export async function writeCreditUploadXlsx(preview: ComputePreview, out: XlsxSt
       cell.set(r.outletCode, byField);
     }
     byField.set(header, (byField.get(header) ?? 0) + (r.points as number));
+    // Quarter rows carry a narration naming the quarter; the first one per (outlet × field) fills the cell.
+    if (r.narration) {
+      let byFieldN = narr.get(r.outletCode);
+      if (!byFieldN) narr.set(r.outletCode, (byFieldN = new Map<string, string>()));
+      if (!byFieldN.has(header)) byFieldN.set(header, r.narration);
+    }
   }
 
   // Row 0 is the TITLE and row 1 the header — the exact layout parseCreditUpload expects (it reads headers at
   // index 1, data at index 2+). Header row: fixed cols + value cols + narration cols (value cols THEN narration).
-  const sheet = await out.addSheet(CREDIT_SHEET_NAME, [`Credits & Payouts Data — ${monthLabel(preview.period)}`]);
+  // A quarter file names the quarter AND the month to upload it under (credit batches are month-keyed).
+  const title = preview.quarter
+    ? `Credits & Payouts Data — ${preview.quarter.label} (${preview.quarter.fyLabel}) — upload under ${monthLabel(preview.quarter.creditPeriod)}`
+    : `Credits & Payouts Data — ${monthLabel(preview.period)}`;
+  const sheet = await out.addSheet(CREDIT_SHEET_NAME, [title]);
   await sheet.addRow([OUTLET_ID_HEADER, OUTLET_NAME_HEADER, ...fieldOrder, ...fieldOrder.map((f) => `${f}${NARRATION_SUFFIX}`)]);
 
   // Data rows: one per outlet. Value = whole points (blank when this outlet has no such field).
@@ -124,7 +136,8 @@ export async function writeCreditUploadXlsx(preview: ComputePreview, out: XlsxSt
       const v = byField.get(f);
       row.push(v === undefined ? '' : v);
     }
-    for (let i = 0; i < fieldOrder.length; i++) row.push('');
+    const byFieldN = narr.get(code);
+    for (const f of fieldOrder) row.push(byFieldN?.get(f) ?? '');
     await sheet.addRow(row);
   }
   return outletOrder.length;

@@ -57,6 +57,8 @@ export default function PointsEngineSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  /** True only after the admin edits the first live month on this page (else it is never sent). */
+  const [firstLiveChanged, setFirstLiveChanged] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -71,7 +73,7 @@ export default function PointsEngineSettingsPage() {
     void load();
   }, [load]);
 
-  const patch = (p: Partial<Pick<PointsEngineSettings, 'enabled' | 'directCreditEnabled'>>) => {
+  const patch = (p: Partial<Pick<PointsEngineSettings, 'enabled' | 'directCreditEnabled' | 'firstLiveMonth'>>) => {
     setSettingsState((s) => (s ? { ...s, ...p } : s));
     setSaved(false);
     setSaveError(null);
@@ -87,9 +89,13 @@ export default function PointsEngineSettingsPage() {
       enabled: settings.enabled,
       // Direct credit can only be on when the engine itself is on (UI guard; backend is source of truth).
       directCreditEnabled: settings.enabled && settings.directCreditEnabled,
+      // Sent ONLY when the admin changed it on this page — otherwise omitted, so the server keeps the stored month and a
+      // stale page can never overwrite a newer value set elsewhere. Cleared → null (no guard).
+      ...(firstLiveChanged ? { firstLiveMonth: settings.firstLiveMonth || null } : {}),
     });
     if (res.success) {
       setSettingsState(res.data);
+      setFirstLiveChanged(false);
       setSaved(true);
     } else {
       setSaveError(res.error ?? 'Failed to save settings');
@@ -178,6 +184,32 @@ export default function PointsEngineSettingsPage() {
             disabled={!canEdit || !settings.enabled || saving}
             label="Allow in-portal direct crediting"
             onChange={(v) => patch({ directCreditEnabled: v })}
+          />
+        </div>
+
+        {/* firstLiveMonth — imported-months guard */}
+        <div className="flex items-start justify-between gap-4 p-5">
+          <div className="flex gap-3">
+            <Info className="mt-0.5 h-5 w-5 text-red-500" />
+            <div>
+              <label htmlFor="pe-first-live" className="text-sm font-semibold text-gray-900">Points engine first live month</label>
+              <p className="mt-0.5 text-sm text-gray-500">
+                Months BEFORE this one were imported from the old system. Any monthly or quarterly run that covers them is
+                shown with a red warning, and its export / in-portal credit is refused unless a Gifsy admin confirms those
+                months were not already paid (recorded in the audit log). Blank = no check.
+              </p>
+            </div>
+          </div>
+          <input
+            id="pe-first-live"
+            type="month"
+            value={settings.firstLiveMonth ?? ''}
+            disabled={!canEdit || saving}
+            onChange={(e) => {
+              patch({ firstLiveMonth: e.target.value || null });
+              setFirstLiveChanged(true);
+            }}
+            className="w-40 shrink-0 rounded-xl border border-gray-200 px-3 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-400"
           />
         </div>
       </div>

@@ -22,6 +22,7 @@ import {
   downloadPayoutReport,
 } from '@/lib/points-engine/api';
 import type { ComputePreview, ComputeCommitResult, ComputePreviewRow } from '@/lib/points-engine/types';
+import { latestEndedQuarterKey } from '@/lib/points-engine/types';
 
 vi.mock('@/lib/points-engine/api', () => ({
   previewCompute: vi.fn(),
@@ -37,6 +38,10 @@ vi.mock('next/link', () => ({
     <a href={typeof href === 'string' ? href : '#'}>{children}</a>
   ),
 }));
+
+// Session role (the imported-months confirmation is Gifsy-admin only). Default: Gifsy admin.
+const sessionRole = vi.hoisted(() => ({ role: 'GIFSY_ADMIN' as string }));
+vi.mock('@/lib/admin-session', () => ({ useAdminSession: () => ({ role: sessionRole.role }) }));
 
 // Program options come from the tenant's configured programs (same source as the rule builder).
 vi.mock('@/lib/gifsy-settings', () => ({
@@ -575,5 +580,118 @@ describe('Points Engine compute page', () => {
     await runPreview();
     await screen.findByTestId('group-SKIP');
     expect(screen.queryByTestId('skip-kpi-scope-count')).not.toBeInTheDocument();
+  });
+});
+
+describe('PE-Q: quarter run (owner-approved 2026-11-25)', () => {
+  it('PE-Q1: picking a quarter runs the preview with period YYYY-Qn and shows the quarter banner + credit month', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        period: '2026-Q3',
+        quarter: { key: '2026-Q3', label: 'Oct–Dec 2026', fyLabel: 'Q3 FY2026-27', months: ['2026-10', '2026-11', '2026-12'], monthLabels: ['Oct 2026', 'Nov 2026', 'Dec 2026'], creditPeriod: '2026-12', openMonths: [] },
+      }),
+    });
+    render(<ComputePage />);
+    fireEvent.click(screen.getByLabelText('Quarter run (quarterly rules only)'));
+    const pick = screen.getByLabelText('Quarter *') as HTMLSelectElement;
+    expect(pick.options[0].value).toMatch(/^\d{4}-Q[1-4]$/);
+    expect(pick.options[0].textContent).toMatch(/^[A-Z][a-z]{2}–[A-Z][a-z]{2} \d{4} \(Q[1-4] FY\d{4}-\d{2}\)$/);
+    fireEvent.change(pick, { target: { value: pick.options[0].value } });
+    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(expect.objectContaining({ period: pick.options[0].value })));
+    const banner = await screen.findByTestId('quarter-run');
+    expect(within(banner).getByText(/Quarter run — Oct–Dec 2026 \(Q3 FY2026-27\)/)).toBeTruthy();
+    expect(banner.textContent).toMatch(/Oct 2026, Nov 2026, Dec 2026/);
+    expect(banner.textContent).toMatch(/December 2026/);
+  });
+});
+describe('PE-Q: quarter run audit fixes (2026-11-26)', () => {
+  const Q = { key: '2026-Q3', label: 'Oct–Dec 2026', fyLabel: 'Q3 FY2026-27', months: ['2026-10', '2026-11', '2026-12'], monthLabels: ['Oct 2026', 'Nov 2026', 'Dec 2026'], creditPeriod: '2026-12' };
+  const nowYm = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+
+  it('PE-Q2: the quarter picker defaults to the latest FULLY ENDED quarter', () => {
+    render(<ComputePage />);
+    fireEvent.click(screen.getByLabelText('Quarter run (quarterly rules only)'));
+    expect((screen.getByLabelText('Quarter *') as HTMLSelectElement).value).toBe(latestEndedQuarterKey(nowYm()));
+  });
+
+  async function runQuarter(over: Partial<ComputePreview>) {
+    previewMock.mockResolvedValue({ success: true, data: makePreview({ period: '2026-Q3', quarter: { ...Q, openMonths: [] }, ...over }) });
+    render(<ComputePage />);
+    fireEvent.click(screen.getByLabelText('Quarter run (quarterly rules only)'));
+    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+    await screen.findByTestId('quarter-run');
+  }
+
+  it('PE-Q3: months not ended → red banner names them up front; export + credit blocked', async () => {
+    await runQuarter({ quarter: { ...Q, openMonths: ['Nov 2026', 'Dec 2026'] } });
+    expect(screen.getByTestId('quarter-open-months').textContent).toMatch(/Oct–Dec 2026 is not finished — Nov 2026, Dec 2026 have not ended yet/);
+    expect((screen.getByRole('button', { name: /Download credit-upload file/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: /Credit in portal/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('PE-Q4: imported months → red banner; actions blocked until the Gifsy tick; the confirm key is sent', async () => {
+    await runQuarter({ importedMonths: { firstLiveMonth: '2026-11', months: ['2026-10'], monthLabels: ['Oct 2026'], confirmKey: 'im_k' } });
+    expect(screen.getByTestId('imported-months').textContent).toMatch(/Oct 2026 is before this programme.s first live month/);
+    const credit = screen.getByRole('button', { name: /Credit in portal/ }) as HTMLButtonElement;
+    expect(credit.disabled).toBe(true);
+    fireEvent.click(screen.getByTestId('imported-months-confirm'));
+    expect(credit.disabled).toBe(false);
+    fireEvent.click(credit);
+    await waitFor(() => expect(commitMock).toHaveBeenCalledWith(expect.objectContaining({ period: latestEndedQuarterKey(nowYm()), confirmImportedMonthsKey: 'im_k' })));
+  });
+
+  it('PE-Q5: an OK quarter row shows its narration; an empty quarter run shows why', async () => {
+    const okRow: ComputePreviewRow = { outletCode: 'W1', kpiCode: 'BSC_CASES', status: 'OK', points: 275, narration: 'Consistency bonus Oct–Dec 2026', explanation: 'x' };
+    await runQuarter({ rows: [okRow], counts: { total: 1, ok: 1, skip: 0, error: 0, noRule: 0 } });
+    expect(screen.getByTestId('row-narration').textContent).toBe('Credit narration: Consistency bonus Oct–Dec 2026');
+  });
+
+  it('PE-Q6: prior-batch warning names a likely duplicate (same quarter + same field) in red', async () => {
+    commitMock.mockResolvedValue({
+      success: true,
+      data: {
+        ...COMMIT_RESULT, period: '2026-12', priorBatchesThisPeriod: 2, quarter: { key: '2026-Q3', label: 'Oct–Dec 2026' },
+        priorBatches: [
+          { batchCode: 'CB-2026-12-001', kind: 'MONTHLY_ENGINE', likelyDuplicate: false },
+          { batchCode: 'CB-2026-12-002', kind: 'QUARTER_ENGINE', quarter: 'Oct–Dec 2026', likelyDuplicate: true },
+        ],
+      },
+    });
+    await runQuarter({});
+    fireEvent.click(screen.getByRole('button', { name: /Credit in portal/ }));
+    const w = await screen.findByTestId('prior-batches');
+    expect(w.textContent).toMatch(/Possible double credit: CB-2026-12-002 \(quarterly bonus Oct–Dec 2026\).*same quarter \(Oct–Dec 2026\)/);
+    expect(w.textContent).not.toMatch(/CB-2026-12-001/);
+  });
+});
+
+describe('PE-Q: empty quarter run reason', () => {
+  it('PE-Q7: shows the emptyReason', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({ period: '2026-Q3', rows: [], counts: { total: 0, ok: 0, skip: 0, error: 0, noRule: 0 }, emptyReason: 'No published quarterly rule is effective during Oct–Dec 2026.' }),
+    });
+    render(<ComputePage />);
+    fireEvent.click(screen.getByLabelText('Quarter run (quarterly rules only)'));
+    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+    expect((await screen.findByTestId('empty-reason')).textContent).toMatch(/No published quarterly rule is effective/);
+  });
+});
+describe('PE-Q: imported months — non-Gifsy admins', () => {
+  afterEach(() => { sessionRole.role = 'GIFSY_ADMIN'; });
+  it('PE-Q8: a client admin sees the confirmation DISABLED with an explanation; actions stay blocked', async () => {
+    sessionRole.role = 'CLIENT_ADMIN';
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({ importedMonths: { firstLiveMonth: '2026-11', months: ['2026-09'], monthLabels: ['Sep 2026'], confirmKey: 'im_k' } }),
+    });
+    render(<ComputePage />);
+    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+    const box = (await screen.findByTestId('imported-months-confirm')) as HTMLInputElement;
+    expect(box.disabled).toBe(true);
+    expect(screen.getByTestId('imported-months-gifsy-only').textContent).toMatch(/Only a Gifsy admin can confirm imported months/);
+    expect((screen.getByRole('button', { name: /Credit in portal/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

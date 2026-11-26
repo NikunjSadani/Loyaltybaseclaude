@@ -44,10 +44,13 @@ export function InputsCard({
   inputs,
   disabled,
   onChange,
+  quarterly = false,
 }: {
   inputs: RuleInput[];
   disabled?: boolean;
   onChange: (inputs: RuleInput[]) => void;
+  /** A QUARTERLY rule: each KPI input reads month 1 / 2 / 3 of the quarter or the quarter total. */
+  quarterly?: boolean;
 }) {
   const setInput = (i: number, patch: Partial<RuleInput>) =>
     onChange(inputs.map((inp, idx) => (idx === i ? { ...inp, ...patch } : inp)));
@@ -122,10 +125,36 @@ export function InputsCard({
                     { value: 'target', label: 'Target of a KPI' },
                     { value: 'pct', label: '% achievement of target' },
                     { value: 'segment', label: 'Segment field' },
-                    { value: 'visibility', label: 'Visibility (POSM) this month' },
+                    // Visibility is monthly — not offered on a quarterly rule (kept visible if already set so the
+                    // validator's error can be read and fixed).
+                    ...(!quarterly || isVisibility ? [{ value: 'visibility' as const, label: 'Visibility (POSM) this month' }] : []),
                   ]}
                 />
               </Field>
+
+              {quarterly && !isSegment && (
+                <Field
+                  label="Which month of the quarter"
+                  hint="Quarter total = the 3 months added up (missing in any month → the input counts as missing, naming the month)."
+                >
+                  <SelectField<string>
+                    value={inp.month ? String(inp.month) : 'Q'}
+                    disabled={disabled}
+                    onChange={(v) => {
+                      const next = { ...inp };
+                      if (v === 'Q') delete next.month;
+                      else next.month = Number(v) as 1 | 2 | 3;
+                      replaceInput(i, next);
+                    }}
+                    options={[
+                      { value: 'Q', label: 'Quarter total (sum of 3 months)' },
+                      { value: '1', label: 'Month 1 of the quarter' },
+                      { value: '2', label: 'Month 2 of the quarter' },
+                      { value: '3', label: 'Month 3 of the quarter' },
+                    ]}
+                  />
+                </Field>
+              )}
 
               <Field
                 label={isSegment ? 'Segment field' : isVisibility ? 'Visibility value' : 'KPI code'}
@@ -222,6 +251,17 @@ export function InputsCard({
           </div>
         );
       })}
+
+      {quarterly && (
+        <p className="rounded-lg border border-violet-100 bg-violet-50 px-2.5 py-1.5 text-[11px] leading-snug text-violet-800" data-testid="quarter-inputs-help">
+          Quarterly rule: give each month its own input (e.g. <code className="rounded bg-white px-1">tot_ach_m1</code>{' '}
+          = TOTAL achievement, month 1) to test every month, and use the quarter total for “all cases in the quarter”. In
+          a gate reason, <code className="rounded bg-white px-1">{'{m1}'}</code> <code className="rounded bg-white px-1">{'{m2}'}</code>{' '}
+          <code className="rounded bg-white px-1">{'{m3}'}</code> become the month names (“Nov 2026”) and{' '}
+          <code className="rounded bg-white px-1">{'{quarter}'}</code> becomes “Oct–Dec 2026”. A 120% cap per month:{' '}
+          <code className="rounded bg-white px-1">cases_m1 * min(1, 1.2 * tot_tgt_m1 / tot_ach_m1)</code>.
+        </p>
+      )}
 
       {!disabled && (
         <button

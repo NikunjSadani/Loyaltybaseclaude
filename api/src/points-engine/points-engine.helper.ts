@@ -40,6 +40,7 @@ import {
   SlabBand,
   RoundingSpec,
 } from './points-engine.types';
+import { EVALUATION_BASES } from './points-engine.types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Enumerated constants (the single source of truth for "well-formed")
@@ -192,28 +193,139 @@ function resolveRaw(input: RuleInput, ctx: EvalContext): number | string | null 
   return null;
 }
 
+/** The source kind of an input: 'kpi' (kpiCode) or the `<kind>:` prefix of its source. */
+function sourceKind(input: RuleInput): string {
+  if (input.kpiCode) return 'kpi';
+  const src = input.source ?? '';
+  const idx = src.indexOf(':');
+  return idx >= 0 ? src.slice(0, idx) : src;
+}
+
+/**
+ * QUARTER binding (owner-approved 2026-11-25). `month` 1–3 → that month's value; no month → the 3-month sum
+ * (`pct:` → Σ achievement ÷ Σ target × 100); `segment:` → the outlet facet as always. Returns the month labels where
+ * the value was absent so every missing-data reason NAMES the month ("Nov 2026: no TOTAL target").
+ */
+function resolveQuarterRaw(
+  input: RuleInput,
+  ctx: EvalContext,
+): { v: number | string | null; missingMonths: string[] } {
+  const q = ctx.quarter!;
+  const kind = sourceKind(input);
+  if (kind === 'segment') return { v: resolveRaw(input, ctx), missingMonths: [] };
+  const monthCtx = (i: number): EvalContext => ({
+    achievements: q.months[i].achievements ?? {},
+    targets: q.months[i].targets ?? {},
+    segment: ctx.segment,
+  });
+  if (input.month === 1 || input.month === 2 || input.month === 3) {
+    const v = resolveRaw(input, monthCtx(input.month - 1));
+    return { v, missingMonths: v === null ? [q.months[input.month - 1].label] : [] };
+  }
+  if (kind === 'pct') {
+    const key = (input.source ?? '').slice('pct:'.length);
+    let a = 0;
+    let t = 0;
+    const missing: string[] = [];
+    q.months.forEach((m, i) => {
+      const mc = monthCtx(i);
+      const av = mc.achievements[key];
+      const tv = mc.targets[key];
+      if (av == null || tv == null || !isFiniteNum(av) || !isFiniteNum(tv)) missing.push(m.label);
+      else {
+        a += av;
+        t += tv;
+      }
+    });
+    if (missing.length > 0) return { v: null, missingMonths: missing };
+    return { v: t > 0 ? (a / t) * 100 : null, missingMonths: [] };
+  }
+  // kpi / achievement / target → the quarter total; absent if ANY month is absent (never a partial sum).
+  let sum = 0;
+  const missing: string[] = [];
+  q.months.forEach((m, i) => {
+    const v = resolveRaw(input, monthCtx(i));
+    if (v === null) missing.push(m.label);
+    else if (typeof v === 'number') sum += v;
+    else {
+      const n = Number(v);
+      if (Number.isFinite(n)) sum += n;
+      else missing.push(m.label);
+    }
+  });
+  return missing.length > 0 ? { v: null, missingMonths: missing } : { v: sum, missingMonths: [] };
+}
+
+/** The placeholders a QUARTERLY gate's failReason may use: {m1} {m2} {m3} → "Oct 2026"…, {quarter} → "Oct–Dec 2026". */
+export const QUARTER_PLACEHOLDERS = ['{m1}', '{m2}', '{m3}', '{quarter}'] as const;
+
+const SEGMENT_FIELD_WORDS: Record<string, string> = {
+  outletType: 'Outlet type',
+  program: 'Program',
+  programCategory: 'Sub-program',
+  metro: 'Metro',
+};
+
+/** Plain words for a failed segment filter (quarterly rules): "Outlet type RET is not one this rule pays (WS)". */
+function segmentFailPlain(node: { field: string; allow: string[] }, ctx: EvalContext): string {
+  const raw = ctx.segment ? (ctx.segment as Record<string, unknown>)[node.field] : undefined;
+  const label = SEGMENT_FIELD_WORDS[node.field] ?? node.field;
+  const val = raw === undefined || raw === null || raw === '' ? null : String(raw);
+  return val === null
+    ? `${label} is blank — this rule only pays ${node.allow.join(' / ')}`
+    : `${label} ${val} is not one this rule pays (${node.allow.join(' / ')})`;
+}
+
+function fillQuarterPlaceholders(text: string, ctx: EvalContext): string {
+  const q = ctx.quarter;
+  if (!q) return text;
+  return text
+    .split('{m1}').join(q.months[0].label)
+    .split('{m2}').join(q.months[1].label)
+    .split('{m3}').join(q.months[2].label)
+    .split('{quarter}').join(q.label);
+}
+
+/** "Nov 2026: no TOTAL target" — a quarter run's plain missing-data label (names the month(s)). */
+function quarterAbsentLabel(input: RuleInput, missingMonths: string[]): string {
+  const base = absentLabel(input);
+  return missingMonths.length > 0 ? `${missingMonths.join(', ')}: ${base}` : base.charAt(0).toUpperCase() + base.slice(1);
+}
+
 /**
  * Bind every input, applying its null policy BEFORE any arithmetic. Precedence when several inputs
  * are absent: a single `reject` dominates (the whole row surfaces for review — a row that needs a
  * human must never be silently zeroed by a later `skipRule`); else any `skipRule` makes the rule
  * contribute 0; else absent `zero` inputs become 0 and we proceed. A present-but-non-numeric number
  * input, or an enum value outside its `values`, is treated as a reject (bad data, surface it).
+ *
+ * `quarterMode` (a QUARTER rule with ctx.quarter) binds per month / quarter total and names the missing month in every
+ * reason. Monthly binding (quarterMode false) is byte-identical to before.
  */
-function bindInputs(inputs: RuleInput[], ctx: EvalContext): BindResult {
+function bindInputs(inputs: RuleInput[], ctx: EvalContext, quarterMode = false): BindResult {
   const values: BoundValues = {};
   const rejects: string[] = [];
   const skips: string[] = [];
   const skipPlain: string[] = [];
 
   for (const inp of inputs) {
-    const raw = resolveRaw(inp, ctx);
+    let raw: number | string | null;
+    let missingMonths: string[] = [];
+    if (quarterMode) {
+      const r = resolveQuarterRaw(inp, ctx);
+      raw = r.v;
+      missingMonths = r.missingMonths;
+    } else {
+      raw = resolveRaw(inp, ctx);
+    }
     const absent = raw === null;
 
     if (absent) {
-      if (inp.nullAs === 'reject') rejects.push(`${inp.ref} (${sourceLabel(inp)})`);
-      else if (inp.nullAs === 'skipRule') {
+      if (inp.nullAs === 'reject') {
+        rejects.push(quarterMode ? `${quarterAbsentLabel(inp, missingMonths)} (${inp.ref})` : `${inp.ref} (${sourceLabel(inp)})`);
+      } else if (inp.nullAs === 'skipRule') {
         skips.push(`${inp.ref} (${sourceLabel(inp)})`);
-        skipPlain.push(absentLabel(inp));
+        skipPlain.push(quarterMode ? quarterAbsentLabel(inp, missingMonths) : absentLabel(inp));
       }
       else values[inp.ref] = inp.type === 'enum' ? '' : 0; // 'zero'
       continue;
@@ -238,7 +350,7 @@ function bindInputs(inputs: RuleInput[], ctx: EvalContext): BindResult {
   }
 
   if (rejects.length > 0) {
-    return { kind: 'skip', reason: `Missing/invalid input(s): ${rejects.join('; ')}` };
+    return { kind: 'skip', reason: `${quarterMode ? 'Missing data' : 'Missing/invalid input(s)'}: ${rejects.join('; ')}` };
   }
   if (skips.length > 0) {
     const plain = [...new Set(skipPlain)].join('; ');
@@ -885,8 +997,18 @@ const ACCRUAL_TYPES: ReadonlySet<string> = new Set(['rate', 'slab', 'milestone',
 export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutcome {
   const trace: TraceStep[] = [];
   try {
+    // A QUARTERLY rule reads only the quarter's per-month values — without them there is nothing honest to compute.
+    const quarterMode = rule.evaluationBasis === 'QUARTER';
+    if (quarterMode && !ctx.quarter) {
+      return {
+        status: 'ERROR',
+        errors: ['This is a quarterly rule — it can only be computed in a quarter run (e.g. 2026-Q3), not for a single month.'],
+        trace,
+      };
+    }
+
     // ── 1. Bind inputs + null policy (before any arithmetic) ────────────────────
-    const bind = bindInputs(rule.inputs ?? [], ctx);
+    const bind = bindInputs(rule.inputs ?? [], ctx, quarterMode);
     if (bind.kind === 'skip') return { status: 'SKIP', reason: bind.reason, trace };
     if (bind.kind === 'ruleZero') {
       // skipRule: the rule contributes 0 points — the row is NOT an error, but it says WHY ("No ADHO target").
@@ -896,6 +1018,10 @@ export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutc
     const pipeline = rule.pipeline ?? [];
 
     let points = 0;
+    // QUARTER rules: EVERY failing hard gate is reported (e.g. "Oct 2026: TOTAL below target; Dec 2026: TOTAL below
+    // target"), not just the first — so the row names every month that broke the consistency condition.
+    const quarterZeroFails: string[] = [];
+    let quarterZeroed = false;
 
     // ── 2. Gates & segment filters (short-circuit per onFail) ───────────────────
     for (const node of pipeline) {
@@ -919,11 +1045,32 @@ export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutc
       }
 
       // Failed → apply the opt-in failAs (gate only), else onFail exactly as before.
-      const failReason = node.type === 'gate' && typeof node.failReason === 'string' && node.failReason.trim() ? node.failReason.trim() : undefined;
+      // A segmentFilter may carry its own reason in a QUARTERLY rule (e.g. "Not a wholesaler outlet").
+      const ownReason = (node as { failReason?: unknown }).failReason;
+      const rawReason =
+        (node.type === 'gate' || (quarterMode && node.type === 'segmentFilter')) && typeof ownReason === 'string' && ownReason.trim()
+          ? ownReason.trim()
+          : undefined;
+      // Quarter placeholders ({m1} {m2} {m3} {quarter}) → the real month names. Monthly reasons are untouched.
+      const failReason = rawReason && quarterMode ? fillQuarterPlaceholders(rawReason, ctx) : rawReason;
       const failAs = node.type === 'gate' ? node.failAs : undefined;
       if (failAs === 'skip') {
         trace.push(step(node, points, points, `${node.type} FAILED (${desc}) → skip row${failReason ? `: ${failReason}` : ''}`));
-        return { status: 'SKIP', reason: failReason ?? `gate "${node.id}" failed (${desc})`, trace };
+        const skipReason = failReason ?? `gate "${node.id}" failed (${desc})`;
+        // Quarter: a later skip keeps the month reasons already found (never drops an earlier failing month).
+        const reason = quarterMode && quarterZeroFails.length > 0 ? [...new Set([...quarterZeroFails, skipReason])].join('; ') : skipReason;
+        return { status: 'SKIP', reason, trace };
+      }
+      if (quarterMode && (failAs === 'zero' || node.onFail === 'zero')) {
+        trace.push(
+          step(node, points, 0, `${node.type} FAILED (${desc}) → ${failAs === 'zero' ? "failAs 'zero'" : "onFail 'zero'"}, rule → 0${failReason ? `: ${failReason}` : ''}`),
+        );
+        quarterZeroed = true;
+        quarterZeroFails.push(
+          failReason ??
+            (node.type === 'segmentFilter' ? segmentFailPlain(node, ctx) : `${node.type} "${node.id}" failed (${desc})`),
+        );
+        continue; // keep checking: every failing month is named
       }
       if (failAs === 'zero' || node.onFail === 'zero') {
         // Hard gate: short-circuit the WHOLE rule to 0 — before floor/cap, so a floor can't revive it.
@@ -934,6 +1081,9 @@ export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutc
       }
       // skipNode / passthrough → no points change, continue.
       trace.push(step(node, points, points, `${node.type} failed (${desc}) → onFail '${node.onFail}', continue`));
+    }
+    if (quarterZeroed) {
+      return { status: 'OK', points: roundNonNeg(0, rule.rounding), trace, reason: [...new Set(quarterZeroFails)].join('; ') };
     }
 
     // ── 3. Accrual nodes (rate, slab, milestone, formula) in listed order ───────
@@ -1169,6 +1319,14 @@ export function validateRule(rule: PointsRuleConfig): string[] {
   const errs: string[] = [];
   if (!isObj(rule)) return ['rule must be an object.'];
 
+  // ── evaluation basis (monthly vs quarterly) ─────────────────────────────────────
+  // Absent → monthly (PERIOD_AGGREGATE), exactly as every rule before quarterly rules existed.
+  const basis = rule.evaluationBasis ?? 'PERIOD_AGGREGATE';
+  if (!(EVALUATION_BASES as readonly string[]).includes(basis)) {
+    errs.push(`evaluationBasis must be one of ${EVALUATION_BASES.join(', ')} (monthly / quarterly).`);
+  }
+  const quarterly = basis === 'QUARTER';
+
   // ── inputs ──────────────────────────────────────────────────────────────────
   const declared = new Set<string>();
   const declaredNumber = new Set<string>(); // refs with type 'number' — valid as a numeric measure/target
@@ -1205,6 +1363,17 @@ export function validateRule(rule: PointsRuleConfig): string[] {
       if (inp.type === 'enum' && (!Array.isArray(inp.values) || inp.values.length === 0)) {
         errs.push(`${w}: an enum input must list non-empty 'values'.`);
       }
+      // Quarterly binding (month 1/2/3 or the quarter total).
+      if (inp.month !== undefined && inp.month !== null) {
+        if (inp.month !== 1 && inp.month !== 2 && inp.month !== 3) {
+          errs.push(`${w}: month must be 1, 2 or 3 (the month of the quarter).`);
+        } else if (!quarterly) {
+          errs.push(`${w}: month (1/2/3 of a quarter) is only for quarterly rules — set evaluationBasis 'QUARTER' or remove it.`);
+        }
+      }
+      if (quarterly && hasSrc && isVisibilityInput(inp)) {
+        errs.push(`${w}: visibility inputs are monthly — a quarterly rule cannot read them yet.`);
+      }
     });
   }
 
@@ -1233,6 +1402,14 @@ export function validateRule(rule: PointsRuleConfig): string[] {
     }
     if (typeof rule.output.fieldId !== 'string' || rule.output.fieldId === '') {
       errs.push('output.fieldId must be a non-empty credit-field id.');
+    }
+    const narration = (rule.output as { narration?: unknown }).narration;
+    if (narration !== undefined && narration !== null) {
+      if (typeof narration !== 'string' || narration.length > 100) {
+        errs.push('output.narration must be text of at most 100 characters.');
+      } else if (!quarterly && narration.trim() !== '') {
+        errs.push('output.narration is only used by quarterly rules — remove it or make the rule quarterly.');
+      }
     }
   }
 
@@ -1313,6 +1490,9 @@ export function validateRule(rule: PointsRuleConfig): string[] {
         if (n.failReason !== undefined && (typeof n.failReason !== 'string' || n.failReason.length > 200)) {
           errs.push(`${w}: failReason must be text of at most 200 characters.`);
         }
+        if (!quarterly && typeof n.failReason === 'string' && QUARTER_PLACEHOLDERS.some((p) => n.failReason!.includes(p))) {
+          errs.push(`${w}: {m1} / {m2} / {m3} / {quarter} in a reason only work in a quarterly rule.`);
+        }
         if (n.failAs !== undefined && n.failAs !== 'zero' && n.failAs !== 'skip') {
           errs.push(`${w}: failAs must be 'zero' or 'skip'.`);
         }
@@ -1330,6 +1510,12 @@ export function validateRule(rule: PointsRuleConfig): string[] {
           errs.push(`${w}: allow must be an array of strings.`);
         }
         if (!ON_FAIL.has(n.onFail)) errs.push(`${w}: onFail must be one of ${[...ON_FAIL].join(', ')}.`);
+        if (n.failReason !== undefined && n.failReason !== null) {
+          if (typeof n.failReason !== 'string' || n.failReason.length > 200) errs.push(`${w}: failReason must be text of at most 200 characters.`);
+          else if (n.failReason.trim() !== '' && (!quarterly || n.onFail !== 'zero')) {
+            errs.push(`${w}: a segment filter's reason is only shown on a quarterly rule whose filter pays 0 (onFail 'zero').`);
+          }
+        }
         break;
       case 'milestone':
         validatePredicate(n.when, declared, `${w}.when`, errs);

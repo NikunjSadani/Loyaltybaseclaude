@@ -1,0 +1,272 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`monthly rules — byte-identical to the pre-quarter evaluator formulaPct: valid + every context 1`] = `
+{
+  "low": {
+    "points": 25,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 25,
+        "detail": "formula "f" (add): if(p >= 120, v * min(1, 120 / p), v) * 5 = 25 → 25",
+        "nodeId": "f",
+        "pointsAfter": 25,
+        "pointsBefore": 0,
+        "type": "formula",
+      },
+    ],
+  },
+  "noAch": {
+    "reason": "Missing/invalid input(s): p (pct:CASES)",
+    "status": "SKIP",
+    "trace": [],
+  },
+  "noTarget": {
+    "reason": "Missing/invalid input(s): p (pct:CASES)",
+    "status": "SKIP",
+    "trace": [],
+  },
+  "normal": {
+    "points": 600,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 600,
+        "detail": "formula "f" (add): if(p >= 120, v * min(1, 120 / p), v) * 5 = 600 → 600",
+        "nodeId": "f",
+        "pointsAfter": 600,
+        "pointsBefore": 0,
+        "type": "formula",
+      },
+    ],
+  },
+  "over": {
+    "points": 600,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 600,
+        "detail": "formula "f" (add): if(p >= 120, v * min(1, 120 / p), v) * 5 = 600 → 600",
+        "nodeId": "f",
+        "pointsAfter": 600,
+        "pointsBefore": 0,
+        "type": "formula",
+      },
+    ],
+  },
+  "zeroTarget": {
+    "reason": "Missing/invalid input(s): p (pct:CASES)",
+    "status": "SKIP",
+    "trace": [],
+  },
+}
+`;
+
+exports[`monthly rules — byte-identical to the pre-quarter evaluator rate: valid + every context 1`] = `
+{
+  "low": {
+    "points": 13,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 12.5,
+        "detail": "rate "n1": 5 × 2.5 → +12.5",
+        "nodeId": "n1",
+        "pointsAfter": 12.5,
+        "pointsBefore": 0,
+        "type": "rate",
+      },
+    ],
+  },
+  "noAch": {
+    "reason": "Missing/invalid input(s): v (kpi:CASES)",
+    "status": "SKIP",
+    "trace": [],
+  },
+  "noTarget": {
+    "points": 125,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 125,
+        "detail": "rate "n1": 50 × 2.5 → +125",
+        "nodeId": "n1",
+        "pointsAfter": 125,
+        "pointsBefore": 0,
+        "type": "rate",
+      },
+    ],
+  },
+  "normal": {
+    "points": 375,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 375,
+        "detail": "rate "n1": 150 × 2.5 → +375",
+        "nodeId": "n1",
+        "pointsAfter": 375,
+        "pointsBefore": 0,
+        "type": "rate",
+      },
+    ],
+  },
+  "over": {
+    "points": 833,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 832.5,
+        "detail": "rate "n1": 333 × 2.5 → +832.5",
+        "nodeId": "n1",
+        "pointsAfter": 832.5,
+        "pointsBefore": 0,
+        "type": "rate",
+      },
+    ],
+  },
+  "zeroTarget": {
+    "points": 125,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 125,
+        "detail": "rate "n1": 50 × 2.5 → +125",
+        "nodeId": "n1",
+        "pointsAfter": 125,
+        "pointsBefore": 0,
+        "type": "rate",
+      },
+    ],
+  },
+}
+`;
+
+exports[`monthly rules — byte-identical to the pre-quarter evaluator slabGateCap: valid + every context 1`] = `
+{
+  "low": {
+    "points": 0,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 0,
+        "detail": "gate passed: t=100 > 0",
+        "nodeId": "g",
+        "pointsAfter": 0,
+        "pointsBefore": 0,
+        "type": "gate",
+      },
+      {
+        "delta": 0,
+        "detail": "gate FAILED (v=5 ≥ 10) → onFail 'zero', rule → 0",
+        "nodeId": "g2",
+        "pointsAfter": 0,
+        "pointsBefore": 0,
+        "type": "gate",
+      },
+    ],
+  },
+  "noAch": {
+    "reason": "Missing/invalid input(s): v (kpi:CASES)",
+    "status": "SKIP",
+    "trace": [],
+  },
+  "noTarget": {
+    "points": 0,
+    "reason": "No CASES target",
+    "status": "OK",
+    "trace": [],
+  },
+  "normal": {
+    "points": 250,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 0,
+        "detail": "gate passed: t=100 > 0",
+        "nodeId": "g",
+        "pointsAfter": 0,
+        "pointsBefore": 0,
+        "type": "gate",
+      },
+      {
+        "delta": 0,
+        "detail": "gate passed: v=150 ≥ 10",
+        "nodeId": "g2",
+        "pointsAfter": 0,
+        "pointsBefore": 0,
+        "type": "gate",
+      },
+      {
+        "delta": 250,
+        "detail": "slab "s" MARGINAL [150 = 150% of target]: 100×1 + 50×3 → +250",
+        "nodeId": "s",
+        "pointsAfter": 250,
+        "pointsBefore": 0,
+        "type": "slab",
+      },
+      {
+        "delta": 0,
+        "detail": "cap 400 (250 ≤ 400, no change)",
+        "nodeId": "c",
+        "pointsAfter": 250,
+        "pointsBefore": 250,
+        "type": "cap",
+      },
+    ],
+  },
+  "over": {
+    "points": 400,
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 0,
+        "detail": "gate passed: t=100 > 0",
+        "nodeId": "g",
+        "pointsAfter": 0,
+        "pointsBefore": 0,
+        "type": "gate",
+      },
+      {
+        "delta": 0,
+        "detail": "gate passed: v=333 ≥ 10",
+        "nodeId": "g2",
+        "pointsAfter": 0,
+        "pointsBefore": 0,
+        "type": "gate",
+      },
+      {
+        "delta": 799,
+        "detail": "slab "s" MARGINAL [333 = 333% of target]: 100×1 + 233×3 → +799",
+        "nodeId": "s",
+        "pointsAfter": 799,
+        "pointsBefore": 0,
+        "type": "slab",
+      },
+      {
+        "delta": -399,
+        "detail": "cap 400 applied (799 → 400)",
+        "nodeId": "c",
+        "pointsAfter": 400,
+        "pointsBefore": 799,
+        "type": "cap",
+      },
+    ],
+  },
+  "zeroTarget": {
+    "points": 0,
+    "reason": "Target is 0",
+    "status": "OK",
+    "trace": [
+      {
+        "delta": 0,
+        "detail": "gate FAILED (t=0 > 0) → failAs 'zero', rule → 0: Target is 0",
+        "nodeId": "g",
+        "pointsAfter": 0,
+        "pointsBefore": 0,
+        "type": "gate",
+      },
+    ],
+  },
+}
+`;

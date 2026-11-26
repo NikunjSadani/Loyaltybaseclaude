@@ -34,6 +34,13 @@ export interface RuleInput {
   nullAs: NullPolicy;
   /** Allowed values when type === 'enum' (e.g. segment codes). */
   values?: string[];
+  /**
+   * QUARTERLY rules only (evaluationBasis 'QUARTER', owner-approved 2026-11-25): read this input from month 1, 2 or 3
+   * of the quarter (e.g. Oct / Nov / Dec for 2026-Q3). OMITTED on a quarterly rule → the QUARTER TOTAL: the sum of the
+   * 3 months (`pct:` = Σ achievement ÷ Σ target × 100), absent if ANY month is absent (the reason names the month).
+   * `segment:` inputs ignore it. Not allowed on a monthly rule (validateRule).
+   */
+  month?: 1 | 2 | 3;
 }
 
 // ── Operands, predicates ───────────────────────────────────────────────────────
@@ -101,7 +108,8 @@ export interface GateNode {
   onFail: OnFail;
   /**
    * OPT-IN (owner-approved 2026-11-25): the plain reason shown on the row when this gate fails, e.g. "Target is 0",
-   * "NON ADHO below ₹400". Absent → today's behaviour exactly (no reason).
+   * "NON ADHO below ₹400". Absent → today's behaviour exactly (no reason). In a QUARTERLY rule it may use {m1} {m2}
+   * {m3} {quarter} → "Nov 2026" / "Oct–Dec 2026", and EVERY failing hard gate's reason is reported (joined by "; ").
    */
   failReason?: string;
   /**
@@ -119,6 +127,11 @@ export interface SegmentFilterNode {
   field: string;
   allow: string[];
   onFail: OnFail;
+  /**
+   * QUARTERLY rules only (onFail 'zero'): the plain reason on a row the filter zeroed, e.g. "Not a wholesaler outlet".
+   * Absent → a generated plain reason ("Outlet type RET is not one this rule pays (WS)"). Monthly rules: refused.
+   */
+  failReason?: string;
 }
 
 /** L3 — a flat lump of points when a discrete threshold is reached. */
@@ -171,6 +184,8 @@ export type NodeType = PipelineNode['type'];
 // ── The rule object (stored as versioned JSON; see §3) ─────────────────────────
 
 export type RuleStatus = 'draft' | 'published' | 'archived';
+export type EvaluationBasis = 'PERIOD_AGGREGATE' | 'QUARTER';
+export const EVALUATION_BASES: readonly EvaluationBasis[] = ['PERIOD_AGGREGATE', 'QUARTER'];
 export type AwardType = 'POINTS' | 'PAYOUT';
 
 export interface RoundingSpec {
@@ -195,9 +210,18 @@ export interface PointsRuleConfig {
   effectiveFrom: string; // 'YYYY-MM-DD' business-time validity
   effectiveTo?: string | null;
   attachsTo: RuleAttachment;
-  evaluationBasis: 'PERIOD_AGGREGATE'; // PER_TRANSACTION deferred (§12 #3)
-  /** Where computed points land — a credit-field bucket + award type. */
-  output: { awardType: AwardType; fieldId: string };
+  /**
+   * PERIOD_AGGREGATE = a MONTHLY rule (every rule before 2026-11-25; computed in `YYYY-MM` runs only).
+   * QUARTER = a QUARTERLY rule (opt-in, owner-approved 2026-11-25): computed ONLY in a `YYYY-Qn` FY-quarter run, its
+   * inputs read month 1/2/3 of the quarter or the quarter total (RuleInput.month). PER_TRANSACTION deferred (§12 #3).
+   */
+  evaluationBasis: EvaluationBasis;
+  /**
+   * Where computed points land — a credit-field bucket + award type. `narration` (QUARTERLY rules only, optional) is
+   * the credit narration prefix; the quarter's months are appended ("Consistency bonus" → "Consistency bonus Oct–Dec
+   * 2026"). Absent → "Quarterly points Oct–Dec 2026".
+   */
+  output: { awardType: AwardType; fieldId: string; narration?: string };
   rounding: RoundingSpec;
   /** The ONLY variables the pipeline may read. */
   inputs: RuleInput[];
@@ -237,8 +261,26 @@ export interface EvalContext {
     /** 1 when the outlet is in the visibility programme for the month, else 0 ("not applicable" vs "not approved"). */
     inScope?: number | null;
   };
+  /**
+   * QUARTER runs only: the outlet's per-month values for the 3 months of the FY quarter (in order). A QUARTERLY rule
+   * reads ONLY this (month inputs → that month; month-less inputs → the 3-month sum); `achievements` / `targets` above
+   * are not read by a quarterly rule. A quarterly rule evaluated without it is an ERROR (never a silent 0).
+   */
+  quarter?: {
+    /** "Oct–Dec 2026". */
+    label: string;
+    months: [QuarterMonthValues, QuarterMonthValues, QuarterMonthValues];
+  };
   /** Optional identifiers for trace/debug (NOT read by rule logic). */
   meta?: { outletCode?: string; period?: string };
+}
+
+/** One month of a quarter: its achievements / targets by kpiCode (null / omitted = blank → nullAs). */
+export interface QuarterMonthValues {
+  /** "Nov 2026" — names the month in reasons ("Nov 2026: TOTAL below target"). */
+  label: string;
+  achievements: Record<string, number | null>;
+  targets: Record<string, number | null>;
 }
 
 /** One step of the "why N points" explanation — one per pipeline node that ran. */

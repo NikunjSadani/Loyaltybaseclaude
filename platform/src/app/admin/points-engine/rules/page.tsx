@@ -182,6 +182,9 @@ export default function PointsRulesPage() {
                       <span className="font-medium text-gray-700">{r.program ?? 'any program'}</span>
                       <span className="text-gray-400"> × </span>
                       <span className="font-mono">{r.kpiCode}</span>
+                      {r.evaluationBasis === 'QUARTER' && (
+                        <span className="ml-1.5 rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700">Quarterly</span>
+                      )}
                     </td>
                     <td className="px-2 py-3 text-xs text-gray-500">
                       {fmtDate(r.effectiveFrom)} → {fmtDate(r.effectiveTo)}
