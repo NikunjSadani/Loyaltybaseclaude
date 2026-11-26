@@ -58,6 +58,7 @@ export interface PayoutReversalKey {
 /** Why an entry of the (batch, outlet, field) cannot be selected for a new reversal. */
 export type PayoutCandidateBlock =
   | 'REVERSED' // already clawed back (terminal)
+  | 'CANCELLED' // cancelled by Gifsy before payment (terminal)
   | 'RESERVED' // held by a pending reversal
   | 'CONSUMED' // taken by an approved reversal (cancelled, or recorded as a receivable)
   | 'ZERO' // a zero-amount entry has nothing to reverse
@@ -126,6 +127,7 @@ export function classifyPayoutCandidates(
     const al = live.get(e.id) ?? null;
     let blockedBy: PayoutCandidateBlock | null = null;
     if (e.status === 'REVERSED') blockedBy = 'REVERSED';
+    else if (e.status === 'CANCELLED') blockedBy = 'CANCELLED';
     else if (al && al.state === 'RESERVED') blockedBy = 'RESERVED';
     else if (al) blockedBy = 'CONSUMED';
     else if (consumed.has(e.id)) blockedBy = 'CONSUMED';
@@ -193,6 +195,7 @@ export async function loadPayoutReversalCandidates(
 
 const BLOCK_TEXT: Record<PayoutCandidateBlock, string> = {
   REVERSED: 'already reversed',
+  CANCELLED: 'cancelled by Gifsy (never paid)',
   RESERVED: 'held by another pending reversal',
   CONSUMED: 'already taken by an approved reversal',
   ZERO: 'has no amount',
@@ -607,8 +610,8 @@ export async function patchPayoutReversalV2(
     }
     if (e.status === 'PROCESSING') throw new BadRequestException(SENT_TO_BANK_MESSAGE);
     // Owner D1: reserved while unpaid, PAID since → refused (whole approval); the admin must reject it instead.
-    if (e.status === 'REVERSED') {
-      throw new ConflictException(`Reserved payout entry ${a.payoutEntryId} is already REVERSED — contact Gifsy`);
+    if (e.status === 'REVERSED' || e.status === 'CANCELLED') {
+      throw new ConflictException(`Reserved payout entry ${a.payoutEntryId} is already ${e.status} — contact Gifsy`);
     }
   }
   // Owner D1 (2026-11-19): an entry reserved while unpaid and PAID since — if 194C — can't be reversed any more.

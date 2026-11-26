@@ -184,8 +184,8 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
     expect(await screen.findByText('Biz Pvt Ltd')).toBeInTheDocument()
     expect(await screen.findByText('TSE > ASM > RSM')).toBeInTheDocument()   // reporting chain
     expect(await screen.findByText('UTR12345')).toBeInTheDocument()          // UTR
-    // 'PAID' appears both as a status <option> and the row badge — assert at least one.
-    expect((await screen.findAllByText('PAID')).length).toBeGreaterThan(0)     // status badge
+    // 'Paid' appears both as a status <option> label and the row badge — assert at least one.
+    expect((await screen.findAllByText('Paid')).length).toBeGreaterThan(0)     // status badge
     expect(await screen.findByText('SEC_194C')).toBeInTheDocument()          // TDS section
     expect(await screen.findByText('ABCDE1234F')).toBeInTheDocument()        // PAN
   })
@@ -543,5 +543,21 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
       expect(notes).toHaveLength(1)
       expect(notes[0].textContent).toBe('₹200.00 less TDS — covered by a TDS credit on this PAN')
     })
+  })
+})
+
+describe('Payments report — cancelled payouts (owner 2026-11-25)', () => {
+  it('offers a "Cancelled" status filter that asks the API for status=CANCELLED', async () => {
+    asRole('GIFSY_ADMIN')
+    const fetchMock = stubFetch()
+    render(<AdminPaymentsReportPage />)
+    await screen.findByText('Shop A')
+
+    const opt = screen.getByRole('option', { name: 'Cancelled' }) as HTMLOptionElement
+    expect(opt.value).toBe('CANCELLED')
+    fireEvent.change(screen.getByDisplayValue('All Statuses'), { target: { value: 'CANCELLED' } })
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some((c) => typeof c[0] === 'string' && (c[0] as string).includes('status=CANCELLED'))).toBe(true),
+    )
   })
 })

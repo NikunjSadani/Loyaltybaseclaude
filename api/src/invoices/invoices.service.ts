@@ -24,6 +24,7 @@ import {
 } from './dto/invoices.dto';
 import { resolveActivePartnerId } from '../common/partner-group.helper';
 import { formatINR } from '../common/money';
+import { lockInvoiceMonths } from './invoice-lock';
 
 /**
  * Self-bill visibility invoicing service (P6.7).
@@ -69,13 +70,25 @@ export class InvoicesService {
    * @returns { generated: number; skipped: {outletCode, reason}[] }
    */
   async generateForPeriod(user: JwtPayload, dto: GenerateInvoicesDto) {
+    // Audit fix 2026-11-26: ONE transaction behind the per-(client, month) invoice lock that the confirm-time
+    // generation and the payout cancellation take too — a run can never race a cancel (void / re-issue) or a confirm.
+    return this.prisma.$transaction(
+      async (tx) => {
+        await lockInvoiceMonths(tx, user.clientId, [dto.period]);
+        return this.generateForPeriodIn(tx, user, dto);
+      },
+      { timeout: 180_000, maxWait: 20_000 },
+    );
+  }
+
+  private async generateForPeriodIn(db: Prisma.TransactionClient, user: JwtPayload, dto: GenerateInvoicesDto) {
     const { clientId } = user;
     const { period } = dto;
 
     // ── Step 1: resolve separate-payout field IDs ───────────────────────────
     // payoutStream=VISIBILITY is the explicit classifier (isSeparatePayout is its
     // deprecated boolean mirror, dropped in W3).
-    const separateFields = await this.prisma.creditField.findMany({
+    const separateFields = await db.creditField.findMany({
       where: { clientId, payoutStream: 'VISIBILITY', isActive: true },
       select: { id: true },
     });
@@ -90,7 +103,7 @@ export class InvoicesService {
     // We aggregate in application code (one query) because Prisma doesn't offer a
     // BigInt groupBy sum in all versions. The entry count is bounded (one per
     // outlet+field per period), so this is safe.
-    const entries = await this.prisma.creditPayoutEntry.findMany({
+    const entries = await db.creditPayoutEntry.findMany({
       where: {
         clientId,
         period,
@@ -98,6 +111,8 @@ export class InvoicesService {
         // Owner 2026-11-18: self-billed SERVICE invoices (+ GST holdback) are ONLY for visibility payouts
         // whose frozen section is 194C (null = a legacy visibility row = 194C). 194R visibility gets none.
         OR: [{ tdsSection: 'SEC_194C' }, { tdsSection: null }],
+        // A payout cancelled before payment (owner 2026-11-25) is not a service rendered for invoicing.
+        status: { not: 'CANCELLED' },
       },
       select: { outletId: true, amountPaise: true },
     });
@@ -116,7 +131,7 @@ export class InvoicesService {
     const outletCodes = [...outletBaseMap.keys()];
 
     // ── Step 3: load outlet + partner data (KYC snapshot) ───────────────────
-    const outlets = await this.prisma.outlet.findMany({
+    const outlets = await db.outlet.findMany({
       where: { clientId, outletCode: { in: outletCodes } },
       select: {
         outletCode: true,
@@ -157,7 +172,7 @@ export class InvoicesService {
     let generated = 0;
 
     // Existing count for this (clientId, period) — used for sequential invoice number.
-    let existingCount = await this.prisma.autoInvoice.count({
+    let existingCount = await db.autoInvoice.count({
       where: { clientId, period },
     });
 
@@ -276,7 +291,9 @@ export class InvoicesService {
         existingCount += 1;
         const invoiceNumber = generateInvoiceNumber(outletCode, period, existingCount);
         try {
-          const created = await this.prisma.autoInvoice.create({
+          // Inside the transaction a unique violation would abort it — a SAVEPOINT lets the P2002 handling below go on.
+          await db.$executeRaw`SAVEPOINT inv_create`;
+          const created = await db.autoInvoice.create({
             data: {
               clientId,
               invoiceNumber,
@@ -297,7 +314,7 @@ export class InvoicesService {
           });
           // GST holdback (D5): a freshly-generated GST invoice needs its HELD reimbursement row.
           if (gst.gstApplicable) {
-            await this.ensureHeldReimbursement(clientId, created.id, partner.id, outletCode, gst.gstPaise);
+            await this.ensureHeldReimbursement(db, clientId, created.id, partner.id, outletCode, gst.gstPaise);
           }
           generated += 1;
           persisted = true;
@@ -305,11 +322,14 @@ export class InvoicesService {
           const isP2002 =
             err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
           if (!isP2002) throw err;
+          await db.$executeRaw`ROLLBACK TO SAVEPOINT inv_create`;
 
           // Which constraint fired? Connector-agnostic: does this outlet's invoice
           // for the period already exist? (tenant-scoped read).
-          const tupleExists = await this.prisma.autoInvoice.findFirst({
-            where: { clientId, outletCode, period },
+          // LIVE invoices only — a VOID one (payouts cancelled) never holds the outlet/month tuple.
+          // SERVICE only — a 194C TDS invoice for the same outlet + month is a different document and is never touched.
+          const tupleExists = await db.autoInvoice.findFirst({
+            where: { clientId, outletCode, period, invoiceKind: 'SERVICE', voidedAt: null },
             select: { id: true },
           });
 
@@ -326,9 +346,10 @@ export class InvoicesService {
             continue;
           }
 
-          // TUPLE conflict — refresh amounts ONLY while still GENERATED.
-          const refreshed = await this.prisma.autoInvoice.updateMany({
-            where: { clientId, outletCode, period, status: 'GENERATED' },
+          // TUPLE conflict — refresh amounts ONLY while still GENERATED and unlocked (a locked invoice is final), and
+          // only the SERVICE invoice (never a TDS invoice of the same outlet + month).
+          const refreshed = await db.autoInvoice.updateMany({
+            where: { clientId, outletCode, period, invoiceKind: 'SERVICE', status: 'GENERATED', lockedAt: null, voidedAt: null },
             data: refreshData,
           });
           if (refreshed.count > 0) {
@@ -337,12 +358,13 @@ export class InvoicesService {
             //     reclassified to REGULAR after the first generation);
             //   • HELD + a different GST          → the held amount is updated (0 GST → the HELD row goes);
             //   • RELEASED + a different GST      → never changed; flagged loudly in `warnings`.
-            const inv = await this.prisma.autoInvoice.findFirst({
-              where: { clientId, outletCode, period, invoiceKind: 'SERVICE' },
+            const inv = await db.autoInvoice.findFirst({
+              where: { clientId, outletCode, period, invoiceKind: 'SERVICE', voidedAt: null },
               select: { id: true },
             });
             if (inv) {
               const warning = await this.reconcileReimbursement(
+                db,
                 clientId,
                 inv.id,
                 partner.id,
@@ -355,7 +377,7 @@ export class InvoicesService {
           } else {
             skipped.push({
               outletCode,
-              reason: 'Invoice already finalized (PAID) — not regenerated',
+              reason: 'Invoice already finalized (PAID or locked) — not regenerated',
             });
           }
           persisted = true;
@@ -373,18 +395,19 @@ export class InvoicesService {
    * kept at ₹0 (still HELD, with a note) for the audit trail, and reused if GST comes back.
    */
   private async reconcileReimbursement(
+    db: Prisma.TransactionClient,
     clientId: string,
     autoInvoiceId: string,
     partnerId: string,
     outletCode: string,
     gstPaise: bigint,
   ): Promise<string | null> {
-    const existing = await this.prisma.gstReimbursement.findUnique({
+    const existing = await db.gstReimbursement.findUnique({
       where: { autoInvoiceId },
       select: { id: true, status: true, gstPaise: true },
     });
     if (!existing) {
-      if (gstPaise > 0n) await this.ensureHeldReimbursement(clientId, autoInvoiceId, partnerId, outletCode, gstPaise);
+      if (gstPaise > 0n) await this.ensureHeldReimbursement(db, clientId, autoInvoiceId, partnerId, outletCode, gstPaise);
       return null;
     }
     if (existing.gstPaise === undefined || existing.gstPaise === gstPaise) return null;
@@ -399,7 +422,7 @@ export class InvoicesService {
                 `Regenerated invoice has no GST — held amount changed from ${formatINR(existing.gstPaise)} to ₹0 ` +
                 `on ${new Date().toISOString().slice(0, 10)}.`,
             };
-      await this.prisma.gstReimbursement.updateMany({ where: { id: existing.id, status: 'HELD' }, data });
+      await db.gstReimbursement.updateMany({ where: { id: existing.id, status: 'HELD' }, data });
       return null;
     }
     if (existing.status === 'RELEASED') {
@@ -418,24 +441,28 @@ export class InvoicesService {
    * always has its held-GST row, and a regenerate that adds GST self-heals the missing row.
    */
   private async ensureHeldReimbursement(
+    db: Prisma.TransactionClient,
     clientId: string,
     autoInvoiceId: string,
     partnerId: string,
     outletCode: string,
     gstPaise: bigint,
   ): Promise<void> {
-    const existing = await this.prisma.gstReimbursement.findUnique({
+    const existing = await db.gstReimbursement.findUnique({
       where: { autoInvoiceId },
       select: { id: true },
     });
     if (existing) return;
     try {
-      await this.prisma.gstReimbursement.create({
+      await db.$executeRaw`SAVEPOINT gst_create`;
+      await db.gstReimbursement.create({
         data: { clientId, autoInvoiceId, partnerId, outletCode, gstPaise, status: 'HELD' },
       });
     } catch (err) {
-      // Concurrent create raced us — the unique on autoInvoiceId already holds the row. Ignore.
+      // Concurrent create raced us — the unique on autoInvoiceId already holds the row. Ignore (the savepoint keeps
+      // the surrounding transaction usable).
       if (!(err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')) throw err;
+      await db.$executeRaw`ROLLBACK TO SAVEPOINT gst_create`;
     }
   }
 
@@ -470,6 +497,8 @@ export class InvoicesService {
     const { clientId, period, batchId, visibilityFieldIds } = params;
     const skipped: { outletCode: string; reason: string }[] = [];
     if (visibilityFieldIds.length === 0) return { generated: 0, linked: 0, skipped };
+    // Same per-(client, month) invoice lock as the manual run and the payout cancellation (audit fix 2026-11-26).
+    await lockInvoiceMonths(tx, clientId, [period]);
 
     // This batch's visibility entries (created moments ago in this same tx).
     const entries = await tx.creditPayoutEntry.findMany({
@@ -560,8 +589,10 @@ export class InvoicesService {
       }
 
       // Idempotency: a SERVICE invoice for this outlet+period already exists → relink only.
+      // Only a LIVE invoice counts: a VOID one (its payouts were cancelled, owner 2026-11-25) stays in history and this
+      // outlet + month gets a NEW invoice (the partial unique index allows one live invoice per outlet/month/kind).
       const existing = await tx.autoInvoice.findFirst({
-        where: { clientId, outletCode, period, invoiceKind: 'SERVICE' },
+        where: { clientId, outletCode, period, invoiceKind: 'SERVICE', voidedAt: null },
         select: { id: true },
       });
       if (existing) {
@@ -815,7 +846,9 @@ export class InvoicesService {
   ): Promise<Prisma.AutoInvoiceWhereInput | null> {
     const where: Prisma.AutoInvoiceWhereInput = { clientId: user.clientId };
     if (q.period) where.period = q.period;
-    if (q.status) where.status = q.status as 'GENERATED' | 'PAID';
+    // VOID invoices (payouts cancelled before payment) are out of the list + export unless an admin asks for them.
+    if (q.status) where.status = q.status as 'GENERATED' | 'PAID' | 'VOID';
+    else where.status = { not: 'VOID' };
     if (q.outletCode) where.outletCode = q.outletCode;
 
     // Free-text search over the real invoice columns (invoiceNumber + outletCode),
@@ -834,6 +867,9 @@ export class InvoicesService {
       const partner = await this.resolveCallerPartner(user, requestedPartnerId);
       if (!partner) return null;
       where.partnerId = partner.id;
+      // A retailer never sees a VOID invoice (its payouts were cancelled before payment).
+      if (q.status === 'VOID') return null;
+      where.status = q.status ? (q.status as 'GENERATED' | 'PAID') : { not: 'VOID' };
     }
 
     return where;
@@ -895,6 +931,7 @@ export class InvoicesService {
       if (!partner || invoice.partnerId !== partner.id) {
         throw new ForbiddenException('Access denied');
       }
+      if (invoice.status === 'VOID') throw new NotFoundException('Invoice not found');
     }
 
     return invoice;
@@ -942,6 +979,9 @@ export class InvoicesService {
       throw new ConflictException('A TDS invoice number cannot be edited (deposited-tax artefact).');
     }
 
+    if (invoice.status === 'VOID') {
+      throw new ConflictException('This invoice was voided (its payouts were cancelled before payment) — it cannot be edited.');
+    }
     if (invoice.lockedAt != null) {
       throw new ConflictException('Invoice number is locked once the payout UTR is recorded');
     }
@@ -983,6 +1023,9 @@ export class InvoicesService {
     if (invoice.status === 'PAID') {
       // Idempotent re-call: return without error.
       return { ...invoice, message: 'Already PAID (no-op)' };
+    }
+    if (invoice.status === 'VOID') {
+      throw new ConflictException('This invoice was voided (its payouts were cancelled before payment) — it cannot be marked paid.');
     }
 
     return this.prisma.autoInvoice.update({

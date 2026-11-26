@@ -70,6 +70,8 @@ function statusBadge(status: string | null): string {
       return 'bg-red-50 text-red-700 border border-red-200';
     case 'REVERSED':
       return 'bg-amber-50 text-amber-700 border border-amber-200';
+    case 'CANCELLED':
+      return 'bg-gray-100 text-gray-700 border border-gray-300';
     default:
       return 'bg-gray-50 text-gray-500 border border-gray-200';
   }
@@ -80,8 +82,19 @@ function formatCount(n: number): string {
   return n.toLocaleString('en-IN');
 }
 
-const STATUS_OPTIONS = ['ALL', 'PAID', 'FAILED', 'REVERSED'] as const;
+const STATUS_OPTIONS = ['ALL', 'PAID', 'FAILED', 'REVERSED', 'CANCELLED'] as const;
 type StatusFilter = (typeof STATUS_OPTIONS)[number];
+
+/** Human label of a payment status (filter options + row badge). Unknown statuses show as sent. */
+const STATUS_LABELS: Record<string, string> = {
+  PENDING:    'Pending',
+  PROCESSING: 'In bank file',
+  PAID:       'Paid',
+  FAILED:     'Failed',
+  REVERSED:   'Reversed',
+  CANCELLED:  'Cancelled',
+};
+const statusLabel = (s: string | null) => (s ? STATUS_LABELS[s.toUpperCase()] ?? s : '—');
 
 // ── SummaryCard (mirrors admin/tds-payouts) ──────────────────────────────────
 function SummaryCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -316,7 +329,7 @@ export default function AdminPaymentsReportPage() {
           >
             <option value="ALL">All Statuses</option>
             {STATUS_OPTIONS.filter((s) => s !== 'ALL').map((s) => (
-              <option key={s} value={s}>{s}</option>
+              <option key={s} value={s}>{statusLabel(s)}</option>
             ))}
           </select>
         </label>
@@ -421,7 +434,7 @@ export default function AdminPaymentsReportPage() {
                     </td>
                     <td className="px-3 py-3 text-center">
                       <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium ${statusBadge(r.status)}`}>
-                        {r.status ?? '—'}
+                        {statusLabel(r.status)}
                       </span>
                       {r.reversal && (
                         <div data-testid="payment-reversal" className="mt-1 text-left whitespace-normal min-w-[14rem] space-y-0.5">

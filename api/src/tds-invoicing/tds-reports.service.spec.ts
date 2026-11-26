@@ -64,7 +64,8 @@ describe('TdsReportsService', () => {
       const res = await service.payoutReport({ clientId: 'deoleo' });
 
       expect(mockPrisma.creditPayoutEntry.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { tdsSection: { not: null }, clientId: 'deoleo' } }),
+        // Cancelled payouts (never paid, no TDS) are out of the TDS payout report.
+        expect.objectContaining({ where: { tdsSection: { not: null }, status: { not: 'CANCELLED' }, clientId: 'deoleo' } }),
       );
       expect(res.count).toBe(1);
       const row = res.rows[0];
@@ -81,7 +82,7 @@ describe('TdsReportsService', () => {
     it('platform-wide scope (no clientId) does not pin the query to a tenant', async () => {
       await service.payoutReport({});
       expect(mockPrisma.creditPayoutEntry.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { tdsSection: { not: null } } }),
+        expect.objectContaining({ where: { tdsSection: { not: null }, status: { not: 'CANCELLED' } } }),
       );
     });
     // The xlsx export (incl. the cellSafe guard) is the 'tds-payouts' export kind — exports/kinds/batch2/tds-payouts.kind.spec.ts.

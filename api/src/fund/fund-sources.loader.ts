@@ -210,6 +210,8 @@ export interface CreditEntryRow {
   paidAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  /** Set when a Gifsy admin cancelled the never-paid payout (status CANCELLED). Optional for older callers. */
+  cancelledAt?: Date | null;
   batch: { batchCode: string; sourceKind: string | null };
   reversalAllocations: Array<{ state: string; amountPaise: bigint; receivablePaise: bigint; creditReversal: { approvedAt: Date | null } | null }>;
 }
@@ -258,6 +260,13 @@ export function creditItem(
     const applied = e.reversalAllocations.find((al) => al.state === 'APPLIED_CANCELLED');
     returnedAt = applied?.creditReversal?.approvedAt ?? legacy?.approvedAt ?? null;
     if (!returnedAt) flags.push('DATE_ESTIMATED'); // placed on its commit day (nets to zero there)
+  } else if (e.status === 'CANCELLED') {
+    // Owner 2026-11-25: a payout cancelled before payment is not charged — listed as Cancelled, committed drops on the
+    // cancellation day (zero net effect overall).
+    status = 'RETURNED';
+    returnedAt = e.cancelledAt ?? null;
+    flags.push('PAYOUT_CANCELLED');
+    if (!returnedAt) flags.push('DATE_ESTIMATED');
   } else if (e.status === 'FAILED') {
     flags.push('FAILED_AWAITING_REBANK');
   }
@@ -287,6 +296,8 @@ export interface TdsRecoveryRow {
   tenantSharePaise: bigint;
   /** The bank run (CreditPayoutDownload.id) whose transaction wrote the row — NULL for rows before 2026-11-24. */
   downloadId: string | null;
+  /** 'PAID' = raised when the payout was PAID (owner 2026-11-25); null/absent = raised at the bank file (old timing). */
+  raisedOn?: string | null;
   createdAt: Date;
 }
 
@@ -391,7 +402,8 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
       out.push({ ...base, ref: `TDS 194C true-up · FY ${r.fyLabel}`, description: `TDS 194C true-up (credit) — ${who}`, status: 'PAID', committedAt: r.createdAt, paidAt: r.createdAt });
       continue;
     }
-    const inRun = (d: TdsRun) => mine.filter((e) => e.downloadId === d.id);
+    // A CANCELLED payout keeps its last run id as history, but it was never paid by that run → not one of its payouts.
+    const inRun = (d: TdsRun) => mine.filter((e) => e.downloadId === d.id && e.status !== 'CANCELLED');
     // A reversal clears the payout's run link, so a reversed payout is tied to a run by period AND field: the run's
     // single field (a SEPARATE run) must be the entry's field. If more than one of this client's runs could own a
     // reversed payout (same period, compatible field) it is ambiguous → never used for the "reversed" note (round 6).
@@ -403,8 +415,12 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
 
     // ── Which run ──
     let run: TdsRun | null = null;
-    let kind: 'matched' | 'reversed' | 'rebanked' | 'other-client' | 'unmatched';
-    if (r.downloadId) {
+    let kind: 'matched' | 'reversed' | 'rebanked' | 'other-client' | 'unmatched' | 'paid';
+    if (r.raisedOn === 'PAID') {
+      // Owner 2026-11-25: raised when its payouts were PAID → charged (paid) on that day, with the run they came from.
+      run = r.downloadId ? (runById.get(r.downloadId) ?? null) : null;
+      kind = run ? 'paid' : 'other-client';
+    } else if (r.downloadId) {
       run = runById.get(r.downloadId) ?? null;
       if (!run) kind = 'other-client';
       else if (inRun(run).length) kind = 'matched';
@@ -434,7 +450,7 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
       const sameYear = (e: Tds194cEntry) => fyLabelForPeriod(e.period) === r.fyLabel;
       // Reversed payouts never count as "earlier payouts". The committed-before-the-row fallback is ONLY for a row
       // recorded with another client's run; this client's unmatched rows get no note (round 6).
-      const counted = (e: Tds194cEntry) => sameYear(e) && e.status !== 'REVERSED';
+      const counted = (e: Tds194cEntry) => sameYear(e) && e.status !== 'REVERSED' && e.status !== 'CANCELLED';
       const earlier = run
         ? mine.some((e) => counted(e) && e.downloadId && e.downloadId !== run!.id && (runById.get(e.downloadId)?.downloadedAt.getTime() ?? Infinity) < run!.downloadedAt.getTime())
         : kind === 'other-client' && mine.some((e) => counted(e) && e.status !== 'PENDING' && e.item.committedAt.getTime() < r.createdAt.getTime());
@@ -444,6 +460,19 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
       }
     }
     const tail = () => (notes.length ? ` — ${notes.join('; ')}` : '');
+
+    if (kind === 'paid') {
+      out.push({
+        ...base,
+        ref: `TDS 194C · ${run!.downloadCode}`,
+        description: `TDS 194C borne by Gifsy — raised when payouts of bank run ${run!.downloadCode} were paid — ${who}${tail()}`,
+        status: 'PAID',
+        committedAt: r.createdAt,
+        paidAt: r.createdAt,
+        flags,
+      });
+      continue;
+    }
 
     if (kind === 'other-client' || kind === 'unmatched') {
       if (kind === 'other-client') {
@@ -626,6 +655,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
         paidAt: true,
         createdAt: true,
         updatedAt: true,
+        cancelledAt: true,
         batch: { select: { batchCode: true, sourceKind: true } },
         tdsDeductedPaise: true,
         tdsSection: true,
@@ -669,7 +699,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
   const recoveries = await allPages((p) =>
     db.tdsRecoveryEntry.findMany({
       where: { clientId, section: 'SEC_194C' },
-      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, downloadId: true, createdAt: true },
+      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, downloadId: true, raisedOn: true, createdAt: true },
       orderBy: { id: 'asc' },
       ...p,
     }),

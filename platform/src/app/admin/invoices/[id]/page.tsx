@@ -44,7 +44,7 @@ interface BackendInvoice {
   outletCode: string;
   period: string;
   invoiceDate: string;
-  status: 'GENERATED' | 'PAID';
+  status: 'GENERATED' | 'PAID' | 'VOID';
   invoiceKind?: 'SERVICE' | 'TDS';
   lockedAt?: string | null;
   subtotalPaise: number;
@@ -81,7 +81,7 @@ interface InvoiceDisplay {
   id: string;
   invoiceNumber: string;
   invoiceNumberEdited: boolean;
-  status: 'GENERATED' | 'PAID';
+  status: 'GENERATED' | 'PAID' | 'VOID';
   invoiceKind: 'SERVICE' | 'TDS';
   period: string;
   periodLabel: string;
@@ -268,13 +268,20 @@ export default function AdminInvoiceDetailPage({
           <span className={`inline-flex items-center gap-1 mt-1 text-xs font-medium px-2.5 py-1 rounded-full ${
             inv.status === 'PAID'
               ? 'bg-green-50 text-green-700'
-              : 'bg-amber-50 text-amber-700'
+              : inv.status === 'VOID'
+                ? 'bg-gray-100 text-gray-600'
+                : 'bg-amber-50 text-amber-700'
           }`}>
             {inv.status === 'PAID'
               ? <CheckCircle className="w-3 h-3" />
               : <Clock className="w-3 h-3" />}
-            {inv.status === 'PAID' ? 'Paid' : 'Generated'}
+            {inv.status === 'PAID' ? 'Paid' : inv.status === 'VOID' ? 'Void' : 'Generated'}
           </span>
+          {inv.status === 'VOID' && (
+            <p className="text-xs text-gray-600 mt-1" data-testid="invoice-void-note">
+              Void — its payout was cancelled by Gifsy before payment; this invoice is not payable.
+            </p>
+          )}
           {inv.invoiceKind === 'TDS' && (
             <span className="inline-flex items-center ml-2 mt-1 text-[10px] font-medium px-2 py-0.5 rounded-full bg-purple-50 text-purple-700">
               TDS invoice

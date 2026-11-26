@@ -2454,6 +2454,9 @@ model TdsRecoveryEntry {
   /// NULL for rows written before 2026-11-24 (no backfill). No FK on purpose (additive; a download row is never
   /// deleted). Read by the fund statement to date the TDS line with its own run exactly.
   downloadId       String?
+  /// 'PAID' = raised when the payout was PAID (owner 2026-11-25 "TDS invoice only on success"). NULL = raised at the
+  /// bank file under the old timing (every row before that change) — kept as history, never rewritten.
+  raisedOn         String?
   createdAt        DateTime   @default(now())
 
   @@index([clientId, fyLabel])
@@ -2492,13 +2495,22 @@ model AutoInvoice {
   // TDS invoices (invoiceKind=TDS): the retailer PAN + FY they settle (one per client/PAN/FY).
   linkedPanNumber     String?
   linkedFyLabel       String?
+  // VOID (owner 2026-11-25): every payout the SERVICE invoice covered was cancelled before payment.
+  voidedAt            DateTime?
+  voidedById          String?
+  voidReason          String?
   createdAt           DateTime          @default(now())
   updatedAt           DateTime          @updatedAt
 
   creditEntries CreditPayoutEntry[]
   reimbursement GstReimbursement?
 
-  @@unique([clientId, outletCode, period, invoiceKind]) // one SERVICE invoice per outlet/month; a TDS row can coexist
+  // One LIVE SERVICE invoice per (client, outlet, month): a MIGRATION-ONLY partial unique index
+  // `auto_invoices_live_service_outlet_period_key` … WHERE "voidedAt" IS NULL AND "invoiceKind" = 'SERVICE'
+  // (20261126100000_tds_invoice_on_paid). A VOID invoice (its payouts were cancelled) stays in history and a later
+  // upload for that outlet + month gets a NEW invoice. 194C TDS top-ups (raised per bank result since 2026-11-25) are
+  // unique by their TGSL-TDS-<PAN>-<FY>-<seq> number (+ the anchor partial unique `auto_invoices_tds_pan_fy_key`).
+  @@index([clientId, outletCode, period, invoiceKind])
   @@index([clientId])
   @@index([partnerId])
   @@index([invoiceDate])
@@ -2509,6 +2521,7 @@ model AutoInvoice {
 enum AutoInvoiceStatus {
   GENERATED // editable (incl. invoice number); not yet paid
   PAID // locked — invoice number can no longer change
+  VOID // every payout it covered was cancelled before payment (voidedAt / voidReason) — out of invoice lists + reports
 }
 
 enum AutoInvoiceKind {
@@ -2545,6 +2558,7 @@ model GstReimbursement {
 enum GstReimbursementStatus {
   HELD // GST withheld pending the retailer's deposit proof
   RELEASED // reimbursed to the retailer after proof
+  VOID // its invoice was voided (the payouts were cancelled before payment) — nothing to release
 }
 
 // ============================================================
@@ -3949,6 +3963,10 @@ enum CreditEntryStatus {
   // payability. Distinct from FAILED (a bank-rejected disbursement, which GLM-2 RE-banks);
   // keeping them separate prevents a reversed award from being resurrected into a download.
   REVERSED
+  // CANCELLED = a Gifsy admin cancelled a payout that was never paid (PENDING, never in a bank file — or FAILED at
+  // the bank) — terminal; never re-banked, never paid, outside every TDS base / fund commitment / partner view.
+  // Owner-approved 2026-11-25 (all clients). cancelledAt / cancelledById / cancelReason say who, when and why.
+  CANCELLED
 }
 
 /// Classifies a credit field's payout stream. VISIBILITY = 194C-eligible marketing/support
@@ -4072,6 +4090,11 @@ model CreditPayoutEntry {
   // which MUST stay null for a non-success row so it never leaks into the default/PAID report view).
   failureReason  String?
   attemptedAt    DateTime?
+  // Payout cancellation (status CANCELLED, owner 2026-11-25). Null for every other entry. A cancelled FAILED entry
+  // keeps its failureReason / attemptedAt / downloadId (its bank-file history).
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancelReason   String?
   createdAt      DateTime          @default(now())
   updatedAt      DateTime          @updatedAt
 

@@ -85,6 +85,8 @@ export class TdsReportsService {
     const where: Prisma.CreditPayoutEntryWhereInput = {
       // Only entries stamped under the visibility-payout TDS regime carry a frozen section.
       tdsSection: { not: null },
+      // A payout cancelled before payment (owner 2026-11-25) was never paid and carries no TDS — not in this report.
+      status: { not: 'CANCELLED' },
     };
     if (scope.clientId) where.clientId = scope.clientId;
     if (scope.period) where.period = scope.period;
@@ -480,7 +482,8 @@ export class TdsReportsService {
    * Filtered in-app by the partner's gstRegistrationType (AutoInvoice has no partner relation).
    */
   async unregisteredReport(scope: ReportScope) {
-    const where: Prisma.AutoInvoiceWhereInput = {};
+    // A VOID invoice (every payout it covered was cancelled before payment) carries no RCM liability.
+    const where: Prisma.AutoInvoiceWhereInput = { status: { not: 'VOID' } };
     if (scope.clientId) where.clientId = scope.clientId;
     if (scope.period) where.period = scope.period;
 

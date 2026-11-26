@@ -295,6 +295,8 @@ const mockTx = {
   creditPayoutEntry: { findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn() },
   outlet: { findMany: jest.fn().mockResolvedValue([]) },
   gstReimbursement: { create: jest.fn() },
+  // the per-(client, month) invoice lock (audit fix 2026-11-26)
+  $executeRaw: jest.fn().mockResolvedValue(1),
 };
 
 // ── Mock Prisma ────────────────────────────────────────────────────────────────
@@ -319,6 +321,7 @@ const mockPrisma = {
     deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
   },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+  $executeRaw: jest.fn().mockResolvedValue(1),
 };
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -392,6 +395,23 @@ describe('InvoicesService', () => {
   // ── generateForPeriod ────────────────────────────────────────────────────────
 
   describe('generateForPeriod', () => {
+    // Audit fix 2026-11-26: the run is ONE transaction behind the per-(client, month) invoice lock — the tx here is the
+    // same mock client, so the existing expectations read the same calls.
+    beforeEach(() => {
+      mockPrisma.$transaction.mockImplementation(async (cb: any) => cb(mockPrisma));
+    });
+    afterEach(() => {
+      mockPrisma.$transaction.mockImplementation(async (cb: any) => cb(mockTx));
+    });
+
+    it('runs in one transaction behind the per-(client, month) invoice lock (shared with confirm + cancel); a P2002 is rolled back to a savepoint', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      await service.generateForPeriod(admin, { period: '2025-01' });
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(mockPrisma.$executeRaw.mock.calls[0])).toContain('INVMONTH|deoleo|2025-01');
+    });
+
     it('returns early if no separate-payout fields exist', async () => {
       mockPrisma.creditField.findMany.mockResolvedValue([]);
 
@@ -590,6 +610,29 @@ describe('InvoicesService', () => {
       const where = mockPrisma.autoInvoice.updateMany.mock.calls[0][0].where;
       expect(where.status).toBe('GENERATED');
       expect(where.outletCode).toBe('O1');
+    });
+
+    it('audit fix 2026-11-26: the re-run only ever looks up / refreshes the SERVICE invoice — a TDS invoice of the same outlet + month (or a locked one) is never touched', async () => {
+      mockPrisma.autoInvoice.count.mockResolvedValue(2);
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([{ outletId: 'O1', amountPaise: 500000n }]);
+      mockPrisma.outlet.findMany.mockResolvedValue([kycApprovedWBOutlet]);
+      const p2002 = new Prisma.PrismaClientKnownRequestError('x', { code: 'P2002', clientVersion: '5.0.0' });
+      mockPrisma.autoInvoice.create.mockRejectedValue(p2002);
+      // Only the TDS invoice exists for this outlet + month; the SERVICE-filtered lookup must not see it as the tuple.
+      const tdsInvoice = { id: 'tds1', invoiceKind: 'TDS', status: 'GENERATED', lockedAt: new Date() };
+      mockPrisma.autoInvoice.findFirst.mockImplementation(async (a: any) => (a?.where?.invoiceKind === 'SERVICE' ? null : tdsInvoice));
+      mockPrisma.autoInvoice.updateMany.mockResolvedValue({ count: 0 });
+
+      const result = await service.generateForPeriod(admin, { period: '2025-01' });
+
+      for (const c of mockPrisma.autoInvoice.findFirst.mock.calls) expect(c[0].where.invoiceKind).toBe('SERVICE');
+      for (const c of mockPrisma.autoInvoice.updateMany.mock.calls) {
+        expect(c[0].where).toMatchObject({ invoiceKind: 'SERVICE', status: 'GENERATED', lockedAt: null, voidedAt: null });
+      }
+      // No SERVICE tuple → treated as a number collision and retried, never a refresh of the TDS invoice.
+      expect(mockPrisma.autoInvoice.updateMany).not.toHaveBeenCalled();
+      expect(result.skipped).toEqual([expect.objectContaining({ outletCode: 'O1', reason: expect.stringMatching(/unique invoice number/) })]);
     });
 
     it('SELF-HEAL: a refresh that (re)gains GST creates the missing HELD reimbursement', async () => {
@@ -1218,6 +1261,49 @@ describe('InvoicesService', () => {
   });
 
   // ── list ─────────────────────────────────────────────────────────────────────
+
+  describe('VOID invoices (payout cancellation, owner 2026-11-25)', () => {
+    it('lists hide VOID by default (admin + partner); an admin can ask for them; a partner never sees one', async () => {
+      mockPrisma.autoInvoice.findMany.mockResolvedValue([]);
+      mockPrisma.autoInvoice.count.mockResolvedValue(0);
+      await service.list(admin, {});
+      expect(mockPrisma.autoInvoice.findMany.mock.calls[0][0].where.status).toEqual({ not: 'VOID' });
+      await service.list(admin, { status: 'VOID' });
+      expect(mockPrisma.autoInvoice.findMany.mock.calls[1][0].where.status).toBe('VOID');
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'p1' });
+      const r = await service.list(partnerUser, { status: 'VOID' });
+      expect(r.invoices).toEqual([]);
+    });
+
+    it('a VOID invoice cannot be marked paid or renumbered', async () => {
+      mockPrisma.autoInvoice.findFirst.mockResolvedValue({ id: 'inv1', clientId: 'deoleo', status: 'VOID', invoiceKind: 'SERVICE', lockedAt: null });
+      await expect(service.markPaid(gifsy, 'inv1')).rejects.toThrow(/voided/);
+      await expect(service.updateInvoiceNumber(admin, 'inv1', { invoiceNumber: 'X-1' })).rejects.toThrow(/voided/);
+      expect(mockPrisma.autoInvoice.update).not.toHaveBeenCalled();
+    });
+
+    it('generateForBatch: only a LIVE invoice is reused — a later upload for an outlet+month whose invoice is VOID gets a NEW one', async () => {
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([{ id: 'e9', outletId: 'O1', outletName: 'Test Store', amountPaise: 300000n }]);
+      mockTx.outlet.findMany.mockResolvedValue([
+        {
+          outletCode: 'O1', name: 'Test Store', state: 'West Bengal',
+          partner: {
+            id: 'p1', businessName: 'Test Enterprises', ownerName: 'Rajesh', phone: '9999999999', panNumber: 'ABCDE1234F',
+            gstNumber: null, entityType: 'INDIVIDUAL', gstRegistrationType: 'UNREGISTERED', bankName: 'SBI',
+            bankAccountNumber: '123', ifscCode: 'SBIN0001234', kycSubmissions: [{ status: 'APPROVED' }],
+          },
+        },
+      ]);
+      mockTx.autoInvoice.findFirst.mockResolvedValue(null); // the VOID one is filtered out by voidedAt: null
+      mockTx.autoInvoice.count.mockResolvedValue(1);
+      mockTx.autoInvoice.create.mockResolvedValue({ id: 'inv-new' });
+      const res = await service.generateForBatch(mockTx as never, { clientId: 'deoleo', period: '2026-05', batchId: 'b2', visibilityFieldIds: ['f-vis'] });
+      expect(mockTx.autoInvoice.findFirst.mock.calls[0][0].where).toMatchObject({ outletCode: 'O1', invoiceKind: 'SERVICE', voidedAt: null });
+      expect(res.generated).toBe(1);
+      expect(res.skipped).toEqual([]);
+      expect(mockTx.creditPayoutEntry.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['e9'] } }, data: { autoInvoiceId: 'inv-new' } });
+    });
+  });
 
   describe('list', () => {
     it('scopes to the tenant clientId for admin', async () => {

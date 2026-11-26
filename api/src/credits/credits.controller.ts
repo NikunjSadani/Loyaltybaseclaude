@@ -19,6 +19,10 @@ import type { Response } from 'express';
 import { streamObjectResponse } from '../common/stream-object';
 import { CreditsService } from './credits.service';
 import { CreditEvidenceService } from './credit-evidence.service';
+import { PayoutCancelService } from './payout-cancel.service';
+import { oldTimingTdsCheck } from './tds-old-timing-check';
+import { PrismaService } from '../prisma/prisma.service';
+import { CancelPayoutsDto, CancelPreviewDto, CancelTemplateQueryDto, PayoutEntriesQueryDto } from './dto/payout-cancel.dto';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
@@ -61,7 +65,81 @@ export class CreditsController {
     private readonly credits: CreditsService,
     private readonly evidence: CreditEvidenceService,
     private readonly wallet: WalletService,
+    private readonly cancels: PayoutCancelService,
+    private readonly prismaForChecks: PrismaService,
   ) {}
+
+  // ─── Payout Status breakdown + row drill-down (owner 2026-11-25) ──────────────────────────────
+  @Get('batches/:id/payout-status')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  payoutStatus(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.cancels.payoutStatus(user, id);
+  }
+
+  @Get('payout-entries')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  payoutEntries(@CurrentUser() user: JwtPayload, @Query() query: PayoutEntriesQueryDto) {
+    return this.cancels.listEntries(user, query);
+  }
+
+  @Get('batches/:id/cancellations')
+  @Roles('CLIENT_ADMIN', 'GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  batchCancellations(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    return this.cancels.listCancellations(user, id);
+  }
+
+  // One-off READ-ONLY owner check (2026-11-25 "TDS invoice only on success"): old-timing 194C TDS recovery rows whose
+  // payee has failed / cancelled / reversed payouts that year. Assumed → that client; un-assumed Gifsy → every client.
+  @Get('tds-recovery/old-timing-check')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:read')
+  oldTimingTdsCheck(@CurrentUser() user: JwtPayload) {
+    return oldTimingTdsCheck(this.prismaForChecks, user.assumed ? user.clientId : null);
+  }
+
+  // ─── Payout cancellation — GIFSY_ADMIN working inside the client ONLY (re-checked in the service) ─────
+  @Post('payout-cancellations/preview')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:approve_reversal')
+  cancelPreview(@CurrentUser() user: JwtPayload, @Body() dto: CancelPreviewDto) {
+    return this.cancels.preview(user, dto);
+  }
+
+  @Post('payout-cancellations')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:approve_reversal')
+  cancelPayouts(@CurrentUser() user: JwtPayload, @Body() dto: CancelPayoutsDto) {
+    return this.cancels.cancel(user, dto);
+  }
+
+  @Get('payout-cancellations/template')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:approve_reversal')
+  async cancelTemplate(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: CancelTemplateQueryDto,
+  ): Promise<StreamableFile> {
+    const { buffer, filename } = await this.cancels.template(user, query);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${filename.replace(/[^\w.\-]+/g, '_')}"`,
+    });
+  }
+
+  @Post('payout-cancellations/upload')
+  @Roles('GIFSY_ADMIN')
+  @RequirePermission('credits:approve_reversal')
+  @UseInterceptors(LimitedFileInterceptor('file', SPREADSHEET_UPLOAD_MAX_BYTES))
+  cancelUpload(
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: Express.Multer.File,
+    @Body() body: { reason?: string; apply?: string; acknowledgedRowNums?: string; previewedEntryIds?: string } = {},
+  ) {
+    return this.cancels.uploadFile(user, file, body);
+  }
 
   // ─── Batches ───────────────────────────────────────────────────────────────
 

@@ -46,6 +46,8 @@ interface Money {
 }
 
 type ReimbursementStatus = 'HELD' | 'RELEASED';
+/** A row's status as the API may return it — VOID = the invoice was voided (its payouts were cancelled before payment). */
+type RowStatus = ReimbursementStatus | 'VOID';
 /** List filter: HELD_ZERO = HELD rows kept at ₹0 after a regenerate (nothing to release). */
 type StatusFilter = ReimbursementStatus | 'HELD_ZERO';
 
@@ -58,7 +60,7 @@ interface ReimbursementItem {
   gstType: 'CGST_SGST' | 'IGST' | null;
   partnerId: string | null;
   outletCode: string | null;
-  status: ReimbursementStatus;
+  status: RowStatus;
   gst: Money;
   proofUrl: string | null;
   releasePayoutRef: string | null;
@@ -393,11 +395,13 @@ export default function GstReimbursementsPage() {
                           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${
                             it.status === 'RELEASED'
                               ? 'bg-green-50 text-green-700 border border-green-200'
-                              : 'bg-amber-50 text-amber-700 border border-amber-200'
+                              : it.status === 'VOID'
+                                ? 'bg-gray-100 text-gray-600 border border-gray-300'
+                                : 'bg-amber-50 text-amber-700 border border-amber-200'
                           }`}
                         >
                           {it.status === 'RELEASED' ? <CheckCircle className="w-3 h-3" /> : <Download className="w-3 h-3" />}
-                          {it.status === 'RELEASED' ? 'Released' : 'Held'}
+                          {it.status === 'RELEASED' ? 'Released' : it.status === 'VOID' ? 'Void' : 'Held'}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right">

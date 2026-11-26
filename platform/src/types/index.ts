@@ -1052,7 +1052,7 @@ export interface CreditParseResult {
 }
 
 /** Status of a payout entry created from a confirmed upload */
-export type PayoutEntryStatus = 'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED';
+export type PayoutEntryStatus = 'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED' | 'REVERSED' | 'CANCELLED';
 
 /** A single payout entry per outlet per field per month */
 export interface CreditPayoutEntry {

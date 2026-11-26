@@ -824,9 +824,23 @@ export class CreditsService {
       currentMethodology: TdsMethodology;
       /** D9: the client's imported-payouts countFrom (read once by the caller), or null. */
       importedCountFrom: string | null;
+      /**
+       * Owner 2026-11-25 ("TDS invoice only on success"): WHEN this plan runs.
+       *  DOWNLOAD (bank file): 194R + 194C DEDUCT withholding only — no 194C gross-up TDS invoice / recovery, no 194C
+       *    no-PAN recovery (those are raised when the payout is PAID).
+       *  PAID (UTR success): ONLY the 194C gross-up invoice + recovery and the 194C no-PAN recovery, on a PAID-only base
+       *    (the just-paid entries are this event; `excludeEntryIds` keeps them out of the "prior" set).
+       */
+      basis?: 'DOWNLOAD' | 'PAID';
+      excludeEntryIds?: string[];
     },
   ): Promise<PayoutTdsPlan> {
     const { clientId, period, engineEntries, outletTaxMap } = params;
+    const basis = params.basis ?? 'DOWNLOAD';
+    // Prior committed base: at a bank file = already in a file or paid; on PAID = paid only (never FAILED / CANCELLED /
+    // REVERSED / still-in-file), the event's own rows excluded (they are PAID in this same transaction).
+    const priorStatuses: CreditEntryStatus[] = basis === 'PAID' ? ['PAID'] : ['PAID', 'PROCESSING'];
+    const excludeIds = params.excludeEntryIds ?? [];
     const plan: PayoutTdsPlan = {
       deductionByOutlet: new Map(),
       entryDeductions: [],
@@ -852,6 +866,8 @@ export class CreditsService {
       methodology: TdsMethodology;
       entityType: string | null;
       entries: typeof engineEntries;
+      /** PAID basis zero-event GROSS_UP group: the outlet to name on the TDS invoice. */
+      repOutletId?: string;
     };
     const groups = new Map<string, Grp>();
     const panSet = new Set<string>();
@@ -897,12 +913,26 @@ export class CreditsService {
       }
       g.entries.push(e);
     }
+    // PAID basis (audit fix 2026-11-26): a PAN whose just-paid 194C rows are all DEDUCT still gets its GROSS_UP due
+    // re-evaluated — the DEDUCT base counts toward the combined threshold, which can make gross-up TDS due on the PAN's
+    // earlier gross-up payouts (possibly another client's). A zero-event GROSS_UP group does that (event base 0; the
+    // representative for the invoice is the paying outlet).
+    if (basis === 'PAID') {
+      for (const g of [...groups.values()]) {
+        if (g.methodology !== TdsMethodology.DEDUCT) continue;
+        const gk = `${g.panNumber}${SEP}${g.section}${SEP}${TdsMethodology.GROSS_UP}`;
+        if (!groups.has(gk)) {
+          groups.set(gk, { panNumber: g.panNumber, section: g.section, methodology: TdsMethodology.GROSS_UP, entityType: g.entityType, entries: [], repOutletId: g.entries[0]?.outletId } as Grp);
+        }
+      }
+    }
+
     // ── 194R: WHOLE-YEAR TRUE-UP on the SHARED definition (owner 2026-11-18, D2/D3/D6/D9, Q1/Q3) ──
     // Only visibility payouts on the client's CURRENT DEDUCT method are ever withheld (10% PAN / 20% no-PAN);
     // under GROSS_UP nothing is withheld and nothing is written (D7). The threshold is tested on ALL
     // the client's 194R benefits to this retailer this FY (incentives, redemptions, off-platform,
     // counted imported payouts, visibility), dated by when actually paid (this run = runAt).
-    if (r194ByPan.size > 0 && params.currentMethodology === TdsMethodology.DEDUCT) {
+    if (basis === 'DOWNLOAD' && r194ByPan.size > 0 && params.currentMethodology === TdsMethodology.DEDUCT) {
       await this.plan194RDeductions(db, plan, {
         clientId,
         runAt: params.runAt,
@@ -912,6 +942,9 @@ export class CreditsService {
     }
 
     if (groups.size === 0 && noPanGroups.size === 0) return plan;
+    // A bank file only withholds DEDUCT; nothing else to plan when this file has no DEDUCT PAN group.
+    if (basis === 'DOWNLOAD' && ![...groups.values()].some((g) => g.methodology === TdsMethodology.DEDUCT)) return plan;
+    if (basis === 'PAID' && ![...groups.values()].some((g) => g.methodology !== TdsMethodology.DEDUCT) && noPanGroups.size === 0) return plan;
 
     // ── Prior FY aggregation per (PAN, section) — 194C only from here on: cross-tenant (D7) ──
     const priorBaseByPS = new Map<string, bigint>();
@@ -958,9 +991,11 @@ export class CreditsService {
           tdsSection: { in: [...sectionSet] },
           // Already committed to a payout (this download's rows are still PENDING/FAILED here,
           // so they are NOT double-counted; they join the "prior" set on the next download).
-          status: { in: ['PAID', 'PROCESSING'] },
+          // On the PAID basis: paid only, the just-paid rows excluded (they are the event).
+          status: { in: priorStatuses },
           period: { gte: startPeriod, lte: endPeriod },
           outletId: { in: [...priorOutletCodes] },
+          ...(excludeIds.length > 0 ? { id: { notIn: excludeIds } } : {}),
         },
         // FIX-D: tdsMethodology partitions the cumulative base for the AMOUNT math. A legacy row
         // with a null methodology only feeds the COMBINED threshold base (no such visibility rows
@@ -1055,6 +1090,9 @@ export class CreditsService {
       const rate = this.tdsRateFor(g.section, true, g.entityType, cfg);
       const thresholdMet = this.tdsThresholdMet(g.section, combinedCumulativeBase, combinedMaxSingle, cfg);
 
+      // DEDUCT withholding happens at the bank file only; the 194C gross-up invoice only once the payout is PAID.
+      if (g.methodology === TdsMethodology.DEDUCT && basis === 'PAID') continue;
+      if (g.methodology !== TdsMethodology.DEDUCT && basis === 'DOWNLOAD') continue;
       if (g.methodology === TdsMethodology.DEDUCT) {
         const priorDeducted = priorDeductedByPS.get(ps) ?? 0n;
         const { tdsDueCumulativePaise, tdsDeductThisPaise, carryForwardPaise } = computeDeduction({
@@ -1114,7 +1152,12 @@ export class CreditsService {
           const sec = i.id ? invSection.get(i.id) : undefined;
           return !(sec && sec !== g.section);
         });
-        if (alreadyThisPeriod) continue; // already topped up this period (in this scope)
+        // PAID basis: several bank results can land in one month, each paying more of the PAN's base — the DELTA below
+        // (dueNow − Σ already recovered, under the per-PAN lock) is the idempotency guard, so a further top-up in the
+        // same month is raised (never a double: a re-run computes delta 0). Only a LEGACY same-month invoice without
+        // recovery rows (its amount is not in the ledger, so the delta can't see it) still blocks, as before.
+        const legacySamePeriod = samePeriod.some((i) => !(i.id && invSection.get(i.id)));
+        if (basis === 'PAID' ? legacySamePeriod : alreadyThisPeriod) continue; // already topped up this period
 
         // FIX-D: dueNow on the GROSS_UP-methodology cumulative base only.
         const dueNow = computeGrossUpTdsInvoiceBasePaise(methodologyCumulativeBase, rate, thresholdMet);
@@ -1171,7 +1214,8 @@ export class CreditsService {
           }))
           .filter((r) => r.tenantSharePaise !== 0n);
 
-        const rep = outletTaxMap.get(g.entries[0].outletId)!;
+        const repCode = g.entries[0]?.outletId ?? g.repOutletId!;
+        const rep = outletTaxMap.get(repCode)!;
         plan.grossUpInvoices.push({
           panNumber: g.panNumber,
           section: g.section,
@@ -1181,14 +1225,15 @@ export class CreditsService {
           isAnchor,
           bodyPaise: delta,
           panBasePaise: methodologyCumulativeBase,
-          representative: { ...rep, outletCode: g.entries[0].outletId },
+          representative: { ...rep, outletCode: repCode },
           recovery,
         });
       }
     }
 
     // ── FIX-9: no-PAN visibility recovery (per clientId+outletCode, no deduction/invoice) ──
-    if (noPanOutletCodes.size > 0) {
+    // Owner 2026-11-25: recorded when the payout is PAID (PAID basis), never at the bank file.
+    if (basis === 'PAID' && noPanOutletCodes.size > 0) {
       // Prior committed no-PAN visibility base for THIS tenant's outlets in the FY (no cross-
       // tenant aggregation is possible without a PAN — this is per-outlet within the tenant).
       const priorNoPan = await db.creditPayoutEntry.findMany({
@@ -1196,8 +1241,9 @@ export class CreditsService {
           clientId,
           outletId: { in: [...noPanOutletCodes] },
           tdsSection: { in: [...new Set([...noPanGroups.values()].map((g) => g.section))] },
-          status: { in: ['PAID', 'PROCESSING'] },
+          status: { in: priorStatuses },
           period: { gte: startPeriod, lte: endPeriod },
+          ...(excludeIds.length > 0 ? { id: { notIn: excludeIds } } : {}),
         },
         select: { outletId: true, amountPaise: true, tdsSection: true },
       });
@@ -1265,6 +1311,241 @@ export class CreditsService {
     }
 
     return plan;
+  }
+
+  /**
+   * Write a plan's 194C gross-up TDS invoices (+ their pro-rata recovery rows) and its 194C no-PAN recovery rows,
+   * inside the caller's transaction. `downloadId` = the bank run the paid payouts came from (Fund Reconciliation's TDS
+   * line). Every row written here is marked `raisedOn = 'PAID'` (owner 2026-11-25: raised when the payout is paid) —
+   * rows without it were raised at the bank file under the old timing.
+   */
+  private async writeGrossUpArtefacts(
+    tx: Prisma.TransactionClient,
+    clientId: string,
+    period: string,
+    plan: PayoutTdsPlan,
+    downloadId: string,
+  ): Promise<{ invoices: number; recoveryRows: number }> {
+    let recoveryRows = 0;
+    // FIX-1: GROSS-UP monthly TOP-UP TDS invoices for the DELTA + the DELTA pro-rata recovery ledger.
+    for (const gi of plan.grossUpInvoices) {
+      // Audit fix 2026-11-26: the TDS invoice belongs to a client that BEARS the recovery — never to a client that owes
+      // none of it (e.g. a DEDUCT payout of client B that tipped the PAN's combined base over the threshold for client A's
+      // gross-up payouts must not put A's invoice in B's lists). The paying client keeps it when it bears a share.
+      const { invoiceClientId, rep } = await this.tdsInvoiceOwner(tx, clientId, gi);
+      const inv = await this.invoicesService.createTdsInvoice(tx, {
+        clientId: invoiceClientId,
+        period,
+        panNumber: gi.panNumber,
+        fyLabel: gi.fyLabel,
+        bodyPaise: gi.bodyPaise,
+        seq: gi.seq,
+        isAnchor: gi.isAnchor,
+        partnerId: rep.partnerId,
+        outletCode: rep.outletCode,
+        outletName: rep.outletName,
+        retailerState: rep.retailerState,
+        businessName: rep.businessName,
+        ownerName: rep.ownerName,
+        phone: rep.phone,
+        entityType: rep.entityType,
+        gstRegistrationType: rep.gstRegistrationType,
+        gstNumber: rep.gstNumber,
+        bankName: rep.bankName,
+        accountNumber: rep.accountNumber,
+        ifscCode: rep.ifscCode,
+      });
+      if (gi.recovery.length > 0) {
+        await tx.tdsRecoveryEntry.createMany({
+          data: gi.recovery.map((r) => ({
+            clientId: r.clientId,
+            panNumber: gi.panNumber,
+            section: gi.section,
+            fyLabel: gi.fyLabel,
+            tdsInvoiceId: inv.invoiceId,
+            downloadId,
+            raisedOn: 'PAID',
+            panTdsTotalPaise: gi.bodyPaise,
+            tenantBasePaise: r.tenantBasePaise,
+            panBasePaise: gi.panBasePaise,
+            tenantSharePaise: r.tenantSharePaise,
+          })),
+        });
+        recoveryRows += gi.recovery.length;
+      }
+    }
+    // FIX-9: no-PAN visibility recovery — tenant obligation only (no deduction, no invoice), keyed per outlet.
+    if (plan.noPanRecovery.length > 0) {
+      await tx.tdsRecoveryEntry.createMany({
+        data: plan.noPanRecovery.map((r) => ({
+          clientId: r.clientId,
+          panNumber: CreditsService.noPanRecoveryKey(r.outletCode),
+          section: r.section,
+          fyLabel: r.fyLabel,
+          tdsInvoiceId: null,
+          downloadId,
+          raisedOn: 'PAID',
+          panTdsTotalPaise: r.tenantSharePaise,
+          tenantBasePaise: r.eventBasePaise,
+          panBasePaise: r.cumulativeBasePaise,
+          tenantSharePaise: r.tenantSharePaise,
+        })),
+      });
+      recoveryRows += plan.noPanRecovery.length;
+    }
+    return { invoices: plan.grossUpInvoices.length, recoveryRows };
+  }
+
+  /**
+   * The client a 194C gross-up TDS invoice is issued under (audit fix 2026-11-26): the paying client when it bears a
+   * share of the recovery, else the client with the largest share — with one of THAT client's outlets for the PAN as
+   * the invoice's representative (so no client ever sees another client's outlet / payout on its invoice).
+   */
+  private async tdsInvoiceOwner(
+    tx: Prisma.TransactionClient,
+    payingClientId: string,
+    gi: PayoutTdsPlan['grossUpInvoices'][number],
+  ): Promise<{ invoiceClientId: string; rep: PayoutTdsPlan['grossUpInvoices'][number]['representative'] }> {
+    const bearers = gi.recovery.filter((r) => r.tenantSharePaise > 0n);
+    if (bearers.length === 0 || bearers.some((r) => r.clientId === payingClientId)) {
+      return { invoiceClientId: payingClientId, rep: gi.representative };
+    }
+    const owner = [...bearers].sort((a, b) => (b.tenantSharePaise > a.tenantSharePaise ? 1 : b.tenantSharePaise < a.tenantSharePaise ? -1 : a.clientId < b.clientId ? -1 : 1))[0].clientId;
+    const o = await tx.outlet.findFirst({
+      where: { clientId: owner, partner: { panNumber: { equals: gi.panNumber, mode: 'insensitive' }, isParent: false } },
+      orderBy: { outletCode: 'asc' },
+      select: {
+        outletCode: true, name: true, state: true,
+        partner: { select: { id: true, entityType: true, gstNumber: true, gstRegistrationType: true, businessName: true, ownerName: true, phone: true, bankName: true, bankAccountNumber: true, ifscCode: true } },
+      },
+    });
+    if (!o?.partner) {
+      // Never put the bearing client's invoice under the paying client: without an outlet of its own the invoice still
+      // goes to the bearing client, named by PAN only (no other client's outlet / partner details).
+      this.logger.warn(`[tds] no ${owner} outlet found for PAN …${gi.panNumber.slice(-4)} — TDS invoice issued without an outlet representative`);
+      return {
+        invoiceClientId: owner,
+        rep: { ...gi.representative, partnerId: gi.representative.partnerId, outletCode: '', outletName: '', businessName: null, ownerName: null, phone: null, bankName: null, accountNumber: null, ifscCode: null, retailerState: null, gstNumber: null },
+      };
+    }
+    const p = o.partner;
+    return {
+      invoiceClientId: owner,
+      rep: {
+        partnerId: p.id,
+        panNumber: gi.panNumber,
+        entityType: p.entityType ?? null,
+        gstNumber: p.gstNumber ?? null,
+        gstRegistrationType: p.gstRegistrationType ?? null,
+        businessName: p.businessName ?? null,
+        ownerName: p.ownerName ?? null,
+        phone: p.phone ?? null,
+        bankName: p.bankName ?? null,
+        accountNumber: p.bankAccountNumber ?? null,
+        ifscCode: p.ifscCode ?? null,
+        outletName: o.name,
+        retailerState: o.state ?? null,
+        outletCode: o.outletCode,
+      },
+    };
+  }
+  /**
+   * Owner 2026-11-25 ("TDS invoice only on success"): when visibility payouts become PAID, raise the 194C GROSS-UP TDS
+   * invoice + recovery and the 194C no-PAN recovery for what was just paid — on a PAID-only yearly base (never FAILED,
+   * CANCELLED, REVERSED or still in a bank file), the increment against everything already recovered (so a re-bank
+   * then PAID, or a re-run, never counts twice). Runs INSIDE the paying transaction, behind a per-payee advisory lock
+   * (`GUPAID|…`, taken only by this path — the bank file no longer writes these rows).
+   *
+   * The payee is the one recorded when the bank file was made (payeePan snapshot): a real PAN → the PAN's gross-up;
+   * none → the outlet's no-PAN recovery.
+   */
+  async recordGrossUpOnPaid(
+    tx: Prisma.TransactionClient,
+    params: {
+      clientId: string;
+      period: string;
+      downloadId: string;
+      paidEntries: Array<{
+        id: string;
+        outletId: string;
+        fieldId: string;
+        amountPaise: bigint;
+        tdsSection: TdsSection | null;
+        tdsMethodology: TdsMethodology | null;
+        payeePan: string | null;
+      }>;
+    },
+  ): Promise<{ invoices: number; recoveryRows: number }> {
+    const { clientId, period } = params;
+    const candidates = params.paidEntries.filter((e) => e.tdsSection === TdsSection.SEC_194C && e.tdsMethodology != null);
+    if (candidates.length === 0) return { invoices: 0, recoveryRows: 0 };
+    const pans = new Map<string, string | null>();
+    for (const e of candidates) {
+      const p = (e.payeePan ?? '').trim();
+      pans.set(e.outletId, p && !p.startsWith(CreditsService.NO_PAN_KEY) ? p.toUpperCase() : null);
+    }
+    // A DEDUCT PAN payout is withheld at the bank file and raises no gross-up of its OWN — but it still counts toward
+    // the PAN's combined yearly base, so it can make the gross-up due on the PAN's OTHER (gross-up) payouts — possibly
+    // another client's (audit fix 2026-11-26). Every PAID 194C event therefore re-evaluates the PAN's gross-up due.
+    const raising = candidates;
+    const vis = await tx.creditField.findMany({ where: { clientId, payoutStream: 'VISIBILITY' }, select: { id: true } });
+    const visIds = new Set((vis ?? []).map((f) => f.id));
+    const live = raising
+      .filter((e) => visIds.has(e.fieldId))
+      .map((e) => ({ id: e.id, outletId: e.outletId, amountPaise: e.amountPaise, tdsSection: e.tdsSection!, tdsMethodology: e.tdsMethodology! }));
+    if (live.length === 0) return { invoices: 0, recoveryRows: 0 };
+    const codes = [...new Set(live.map((e) => e.outletId))];
+    const outlets = await tx.outlet.findMany({
+      where: { clientId, outletCode: { in: codes } },
+      select: {
+        outletCode: true,
+        name: true,
+        state: true,
+        partner: {
+          select: {
+            id: true, entityType: true, gstNumber: true, gstRegistrationType: true, businessName: true, ownerName: true,
+            phone: true, bankName: true, bankAccountNumber: true, ifscCode: true,
+          },
+        },
+      },
+    });
+    const outletTaxMap = new Map<string, PartnerTaxInfo>();
+    for (const o of outlets ?? []) {
+      const p = o.partner;
+      outletTaxMap.set(o.outletCode, {
+        partnerId: p?.id ?? '',
+        panNumber: pans.get(o.outletCode) ?? null,
+        entityType: p?.entityType ?? null,
+        gstNumber: p?.gstNumber ?? null,
+        gstRegistrationType: p?.gstRegistrationType ?? null,
+        businessName: p?.businessName ?? null,
+        ownerName: p?.ownerName ?? null,
+        phone: p?.phone ?? null,
+        bankName: p?.bankName ?? null,
+        accountNumber: p?.bankAccountNumber ?? null,
+        ifscCode: p?.ifscCode ?? null,
+        outletName: o.name,
+        retailerState: o.state ?? null,
+      });
+    }
+    const { fyLabel } = this.fyForPeriod(period);
+    const keys = [...new Set(live.map((e) => {
+      const pan = pans.get(e.outletId);
+      return pan ? `GUPAID|${pan}|${fyLabel}` : `GUPAID|NOPAN|${clientId}|${e.outletId}|${fyLabel}`;
+    }))].sort();
+    await lockAdvisoryKeys(tx, keys);
+    const plan = await this.buildPayoutTdsPlan(tx, {
+      clientId,
+      period,
+      engineEntries: live,
+      outletTaxMap,
+      runAt: new Date(),
+      currentMethodology: TdsMethodology.GROSS_UP,
+      importedCountFrom: null,
+      basis: 'PAID',
+      excludeEntryIds: params.paidEntries.map((e) => e.id),
+    });
+    return this.writeGrossUpArtefacts(tx, clientId, period, plan, params.downloadId);
   }
 
   /**
@@ -3703,71 +3984,10 @@ export class CreditsService {
           });
         }
 
-        // FIX-1: GROSS-UP monthly TOP-UP TDS invoices (one per crossing period) for the DELTA
-        // + the DELTA pro-rata recovery ledger ("in lieu of TDS" — dashboard-only).
-        for (const gi of tdsPlan.grossUpInvoices) {
-          const rep = gi.representative;
-          const inv = await this.invoicesService.createTdsInvoice(tx, {
-            clientId: user.clientId,
-            period,
-            panNumber: gi.panNumber,
-            fyLabel: gi.fyLabel,
-            bodyPaise: gi.bodyPaise,
-            seq: gi.seq,
-            isAnchor: gi.isAnchor,
-            partnerId: rep.partnerId,
-            outletCode: rep.outletCode,
-            outletName: rep.outletName,
-            retailerState: rep.retailerState,
-            businessName: rep.businessName,
-            ownerName: rep.ownerName,
-            phone: rep.phone,
-            entityType: rep.entityType,
-            gstRegistrationType: rep.gstRegistrationType,
-            gstNumber: rep.gstNumber,
-            bankName: rep.bankName,
-            accountNumber: rep.accountNumber,
-            ifscCode: rep.ifscCode,
-          });
-          if (gi.recovery.length > 0) {
-            await tx.tdsRecoveryEntry.createMany({
-              data: gi.recovery.map((r) => ({
-                clientId: r.clientId,
-                panNumber: gi.panNumber,
-                section: gi.section,
-                fyLabel: gi.fyLabel,
-                tdsInvoiceId: inv.invoiceId,
-                // The bank run that wrote this row (fund reconciliation dates the TDS line with it).
-                downloadId: rec.id,
-                panTdsTotalPaise: gi.bodyPaise,
-                tenantBasePaise: r.tenantBasePaise,
-                panBasePaise: gi.panBasePaise,
-                tenantSharePaise: r.tenantSharePaise,
-              })),
-            });
-          }
-        }
-
-        // FIX-9: no-PAN visibility recovery — tenant obligation only (no deduction, no invoice).
-        // panNumber sentinel '__NO_PAN__'; per (clientId, outletCode) crossing. panBase/tenantBase
-        // carry the cumulative/this-event base for the report; tdsInvoiceId stays null.
-        if (tdsPlan.noPanRecovery.length > 0) {
-          await tx.tdsRecoveryEntry.createMany({
-            data: tdsPlan.noPanRecovery.map((r) => ({
-              clientId: r.clientId,
-              // FIX-B: encode the outlet so the no-PAN recovery telescopes per (clientId, outlet, FY).
-              panNumber: CreditsService.noPanRecoveryKey(r.outletCode),
-              section: r.section,
-              fyLabel: r.fyLabel,
-              tdsInvoiceId: null,
-              downloadId: rec.id,
-              panTdsTotalPaise: r.tenantSharePaise,
-              tenantBasePaise: r.eventBasePaise,
-              panBasePaise: r.cumulativeBasePaise,
-              tenantSharePaise: r.tenantSharePaise,
-            })),
-          });
-        }
+        // Owner 2026-11-25 ("TDS invoice only on success"): the 194C GROSS-UP TDS invoice + recovery and the 194C
+        // no-PAN recovery are NOT written at the bank file any more — they are raised when the payout is PAID
+        // (uploadUtr → recordGrossUpOnPaid). The DOWNLOAD-basis plan never contains them (defensive no-op).
+        await this.writeGrossUpArtefacts(tx, user.clientId, period, tdsPlan, rec.id);
 
         // A-H2: an outlet whose WHOLE payout was withheld as TDS is not a bank line (a ₹0 line would be
         // sent to the bank and later "credited ₹0"). Settle its entries here without the bank — guarded
@@ -3786,10 +4006,30 @@ export class CreditsService {
               `Could not settle ${ids.length - settled.count} fully-withheld payout(s) for period ${period}. Rolled back — retry the download.`,
             );
           }
+          // The other path that sets PAID (owner 2026-11-25 "TDS invoice only on success"): same hook as a UTR success.
+          // A fully withheld payout is a DEDUCT payout with a PAN, so this raises nothing today — kept so the rule holds
+          // on every PAID path.
+          const settledSet = new Set(ids);
+          await this.recordGrossUpOnPaid(tx, {
+            clientId: user.clientId,
+            period,
+            downloadId: rec.id,
+            paidEntries: entries
+              .filter((e) => settledSet.has(e.id))
+              .map((e) => ({
+                id: e.id,
+                outletId: e.outletId,
+                fieldId: e.fieldId,
+                amountPaise: e.amountPaise,
+                tdsSection: e.tdsSection,
+                tdsMethodology: e.tdsMethodology,
+                payeePan: r194RetailerKey(user.clientId, e.outletId, outletTaxMap.get(e.outletId)).key,
+              })),
+          });
           // A-M4/B-M2: lock the self-billed SERVICE invoice of a payout settled here — the same lock a
           // UTR PAID applies (D12): it is final, its number can no longer be edited.
           await tx.autoInvoice.updateMany({
-            where: { clientId: user.clientId, outletCode: { in: fullyWithheldCodes }, period, invoiceKind: 'SERVICE', lockedAt: null },
+            where: { clientId: user.clientId, outletCode: { in: fullyWithheldCodes }, period, invoiceKind: 'SERVICE', lockedAt: null, voidedAt: null },
             data: { lockedAt: runAt },
           });
           // Nothing left for the bank at all → the download is already fully settled.
@@ -4280,6 +4520,7 @@ export class CreditsService {
     // Policy round B: every entry this apply flips to FAILED (TDS credit applications on them are released).
     const failedEntryIdsAll: string[] = [];
     const tdsCreditReleased: ReleasedApplication[] = [];
+    let grossUpOnPaid: { invoices: number; recoveryRows: number } = { invoices: 0, recoveryRows: 0 };
 
     // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
     await this.prisma.$transaction(async (tx) => {
@@ -4302,8 +4543,13 @@ export class CreditsService {
           tdsSection: true,
           period: true,
           paidAt: true,
+          // Owner 2026-11-25: the 194C gross-up / no-PAN TDS is raised for what THIS apply pays.
+          fieldId: true,
+          tdsMethodology: true,
+          payeePan: true,
         },
       });
+      const paidNow: typeof freshEntries = [];
       // A-L: take the 194R retailer lock(s) of every withheld 194R entry in this download BEFORE any
       // flip / offset write — the same key the engine holds while it computes withholding.
       // A-M2: ANY 194R entry flipped here changes the 194R base of its bank-file FY → take that lock too.
@@ -4394,6 +4640,7 @@ export class CreditsService {
         }
 
         if (row.success) {
+          paidNow.push(...pending);
           // ONE paid record per outlet with the SUMMED amount actually flipped (the bank line).
           flippedPaid.push({
             outletId: row.outletId,
@@ -4481,6 +4728,25 @@ export class CreditsService {
         tdsCreditReleased.push(...(await releaseCreditApplications(tx, failedEntryIdsAll, 'PAYOUT_FAILED', user.clientId)));
       }
 
+      // Owner 2026-11-25 ("TDS invoice only on success"): the 194C gross-up TDS invoice + recovery and the 194C no-PAN
+      // recovery for exactly the payouts THIS apply marked PAID (a FAILED row raises nothing; a re-bank pays once).
+      if (paidNow.length > 0) {
+        grossUpOnPaid = await this.recordGrossUpOnPaid(tx, {
+          clientId: user.clientId,
+          period: download.period,
+          downloadId: download.id,
+          paidEntries: paidNow.map((e) => ({
+            id: e.id,
+            outletId: e.outletId,
+            fieldId: e.fieldId,
+            amountPaise: e.amountPaise,
+            tdsSection: e.tdsSection,
+            tdsMethodology: e.tdsMethodology,
+            payeePan: e.payeePan,
+          })),
+        });
+      }
+
       // Download status from the entries' LIVE statuses, re-read in this tx AFTER the flips (never
       // from the parse rows — an already-applied SKIP row is settled, not pending). Same rule as
       // before: every entry settled (PAID / FAILED / REVERSED) → PAID; any entry still awaiting a
@@ -4501,6 +4767,8 @@ export class CreditsService {
             period: download.period,
             invoiceKind: 'SERVICE',
             lockedAt: null,
+            // A VOID invoice (payouts cancelled) is history — never locked as if paid.
+            voidedAt: null,
           },
           data: { lockedAt: now },
         });
@@ -4591,6 +4859,8 @@ export class CreditsService {
       skippedCount: parseResult.summary.skipped,
       notApplied,
       notices,
+      // Owner 2026-11-25: 194C TDS raised for what this apply paid (only present when any).
+      ...(grossUpOnPaid.invoices + grossUpOnPaid.recoveryRows > 0 ? { tdsRaisedOnPaid: grossUpOnPaid } : {}),
       // Policy round B: TDS credit given back because the payout it covered FAILED (only present when any).
       ...(tdsCreditReleased.length > 0
         ? {
@@ -5191,7 +5461,10 @@ export class CreditsService {
             if (cur.status === 'PAID') {
               // The fully-withheld flip lost a race — fall through to the fresh re-read below.
             } else if (cur.status === 'PROCESSING') throw sentToBank();
-            else {
+            else if (cur.status === 'CANCELLED') {
+              // Defensive: a pending reversal blocks a cancellation, so this cannot normally happen — never re-flip it.
+              throw new ConflictException(`Payout entry ${payoutEntry.id} was cancelled by Gifsy — reject this reversal instead.`);
+            } else {
               // PENDING / FAILED — guarded on the status (and withholding stamp) we read, so a
               // concurrent bank-file download / UTR apply can't be overwritten.
               const offsetIt = cur.tdsDeductedPaise > 0n && !!payoutEntry.tdsSection;
