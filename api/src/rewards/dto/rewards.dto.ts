@@ -4,6 +4,7 @@ import {
   IsArray,
   IsBoolean,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsObject,
@@ -708,6 +709,12 @@ export class CreateRewardCatalogDto {
   @Min(0)
   stockQuantity?: number;
 
+  /** Optional reason recorded on the stock-history row this write creates (shown in Stock history). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  stockReason?: string;
+
   @IsOptional()
   @IsString()
   termsAndConditions?: string;
@@ -813,6 +820,12 @@ export class UpdateRewardCatalogDto {
   @Min(0)
   stockQuantity?: number;
 
+  /** Optional reason recorded on the stock-history row when this edit changes the stock (shown in Stock history). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  stockReason?: string;
+
   @IsOptional()
   @IsString()
   termsAndConditions?: string;
@@ -842,4 +855,16 @@ export class UpdateRewardCatalogDto {
   @IsInt({ each: true, message: 'Gift card amounts must be whole rupees' })
   @IsPositive({ each: true, message: 'Gift card amounts must be greater than 0' })
   hubbleDenominations?: number[];
+}
+
+/** POST /v1/admin/rewards/stock-reviews/:id/resolve — an admin's decision on a pre-release return. */
+export class ResolveStockReviewDto {
+  @IsIn(['RETURN', 'KEEP'])
+  action!: 'RETURN' | 'KEEP';
+
+  /** Required for KEEP (why the stock stays as it is); optional for RETURN. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  note?: string;
 }

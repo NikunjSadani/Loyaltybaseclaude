@@ -13,9 +13,14 @@ function makeTx() {
       update: jest.fn().mockResolvedValue({ id: 'o1', status: 'X' }),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       findMany: jest.fn().mockResolvedValue([]),
+      findFirst: jest.fn().mockResolvedValue(null),
       findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'o1', status: 'DISPATCHED' }),
     },
     redemptionStatusHistory: { create: jest.fn().mockResolvedValue({}) },
+    // Stock history (reward-stock.ts): no stock was ever taken for these orders.
+    rewardStockMovement: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null), create: jest.fn() },
+    rewardStockReview: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
+    rewardCatalog: { findFirst: jest.fn().mockResolvedValue(null) },
     $executeRaw: jest.fn().mockResolvedValue(1),
   };
 }

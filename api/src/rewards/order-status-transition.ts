@@ -1,6 +1,7 @@
 import { ConflictException } from '@nestjs/common';
 import { Prisma, RedemptionOrder, RedemptionStatus } from '@prisma/client';
 import { PAN_NORMALISE_SQL } from '../tds/tds-194r.shared';
+import { returnStockForOrder } from './reward-stock';
 
 /**
  * THE single write path for `RedemptionOrder.status` (order-timeline plan, owner D1).
@@ -22,8 +23,9 @@ import { PAN_NORMALISE_SQL } from '../tds/tds-194r.shared';
  *    status the caller read; a lost claim throws 409. Used by the manual admin + vendor
  *    transitions so a stale read / concurrent click can never apply two transitions.
  *
- * Callers keep their own money logic (refund claims, debits) untouched; this only owns the
- * status column + its audit row. `fromStatus: null` = "not known at the call site" (the
+ * Callers keep their own money logic (refund claims, debits) untouched; this owns the status
+ * column + its audit row + the STOCK RETURN on a move to CANCELLED / FAILED / RETURNED
+ * (reward-stock.ts returnStockForOrder — once per order, same tx). `fromStatus: null` = "not known at the call site" (the
  * member timeline uses `toStatus` only). Never put member-visible text in `notes` — it is
  * ops-only and the member `/track` projection never selects it.
  */
@@ -67,6 +69,13 @@ export async function transitionOrderStatus(
       },
     });
 
+  // STOCK RETURN (owner 2026-11-26): every move to CANCELLED / FAILED / RETURNED gives the order's taken stock back,
+  // once, in this same tx — every refund path writes its status through here, so none can skip it.
+  const stockReturn = () =>
+    REFUND_TARGET_STATUSES.has(toStatus)
+      ? returnStockForOrder(tx, { orderId, fromStatus, toStatus, actorId: args.changedById ?? null })
+      : Promise.resolve();
+
   if (args.guard) {
     const claim = await tx.redemptionOrder.updateMany({
       where: { id: orderId, ...args.guard },
@@ -75,6 +84,7 @@ export async function transitionOrderStatus(
     if (claim.count > 0) {
       await history();
       if (toStatus === RedemptionStatus.DELIVERED) await snapshotPayee(tx, orderId);
+      await stockReturn();
     }
     return claim;
   }
@@ -85,6 +95,7 @@ export async function transitionOrderStatus(
   });
   if (fromStatus !== toStatus) await history();
   if (toStatus === RedemptionStatus.DELIVERED) await snapshotPayee(tx, orderId);
+  if (fromStatus !== toStatus) await stockReturn();
   return updated;
 }
 

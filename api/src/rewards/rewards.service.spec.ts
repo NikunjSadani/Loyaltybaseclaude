@@ -69,6 +69,13 @@ const mockPrisma = {
   // Persistent partner wishlist (getWishlist / addToWishlist / removeFromWishlist).
   partnerWishlist: { findMany: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
+  // Stock history (reward-stock.ts) — default: no ledger rows (nothing was taken → nothing to return).
+  rewardStockMovement: {
+    findMany: jest.fn().mockResolvedValue([]),
+    findFirst: jest.fn().mockResolvedValue(null),
+    create: jest.fn().mockResolvedValue({}),
+  },
+  rewardStockReview: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
   payoutTransaction: { create: jest.fn() },
   // clients.features read for the Hubble feature flag (default OFF via beforeEach).
   client: { findFirst: jest.fn(), findMany: jest.fn() },
@@ -5087,6 +5094,26 @@ describe('RewardsService', () => {
       expect(call.data.clientId).toBe('deoleo');
     });
 
+    it('STOCK HISTORY: creating a tracked item writes its OPENING row (actor = creator) in the same tx', async () => {
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'c1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null); // no code clash
+      mockPrisma.rewardCatalog.create.mockResolvedValue({ id: 'r9', clientId: 'deoleo', stockQuantity: 25 });
+      await service.createCatalogItem(gifsy, { ...base, stockQuantity: 25 });
+      expect(mockPrisma.rewardStockMovement.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          type: 'OPENING', quantity: 25, balanceAfter: 25, rewardId: 'r9', clientId: 'deoleo', actorId: 'admin1',
+        }),
+      });
+    });
+
+    it('STOCK HISTORY: an untracked (unlimited) item writes no stock row', async () => {
+      mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'c1' });
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
+      mockPrisma.rewardCatalog.create.mockResolvedValue({ id: 'r9', clientId: 'deoleo', stockQuantity: null });
+      await service.createCatalogItem(gifsy, { ...base });
+      expect(mockPrisma.rewardStockMovement.create).not.toHaveBeenCalled();
+    });
+
     it('creates with defaults when valid (stamps clientId, default status ACTIVE)', async () => {
       mockPrisma.rewardCategory.findFirst.mockResolvedValue({ id: 'c1' });
       mockPrisma.rewardCatalog.findFirst.mockResolvedValue(null);
@@ -5256,6 +5283,37 @@ describe('RewardsService', () => {
       await service.updateCatalogItem(gifsy, 'r1', { status: 'ACTIVE' });
       const call = mockPrisma.rewardCatalog.update.mock.calls?.[0]?.[0];
       expect(call.data.status).toBe('OUT_OF_STOCK');
+    });
+
+    it('STOCK HISTORY: an admin stock edit locks the row, then writes ADJUSTED old → new with the actor + reason (same tx)', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', code: 'AMZ500', stockQuantity: 5, pointsCost: 500, sellingValuePaise: null,
+        minRedemptionPoints: null, maxRedemptionPoints: null,
+      });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1', clientId: 'deoleo', stockQuantity: 12 });
+      // The FOR UPDATE read sees 4 (a redemption confirmed after the pre-read) — the row records 4 → 12.
+      mockPrisma.$queryRaw.mockResolvedValueOnce([{ stockQuantity: 4 }]);
+      mockPrisma.rewardStockMovement.findFirst.mockResolvedValueOnce({ id: 'baseline' });
+      await service.updateCatalogItem(gifsy, 'r1', { stockQuantity: 12, stockReason: 'Restocked from vendor' });
+      expect(mockPrisma.$transaction).toHaveBeenCalled();
+      const created = mockPrisma.rewardStockMovement.create.mock.calls.map((c) => c[0].data);
+      expect(created).toEqual([
+        expect.objectContaining({
+          type: 'ADJUSTED', quantity: 8, balanceAfter: 12, rewardId: 'r1', clientId: 'deoleo',
+          actorId: gifsy.sub, reason: expect.stringContaining('Stock changed 4 → 12'),
+        }),
+      ]);
+      expect(created[0].reason).toContain('Restocked from vendor');
+    });
+
+    it('STOCK HISTORY: an edit that does not touch stock writes no stock row', async () => {
+      mockPrisma.rewardCatalog.findFirst.mockResolvedValue({
+        id: 'r1', code: 'AMZ500', stockQuantity: 5, pointsCost: 500, sellingValuePaise: null,
+        minRedemptionPoints: null, maxRedemptionPoints: null,
+      });
+      mockPrisma.rewardCatalog.update.mockResolvedValue({ id: 'r1', clientId: 'deoleo', stockQuantity: 5 });
+      await service.updateCatalogItem(gifsy, 'r1', { name: 'Renamed' });
+      expect(mockPrisma.rewardStockMovement.create).not.toHaveBeenCalled();
     });
 
     it('allows ACTIVE when effective stock is positive', async () => {

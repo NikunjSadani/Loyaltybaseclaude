@@ -84,6 +84,9 @@ const mockPrisma = {
     findMany: jest.fn(async () => canaryRows),
   },
   redemptionStatusHistory: { create: jest.fn().mockResolvedValue({}) },
+  // Stock history (reward-stock.ts) — default: no ledger rows (nothing taken → nothing returned).
+  rewardStockMovement: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) },
+  rewardStockReview: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
   // Last-resort ATOMIC jsonb merge (`metadata || patch`) — values: [json, now, id]; OPEN = still open.
   $executeRaw: jest.fn(async (strings: TemplateStringsArray | { strings: string[] }, ...vals: unknown[]) => {
     // DELIVERED moves also snapshot the TDS payee (owner rule 2026-11-18; a Prisma.sql object) — not the metadata merge.

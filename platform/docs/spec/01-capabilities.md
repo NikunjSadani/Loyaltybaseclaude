@@ -175,6 +175,11 @@ intended design. Gap refs point to [gap-register.md](gap-register.md).
   `RedemptionStatusHistory`, `RedemptionStatus`/`RewardCatalogStatus` enums. *(No `RewardInventory`
   model — inventory is a nullable `RewardCatalog.stockQuantity` column, added P5; the earlier
   `RewardInventory` reference was a phantom — see `reconcile/P5-wallet-points-rewards.md` §4.)*
+  **Stock history (2026-11-26, all clients):** every `stockQuantity` change writes a `RewardStockMovement`
+  row in the same tx (OPENING / REDEEMED / RETURNED / ADJUSTED; a "Baseline at go-live of stock history"
+  OPENING per tracked reward at deploy). A move to CANCELLED / FAILED / RETURNED returns the order's stock
+  ONCE (via `transitionOrderStatus`); orders confirmed outside the ledger (before go-live) are never
+  auto-returned — `RewardStockReview` lists them for an admin. Code: `api/src/rewards/reward-stock.ts`.
 - **Surface.** `partner/rewards{,/orders}`, `admin/gifts`, `api/rewards/{catalog,orders,
   redeem,redeem/confirm}`, `api/admin/gift-config`.
 - **Current.** Gifsy-managed catalogue; inventory; OTP-confirmed redemption; order lifecycle.

@@ -47,6 +47,9 @@ const mockPrisma = {
   },
   partnerWishlist: { findMany: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
   redemptionStatusHistory: { create: jest.fn() },
+  // Stock history (reward-stock.ts) — default: no ledger rows (nothing taken → nothing returned).
+  rewardStockMovement: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) },
+  rewardStockReview: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
   payoutTransaction: { create: jest.fn() },
   client: { findFirst: jest.fn() },
   $executeRaw: jest.fn().mockResolvedValue(1),
