@@ -137,6 +137,7 @@ const PREVIEW_REPORT_COLUMNS = [
   'Status',
   'Points',
   'Reason / Explanation',
+  'Rule Name',
   'Rule ID',
   'Rule Version',
 ] as const;
@@ -183,6 +184,7 @@ function old_buildPreviewReportXlsx(preview: ComputePreview): Buffer {
     Points: r.status === 'OK' ? num(r.points) : '',
     // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation`.
     'Reason / Explanation': r.reason ?? r.explanation ?? '',
+    'Rule Name': r.ruleName ?? '',
     'Rule ID': r.ruleId ?? '',
     'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
   }));
@@ -229,6 +231,7 @@ const PAYOUT_REPORT_COLUMNS = [
   'Status',
   'Payout (INR)',
   'Reason / Explanation',
+  'Rule Name',
   'Rule ID',
   'Rule Version',
 ] as const;
@@ -271,6 +274,7 @@ function old_buildPayoutReportXlsx(preview: ComputePreview): Buffer {
     'Payout (INR)': r.status === 'OK' ? num(r.payoutRupees) : '',
     // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation`.
     'Reason / Explanation': r.reason ?? r.explanation ?? '',
+    'Rule Name': r.ruleName ?? '',
     'Rule ID': r.ruleId ?? '',
     'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
   }));

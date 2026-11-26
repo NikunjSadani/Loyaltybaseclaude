@@ -304,6 +304,7 @@ export function defaultNode(type: NodeType, firstVar: string): PipelineNode {
 export function blankDraft(): RuleConfigDraft {
   const today = new Date().toISOString().slice(0, 10);
   return {
+    name: '',
     effectiveFrom: today,
     effectiveTo: null,
     evaluationBasis: 'PERIOD_AGGREGATE',
@@ -319,6 +320,7 @@ export function blankDraft(): RuleConfigDraft {
 export function rowToDraft(row: PointsRuleRow): RuleConfigDraft {
   return {
     ruleId: row.ruleId,
+    name: row.name ?? '',
     effectiveFrom: row.effectiveFrom.slice(0, 10),
     effectiveTo: row.effectiveTo ? row.effectiveTo.slice(0, 10) : null,
     evaluationBasis: row.evaluationBasis,
@@ -327,6 +329,101 @@ export function rowToDraft(row: PointsRuleRow): RuleConfigDraft {
     rounding: row.rounding,
     inputs: row.inputs,
     pipeline: row.pipeline,
+  };
+}
+
+// ── Rule display name (display-only metadata — never affects compute) ─────────────────
+
+/** Max length of a rule name (mirrors the backend RULE_NAME_MAX, checked on the trimmed value). */
+export const RULE_NAME_MAX = 120;
+/** Placeholder shown in every rule-name box. */
+export const RULE_NAME_PLACEHOLDER = 'e.g. Unnati – ADHO 2.5%';
+/** Shown wherever an unnamed rule is listed (with its ruleId alongside). */
+export const UNNAMED_RULE = 'Unnamed rule';
+
+/** Collapse internal whitespace + trim — exactly what the backend stores. */
+export function cleanRuleName(name: string | null | undefined): string {
+  return (name ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Blocking issue for a rule name, or null. A NEW rule must be named (soft requirement — Save draft is blocked with
+ * this message); an existing rule may stay unnamed. A provided name must fit RULE_NAME_MAX.
+ */
+export function ruleNameIssue(name: string | null | undefined, required: boolean): string | null {
+  const t = cleanRuleName(name);
+  if (t === '') return required ? 'Give the rule a name (e.g. “Unnati – ADHO 2.5%”) so it can be told apart in lists and reports.' : null;
+  if (t.length > RULE_NAME_MAX) return `Rule name is ${t.length} characters — keep it to ${RULE_NAME_MAX}.`;
+  return null;
+}
+
+/**
+ * Non-blocking warning when ANOTHER logical rule (different ruleId) already uses this name (case-insensitive).
+ * Duplicates are allowed — they only make lists / reports ambiguous.
+ */
+export function duplicateRuleNameWarning(
+  name: string | null | undefined,
+  ownRuleId: string | null | undefined,
+  rules: ReadonlyArray<Pick<PointsRuleRow, 'ruleId' | 'name'>>,
+): string | null {
+  const t = cleanRuleName(name).toLowerCase();
+  if (t === '') return null;
+  const clash = new Set(
+    rules.filter((r) => r.ruleId !== ownRuleId && cleanRuleName(r.name).toLowerCase() === t).map((r) => r.ruleId),
+  );
+  if (clash.size === 0) return null;
+  return `Another rule is already named “${cleanRuleName(name)}” — that is allowed, but lists and reports will show the same name for both. Consider a more specific name.`;
+}
+
+/** The title to show for a rule: its name, or "Unnamed rule" (the caller shows the ruleId alongside). */
+export function ruleTitle(row: { name?: string | null }): { title: string; unnamed: boolean } {
+  const t = cleanRuleName(row.name);
+  return t ? { title: t, unnamed: false } : { title: UNNAMED_RULE, unnamed: true };
+}
+
+/**
+ * Resolve a rule's output credit-field id to its NAME for display. An unknown or inactive field is called out
+ * loudly — "<id> (field not found)" / "<name> (inactive)" — never shown as a bare id.
+ */
+export function creditFieldLabel(
+  fieldId: string | null | undefined,
+  fields: ReadonlyArray<{ id: string; name: string; isActive: boolean }>,
+): { label: string; problem: 'missing' | 'inactive' | null } {
+  const id = (fieldId ?? '').trim();
+  if (id === '') return { label: '—', problem: 'missing' };
+  const f = fields.find((x) => x.id === id);
+  if (!f) return { label: `${id} (field not found)`, problem: 'missing' };
+  if (!f.isActive) return { label: `${f.name} (inactive)`, problem: 'inactive' };
+  return { label: f.name, problem: null };
+}
+
+/** Name for a duplicated rule: "<name> (copy)", trimmed to fit RULE_NAME_MAX; '' when the source is unnamed. */
+export function copyRuleName(name: string | null | undefined): string {
+  const t = cleanRuleName(name);
+  if (t === '') return '';
+  const suffix = ' (copy)';
+  return t.length + suffix.length <= RULE_NAME_MAX ? `${t}${suffix}` : `${t.slice(0, RULE_NAME_MAX - suffix.length).trimEnd()}${suffix}`;
+}
+
+/**
+ * "Duplicate rule": a NEW-rule draft pre-filled from a stored rule — attachment, period basis, effective dates,
+ * inputs, pipeline (every step gets a FRESH id), output, rounding and the name "<name> (copy)". It carries NO
+ * ruleId, so saving mints a brand-new logical rule (version 1, draft); the source rule is never touched. Deep-cloned
+ * so editing the copy can never mutate the loaded source object.
+ */
+export function duplicateDraft(row: PointsRuleRow): RuleConfigDraft {
+  const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
+  const base = rowToDraft(row);
+  return {
+    name: copyRuleName(row.name),
+    effectiveFrom: base.effectiveFrom,
+    effectiveTo: base.effectiveTo ?? null,
+    evaluationBasis: base.evaluationBasis,
+    attachsTo: clone(base.attachsTo),
+    output: clone(base.output),
+    rounding: clone(base.rounding),
+    inputs: clone(base.inputs),
+    pipeline: clone(base.pipeline).map((n) => ({ ...n, id: genId() })),
   };
 }
 
@@ -520,3 +617,34 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
 
 /** Gate-reason placeholders a QUARTERLY rule may use (mirror of the backend QUARTER_PLACEHOLDERS). */
 export const QUARTER_PLACEHOLDERS = ['{m1}', '{m2}', '{m3}', '{quarter}'] as const;
+
+// ── Rules list: program / sub-programme / KPI columns + sort ─────────────────────────
+/** Blank program / sub-programme on a rule = it matches ALL of them. */
+const ALL = 'All';
+export function programCell(v: string | null | undefined): string {
+  return v && v.trim() ? v : ALL;
+}
+
+export type RuleSortKey = 'program' | 'subProgram' | 'kpi' | 'status';
+const STATUS_ORDER: Record<RuleStatus, number> = { published: 0, draft: 1, archived: 2 };
+
+/** Client-side sort of the loaded rows (stable; ties keep the server order: ruleId asc, version desc). */
+export function sortRules(rows: PointsRuleRow[], key: RuleSortKey | null, dir: 'asc' | 'desc'): PointsRuleRow[] {
+  if (!key) return rows;
+  const val = (r: PointsRuleRow): string | number =>
+    key === 'program' ? programCell(r.program).toLowerCase()
+      : key === 'subProgram' ? programCell(r.programCategory).toLowerCase()
+        : key === 'kpi' ? (r.kpiCode ?? '').toLowerCase()
+          : STATUS_ORDER[r.status] ?? 9;
+  const sign = dir === 'asc' ? 1 : -1;
+  return rows
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => {
+      const va = val(a.r);
+      const vb = val(b.r);
+      if (va < vb) return -sign;
+      if (va > vb) return sign;
+      return a.i - b.i;
+    })
+    .map((x) => x.r);
+}

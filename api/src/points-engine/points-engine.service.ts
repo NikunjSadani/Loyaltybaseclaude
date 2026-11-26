@@ -58,6 +58,7 @@ import type {
 import {
   CreatePointsRuleDto,
   ListPointsRulesQueryDto,
+  RULE_NAME_MAX,
   UpdatePointsRuleDto,
 } from './dto/points-rule.dto';
 
@@ -98,11 +99,14 @@ export class PointsEngineService {
 
     let ruleId = dto.ruleId?.trim();
     let version = 1;
+    // Validate the name up-front (400 on blank / too long) before any DB work.
+    const suppliedName = dto.name === undefined ? undefined : normalizeRuleName(dto.name);
+    let inheritedName: string | null = null;
 
     if (ruleId) {
       const existing = await this.prisma.pointsRule.findMany({
         where: { clientId, ruleId },
-        select: { version: true, status: true, evaluationBasis: true },
+        select: { version: true, status: true, evaluationBasis: true, name: true },
       });
       if (existing.length === 0) {
         throw new NotFoundException(`No rule ${ruleId} exists for this tenant.`);
@@ -116,6 +120,10 @@ export class PointsEngineService {
         );
       }
       version = Math.max(...existing.map((r) => r.version)) + 1;
+      // A new version inherits the latest version's display name unless the caller supplies one.
+      if (dto.name === undefined) {
+        inheritedName = existing.reduce((a, b) => (b.version > a.version ? b : a)).name ?? null;
+      }
     } else {
       // Brand-new logical rule. ruleId is a distinct, caller-stable identity (separate from the
       // row's @default(cuid()) primary id), so mint one up-front.
@@ -127,7 +135,10 @@ export class PointsEngineService {
 
     try {
       return await this.prisma.pointsRule.create({
-        data: this.toCreateData(clientId, ruleId, version, 'draft', dto, user.sub),
+        data: {
+          ...this.toCreateData(clientId, ruleId, version, 'draft', dto, user.sub),
+          name: suppliedName === undefined ? inheritedName : suppliedName,
+        },
       });
     } catch (e) {
       // Two concurrent createDraft on the same ruleId can both pass the version/open-draft check above
@@ -182,7 +193,48 @@ export class PointsEngineService {
         kpiCode:         attachsTo.kpiCode,
         program:         attachsTo.program ?? null,
         programCategory: attachsTo.programCategory ?? null,
+        // Omitted name = keep the current one (a whole-object config replace must not silently clear it).
+        ...(dto.name === undefined ? {} : { name: normalizeRuleName(dto.name) }),
       },
+    });
+  }
+
+  // ─── rename (display-only) ──────────────────────────────────────────────────
+
+  /**
+   * Rename a logical rule WITHOUT creating a new version — works on a PUBLISHED (or archived) rule too.
+   * The name is DISPLAY-ONLY metadata: it is never read by compute and is not part of the rule's identity
+   * (ruleId/version), config hash, or any idempotency / source key, so changing it cannot change what a rule
+   * pays or re-open a credited run. Applied to EVERY version of the logical rule (same clientId + ruleId) so the
+   * Rules list / history / preview all show one name. Only `name` (and the @updatedAt stamp) is written. Audited
+   * (POINTS_RULE_RENAME) with the before/after name of each version.
+   */
+  async rename(user: JwtPayload, id: string, rawName: string | null | undefined): Promise<PointsRule> {
+    if (rawName === undefined) throw new BadRequestException('name is required (send null to clear it).');
+    const name = normalizeRuleName(rawName);
+    const row = await this.loadForWrite(user, id);
+    return this.prisma.$transaction(async (tx) => {
+      const versions = await tx.pointsRule.findMany({
+        where: { clientId: row.clientId, ruleId: row.ruleId },
+        select: { id: true, version: true, name: true },
+      });
+      await tx.pointsRule.updateMany({
+        where: { clientId: row.clientId, ruleId: row.ruleId },
+        data: { name },
+      });
+      await tx.auditLog.create({
+        data: {
+          action: 'UPDATE',
+          entityType: 'POINTS_RULE_RENAME',
+          entityId: row.ruleId,
+          actorId: user.sub,
+          oldValues: { names: versions.map((v) => ({ version: v.version, name: v.name ?? null })) } as Prisma.InputJsonValue,
+          newValues: { name } as Prisma.InputJsonValue,
+          metadata: { clientId: row.clientId, ruleId: row.ruleId, viaRowId: row.id, versions: versions.length } as Prisma.InputJsonValue,
+        },
+      });
+      const updated = await tx.pointsRule.findFirst({ where: { id: row.id } });
+      return updated ?? { ...row, name };
     });
   }
 
@@ -650,6 +702,21 @@ export function notCoveringReason(r: Pick<PointsRule, 'ruleId' | 'version' | 'ef
     return `Rule ${who} starts ${longDay(r.effectiveFrom)}, after the quarter began ${longDay(qStart)} — back-date its effective-from to ${longDay(qStart)} to cover this quarter.`;
   }
   return `Rule ${who} ends ${longDay(r.effectiveTo!)}, before the quarter ends ${longDay(qEnd)} — a quarterly rule must be effective for the whole quarter.`;
+}
+
+/**
+ * Normalise a rule display name: trimmed; null clears it; a provided name must be non-empty after trimming and
+ * ≤ RULE_NAME_MAX characters. Duplicates across rules are allowed (the UI warns).
+ */
+export function normalizeRuleName(raw: string | null): string | null {
+  if (raw === null) return null;
+  if (typeof raw !== 'string') throw new BadRequestException('Rule name must be text.');
+  const t = raw.replace(/\s+/g, ' ').trim();
+  if (t === '') throw new BadRequestException('Rule name cannot be blank — enter a name or clear it.');
+  if (t.length > RULE_NAME_MAX) {
+    throw new BadRequestException(`Rule name is ${t.length} characters — the limit is ${RULE_NAME_MAX}.`);
+  }
+  return t;
 }
 
 /** Refuse a version whose monthly/quarterly kind differs from the rule's other versions. */

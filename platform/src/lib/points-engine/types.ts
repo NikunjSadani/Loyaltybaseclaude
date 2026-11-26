@@ -130,6 +130,8 @@ export interface RuleOutput { awardType: AwardType; fieldId: string; narration?:
 /** The authoring fields a draft create/update sends (server owns identity/version/status). */
 export interface RuleConfigDraft {
   ruleId?: string;
+  /** Display name (display-only; never affects compute). '' in the builder = not set. */
+  name?: string | null;
   effectiveFrom: string; // YYYY-MM-DD
   effectiveTo?: string | null;
   evaluationBasis?: EvaluationBasis;
@@ -144,6 +146,8 @@ export interface RuleConfigDraft {
 export interface PointsRuleRow {
   id: string;
   ruleId: string;
+  /** Display name — null/absent = "Unnamed rule" (show the ruleId instead). */
+  name?: string | null;
   clientId: string;
   version: number;
   status: RuleStatus;
@@ -211,6 +215,8 @@ export interface ComputePreviewRow {
   kpiCode: string;
   ruleId?: string;
   ruleVersion?: number;
+  /** The rule's display name (absent when the rule is unnamed). */
+  ruleName?: string;
   awardType?: AwardType;
   fieldId?: string;
   fieldName?: string;
@@ -263,6 +269,8 @@ export interface ComputePreview {
   /** Gifsy-enabled in-portal direct crediting — lets the UI offer/hide "Credit in portal" pre-click. */
   directCreditEnabled: boolean;
   ruleVersionsUsed: Array<{ ruleId: string; version: number }>;
+  /** ruleId → display name for the named rules this run used (display-only). */
+  ruleNames?: Record<string, string>;
   /** Content hash of this run — pass back as `expectedKey` on commit to guard the review→commit TOCTOU. */
   sourceKey: string;
   /** Content hash of the run's PAYOUT rows — pass back as `expectedKey` on the payout-report download. */

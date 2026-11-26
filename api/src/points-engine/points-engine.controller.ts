@@ -6,6 +6,7 @@
  *   GET    /v1/admin/points-rules/:id        get one rule
  *   POST   /v1/admin/points-rules            create a draft (optionally a new version of a ruleId)
  *   PATCH  /v1/admin/points-rules/:id        update a draft (only while status=draft)
+ *   PATCH  /v1/admin/points-rules/:id/name   rename (any status, no new version — display-only; audited)
  *   POST   /v1/admin/points-rules/:id/publish    publish a draft (→ immutable published version)
  *   POST   /v1/admin/points-rules/:id/archive    archive a rule
  *
@@ -30,6 +31,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import {
   CreatePointsRuleDto,
   ListPointsRulesQueryDto,
+  RenamePointsRuleDto,
   UpdatePointsRuleDto,
 } from './dto/points-rule.dto';
 
@@ -71,6 +73,21 @@ export class PointsEngineController {
     @Body() dto: UpdatePointsRuleDto,
   ) {
     return this.points.updateDraft(user, id, dto);
+  }
+
+  /**
+   * PATCH /v1/admin/points-rules/:id/name — rename a rule (draft, published or archived) WITHOUT creating a new
+   * version. Display-only metadata; same write permission as authoring; audited (POINTS_RULE_RENAME).
+   */
+  @Patch(':id/name')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('points_rules:write')
+  rename(
+    @CurrentUser() user: JwtPayload,
+    @Param('id') id: string,
+    @Body() dto: RenamePointsRuleDto,
+  ) {
+    return this.points.rename(user, id, dto.name);
   }
 
   /** POST /v1/admin/points-rules/:id/publish — publish a draft. */
