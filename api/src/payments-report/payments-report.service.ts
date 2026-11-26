@@ -1,7 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { CreditEntryStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { isSettledByTds, PAYMENT_ENTRY_SELECT, paymentsOrderBy, paymentsTotals, paymentsWhere } from './payments-report.query';
+import {
+  isSettledByTds,
+  offPortalTotals,
+  offPortalWhere,
+  PAYMENT_ENTRY_SELECT,
+  paymentsOrderBy,
+  paymentsTotals,
+  paymentsWhere,
+} from './payments-report.query';
 import { PAYMENTS_DEFAULT_PAGE_SIZE, PAYMENTS_MAX_PAGE_SIZE } from './dto/payments-report.dto';
 import { formatINR } from '../common/money';
 import { istDate } from '../credits/tds-credit';
@@ -100,9 +108,11 @@ export class PaymentsReportService {
     // ("Showing 1–50 of N") always describe the same set of rows even while payouts are being written. The page is
     // CLAMPED to the last page (a page past the end — e.g. the range shrank — returns the last page, never an empty
     // page with non-zero totals); the effective page is returned so the client can follow.
-    const { totals, page, entries } = await this.prisma.$transaction(
+    const opWhere = offPortalWhere(scope);
+    const { totals, page, entries, offPortal } = await this.prisma.$transaction(
       async (tx) => {
         const t = await paymentsTotals(tx, where);
+        const op = await offPortalTotals(tx, opWhere);
         const lastPage = Math.max(1, Math.ceil(t.count / pageSize));
         const p = Math.min(requestedPage, lastPage);
         const rows = await tx.creditPayoutEntry.findMany({
@@ -122,7 +132,7 @@ export class PaymentsReportService {
             },
           },
         });
-        return { totals: t, page: p, entries: rows };
+        return { totals: t, page: p, entries: rows, offPortal: op };
       },
       { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
     );
@@ -257,6 +267,9 @@ export class PaymentsReportService {
         amount: this.money(totals.amountPaise),
         tdsDeducted: this.money(totals.tdsDeductedPaise),
       },
+      // Off-portal payments register — paid OUTSIDE the portal in the same range (NOT in the rows / totals above; the
+      // export lists them on their own sheet). null for a non-PAID status filter.
+      offPortal: opWhere ? { count: offPortal.count, amount: this.money(offPortal.amountPaise) } : null,
       rows,
     };
   }

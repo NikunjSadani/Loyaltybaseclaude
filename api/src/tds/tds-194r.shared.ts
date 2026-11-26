@@ -10,6 +10,9 @@
  *    - DELIVERED redemptions: UPI / BANK_TRANSFER                                → "cash" (client-borne)
  *                             GIFT_CARD / PHYSICAL_GIFT (vouchers, gifts)        → "nonCash"
  *    - TdsOffPlatformEntry (194R)                                                → "nonCash"
+ *      (except a marker row REPLACED by a live off-portal payment — the payment counts instead, never both)
+ *    - OffPortalPayment (194R, not void; owner 2026-11-25) by PAYMENT DATE: incentive cash → "cash",
+ *      visibility cash → "vis", any gift → "nonCash". Paid in full — nothing withheld.
  *
  *  DATES (owner FY rule 2026-11-18): a payout that went through a bank file — PAID or PROCESSING —
  *  belongs to the FY its BANK FILE was made (`download.downloadedAt`; the engine counts the run it is
@@ -274,6 +277,18 @@ export interface Collect194RArgs {
    * explanation and the reversal credit cap. Only V2 reversals set the marker → every other tenant is unchanged.
    */
   reversedSink?: (key: string, item: Reversed194RItem) => void;
+  /** Off-portal payments register (2026-11-25): every off-portal payment counted, under its key (report call-outs). */
+  offPortalSink?: (key: string, item: OffPortal194RItem) => void;
+}
+
+/** An off-portal payment counted in the 194R base (paid in full outside the portal — nothing withheld). */
+export interface OffPortal194RItem {
+  id: string;
+  hasPan: boolean;
+  bucket: 'visPaise' | 'cashPaise' | 'nonCashPaise';
+  amountPaise: bigint;
+  paymentDate: Date;
+  outletCode: string;
 }
 
 /** A payout taken off the 194R base by a V2 reversal (D1). */
@@ -294,7 +309,7 @@ export interface Reversed194RItem {
  * vis / cash / nonCash. The single source of "what counts" for the engine AND the report.
  */
 export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Promise<Map<string, Bases194R>> {
-  const { clientId, fyLabel, importedCountFrom, scope, noteOutlet, reversedSink } = args;
+  const { clientId, fyLabel, importedCountFrom, scope, noteOutlet, reversedSink, offPortalSink } = args;
   const { start, endExclusive } = fyFromLabel(fyLabel);
   const out = new Map<string, Bases194R>();
   const add = (key: string, hasPan: boolean, bucket: keyof Omit<Bases194R, 'hasPan'>, amount: bigint): void => {
@@ -457,8 +472,23 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
           }
         : {}),
     },
-    select: { panNumber: true, amountPaise: true, outletCode: true, resolvedKey: true },
+    select: { id: true, panNumber: true, amountPaise: true, outletCode: true, resolvedKey: true },
   });
+  // Off-portal payments register: a legacy marker row REPLACED by a live off-portal payment is not counted here — the
+  // payment (Source 4, with its true cash / gift bucket) counts instead. Never both. (No live payment → unchanged.)
+  // `offPortalPayment` is absent only on narrow unit-test fakes; the real client always has it.
+  const offPortalDelegate = (db as Partial<Tds194RDb>).offPortalPayment;
+  const replaced = offPlatform.length && offPortalDelegate
+    ? new Set(
+        (
+          await offPortalDelegate.findMany({
+            where: { clientId, voidedAt: null, supersedesOffPlatformEntryId: { in: offPlatform.map((r) => r.id).filter(Boolean) } },
+            select: { supersedesOffPlatformEntryId: true },
+          })
+        ).map((p) => p.supersedesOffPlatformEntryId),
+      )
+    : new Set<string | null>();
+  for (let i = offPlatform.length - 1; i >= 0; i--) if (offPlatform[i].id && replaced.has(offPlatform[i].id)) offPlatform.splice(i, 1);
   const noPanCodes = offPlatform
     .filter((r) => !r.resolvedKey && isNoPanCell(r.panNumber) && r.outletCode?.trim())
     .map((r) => r.outletCode!.trim());
@@ -482,6 +512,45 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
     if (noteOutlet && e.outletCode?.trim()) {
       const m = isNoPanCell(e.panNumber) ? byCode.get(e.outletCode.trim().toUpperCase()) : undefined;
       noteOutlet(key, m && m.length === 1 ? m[0].outletCode : e.outletCode);
+    }
+  }
+
+  // ── Source 4: OFF-PORTAL payments register (owner 2026-11-25) — paid IN FULL outside the portal, by PAYMENT DATE ──
+  // Key: the PAN frozen at upload (file PAN, else the portal owner's PAN then); no PAN → the outlet's CURRENT no-PAN
+  // owner key (`__NO_PAN__:<partnerId>`, else `__NO_PAN__:outlet:<clientId>:<code>` — so an Outlet ID that registers
+  // later joins its owner's no-PAN year). Bucket: Incentive → cash / gift → non-cash; Visibility (194R) → visibility
+  // (cash) / gift → non-cash. Voided rows never count. 194C visibility rows are read by the 194C report instead.
+  if (offPortalDelegate) {
+    const scopeCodes = scope ? [...new Set(scope.outletCodes.map((c) => c.trim().toUpperCase()))] : [];
+    const offPortal = await offPortalDelegate.findMany({
+      where: {
+        clientId,
+        voidedAt: null,
+        tdsSection: 'SEC_194R',
+        paymentDate: { gte: start, lt: endExclusive },
+        ...(scope ? { OR: [{ panNumber: { in: scopeKeys } }, { panNumber: null, outletCodeKey: { in: scopeCodes } }] } : {}),
+      },
+      select: { id: true, outletCode: true, outletCodeKey: true, panNumber: true, amountPaise: true, paymentDate: true, payoutStream: true, paymentMode: true },
+    });
+    const noPanOp = offPortal.filter((p) => isNoPanCell(p.panNumber)).map((p) => p.outletCode);
+    const opOutlets = await outletsByCodeCI(db, noPanOp, clientId);
+    for (const p of offPortal) {
+      let key: string;
+      let hasPan: boolean;
+      if (!isNoPanCell(p.panNumber)) {
+        key = normalisePan(p.panNumber!);
+        hasPan = true;
+      } else {
+        const m = opOutlets.get(p.outletCodeKey) ?? [];
+        const o = m.length === 1 ? m[0] : null;
+        key = o?.partnerId ? noPanPartnerKey(o.partnerId) : noPanOutletKey(clientId, o?.outletCode ?? p.outletCode);
+        hasPan = false;
+      }
+      const bucket: OffPortal194RItem['bucket'] =
+        p.paymentMode === 'GIFT' ? 'nonCashPaise' : p.payoutStream === 'VISIBILITY' ? 'visPaise' : 'cashPaise';
+      add(key, hasPan, bucket, p.amountPaise);
+      noteOutlet?.(key, p.outletCode);
+      offPortalSink?.(key, { id: p.id, hasPan, bucket, amountPaise: p.amountPaise, paymentDate: p.paymentDate, outletCode: p.outletCode });
     }
   }
   return out;

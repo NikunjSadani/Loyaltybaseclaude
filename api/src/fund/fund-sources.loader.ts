@@ -30,6 +30,8 @@
  *    full — recovered from this tenant). Owner decisions 2026-11-24: charged IN FULL as what Gifsy actually pays, WITH
  *    ITS BANK RUN (the run id stored on the row; an interim match for older rows) — rules in tdsItems() below. 194R /
  *    DEDUCT TDS excluded.
+ *  OFF_PORTAL_PAYMENT — OffPortalPayment (off-portal payments register, owner 2026-11-25): paid on its payment date
+ *    (committed = paid = paymentDate), face = amount, agency fee per the existing rules; voided → returned on voidedAt.
  */
 import { computeFrozenValuePaise } from '../rewards/gift-value.helper';
 import { fyLabelForPeriod } from '../tds/tds.helpers';
@@ -42,7 +44,9 @@ const REFUNDED: ReadonlySet<string> = new Set(['FAILED', 'CANCELLED', 'RETURNED'
 type Db = Pick<
   PrismaService,
   'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'creditField' | 'creditReversal' | 'creditPayoutDownload' | 'tdsRecoveryEntry' | 'fundReceipt' | 'fundRate'
->;
+> &
+  // Off-portal payments register (2026-11-25). Optional only so narrow unit-test fakes keep working; the real client has it.
+  Partial<Pick<PrismaService, 'offPortalPayment'>>;
 
 /** Keyset pages ordered by id (id is unique + NOT NULL). */
 async function allPages<T extends { id: string }>(fetch: (p: { take: number; cursor?: { id: string }; skip?: number }) => Promise<T[]>): Promise<T[]> {
@@ -491,6 +495,44 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
   return out;
 }
 
+// ── Off-portal payments ──────────────────────────────────────────────────────────────────────────
+
+export interface OffPortalRow {
+  id: string;
+  outletCode: string;
+  outletName: string;
+  amountPaise: bigint;
+  paymentDate: Date;
+  utr: string | null;
+  payoutStream: string;
+  paymentMode: string;
+  period: string;
+  voidedAt: Date | null;
+}
+
+/**
+ * OFF_PORTAL_PAYMENT (owner 2026-11-25) — a payment already made outside the portal, recorded in the off-portal payments
+ * register: committed AND paid on its payment date (it was paid from the advance), charged face + agency fee like every
+ * payout (NO_FEE_RATE flagged when no fee is set). A VOIDED entry is returned on its void date (nets to zero, visible).
+ */
+export function offPortalItem(p: OffPortalRow): FundSpendItem {
+  const kind = `${p.payoutStream === 'VISIBILITY' ? 'Visibility' : 'Incentive'}, ${p.paymentMode === 'GIFT' ? 'gift' : 'cash'}`;
+  return {
+    key: `opp:${p.id}`,
+    type: 'OFF_PORTAL_PAYMENT',
+    ref: p.utr ? `${p.outletCode} · ${p.utr}` : p.outletCode,
+    description: `Off-portal payment (${kind}, ${p.period}) to ${p.outletName} (${p.outletCode})${p.voidedAt ? ' — VOIDED' : ''}`,
+    source: { kind: 'offPortalPayment', id: p.id },
+    facePaise: p.amountPaise,
+    status: p.voidedAt ? 'RETURNED' : 'PAID',
+    committedAt: p.paymentDate,
+    paidAt: p.paymentDate,
+    returnedAt: p.voidedAt,
+    utr: p.utr,
+    flags: [],
+  };
+}
+
 // ── Loader ───────────────────────────────────────────────────────────────────────────────────────
 
 export interface FundInputs {
@@ -701,6 +743,29 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
     ? await db.creditPayoutDownload.findMany({ where: { clientId }, select: { id: true, downloadCode: true, downloadedAt: true, period: true, fieldId: true } })
     : [];
   items.push(...tdsItems(recoveries, runs, tds194c));
+
+  if (db.offPortalPayment) {
+    const op = await allPages((p) =>
+      db.offPortalPayment!.findMany({
+        where: { clientId },
+        select: {
+          id: true,
+          outletCode: true,
+          outletName: true,
+          amountPaise: true,
+          paymentDate: true,
+          utr: true,
+          payoutStream: true,
+          paymentMode: true,
+          period: true,
+          voidedAt: true,
+        },
+        orderBy: { id: 'asc' },
+        ...p,
+      }),
+    );
+    for (const p of op) items.push(offPortalItem(p));
+  }
 
   return {
     items,

@@ -35,6 +35,7 @@ import { KycModule }      from './kyc/kyc.module';
 import { SalesModule }    from './sales/sales.module';
 import { PayoutsModule }  from './payouts/payouts.module';
 import { FundModule }     from './fund/fund.module';
+import { OffPortalPaymentsModule } from './off-portal-payments/off-portal-payments.module';
 import { ReportsModule }  from './reports/reports.module';
 import { PaymentsReportModule } from './payments-report/payments-report.module';
 import { SchemesModule }  from './schemes/schemes.module';
@@ -106,6 +107,7 @@ import { HelpModule }         from './help/help.module';
     SalesModule,
     PayoutsModule,
     FundModule,
+    OffPortalPaymentsModule,
     ReportsModule,
     PaymentsReportModule,
     SchemesModule,

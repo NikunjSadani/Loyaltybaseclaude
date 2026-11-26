@@ -2,7 +2,7 @@
 // (partner.service.getPayouts) and the sales outlet ledger (kyc.service.ledger),
 // so the two payout views can never drift (mirrors the credit-field-name helper).
 //
-// Two payout rails are unioned into one history:
+// Three payout rails are unioned into one history (the third — the off-portal payments register — since 2026-11-25):
 //   • redemption cash-outs  → PayoutTransaction (scoped by partnerId)
 //   • credit-based payouts   → CreditPayoutEntry (scoped by outlet CODE — its
 //     `outletId` column holds the outlet CODE string, NOT the Outlet PK)
@@ -43,6 +43,23 @@ export interface PayoutRow {
   tdsWithheldPaise?: number;
   /** The WHOLE payout was withheld as TDS — ₹0 reached the retailer (no bank transfer, no UTR). */
   settledByTds?: true;
+  /** Off-portal payments register (2026-11-25): paid outside the portal, recorded by Gifsy. */
+  offPortal?: true;
+  /** Off-portal only: paid as a gift (not money) — present only on gift rows. */
+  gift?: true;
+}
+
+/** OffPortalPayment row shape consumed here (off-portal payments register). */
+interface OffPortalRow {
+  id: string;
+  period: string;
+  payoutStream: string;
+  paymentMode: string;
+  amountPaise: bigint;
+  paymentDate: Date;
+  utr: string | null;
+  narration: string | null;
+  createdAt: Date;
 }
 
 /** PayoutTransaction row shape consumed here (redemption rail). */
@@ -78,6 +95,8 @@ export interface PayoutStatementReader {
   outlet: { findMany: (args: unknown) => Promise<Array<{ outletCode: string }>> };
   payoutTransaction: { findMany: (args: unknown) => Promise<unknown[]> };
   creditPayoutEntry: { findMany: (args: unknown) => Promise<CreditEntryRow[]> };
+  /** Optional only so narrow unit-test fakes keep working; PrismaService / a tx client always has it. */
+  offPortalPayment?: { findMany: (args: unknown) => Promise<OffPortalRow[]> };
 }
 
 /**
@@ -202,7 +221,34 @@ export async function buildPayoutStatement(
     };
   });
 
-  return [...redemptionPayouts, ...creditPayouts]
+  // Off-portal payments register (owner 2026-11-25): payments made OUTSIDE the portal to one of these outlets (matched
+  // by Outlet ID, case-insensitive — an Outlet ID paid before it registered links automatically). Paid in full; voided
+  // entries are hidden (like FAILED / REVERSED payouts).
+  const offPortalRows =
+    outletCodes.length && prisma.offPortalPayment
+      ? await prisma.offPortalPayment.findMany({
+          where: { clientId, voidedAt: null, outletCodeKey: { in: [...new Set(outletCodes.map((c) => c.trim().toUpperCase()))] } },
+          select: { id: true, period: true, payoutStream: true, paymentMode: true, amountPaise: true, paymentDate: true, utr: true, narration: true, createdAt: true },
+          orderBy: { paymentDate: 'desc' },
+        })
+      : [];
+  const offPortalPayouts = offPortalRows.map((p) => ({
+    id: p.id,
+    period: p.period,
+    kpiLabel: `Off-portal ${p.payoutStream === 'VISIBILITY' ? 'visibility' : 'incentive'} payment${p.paymentMode === 'GIFT' ? ' (gift)' : ''}`,
+    achievedPct: 100,
+    payoutAmountPaise: Number(p.amountPaise),
+    uploadedAt: p.createdAt.toISOString(),
+    utr: p.utr ?? undefined,
+    paidAt: p.paymentDate.toISOString(),
+    status: 'PAID' as const,
+    narration: p.narration ?? 'Paid outside the portal',
+    offPortal: true as const,
+    ...(p.paymentMode === 'GIFT' ? { gift: true as const } : {}),
+    _sortAt: p.paymentDate.getTime(),
+  }));
+
+  return [...redemptionPayouts, ...creditPayouts, ...offPortalPayouts]
     .sort((a, b) => b._sortAt - a._sortAt)
     .map(({ _sortAt: _drop, ...p }) => p);
 }

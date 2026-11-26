@@ -22,7 +22,7 @@ const DATE_MSG = 'must be a date (YYYY-MM-DD)';
 export class FundStatementQueryDto {
   @IsOptional() @Matches(DATE_RE, { message: `from ${DATE_MSG}` }) from?: string;
   @IsOptional() @Matches(DATE_RE, { message: `to ${DATE_MSG}` }) to?: string;
-  @IsOptional() @IsIn(['VOUCHER', 'CASH_REDEMPTION', 'CREDIT_PAYOUT', 'VISIBILITY_PAYOUT', 'TDS_194C']) type?: string;
+  @IsOptional() @IsIn(['VOUCHER', 'CASH_REDEMPTION', 'CREDIT_PAYOUT', 'VISIBILITY_PAYOUT', 'TDS_194C', 'OFF_PORTAL_PAYMENT']) type?: string;
   @IsOptional() @IsIn(['COMMITTED', 'PAID', 'RETURNED']) status?: string;
   @IsOptional() @IsIn(['OPENING', 'RECEIPT', 'ADJUSTMENT', 'CHARGE', 'RETURN', 'RATE_CHANGE']) event?: string;
   @IsOptional() @IsString() @MaxLength(100) q?: string;

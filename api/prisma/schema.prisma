@@ -2309,6 +2309,111 @@ model TdsOffPlatformEntry {
   @@map("tds_off_platform_entries")
 }
 
+// ─── OFF-PORTAL PAYMENTS REGISTER (owner-approved 2026-11-25, platform-wide, all clients) ─────────────────────────
+// Payments ALREADY MADE outside the portal (bank transfer / UPI / gift), recorded by a Gifsy admin (assumed into the
+// client) so that (a) the 194R / 194C yearly totals per payee are right, (b) Fund Reconciliation shows them as paid
+// from the client's advance, (c) the outlet's payout history shows them. Keyed by OUTLET ID (clientId + outlet code,
+// case-insensitive via outletCodeKey) — an outlet that registers later with the same Outlet ID links automatically.
+// Every consumer ignores a VOIDED row (voidedAt set). No FKs (a row must outlive a deleted outlet / upload).
+// Not to be confused with TdsOffPlatformEntry (a TDS-only 194R marker): a payment that matches a legacy marker row
+// REPLACES it in the 194R base (supersedesOffPlatformEntryId — at most one live payment per marker, partial unique
+// index in the migration) so nothing is counted twice.
+enum OffPortalPaymentMode {
+  CASH
+  GIFT
+}
+
+model OffPortalPaymentUpload {
+  id            String   @id @default(cuid())
+  clientId      String
+  fileName      String
+  /// Storage key of the uploaded file (kept for audit).
+  fileKey       String?
+  fileSha256    String
+  rowsInFile    Int
+  recordedCount Int
+  skippedCount  Int
+  totalPaise    BigInt
+  /// The warning categories the admin ticked, with their row counts.
+  acknowledged  Json
+  uploadedById  String
+  createdAt     DateTime @default(now())
+
+  @@index([clientId, createdAt])
+  @@map("off_portal_payment_uploads")
+}
+
+/// An Outlet ID that was paid off-portal while it was NOT on the portal (latest details from the uploads).
+model OffPortalPayee {
+  id                String   @id @default(cuid())
+  clientId          String
+  outletCode        String
+  outletCodeKey     String
+  name              String
+  phone             String?
+  panNumber         String?
+  bankAccountNumber String?
+  ifsc              String?
+  upiId             String?
+  createdById       String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([clientId, outletCodeKey])
+  @@map("off_portal_payees")
+}
+
+model OffPortalPayment {
+  id                           String               @id @default(cuid())
+  clientId                     String
+  uploadId                     String
+  /// Sheet row number in the uploaded file (header = row 1).
+  rowNumber                    Int
+  outletCode                   String
+  /// Upper-cased trimmed outlet code — the case-insensitive link to Outlet.outletCode.
+  outletCodeKey                String
+  outletName                   String
+  /// The Outlet ID was on the portal when the payment was recorded.
+  onPortalAtUpload             Boolean
+  phone                        String?
+  /// PAN as given in the file (normalised), if any.
+  filePan                      String?
+  /// The portal owner's PAN at upload (normalised), if any.
+  portalPan                    String?
+  /// The PAN the payment's TDS counts under (file PAN, else portal PAN) — null = no PAN (no-PAN rate).
+  panNumber                    String?
+  bankAccountNumber            String?
+  ifsc                         String?
+  upiId                        String?
+  amountPaise                  BigInt
+  /// 00:00 IST of the payment day — the FY / fund date.
+  paymentDate                  DateTime
+  utr                          String?
+  payoutStream                 PayoutStream
+  paymentMode                  OffPortalPaymentMode
+  /// "YYYY-MM" — from the file, else the payment month (IST).
+  period                       String
+  narration                    String?
+  /// FROZEN at upload: Incentive → 194R; Visibility → the client's tdsPolicy section.
+  tdsSection                   TdsSection
+  /// FROZEN at upload: the client's tdsPolicy methodology.
+  tdsMethodology               TdsMethodology
+  /// The warning categories this row carried (each explicitly acknowledged at upload).
+  flags                        Json                 @default("[]")
+  supersedesOffPlatformEntryId String?
+  voidedAt                     DateTime?
+  voidedById                   String?
+  voidReason                   String?
+  createdById                  String
+  createdAt                    DateTime             @default(now())
+
+  @@index([clientId, outletCodeKey])
+  @@index([clientId, paymentDate])
+  @@index([uploadId])
+  @@index([supersedesOffPlatformEntryId])
+  @@map("off_portal_payments")
+}
+
 // TDS actually deposited to the government (reconciliation). 194R = CLIENT (clientId set,
 // per-tenant); 194C = GIFSY (clientId null, platform). liability(computed) − deposited = outstanding.
 model TdsDeposit {

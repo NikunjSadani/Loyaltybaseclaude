@@ -24,6 +24,8 @@ import type { JwtPayload } from '../../../common/decorators/current-user.decorat
 import { PaymentsReportQueryDto } from '../../../payments-report/dto/payments-report.dto';
 import {
   isSettledByTds,
+  offPortalTotals,
+  offPortalWhere,
   SETTLED_BY_TDS_LABEL,
   PAYMENT_ENTRY_SELECT,
   paymentsOrderBy,
@@ -31,6 +33,7 @@ import {
   paymentsWhere,
 } from '../../../payments-report/payments-report.query';
 import { isBoundedRange } from '../batch1/common';
+import { maskPanValue, maskTail } from '../../../off-portal-payments/off-portal-payments.parse';
 import type { ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { EXPORT_PAGE_SIZE, JsonSheet, parseQueryDto } from './kind-support';
@@ -219,10 +222,58 @@ async function runIn(
     );
   }
 
+  // Off-portal payments register (owner 2026-11-25): payments made OUTSIDE the portal in the same range / tenant — their
+  // own sheet (never mixed into "Payments" or its totals). Phone / PAN / bank are masked for anyone but a Gifsy admin.
+  const opWhere = offPortalWhere(filter);
+  const op = await offPortalTotals(prisma, opWhere);
+  if (opWhere && op.count > 0) {
+    const unmasked = ctx.user.role === 'GIFSY_ADMIN';
+    const opSheet = new JsonSheet(out, 'Off-portal payments');
+    let opWritten = 0;
+    let opAmount = 0n;
+    for (;;) {
+      const page = await prisma.offPortalPayment.findMany({
+        where: opWhere,
+        orderBy: [{ paymentDate: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+        skip: opWritten,
+        take: EXPORT_PAGE_SIZE,
+      });
+      for (const r of page) {
+        opAmount += r.amountPaise;
+        await opSheet.add({
+          'S.No': ++opWritten,
+          Client: r.clientId,
+          'Payment Date': istDateKey(r.paymentDate),
+          'Outlet Code': r.outletCode,
+          'Outlet Name': r.outletName,
+          'Amount (₹)': inr(r.amountPaise),
+          'UTR / reference': r.utr ?? '',
+          'Payment type': r.payoutStream === 'VISIBILITY' ? 'Visibility' : 'Incentive',
+          'Cash or Gift': r.paymentMode === 'GIFT' ? 'Gift' : 'Cash',
+          Period: r.period,
+          Narration: r.narration ?? '',
+          'TDS Section': r.tdsSection,
+          'TDS Withheld': 'None — paid in full',
+          PAN: (unmasked ? r.panNumber : maskPanValue(r.panNumber)) ?? '',
+          Phone: (unmasked ? r.phone : maskTail(r.phone)) ?? '',
+        });
+      }
+      if (page.length < EXPORT_PAGE_SIZE) break;
+    }
+    await opSheet.end();
+    if (opWritten !== op.count || opAmount !== op.amountPaise) {
+      throw new Error(`payments-report export: off-portal sheet streamed ${opWritten} / ${opAmount} but the aggregate is ${op.count} / ${op.amountPaise}`);
+    }
+  }
+
   const summary = new JsonSheet(out, 'Summary');
   await summary.add({ Metric: 'Rows', Value: totals.count });
   await summary.add({ Metric: 'Total Amount (₹)', Value: inr(totals.amountPaise) });
   await summary.add({ Metric: 'Total TDS Deducted (₹)', Value: inr(totals.tdsDeductedPaise) });
+  if (opWhere && op.count > 0) {
+    await summary.add({ Metric: 'Off-portal payments (paid outside the portal — not in the rows above)', Value: op.count });
+    await summary.add({ Metric: 'Off-portal payments amount (₹)', Value: inr(op.amountPaise) });
+  }
   await summary.end();
   return { rowCount };
 }

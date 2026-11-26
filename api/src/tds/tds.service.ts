@@ -28,6 +28,8 @@
  * Sources summed per PAN:
  *   Visibility CreditPayoutEntry (isSeparatePayout=true field, status PAID, paidAt in FY)
  *   → PAN via Outlet→ChannelPartner; entityType too.
+ *   OffPortalPayment (194C, not void; owner 2026-11-25) by PAYMENT DATE, frozen methodology — paid in full,
+ *   nothing withheld (Deduct → flagged SHORTFALL on the row). 194R off-portal rows: see tds-194r.shared.
  * Threshold: maxSingle > 3,000,000 paise OR fyTotal > 10,000,000 paise.
  * Two columns: (a) with-threshold, (b) no-threshold (TDS on everything).
  * Deposited: SUM TdsDeposit (section=SEC_194C, panNumber) by "TDS for month" FY — platform-wide.
@@ -78,6 +80,7 @@ import {
   currentRetailerKeys,
   creditUnusableReason,
   type Reversed194RItem,
+  type OffPortal194RItem,
   type Bases194R,
 } from './tds-194r.shared';
 import type { TdsMethodology } from '@prisma/client';
@@ -308,6 +311,10 @@ export interface TdsRow194R {
   depositForPeriods?: string[];
   /** Fix round B: payouts reversed off this row's base (absent when none). */
   reversal?: TdsRowReversal;
+  /** Off-portal payments register: paid in full off-portal, counted in this row's base (absent when none). */
+  offPortalPaidPaise?: bigint;
+  /** …of which visibility on the Deduct method — TDS due but NOT withheld (shortfall; absent when none). */
+  offPortalNotWithheldPaise?: bigint;
 }
 
 /**
@@ -347,6 +354,12 @@ export interface TdsRow194C {
   recoveryByTenant: TdsRecoveryAttribution[]; // GROSS-UP per-tenant recovery split (report-only)
   /** See TdsRow194R.depositForPeriods. */
   depositForPeriods?: string[];
+  /** Off-portal payments register: paid in full off-portal (absent when none). */
+  offPortalPaidPaise?: bigint;
+  /** …of which on the Deduct method — TDS not withheld (shortfall; absent when none). */
+  offPortalNotWithheldPaise?: bigint;
+  /** Plain-words call-out (absent when none). */
+  note?: string;
 }
 
 export interface TdsSummary194R {
@@ -355,6 +368,10 @@ export interface TdsSummary194R {
   /** Owner 2026-11-18: Σ TDS taken in excess (flag only) + how many retailers have any. */
   totalExcessDeductedPaise?: bigint;
   excessRetailerCount?: number;
+  /** Off-portal payments register (present only when the FY has any). */
+  totalOffPortalPaidPaise?: bigint;
+  totalOffPortalNotWithheldPaise?: bigint;
+  offPortalNotWithheldRetailerCount?: number;
   totalBasePaise: bigint;
   totalLiabilityPaise: bigint;
   totalDepositedPaise: bigint;
@@ -498,6 +515,14 @@ export class TdsService {
         ...summariseRows(rows),
         totalExcessDeductedPaise: rows.reduce((s, r) => s + r.excessDeductedPaise, 0n),
         excessRetailerCount: rows.filter((r) => r.excessDeductedPaise > 0n).length,
+        // Off-portal payments register — only when there are any (every other summary is unchanged).
+        ...(rows.some((r) => r.offPortalPaidPaise)
+          ? {
+              totalOffPortalPaidPaise: rows.reduce((s, r) => s + (r.offPortalPaidPaise ?? 0n), 0n),
+              totalOffPortalNotWithheldPaise: rows.reduce((s, r) => s + (r.offPortalNotWithheldPaise ?? 0n), 0n),
+              offPortalNotWithheldRetailerCount: rows.filter((r) => (r.offPortalNotWithheldPaise ?? 0n) > 0n).length,
+            }
+          : {}),
       },
       importedPayoutsCountedFrom: disclosed,
       importedPayoutsNote: disclosed ? importedPayoutsNote(disclosed) : null,
@@ -541,11 +566,17 @@ export class TdsService {
 
     // ── Base: the ONE shared definition (tds-194r.shared — also used by the payout engine) ──
     const reversed194R = new Map<string, Reversed194RItem[]>();
+    const offPortal194R = new Map<string, OffPortal194RItem[]>();
     const accum = await collect194RBases(this.prisma, {
       clientId,
       fyLabel,
       importedCountFrom: countFromDate,
       noteOutlet: contributingOutlets ? noteOutlet : undefined,
+      offPortalSink: (key, item) => {
+        const list = offPortal194R.get(key) ?? [];
+        list.push(item);
+        offPortal194R.set(key, list);
+      },
       // WRE D1: V2-reversed PAID payouts are off the base — collected here for the row call-outs.
       reversedSink: (key, item) => {
         const list = reversed194R.get(key) ?? [];
@@ -647,6 +678,27 @@ export class TdsService {
     }
     for (const r of rows) {
       const notes: string[] = [];
+      // Off-portal payments register (owner 2026-11-25): paid in full outside the portal — always said on the row; on
+      // the Deduct method the visibility part is a SHORTFALL (TDS due on it, nothing withheld) — never silent.
+      const op = offPortal194R.get(r.panNumber);
+      if (op?.length) {
+        const paid = op.reduce((s, i) => s + i.amountPaise, 0n);
+        const notWithheld = methodology === 'DEDUCT' ? op.filter((i) => i.bucket === 'visPaise').reduce((s, i) => s + i.amountPaise, 0n) : 0n;
+        r.offPortalPaidPaise = paid;
+        notes.push(
+          `Includes ${formatINR(paid)} paid off-portal in full (${op.length} payment${op.length === 1 ? '' : 's'}, off-portal payments register) — no TDS was withheld on it.`,
+        );
+        if (notWithheld > 0n) {
+          r.offPortalNotWithheldPaise = notWithheld;
+          notes.push(
+            r.deductLiabilityPaise > 0n
+              ? `TDS NOT WITHHELD — SHORTFALL: ${formatINR(notWithheld)} of visibility was paid off-portal on the Deduct method; ` +
+                  "the year's deducted part includes TDS on it, which was not withheld (the next visibility payout run carries it forward)."
+              : `TDS NOT WITHHELD: ${formatINR(notWithheld)} of visibility was paid off-portal on the Deduct method — below the ` +
+                  'yearly threshold today, so no TDS is due yet; if the year crosses it, TDS on this amount is a shortfall.',
+          );
+        }
+      }
       if (r.baseFyTotalPaise === 0n && r.deductedPaise !== 0n) {
         notes.push(
           'TDS was withheld from this retailer this year but no benefit is counted this year (for example the payout was ' +
@@ -1014,6 +1066,43 @@ export class TdsService {
       }
     }
 
+    // ── Source: OFF-PORTAL payments register (owner 2026-11-25) — 194C visibility paid IN FULL outside the portal, in
+    // the FY of the PAYMENT DATE, under the methodology FROZEN at upload. Key: the PAN frozen at upload, else the
+    // per-OUTLET no-PAN key (194C granularity). Nothing was withheld → on Deduct the TDS on it stays in "outstanding"
+    // and the row says SHORTFALL. Voided rows never count. ──
+    const offPortalPaid = new Map<string, { paid: bigint; notWithheld: bigint; count: number }>();
+    {
+      const { start: fyStart, endExclusive: fyEnd } = fyFromLabel(fyLabel);
+      // `offPortalPayment` is absent only on narrow unit-test fakes; the real client always has it.
+      const delegate = (this.prisma as Partial<PrismaService>).offPortalPayment;
+      const op = delegate
+        ? await delegate.findMany({
+            where: { voidedAt: null, tdsSection: 'SEC_194C', paymentDate: { gte: fyStart, lt: fyEnd } },
+            select: { clientId: true, outletCode: true, outletCodeKey: true, panNumber: true, amountPaise: true, tdsMethodology: true },
+          })
+        : [];
+      if (op.length) {
+        const entityTypes = await this.entityTypesByPan(op.filter((p) => !isNoPanCell(p.panNumber)).map((p) => p.panNumber!));
+        const portalCode = new Map<string, string>();
+        for (const cid of [...new Set(op.filter((p) => isNoPanCell(p.panNumber)).map((p) => p.clientId))]) {
+          const m = await this.outletsByCodeCI(op.filter((p) => p.clientId === cid && isNoPanCell(p.panNumber)).map((p) => p.outletCode), cid);
+          for (const [k, list] of m) if (list.length === 1) portalCode.set(`${cid}|${k}`, list[0].outletCode);
+        }
+        for (const p of op) {
+          const hasPan = !isNoPanCell(p.panNumber);
+          const pan = hasPan ? normalisePan(p.panNumber!) : null;
+          const noPanKey = noPanOutletKey(p.clientId, portalCode.get(`${p.clientId}|${p.outletCodeKey}`) ?? p.outletCode);
+          addToC(pan, p.amountPaise, pan ? (entityTypes.get(pan) ?? null) : null, p.tdsMethodology, noPanKey);
+          const key = pan ?? noPanKey;
+          const cur = offPortalPaid.get(key) ?? { paid: 0n, notWithheld: 0n, count: 0 };
+          cur.paid += p.amountPaise;
+          cur.count += 1;
+          if (p.tdsMethodology === 'DEDUCT') cur.notWithheld += p.amountPaise;
+          offPortalPaid.set(key, cur);
+        }
+      }
+    }
+
     // ── Deposited: SUM TdsDeposit (section=SEC_194C, "TDS for month" in FY) — platform-wide ──
     const deposits = await this.depositsForFy('SEC_194C', fyLabel);
 
@@ -1249,6 +1338,22 @@ export class TdsService {
         unlinkedNoPanDeposit: true as const,
         ...depositPeriods.fieldFor(UNLINKED_NO_PAN_DEPOSIT_KEY),
       });
+    }
+    // Off-portal payments register: said on the row (never silent); Deduct-method rows are a SHORTFALL.
+    for (const r of rows) {
+      const op = offPortalPaid.get(r.panNumber);
+      if (!op) continue;
+      r.offPortalPaidPaise = op.paid;
+      const notes = [`Includes ${formatINR(op.paid)} paid off-portal in full (${op.count} payment${op.count === 1 ? '' : 's'}) — no TDS was withheld on it.`];
+      if (op.notWithheld > 0n) {
+        r.offPortalNotWithheldPaise = op.notWithheld;
+        notes.push(
+          r.thresholdMet
+            ? `TDS NOT WITHHELD — SHORTFALL: ${formatINR(op.notWithheld)} was paid off-portal on the Deduct method; the TDS on it is in the outstanding.`
+            : `TDS NOT WITHHELD: ${formatINR(op.notWithheld)} was paid off-portal on the Deduct method — below the threshold today; if it is crossed, TDS on it is a shortfall.`,
+        );
+      }
+      r.note = notes.join(' ');
     }
     await this.attachNoPanDeductees(rows, null);
 
@@ -2076,6 +2181,7 @@ export class TdsService {
     }
 
     const withOutletCol = rows.some((r) => r.noPanDeductee);
+    const anyNote194C = rows.some((r) => r.note);
     const detailRows = rows.map((r, i) => {
       const hasPan = !isNoPanKey(r.panNumber);
 
@@ -2109,6 +2215,8 @@ export class TdsService {
         'TDS Withheld (Deduct) (₹)': moneyCell(r.withheldPaise),
         'TDS Recovered (Gross-Up) (₹)': moneyCell(r.recoveredPaise),
         'Outstanding (₹)': moneyCell(r.outstandingPaise),
+        // Off-portal payments register call-outs — the column appears only when a row has one (else the file is unchanged).
+        ...(anyNote194C ? { Note: cellSafe(r.note ?? '') } : {}),
         FY: fyLabel,
       };
     });
