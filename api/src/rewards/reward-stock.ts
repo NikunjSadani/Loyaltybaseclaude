@@ -177,6 +177,17 @@ async function provablyNotTaken(tx: Tx, rewardId: string, orderId: string, order
     orderBy: { createdAt: 'asc' },
     select: { createdAt: true },
   });
+  if (!confirmedRow) {
+    // No CONFIRMED history row. Every confirm since the status timeline shipped (old build included) writes one,
+    // so an order placed AFTER the reward's ledger began was simply never confirmed (e.g. a PENDING order
+    // failed via a fromStatus-null path) → stock never taken. An order placed before it is legacy → uncertain.
+    const firstRow = await tx.rewardStockMovement.findFirst({
+      where: { rewardId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: { createdAt: true },
+    });
+    if (firstRow && orderCreatedAt >= firstRow.createdAt) return true;
+  }
   const confirmedAt = confirmedRow?.createdAt ?? orderCreatedAt;
   const latestBefore = await tx.rewardStockMovement.findFirst({
     where: { rewardId, createdAt: { lte: confirmedAt } },

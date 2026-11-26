@@ -386,6 +386,18 @@ describe('reward stock history — orders confirmed BEFORE stock history (pre-re
     expect(db.reviews).toHaveLength(0);
   });
 
+  it('a NEVER-confirmed (PENDING) order failed via a fromStatus-null path after go-live → no review, no return', async () => {
+    const db = makeDb();
+    db.addReward({ id: 'r1', stockQuantity: 7 });
+    db.moves.push({ id: 'b', rewardId: 'r1', clientId: 'bajaj', type: 'OPENING', quantity: 7, balanceAfter: 7, reason: STOCK_BASELINE_REASON, createdAt: db.now() });
+    db.addOrder({ id: 'p1', rewardId: 'r1', status: 'PENDING' });
+    await transitionOrderStatus(db.tx as never, {
+      orderId: 'p1', guard: { status: { in: ['CONFIRMED', 'PROCESSING', 'PENDING'] } }, fromStatus: null, toStatus: RedemptionStatus.FAILED,
+    });
+    expect(db.reviews).toHaveLength(0);
+    expect(db.rewards[0].stockQuantity).toBe(7);
+  });
+
   it('a tracked reward with NO ledger row at all (created by the old build) → review (takes unknown)', async () => {
     const db = makeDb();
     db.addReward({ id: 'r1', stockQuantity: 4 });
