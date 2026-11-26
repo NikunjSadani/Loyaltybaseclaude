@@ -17,8 +17,8 @@ import { ROUNDING_COPY, roundedAmountText, roundedRows } from './rounded-amounts
 
 // ─── Contract ────────────────────────────────────────────────────────────────
 
-export type AckCategory = 'SKIPPED' | 'ROUNDED' | 'NOT_APPLIED' | 'BELOW_ZERO' | 'REPEAT_DEDUCTION';
-export const ACK_ORDER: AckCategory[] = ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'];
+export type AckCategory = 'SKIPPED' | 'ROUNDED' | 'NOT_APPLIED' | 'BELOW_ZERO' | 'REPEAT_DEDUCTION' | 'OFF_PORTAL_DUPLICATE';
+export const ACK_ORDER: AckCategory[] = ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION', 'OFF_PORTAL_DUPLICATE'];
 
 export interface UploadPreviewOutlet {
   outletCode:         string;
@@ -285,6 +285,8 @@ const SERVER_ONLY_TEXT: Record<AckCategory, string> = {
   NOT_APPLIED:      "some rows won't be applied (outlet not found or not linked)",
   BELOW_ZERO:       'some wallets will go below zero',
   REPEAT_DEDUCTION: 'some deductions may be a repeat',
+  // Off-portal payments register: server-only (the screen has no copy of the register) — listed from `details.items`.
+  OFF_PORTAL_DUPLICATE: 'some payouts may already have been paid outside the portal (off-portal payments register)',
 };
 
 /** The items a refused confirm returned for a category (`details.items`). */

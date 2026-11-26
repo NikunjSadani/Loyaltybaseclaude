@@ -113,7 +113,7 @@ import {
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { formatINR, paiseToRupees, toPaiseBigInt } from '../common/money';
-import { monthYearIST, formatDateIST, IST_OFFSET_MIN } from '../common/ist-date';
+import { monthYearIST, formatDateIST, IST_OFFSET_MIN, istDateKey, istMonthBounds } from '../common/ist-date';
 import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import {
   resolveEffectiveKycStatus,
@@ -611,6 +611,8 @@ export class CreditsService {
       importedCountFrom: a.importedCountFrom,
       scope,
       reversedSink: (key) => reversedKeys.add(key),
+      // Owner 2026-11-26: off-portal payments count toward the threshold only — never withheld from this run.
+      offPortalForThresholdOnly: true,
     });
     // Already deducted for this (client, PAN-or-no-PAN key, FY) — net of FAILED/reversal negative rows —
     // by the ledger row's OWN stored key (owner rule 2026-11-18: by PAN; a PAN change splits the year).
@@ -757,7 +759,8 @@ export class CreditsService {
     const importedCountFrom = await importedPayoutsCountFromOrThrow(db, q.clientId);
     const scope = await this.scope194R(db, q.clientId, [{ key, hasPan, partnerId }]);
     // The caller marked the entry first → the shared definition already leaves it (and any earlier one) out.
-    const bases = await collect194RBases(db, { clientId: q.clientId, fyLabel: q.fyLabel, importedCountFrom, scope });
+    // Same engine view as plan194RDeductions (off-portal = threshold only), so the cap matches what was withheld.
+    const bases = await collect194RBases(db, { clientId: q.clientId, fyLabel: q.fyLabel, importedCountFrom, scope, offPortalForThresholdOnly: true });
     const after = { ...(bases.get(key) ?? emptyBases194R(hasPan)), hasPan };
     const lAfter = liability194R(after, methodology, cfg);
     // "Before" = with the payout this reversal took off — only the THRESHOLD is read from it (on the total base, so
@@ -1023,6 +1026,31 @@ export class CreditsService {
       }
     }
 
+    // Off-portal payments register (owner 2026-11-26): 194C payments made OUTSIDE the portal to these PANs (any tenant —
+    // 194C is per PAN; FY of the payout PERIOD, the same rule as portal 194C entries) count toward the THRESHOLD only
+    // (combined base + max single) — never the withholding AMOUNT base, so a later portal payout withholds only its own
+    // TDS; the 194C report shows the off-portal TDS as a shortfall. Off-portal 194C rows are always DEDUCT: a gross-up
+    // client's visibility payouts must go through the portal (the upload refuses them — owner 2026-11-26).
+    // `offPortalPayment` is absent only on narrow unit-test fakes.
+    const offPortalDb = (db as Partial<Prisma.TransactionClient>).offPortalPayment;
+    if (panSet.size && sectionSet.has(TdsSection.SEC_194C) && offPortalDb) {
+      const op = await offPortalDb.findMany({
+        where: {
+          voidedAt: null,
+          tdsSection: TdsSection.SEC_194C,
+          panNumber: { in: [...panSet] },
+          period: { gte: startPeriod, lte: endPeriod },
+        },
+        select: { panNumber: true, amountPaise: true },
+      });
+      for (const p of op) {
+        if (!p.panNumber) continue;
+        const ps = `${p.panNumber}${SEP}${TdsSection.SEC_194C}`;
+        priorBaseByPS.set(ps, (priorBaseByPS.get(ps) ?? 0n) + p.amountPaise);
+        if (p.amountPaise > (priorMaxSingleByPS.get(ps) ?? 0n)) priorMaxSingleByPS.set(ps, p.amountPaise);
+      }
+    }
+
     // Running DEDUCT carry-forward (PAN/section/FY ledger — cross-tenant, 194C).
     const priorDeductedByPS = new Map<string, bigint>();
     if (panSet.size) {
@@ -1273,6 +1301,31 @@ export class CreditsService {
         },
         select: { panNumber: true, section: true, tenantSharePaise: true },
       });
+      // Off-portal no-PAN 194C payments to these outlets (this client, FY of the payout period): treated like portal no-PAN
+      // payouts (owner 2026-11-26) — no-PAN 194C is never withheld, only RECOVERED from the client — so they count in
+      // the threshold AND the recovery base: this outlet's next portal run records the recovery on them too (the ledger
+      // telescopes, never twice). Not a TDS shortfall.
+      const opNoPan = new Map<string, { total: bigint; max: bigint }>(); // `<OUTLETKEY>|<section>`
+      if (offPortalDb) {
+        const rows = await offPortalDb.findMany({
+          where: {
+            clientId,
+            voidedAt: null,
+            tdsSection: TdsSection.SEC_194C,
+            panNumber: null,
+            outletCodeKey: { in: [...noPanOutletCodes].map((c) => c.trim().toUpperCase()) },
+            period: { gte: startPeriod, lte: endPeriod },
+          },
+          select: { outletCodeKey: true, amountPaise: true },
+        });
+        for (const r of rows) {
+          const k = `${r.outletCodeKey}${SEP}${TdsSection.SEC_194C}`;
+          const cur = opNoPan.get(k) ?? { total: 0n, max: 0n };
+          cur.total += r.amountPaise;
+          if (r.amountPaise > cur.max) cur.max = r.amountPaise;
+          opNoPan.set(k, cur);
+        }
+      }
       const noPanRecByKS = new Map<string, bigint>(); // `<encodedKey>|<section>` → recovered
       for (const r of existingNoPanRec) {
         const k = `${r.panNumber}${SEP}${r.section}`;
@@ -1288,10 +1341,11 @@ export class CreditsService {
         const os = `${ng.outletCode}${SEP}${ng.section}`;
         const thisEventBase = ng.entries.reduce((s, e) => s + e.amountPaise, 0n);
         const priorBase = priorNoPanByOS.get(os) ?? 0n;
-        const cumulativeBase = priorBase + thisEventBase;
+        const op = opNoPan.get(`${ng.outletCode.trim().toUpperCase()}${SEP}${ng.section}`);
+        const cumulativeBase = priorBase + thisEventBase + (op?.total ?? 0n);
         const eventMaxSingle = ng.entries.reduce((m, e) => (e.amountPaise > m ? e.amountPaise : m), 0n);
         const priorMaxSingle = priorNoPanMaxByOS.get(os) ?? 0n;
-        const cumMaxSingle = eventMaxSingle > priorMaxSingle ? eventMaxSingle : priorMaxSingle;
+        const cumMaxSingle = [eventMaxSingle, priorMaxSingle, op?.max ?? 0n].reduce((m, x) => (x > m ? x : m), 0n);
         const nowCrossed = this.tdsThresholdMet(ng.section, cumulativeBase, cumMaxSingle, cfg);
         if (!nowCrossed) continue;
         const encodedKey = CreditsService.noPanRecoveryKey(ng.outletCode);
@@ -1977,6 +2031,31 @@ export class CreditsService {
           text: `${x.outletCode}: already deducted in batch ${x.batchCode} (${fmt(x.points)} pts still deducted) — check this isn't a repeat`,
         }));
       }
+    }
+    // Off-portal payments register (owner 2026-11-26, reverse order of the off-portal PAID_ON_PORTAL check): a PAYOUT row
+    // whose outlet was already paid the SAME amount outside the portal for this month (or within 3 days of it).
+    const payoutRows = ok.filter((r) => r.awardType === 'PAYOUT' && r.amount > 0);
+    const offPortalDb = (db as Partial<Prisma.TransactionClient>).offPortalPayment; // absent only on narrow test fakes
+    if (payoutRows.length > 0 && offPortalDb && /^\d{4}-\d{2}$/.test(period)) {
+      const { start, endExclusive } = istMonthBounds(period);
+      const lo = new Date(start.getTime() - 3 * 86_400_000);
+      const hi = new Date(endExclusive.getTime() + 3 * 86_400_000);
+      const keys = [...new Set(payoutRows.map((r) => r.outletId.trim().toUpperCase()))];
+      const live = await offPortalDb.findMany({
+        where: { clientId, voidedAt: null, outletCodeKey: { in: keys }, OR: [{ period }, { paymentDate: { gte: lo, lt: hi } }] },
+        select: { id: true, outletCodeKey: true, amountPaise: true, paymentDate: true, utr: true },
+      });
+      const hits: AckItem[] = [];
+      for (const r of payoutRows) {
+        const m = (live ?? []).find((p) => p.outletCodeKey === r.outletId.trim().toUpperCase() && p.amountPaise === BigInt(r.amount));
+        if (m) {
+          hits.push({
+            key: `${r.outletId}|${r.fieldId}|${m.id}`,
+            text: `${r.outletId} · ${r.fieldName ?? r.fieldId}: ₹${fmt(r.amount / 100)} — possible duplicate of an off-portal payment on ${istDateKey(m.paymentDate)}${m.utr ? ` (UTR ${m.utr})` : ''}`,
+          });
+        }
+      }
+      if (hits.length > 0) req.OFF_PORTAL_DUPLICATE = hits;
     }
     return req;
   }

@@ -7,7 +7,7 @@
  *
  * Accounting model (bank-statement style):
  *  - every spend item is ONE debit at its commit date of `charged` (vouchers: face − the client's discount for that
- *    VOUCHER ITEM (owner D4); cash / credit / visibility payouts: face + agency fee; 194C TDS: what Gifsy actually
+ *    VOUCHER ITEM (owner D4); cash / credit / visibility payouts and off-portal payments: face + agency fee; 194C TDS: what Gifsy actually
  *    pays, in full, with its bank run (owner 2026-11-24) — a negative true-up is a credit);
  *  - a RETURNED item adds ONE credit of the same `charged` at its return date (net effect 0);
  *  - receipts / adjustments are credits (an adjustment may be negative); the opening balance is the first line.
@@ -20,7 +20,7 @@
  *  RATE_CHANGE line (amount 0) saying how many lines it re-priced and by how much.
  */
 
-export type FundSpendType = 'VOUCHER' | 'CASH_REDEMPTION' | 'CREDIT_PAYOUT' | 'VISIBILITY_PAYOUT' | 'TDS_194C';
+export type FundSpendType = 'VOUCHER' | 'CASH_REDEMPTION' | 'CREDIT_PAYOUT' | 'VISIBILITY_PAYOUT' | 'TDS_194C' | 'OFF_PORTAL_PAYMENT';
 export type FundItemStatus = 'COMMITTED' | 'PAID' | 'RETURNED';
 export type FundEntryKind = 'RECEIPT' | 'ADJUSTMENT' | 'OPENING_BALANCE';
 export type FundEventKind = 'OPENING' | 'RECEIPT' | 'ADJUSTMENT' | 'CHARGE' | 'RETURN' | 'RATE_CHANGE';
@@ -31,6 +31,7 @@ export const FUND_SPEND_TYPES: readonly FundSpendType[] = [
   'CREDIT_PAYOUT',
   'VISIBILITY_PAYOUT',
   'TDS_194C',
+  'OFF_PORTAL_PAYMENT',
 ];
 
 export const FUND_SPEND_TYPE_LABEL: Record<FundSpendType, string> = {
@@ -39,6 +40,7 @@ export const FUND_SPEND_TYPE_LABEL: Record<FundSpendType, string> = {
   CREDIT_PAYOUT: 'Target / credit payouts',
   VISIBILITY_PAYOUT: 'Visibility payouts',
   TDS_194C: 'TDS 194C (gross-up)',
+  OFF_PORTAL_PAYMENT: 'Off-portal payments',
 };
 
 /** Item flags — every one is shown on the statement (owner rule: no silent pass-through). */
@@ -55,10 +57,11 @@ export type FundFlag =
   | 'TDS_INCLUDES_EARLIER' // a 194C TDS amount that includes TDS for earlier payouts this year (yearly limit crossed)
   | 'TDS_RUN_UNMATCHED' // an older TDS row whose bank run could not be identified — charged in full on the day recorded
   | 'TDS_OTHER_CLIENT_RUN' // recovered with a payout run outside this client's statement (a PAN shared with another client)
-  | 'TDS_PAYOUTS_REVERSED'; // the run's payouts were reversed — the TDS stays deposited (not given back)
+  | 'TDS_PAYOUTS_REVERSED' // the run's payouts were reversed — the TDS stays deposited (not given back)
+  | 'GIFT_NO_AGENCY_FEE'; // an off-portal GIFT: no agency fee (owner decision 2026-11-26) — an informational note
 
 export type FundSourceRef = {
-  kind: 'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'tdsRecoveryEntry' | 'creditReversal';
+  kind: 'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'tdsRecoveryEntry' | 'creditReversal' | 'offPortalPayment';
   id: string;
 };
 
@@ -105,6 +108,8 @@ export interface FundSpendItem {
   /** Paid, then reversed: the amount to recover off-platform (shown as "to recover", NOT a credit). */
   receivablePaise?: bigint;
   flags?: FundFlag[];
+  /** Off-portal gifts — owner decision 2026-11-26: NO agency fee (charged at face value). */
+  feeExempt?: boolean;
 }
 
 export interface FundManualEntry {
@@ -283,7 +288,11 @@ export function chargeFor(item: FundSpendItem, rates: readonly FundRateRow[]): F
     const discount = applyBps(item.facePaise, r.rateBps);
     return { discountPaise: discount, feePaise: 0n, tdsPaise: 0n, chargedPaise: item.facePaise - discount, rateLabel: bpsLabel(r.rateBps), flags };
   }
-  // Cash redemption / credit payout / visibility payout → agency fee.
+  if (item.feeExempt) {
+    flags.push('GIFT_NO_AGENCY_FEE');
+    return { discountPaise: 0n, feePaise: 0n, tdsPaise: 0n, chargedPaise: item.facePaise, rateLabel: null, flags };
+  }
+  // Cash redemption / credit payout / visibility payout / off-portal cash payment → agency fee.
   const feeRows = rates.filter((r) => r.kind === 'AGENCY_FEE');
   const r = rateInForce(feeRows, item.committedAt);
   if (!r || !r.feeType) {

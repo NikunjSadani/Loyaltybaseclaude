@@ -322,6 +322,10 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
     ...(r.unusableTdsCreditPaise !== undefined
       ? { unusableTdsCreditPaise: r.unusableTdsCreditPaise.toString(), unusableTdsCreditReasons: r.unusableTdsCreditReasons ?? [] }
       : {}),
+    // Off-portal payments register (only on rows that have any).
+    ...(r.offPortalPaidPaise !== undefined ? { offPortalPaidPaise: r.offPortalPaidPaise.toString() } : {}),
+    ...(r.offPortalNotWithheldPaise !== undefined ? { offPortalNotWithheldPaise: r.offPortalNotWithheldPaise.toString() } : {}),
+    ...(r.offPortalShortfallTdsPaise !== undefined ? { offPortalShortfallTdsPaise: r.offPortalShortfallTdsPaise.toString() } : {}),
   };
 }
 
@@ -357,6 +361,11 @@ function serializeRow194C(r: import('./tds.service').TdsRow194C) {
     outstandingPaise: r.outstandingPaise.toString(),
     // "TDS for month" (YYYY-MM) of the deposits counted on the row — only when there are any.
     ...(r.depositForPeriods ? { depositForPeriods: r.depositForPeriods } : {}),
+    // Off-portal payments register (only on rows that have any).
+    ...(r.offPortalPaidPaise !== undefined ? { offPortalPaidPaise: r.offPortalPaidPaise.toString() } : {}),
+    ...(r.offPortalNotWithheldPaise !== undefined ? { offPortalNotWithheldPaise: r.offPortalNotWithheldPaise.toString() } : {}),
+    ...(r.offPortalShortfallTdsPaise !== undefined ? { offPortalShortfallTdsPaise: r.offPortalShortfallTdsPaise.toString() } : {}),
+    ...(r.note ? { note: r.note } : {}),
   };
 }
 
@@ -377,6 +386,14 @@ function serializeSummary194R(s: import('./tds.service').TdsSummary194R) {
     rowCount: s.rowCount,
     totalExcessDeductedPaise: (s.totalExcessDeductedPaise ?? 0n).toString(),
     excessRetailerCount: s.excessRetailerCount ?? 0,
+    ...(s.totalOffPortalPaidPaise !== undefined
+      ? {
+          totalOffPortalPaidPaise: s.totalOffPortalPaidPaise.toString(),
+          totalOffPortalNotWithheldPaise: (s.totalOffPortalNotWithheldPaise ?? 0n).toString(),
+          totalOffPortalShortfallTdsPaise: (s.totalOffPortalShortfallTdsPaise ?? 0n).toString(),
+          offPortalNotWithheldRetailerCount: s.offPortalNotWithheldRetailerCount ?? 0,
+        }
+      : {}),
   };
 }
 

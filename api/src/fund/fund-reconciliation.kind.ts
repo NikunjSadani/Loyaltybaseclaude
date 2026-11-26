@@ -41,6 +41,7 @@ const FLAG_WORDS: Record<string, string> = {
   TDS_RUN_UNMATCHED: 'An older TDS entry whose bank run could not be identified — charged in full on the day recorded, shown as paid',
   TDS_OTHER_CLIENT_RUN: "Recovered with a payout run outside this client's statement (PAN shared with another client)",
   TDS_PAYOUTS_REVERSED: 'Payouts reversed — the TDS stays deposited (not given back)',
+  GIFT_NO_AGENCY_FEE: 'No agency fee — gift',
   FAILED_AWAITING_REBANK: 'Failed at the bank — awaiting re-bank (still committed)',
   PAYOUT_CANCELLED: 'Cancelled by Gifsy before payment — not charged (returned on the cancel day)',
   FACE_RECOMPUTED: 'Face value re-derived from the order (its value was cleared by the refund)',

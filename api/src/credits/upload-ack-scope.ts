@@ -9,7 +9,7 @@
  */
 
 /** Preview categories the admin must acknowledge before Confirm. */
-export const UPLOAD_ACK_CATEGORIES = ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'] as const;
+export const UPLOAD_ACK_CATEGORIES = ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION', 'OFF_PORTAL_DUPLICATE'] as const;
 export type UploadAckCategory = (typeof UPLOAD_ACK_CATEGORIES)[number];
 
 export const UPLOAD_ACK_LABELS: Record<UploadAckCategory, string> = {
@@ -18,6 +18,9 @@ export const UPLOAD_ACK_LABELS: Record<UploadAckCategory, string> = {
   NOT_APPLIED: 'rows that will not be applied (outlet not found or not linked)',
   BELOW_ZERO: 'wallets that will go below zero',
   REPEAT_DEDUCTION: 'deductions that may be a repeat',
+  // Off-portal payments register (2026-11-26): the same outlet + amount was already paid OUTSIDE the portal for this
+  // month (or within 3 days of it) — paying it again on the portal would pay twice.
+  OFF_PORTAL_DUPLICATE: 'payouts that may already have been paid outside the portal (off-portal payments register)',
 };
 
 /** Owner 2026-11-25: true = every client. The one switch. */

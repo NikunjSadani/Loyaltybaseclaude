@@ -264,4 +264,19 @@ describe('BYC — ack keys (byte-identical with the server)', () => {
     expect([rp.required, rp.items.length]).toEqual([true, 1]);
     expect(ackItemsFor(out, ['BELOW_ZERO', 'REPEAT_DEDUCTION'])).toEqual({ BELOW_ZERO: ['P|-260'], REPEAT_DEDUCTION: ['A|f1|b9|300'] });
   });
+
+  it('BYC15: OFF_PORTAL_DUPLICATE (server-only) gets its own box with the server rows, last in order', () => {
+    const rows = [row({ rowNum: 3, status: 'SKIP', amount: 0 })];
+    const cats = presentCategories(parse(rows), data([outlet('BJ1')], { ackCategories: [] }));
+    const out = withServerRequired(cats, ['OFF_PORTAL_DUPLICATE', 'SKIPPED'], {
+      OFF_PORTAL_DUPLICATE: [{ key: 'BJ1|f1|2026-10|150000', text: 'BJ1 · ₹1,500 — already paid outside the portal on 10 Nov 2026' }],
+    });
+    expect(out.map((c) => c.category)).toEqual(['SKIPPED', 'OFF_PORTAL_DUPLICATE']);
+    const op = out[1];
+    expect(op.required).toBe(true);
+    expect(op.label).toBe('I understand some payouts may already have been paid outside the portal (off-portal payments register)');
+    expect(op.items).toEqual([{ key: 'BJ1|f1|2026-10|150000', text: 'BJ1 · ₹1,500 — already paid outside the portal on 10 Nov 2026' }]);
+    expect(ackItemsFor(out, ['OFF_PORTAL_DUPLICATE'])).toEqual({ OFF_PORTAL_DUPLICATE: ['BJ1|f1|2026-10|150000'] });
+    expect(ACK_ORDER.at(-1)).toBe('OFF_PORTAL_DUPLICATE');
+  });
 });

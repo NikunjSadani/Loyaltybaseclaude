@@ -40,6 +40,7 @@ import {
   FileSpreadsheet,
   FolderDown,
   PiggyBank,
+  HandCoins,
 } from 'lucide-react';
 import { useClientConfig } from '@/lib/platform/client-config-context';
 import { appDisplayName } from '@/lib/platform/app-display-name';
@@ -47,6 +48,7 @@ import { useTenantFeatures, ADMIN_FEATURES_URL } from '@/lib/tenant-features';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useTodayLabel } from '@/lib/use-today-label';
 import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
+import { useOffPortalNavVisible } from '@/lib/off-portal-payments';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
 import { useAssumedContext } from '@/lib/use-assumed-context';
@@ -141,6 +143,10 @@ const ALL_NAV_ITEMS = [
   // fundAdmin: GIFSY_ADMIN / GIFSY_STAFF (assumed; writes need payouts:manage_fund) + CLIENT_ADMIN (read-only) — the
   // same roles as the admin/fund/layout.tsx guard. Replaces the retired "Fund Management" child of Redemption Payouts.
   { href: '/admin/fund', label: 'Fund Reconciliation', icon: PiggyBank, featureFlag: null, fundAdmin: true },
+  // Off-portal payments register — payments made outside the portal (bank / UPI / gift). offPortalAdmin: GIFSY_ADMIN
+  // (assumed; uploads + voids) + CLIENT_ADMIN (read-only, PII masked) — the same roles as the backend read routes and the
+  // admin/off-portal-payments/layout.tsx guard (GIFSY_STAFF is refused by the API, so the item is hidden from them).
+  { href: '/admin/off-portal-payments', label: 'Off-portal Payments', icon: HandCoins, featureFlag: null, offPortalAdmin: true },
   { href: '/admin/gifts',    label: 'Gift Catalogue',  icon: Gift,          featureFlag: 'walletModule' as const },
   { href: '/admin/gift-catalogue', label: 'Gift Master Catalogue', icon: ShoppingBag, featureFlag: null, gifsyAdminOnly: true },
   { href: process.env.NEXT_PUBLIC_EXCEL_TARGETS_ONLY === 'true' ? '/admin/targets/upload' : '/admin/targets', label: 'Targets', icon: Target, featureFlag: null },
@@ -247,6 +253,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   // hydration — the same post-mount tick in which the role-gated items (adminSession) appear.
   const visibilityEnabled = useGifsySettings().visibilityEnabled === true;
   const todayLabel = useTodayLabel();
+  // Off-portal payments register nav (B7): GIFSY_ADMIN always; CLIENT_ADMIN only when the client has entries.
+  const offPortalNavVisible = useOffPortalNavVisible(adminSession.role);
 
   // RBAC Option-X (P5 UI/UX audit M2): a GIFSY_STAFF reaches the admin shell ONLY while assumed
   // into a granted brand. An un-assumed staff who lands on /admin/* has no coherent state here
@@ -298,6 +306,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         if ((item as { fundAdmin?: boolean }).fundAdmin
           && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'GIFSY_STAFF'
           && adminSession.role !== 'CLIENT_ADMIN') return false;
+        // offPortalAdmin items (Off-portal Payments) — GIFSY_ADMIN + CLIENT_ADMIN only (hidden from GIFSY_STAFF + MIS_USER).
+        // B7: a CLIENT_ADMIN sees it only once the client has entries (fail-open on a failed presence read).
+        if ((item as { offPortalAdmin?: boolean }).offPortalAdmin && !offPortalNavVisible) return false;
         // salesImportAdmin items (Sales Import) — GIFSY_ADMIN, GIFSY_STAFF (owner 2026-11-25: Project Manager uploads +
         // applies; AdminRouteGuard checks targets:read, the backend re-checks each action) and CLIENT_ADMIN; also gated
         // on the tenant featureFlag below.
@@ -315,7 +326,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         if (!item.featureFlag) return true;
         return !!(features as unknown as Record<string, boolean>)[item.featureFlag];
       }),
-    [features, adminSession.canManageSchemes, adminSession.role, visibilityEnabled],
+    [features, adminSession.canManageSchemes, adminSession.role, visibilityEnabled, offPortalNavVisible],
   );
 
   // Auto-expand the parent whose child matches the current path. Scans ALL_NAV_ITEMS (not the

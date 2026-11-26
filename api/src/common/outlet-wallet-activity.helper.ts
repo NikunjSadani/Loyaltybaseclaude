@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { isLoyaltyEnabledForPartner } from './loyalty-eligibility';
+import { clientHasOffPortalPayments, type PresenceDb } from '../off-portal-payments/off-portal-presence';
 import {
   PRIMARY_OUTLET_ORDER_BY,
   partnerOutletsWhere,
@@ -32,7 +33,9 @@ type Db = Pick<
   | 'pointsLedger'
   | 'creditPayoutEntry'
   | 'payoutTransaction'
->;
+> &
+  // Off-portal payments register (2026-11-25). Optional only for narrow unit-test fakes; the real client has it.
+  Partial<Pick<Prisma.TransactionClient, 'offPortalPayment'>>;
 
 /** The partner's outlets, PRIMARY first — the fields every consumer of the activity needs. */
 export const ACTIVITY_OUTLET_SELECT = {
@@ -118,7 +121,15 @@ export async function resolveOutletWalletActivity(
       select: { id: true },
     }),
   ]);
-  const hasPayoutActivity = !!payoutEntry || !!payoutTxn;
+  // The payout LIST also shows off-portal payments (not void) to these outlets → they flip the card too.
+  const offPortal =
+    !payoutEntry && !payoutTxn && outletCodes.length && db.offPortalPayment && (await clientHasOffPortalPayments(db as PresenceDb, clientId))
+      ? await db.offPortalPayment.findFirst({
+          where: { clientId, voidedAt: null, outletCodeKey: { in: [...new Set(outletCodes.map((c) => c.trim().toUpperCase()))] } },
+          select: { id: true },
+        })
+      : null;
+  const hasPayoutActivity = !!payoutEntry || !!payoutTxn || !!offPortal;
 
   return {
     outlets,

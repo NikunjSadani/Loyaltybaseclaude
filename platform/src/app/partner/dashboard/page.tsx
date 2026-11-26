@@ -402,6 +402,8 @@ function PerformanceCard({
   const [trend,    setTrend]    = useState<TrendResponse | null>(null);
   const [pointsCr, setPointsCr] = useState<number | null>(null);
   const [payoutCr, setPayoutCr] = useState<number | null>(null);
+  /** B2: the off-portal GIFT part of payoutCr (gifts stay in the figure — said under it). */
+  const [giftCr,   setGiftCr]   = useState<number | null>(null);
   const primaryCode = primary?.code;
   const thisKey = istMonthKey(new Date()); // current IST calendar month
   const lastKey = previousMonthKey();       // previous IST calendar month
@@ -445,8 +447,9 @@ function PerformanceCard({
         if (cancelled) return;
         const payouts = json.success && Array.isArray(json.data?.payouts) ? json.data!.payouts! : [];
         setPayoutCr(sumPayoutCreditedInMonth(payouts, lastKey));
+        setGiftCr(sumPayoutCreditedInMonth(payouts.filter((p) => p.gift), lastKey));
       })
-      .catch(() => { if (!cancelled) setPayoutCr(0); }); // honest zero
+      .catch(() => { if (!cancelled) { setPayoutCr(0); setGiftCr(0); } }); // honest zero
     return () => { cancelled = true; };
   }, [hasPayoutActivity, lastKey]);
 
@@ -529,6 +532,11 @@ function PerformanceCard({
                 {hasPayoutActivity && (
                   <p className="text-[11px] font-semibold text-[var(--brand-primary-dark)] truncate">
                     {formatInrCompact(payoutCr ?? 0)} payout
+                  </p>
+                )}
+                {hasPayoutActivity && (giftCr ?? 0) > 0 && (
+                  <p data-testid="dashboard-payout-gift" className="text-[10px] text-gray-500 truncate">
+                    includes {formatInrCompact(giftCr ?? 0)} Gift (off-portal)
                   </p>
                 )}
               </div>

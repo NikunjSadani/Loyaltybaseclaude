@@ -48,6 +48,26 @@ export function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
             {tdsNote}
           </p>
         )}
+        {(p.offPortal || p.gift) && (
+          <span className="mt-0.5 flex flex-wrap gap-1">
+            {p.offPortal && (
+              <span
+                data-testid="payout-offportal-badge"
+                className="inline-block text-[9px] font-semibold uppercase tracking-wide text-slate-700 bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5"
+              >
+                Paid outside the portal
+              </span>
+            )}
+            {p.gift && (
+              <span
+                data-testid="payout-gift-badge"
+                className="inline-block text-[9px] font-semibold uppercase tracking-wide text-violet-700 bg-violet-50 border border-violet-100 rounded px-1.5 py-0.5"
+              >
+                Gift (off-portal)
+              </span>
+            )}
+          </span>
+        )}
         {!isPaid && (
           <span
             data-testid="payout-pending-badge"

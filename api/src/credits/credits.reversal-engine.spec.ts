@@ -23,7 +23,7 @@ jest.mock('../common/reward-account.helper', () => ({
 }));
 
 const NOW = new Date('2026-06-01T00:00:00.000Z');
-const ALL_ACKS = ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'];
+const ALL_ACKS = ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION', 'OFF_PORTAL_DUPLICATE'];
 
 /**
  * The confirm body an admin who ticked `cats` (default: everything) sends: the categories + the EXACT item keys the
@@ -1593,7 +1593,7 @@ describe('fix round — row guards (D1), undo once repaid (D2), expiry (F2 / L1)
     const preview = await h.credits.uploadPreview(adminUser, { outletCodes: ['O1'], period: '2026-05', lines: [{ outletCode: 'O1', fieldId: 'F' }] });
     expect(preview).toMatchObject({
       deductionsEnabled: true,
-      ackCategories: ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'],
+      ackCategories: ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION', 'OFF_PORTAL_DUPLICATE'],
       outlets: [{ outletCode: 'O1', found: true, linked: true, walletId: 'w-cp1', partnerId: 'cp1', balance: 900, heldOpeningBalance: null, dueExpiry: 0, ready: true }],
       priorDeductions: [{ outletCode: 'O1', fieldId: 'F', batchId: 'B1', points: 100, givenBack: 0 }],
     });

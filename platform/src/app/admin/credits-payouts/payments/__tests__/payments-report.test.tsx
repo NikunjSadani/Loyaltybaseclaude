@@ -231,6 +231,30 @@ describe('/admin/credits-payouts/payments — Payments Report', () => {
     expect(screen.queryByText('UTR12345')).not.toBeInTheDocument()
   })
 
+  it('off-portal payments in the range: a card with count + amount (not in the table); none → no card', async () => {
+    asRole('CLIENT_ADMIN')
+    vi.stubGlobal('fetch', vi.fn((url: string) =>
+      url.startsWith('/api/admin/payments-report')
+        ? Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { ...report(), offPortal: { count: 3, amount: { paise: '450050', inr: 4500.5 } } } }) })
+        : Promise.reject(new Error('unexpected fetch in test: ' + url)),
+    ))
+    const { unmount } = render(<AdminPaymentsReportPage />)
+    await screen.findByText('Shop A')
+    const card = await screen.findByTestId('payments-offportal-card')
+    expect(card).toHaveTextContent('Off-portal payments in this range: 3, ₹4,500.50')
+    expect(card).toHaveTextContent(/not in the totals or the table below/)
+    unmount()
+
+    vi.stubGlobal('fetch', vi.fn((url: string) =>
+      url.startsWith('/api/admin/payments-report')
+        ? Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data: { ...report(), offPortal: { count: 0, amount: { paise: '0', inr: 0 } } } }) })
+        : Promise.reject(new Error('unexpected fetch in test: ' + url)),
+    ))
+    render(<AdminPaymentsReportPage />)
+    await screen.findByText('Shop A')
+    expect(screen.queryByTestId('payments-offportal-card')).not.toBeInTheDocument()
+  })
+
   it('Export button fetches the export URL carrying the current filters', async () => {
     asRole('GIFSY_ADMIN')
     const fetchMock = stubFetch()

@@ -93,6 +93,31 @@ export const PAYMENT_ENTRY_SELECT = {
   autoInvoice: { select: { invoiceNumber: true } },
 } satisfies Prisma.CreditPayoutEntrySelect;
 
+/**
+ * Off-portal payments register (owner 2026-11-25) — payments made OUTSIDE the portal in the same range / tenant. They
+ * are not CreditPayoutEntry rows, so they never enter the paged rows / totals above (which stay byte-identical); the
+ * screen shows them as a separate card and the export as a separate "Off-portal payments" sheet. A non-PAID status
+ * filter (FAILED / REVERSED audit view) has no off-portal rows → null. Voided entries are excluded.
+ */
+export function offPortalWhere(f: PaymentsFilter): Prisma.OffPortalPaymentWhereInput | null {
+  if (isNonPaidStatus(f)) return null;
+  const range = istDayRangeFilter(f.from ?? undefined, f.to ?? undefined);
+  const where: Prisma.OffPortalPaymentWhereInput = { voidedAt: null };
+  if (f.clientId) where.clientId = f.clientId;
+  if (range) where.paymentDate = range;
+  return where;
+}
+
+export async function offPortalTotals(
+  // Optional only so narrow unit-test fakes keep working; PrismaService / a tx client always has it.
+  prisma: { offPortalPayment?: { aggregate: Prisma.OffPortalPaymentDelegate['aggregate'] } },
+  where: Prisma.OffPortalPaymentWhereInput | null,
+): Promise<{ count: number; amountPaise: bigint }> {
+  if (!where || !prisma.offPortalPayment) return { count: 0, amountPaise: 0n };
+  const agg = await prisma.offPortalPayment.aggregate({ where, _count: { _all: true }, _sum: { amountPaise: true } });
+  return { count: agg._count?._all ?? 0, amountPaise: agg._sum?.amountPaise ?? 0n };
+}
+
 export interface PaymentsTotals {
   count: number;
   amountPaise: bigint;

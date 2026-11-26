@@ -616,6 +616,10 @@ export interface PayoutLedgerEntry {
   tdsWithheldPaise?: number;
   /** The whole payout was withheld as TDS — ₹0 paid to the retailer (no bank transfer / UTR). */
   settledByTds?:     true;
+  /** Off-portal payments register: paid OUTSIDE the portal (bank / UPI / gift), recorded by Gifsy. Always PAID. */
+  offPortal?:        true;
+  /** Off-portal only: paid as a gift (not money). */
+  gift?:             true;
 }
 
 // ─── Wallet Balance Type ──────────────────────────────────────────────────────

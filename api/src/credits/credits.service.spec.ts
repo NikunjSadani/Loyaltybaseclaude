@@ -526,7 +526,7 @@ describe('CreditsService', () => {
       const outlets = [{ outletCode: 'O1', found: true, linked: true, walletId: 'w1', partnerId: 'p1', balance: 100, heldOpeningBalance: null, ready: true, reason: null, code: null }];
       mockWalletService.uploadDeductionReadiness.mockResolvedValueOnce(outlets);
       await expect(service.uploadPreview(admin, { outletCodes: ['O1'], period: '2026-05', lines: [] })).resolves.toEqual({
-        deductionsEnabled: false, ackCategories: ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION'], outlets, priorDeductions: [],
+        deductionsEnabled: false, ackCategories: ['SKIPPED', 'ROUNDED', 'NOT_APPLIED', 'BELOW_ZERO', 'REPEAT_DEDUCTION', 'OFF_PORTAL_DUPLICATE'], outlets, priorDeductions: [],
       });
       expect(mockWalletService.uploadDeductionReadiness).toHaveBeenCalledWith('deoleo', ['O1']);
     });

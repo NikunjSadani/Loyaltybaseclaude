@@ -82,6 +82,12 @@ interface Tds194RRow {
   excessDeductedPaise?: number | string;
   carryForwardDroppedPaise?: number | string;
   reversal?: TdsReversalFlag;
+  /** Off-portal payments register: paid outside the portal (in the base) — only on rows that have any. */
+  offPortalPaidPaise?: number | string;
+  /** Of which paid in full on the Deduct method — TDS NOT withheld (a shortfall). */
+  offPortalNotWithheldPaise?: number | string;
+  /** The TDS amount short on those off-portal payments. */
+  offPortalShortfallTdsPaise?: number | string;
 }
 
 interface Tds194RResponse {
@@ -99,6 +105,11 @@ interface Tds194RResponse {
     excessRetailerCount?: number;
     /** Count of rows carrying a `reversal` flag (newer API). */
     reversalFlags?: number;
+    /** Off-portal payments register (only when any row has off-portal payments). */
+    totalOffPortalPaidPaise?: number | string;
+    totalOffPortalNotWithheldPaise?: number | string;
+    totalOffPortalShortfallTdsPaise?: number | string;
+    offPortalNotWithheldRetailerCount?: number;
   };
   rows: Tds194RRow[];
 }
@@ -116,6 +127,12 @@ interface Tds194CRow {
   outstandingPaise:        number | string;
   depositForPeriods?:      string[];
   reversal?:               TdsReversalFlag;
+  /** Off-portal payments register (only on rows that have any). */
+  offPortalPaidPaise?:        number | string;
+  offPortalNotWithheldPaise?: number | string;
+  offPortalShortfallTdsPaise?: number | string;
+  /** API-authored explanation — shown verbatim. */
+  note?:                   string;
 }
 
 interface Tds194CResponse {
@@ -260,6 +277,53 @@ function ReversalFlagCell({ flag }: { flag?: TdsReversalFlag }) {
 }
 
 /** One-line summary above a liability table when any row is flagged. */
+/**
+ * Off-portal payments register — the loud banner when payments made OUTSIDE the portal were paid in full on the
+ * Deduct method (TDS NOT withheld): that TDS is a shortfall the client has to cover.
+ */
+function OffPortalShortfallBanner({
+  paise, shortfallTdsPaise, retailers, testId,
+}: { paise: number; shortfallTdsPaise?: number; retailers?: number; testId: string }) {
+  if (!(paise > 0) && !((shortfallTdsPaise ?? 0) > 0)) return null;
+  return (
+    <div role="alert" data-testid={testId} className="flex items-start gap-2 bg-red-50 border border-red-300 rounded-xl px-4 py-3 text-sm text-red-800">
+      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden />
+      <div>
+        <p className="font-semibold">TDS not withheld on off-portal payments — shortfall</p>
+        {shortfallTdsPaise !== undefined && (
+          <p className="mt-0.5 font-semibold" data-testid={`${testId}-tds`}>TDS shortfall {formatINR(shortfallTdsPaise)}</p>
+        )}
+        <p className="text-xs mt-0.5">
+          {formatINR(paise)} was paid outside the portal on the Deduct method without withholding TDS
+          {retailers != null && retailers > 0 ? ` (${retailers} payee${retailers === 1 ? '' : 's'})` : ''}. Where the payee is
+          over the yearly threshold, the TDS on it is due and nothing was withheld; below the threshold nothing is due yet. Each
+          affected row below says which — see also the Off-portal payments register.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** Off-portal figures on a 194R / 194C row (only when the row has any). */
+function OffPortalRowLines({
+  row, testId,
+}: { row: { offPortalPaidPaise?: number | string; offPortalNotWithheldPaise?: number | string; offPortalShortfallTdsPaise?: number | string }; testId: string }) {
+  if (row.offPortalPaidPaise === undefined && row.offPortalNotWithheldPaise === undefined && row.offPortalShortfallTdsPaise === undefined) return null;
+  return (
+    <div className="mt-1 font-sans text-[11px] leading-snug" data-testid={testId}>
+      {row.offPortalPaidPaise !== undefined && (
+        <div className="text-gray-600">Paid outside the portal: {formatINR(p(row.offPortalPaidPaise))}</div>
+      )}
+      {p(row.offPortalNotWithheldPaise ?? 0) > 0 && (
+        <div className="font-semibold text-red-700">TDS not withheld on {formatINR(p(row.offPortalNotWithheldPaise))} paid off-portal</div>
+      )}
+      {p(row.offPortalShortfallTdsPaise ?? 0) > 0 && (
+        <div className="font-semibold text-red-700" data-testid={`${testId}-row-shortfall`}>TDS shortfall {formatINR(p(row.offPortalShortfallTdsPaise))}</div>
+      )}
+    </div>
+  );
+}
+
 function ReversalSummaryLine({ count, testId }: { count: number; testId: string }) {
   if (count <= 0) return null;
   return (
@@ -740,6 +804,14 @@ export default function AdminTdsPage() {
               only, payer-borne (nothing was withheld from those payouts). Set on the TDS Treatment screen.
             </p>
           )}
+          {r194 && (
+            <OffPortalShortfallBanner
+              testId="r194-offportal-shortfall"
+              paise={p(r194.summary.totalOffPortalNotWithheldPaise ?? 0)}
+              shortfallTdsPaise={r194.summary.totalOffPortalShortfallTdsPaise !== undefined ? p(r194.summary.totalOffPortalShortfallTdsPaise) : undefined}
+              retailers={r194.summary.offPortalNotWithheldRetailerCount}
+            />
+          )}
           {/* Summary cards */}
           {r194 && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -826,6 +898,7 @@ export default function AdminTdsPage() {
                               {row.note && (
                                 <div className="mt-1 font-sans text-[11px] text-amber-700" data-testid="r194-note">{row.note}</div>
                               )}
+                              <OffPortalRowLines row={row} testId="r194-offportal" />
                               <ReversalFlagCell flag={row.reversal} />
                             </td>
                             <td className="px-4 py-3 text-right text-gray-700">{formatINR(p(row.baseFyTotalPaise))}</td>
@@ -896,6 +969,19 @@ export default function AdminTdsPage() {
       {/* ── 194C Tab (GIFSY_ADMIN only) ──────────────────────────────────────── */}
       {activeTab === '194C' && isGifsy && (
         <div className="space-y-5">
+          {/* 194C summary has no off-portal totals — summed from the rows (the API returns every row of the year). */}
+          {r194c && (
+            <OffPortalShortfallBanner
+              testId="r194c-offportal-shortfall"
+              paise={r194c.rows.reduce((s, r) => s + p(r.offPortalNotWithheldPaise ?? 0), 0)}
+              shortfallTdsPaise={
+                r194c.rows.some((r) => r.offPortalShortfallTdsPaise !== undefined)
+                  ? r194c.rows.reduce((s, r) => s + p(r.offPortalShortfallTdsPaise ?? 0), 0)
+                  : undefined
+              }
+              retailers={r194c.rows.filter((r) => p(r.offPortalNotWithheldPaise ?? 0) > 0).length}
+            />
+          )}
           {/* Summary cards */}
           {r194c && (
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -969,6 +1055,10 @@ export default function AdminTdsPage() {
                           <tr key={i} className={`hover:bg-gray-50 transition-colors${row.reversal ? ' bg-amber-50/40' : ''}`}>
                             <td className="px-4 py-3 font-mono text-xs text-gray-800">
                               {deducteeCellLabel(row)}
+                              {row.note && (
+                                <div className="mt-1 font-sans text-[11px] text-amber-700" data-testid="r194c-note">{row.note}</div>
+                              )}
+                              <OffPortalRowLines row={row} testId="r194c-offportal" />
                               <ReversalFlagCell flag={row.reversal} />
                             </td>
                             <td className="px-4 py-3 text-xs text-gray-700">{row.entityType}</td>
