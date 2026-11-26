@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   apiJson, BUCKET_ORDER, inr, plural,
-  type Breakdown, type BucketKey, type PayoutStatusData,
+  type Breakdown, type BucketKey, type Money, type PayoutStatusData,
 } from './payout-cancel-shared';
 
 const BUCKET_LABEL: Record<BucketKey, string> = {
@@ -82,12 +82,22 @@ export default function PayoutStatusBreakdown({ batchId, refreshKey, onPick, onL
 
       {!data.reconciles && (
         <div role="alert" data-testid="payout-status-not-reconciled" className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-xs text-red-800">
-          These figures do not add up: the payout rows total {inr(data.entriesTotalPaise)} but the upload total is{' '}
-          {inr(data.uploadTotalPaise)}. Do not act on this upload until Gifsy tech has checked it.
+          <p className="font-semibold">These figures do not add up.</p>
+          <p data-testid="payout-status-not-reconciled-figures">
+            Upload total {inr(data.uploadTotalPaise)} vs payout rows {inr(data.entriesTotalPaise)} (difference{' '}
+            {inr(Math.abs(data.uploadTotalPaise - data.entriesTotalPaise))}).
+          </p>
+          {data.notes.length > 0 && (
+            <ul className="list-disc pl-4 space-y-0.5" data-testid="payout-status-not-reconciled-notes">
+              {data.notes.map((n, i) => <li key={i}>{n}</li>)}
+            </ul>
+          )}
+          <p>Do not act on this upload until Gifsy tech has checked it.</p>
         </div>
       )}
 
-      {data.notes.length > 0 && (
+      {/* When the figures don't reconcile the notes are shown inside the red warning above (not twice). */}
+      {data.reconciles && data.notes.length > 0 && (
         <ul data-testid="payout-status-notes" className="space-y-1">
           {data.notes.map((n, i) => (
             <li key={i} className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-900">{n}</li>
@@ -153,6 +163,38 @@ export default function PayoutStatusBreakdown({ batchId, refreshKey, onPick, onL
   );
 }
 
+/**
+ * Only the FAILED rows not held elsewhere go into the next bank file; the held ones are listed with why (never
+ * implied to be re-banked). A part with no rows is omitted.
+ */
+function FailedNote({ failed, b }: { failed: Money; b: Breakdown }) {
+  const rev = b.failedHeldByReversal ?? { count: 0, paise: 0 };
+  const kyc = b.failedKycHold ?? { count: 0, paise: 0 };
+  const eligible = {
+    count: Math.max(0, failed.count - rev.count - kyc.count),
+    paise: Math.max(0, failed.paise - rev.paise - kyc.paise),
+  };
+  return (
+    <>
+      {eligible.count > 0 && (
+        <span className="block text-gray-500" data-testid="failed-rebank">
+          {plural(eligible.count, 'row', 'rows')} ({inr(eligible.paise)}) will be re-banked in the next bank file
+        </span>
+      )}
+      {rev.count > 0 && (
+        <span className="block text-amber-700" data-testid="failed-held-reversal">
+          {plural(rev.count, 'row', 'rows')} ({inr(rev.paise)}) held by a pending reversal request
+        </span>
+      )}
+      {kyc.count > 0 && (
+        <span className="block text-amber-700" data-testid="failed-kyc-hold">
+          {plural(kyc.count, 'row', 'rows')} ({inr(kyc.paise)}) on KYC / partner hold — not re-banked until KYC is approved
+        </span>
+      )}
+    </>
+  );
+}
+
 function BreakdownTable({ title, testId, b, onPick }: { title: string; testId: string; b: Breakdown; onPick: (s: BucketKey) => void }) {
   return (
     <div data-testid={testId} className="border border-gray-200 rounded-lg overflow-hidden">
@@ -192,9 +234,7 @@ function BreakdownTable({ title, testId, b, onPick }: { title: string; testId: s
                       {plural(b.pendingHeldByReversal.count, 'row', 'rows')} ({inr(b.pendingHeldByReversal.paise)}) held by a pending reversal
                     </span>
                   )}
-                  {k === 'FAILED' && m.count > 0 && (
-                    <span className="block text-gray-500">will be re-banked in the next bank file</span>
-                  )}
+                  {k === 'FAILED' && m.count > 0 && <FailedNote failed={m} b={b} />}
                 </td>
                 <td className="px-3 py-1.5 text-right text-gray-600 whitespace-nowrap">{plural(m.count, 'row', 'rows')}</td>
                 <td className="px-3 py-1.5 text-right text-gray-900 whitespace-nowrap">{inr(m.paise)}</td>

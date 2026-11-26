@@ -311,8 +311,9 @@ export class InvoicesService {
           // Which constraint fired? Connector-agnostic: does this outlet's invoice
           // for the period already exist? (tenant-scoped read).
           // LIVE invoices only — a VOID one (payouts cancelled) never holds the outlet/month tuple.
+          // SERVICE only — a 194C TDS invoice for the same outlet + month is a different document and is never touched.
           const tupleExists = await this.prisma.autoInvoice.findFirst({
-            where: { clientId, outletCode, period, voidedAt: null },
+            where: { clientId, outletCode, period, invoiceKind: 'SERVICE', voidedAt: null },
             select: { id: true },
           });
 
@@ -329,9 +330,10 @@ export class InvoicesService {
             continue;
           }
 
-          // TUPLE conflict — refresh amounts ONLY while still GENERATED.
+          // TUPLE conflict — refresh amounts ONLY while still GENERATED and unlocked (a locked invoice is final), and
+          // only the SERVICE invoice (never a TDS invoice of the same outlet + month).
           const refreshed = await this.prisma.autoInvoice.updateMany({
-            where: { clientId, outletCode, period, status: 'GENERATED', voidedAt: null },
+            where: { clientId, outletCode, period, invoiceKind: 'SERVICE', status: 'GENERATED', lockedAt: null, voidedAt: null },
             data: refreshData,
           });
           if (refreshed.count > 0) {
@@ -358,7 +360,7 @@ export class InvoicesService {
           } else {
             skipped.push({
               outletCode,
-              reason: 'Invoice already finalized (PAID) — not regenerated',
+              reason: 'Invoice already finalized (PAID or locked) — not regenerated',
             });
           }
           persisted = true;

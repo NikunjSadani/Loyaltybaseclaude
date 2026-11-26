@@ -22,6 +22,8 @@ const BD: Breakdown = {
   paidTdsWithheldPaise: 2000,
   paidSettledByTds: m(1, 1500),
   pendingHeldByReversal: m(1, 10000),
+  failedHeldByReversal: m(0, 0),
+  failedKycHold: m(0, 0),
 };
 const DATA: PayoutStatusData = {
   batch: { id: 'b1', batchCode: 'CB-1', period: '2026-10', status: 'CONFIRMED', totalPayoutPaise: 295000, sourceKind: 'UPLOAD' },
@@ -62,7 +64,9 @@ describe('PayoutStatusBreakdown', () => {
     expect(row('PROCESSING')).toContain('In bank file (awaiting bank result)');
     expect(row('PENDING')).toContain('Pending (not yet in a bank file)');
     expect(row('PENDING')).toContain('1 row (₹100.00) held by a pending reversal');
-    expect(row('FAILED')).toContain('will be re-banked in the next bank file');
+    expect(row('FAILED')).toContain('1 row (₹100.00) will be re-banked in the next bank file');
+    expect(row('FAILED')).not.toContain('held by a pending reversal request');
+    expect(row('FAILED')).not.toContain('KYC');
     expect(row('REVERSED')).toContain('0 rows');
     expect(row('CANCELLED')).toContain('₹50.00');
     expect(row('TOTAL')).toContain('8 rows');
@@ -92,12 +96,60 @@ describe('PayoutStatusBreakdown', () => {
     expect(onPick).toHaveBeenLastCalledWith('FAILED', 'f2');
   });
 
-  it('shows a red warning when the figures do not reconcile', async () => {
-    stub({ success: true, data: { ...DATA, reconciles: false, entriesTotalPaise: 295000, uploadTotalPaise: 300000, notes: [] } });
+  it('failed rows: only the eligible ones are "re-banked"; reversal-held and KYC-held are listed with why (overall + per field)', async () => {
+    const held: Breakdown = {
+      ...BD,
+      buckets: { ...BD.buckets, FAILED: m(5, 50000) },
+      failedHeldByReversal: m(1, 10000),
+      failedKycHold: m(2, 25000),
+    };
+    const allHeld: Breakdown = {
+      ...BD,
+      buckets: { ...BD.buckets, FAILED: m(2, 20000) },
+      failedHeldByReversal: m(0, 0),
+      failedKycHold: m(2, 20000),
+    };
+    stub({ success: true, data: { ...DATA, overall: held, fields: [
+      { fieldId: 'f1', fieldName: 'Volume', breakdown: held },
+      { fieldId: 'f2', fieldName: 'Visibility', breakdown: allHeld },
+    ] } });
+    render(<PayoutStatusBreakdown batchId="b1" refreshKey={0} onPick={vi.fn()} />);
+    const overall = (await screen.findByTestId('breakdown-overall-FAILED')).textContent ?? '';
+    expect(overall).toContain('2 rows (₹150.00) will be re-banked in the next bank file');
+    expect(overall).toContain('1 row (₹100.00) held by a pending reversal request');
+    expect(overall).toContain('2 rows (₹250.00) on KYC / partner hold — not re-banked until KYC is approved');
+
+    const f1 = screen.getByTestId('breakdown-field-f1-FAILED').textContent ?? '';
+    expect(f1).toContain('2 rows (₹150.00) will be re-banked in the next bank file');
+    // every failed row on KYC hold: no "re-banked" claim, no reversal line
+    const f2 = screen.getByTestId('breakdown-field-f2-FAILED').textContent ?? '';
+    expect(f2).not.toContain('will be re-banked');
+    expect(f2).not.toContain('pending reversal request');
+    expect(f2).toContain('2 rows (₹200.00) on KYC / partner hold — not re-banked until KYC is approved');
+  });
+
+  it('shows a red warning with the real figures + the server notes when the figures do not reconcile', async () => {
+    stub({ success: true, data: {
+      ...DATA, reconciles: false, entriesTotalPaise: 295000, uploadTotalPaise: 300000,
+      notes: ['The upload total differs from the payout rows created.'],
+    } });
     render(<PayoutStatusBreakdown batchId="b1" refreshKey={0} onPick={vi.fn()} />);
     const warn = await screen.findByTestId('payout-status-not-reconciled');
     expect(warn).toHaveAttribute('role', 'alert');
-    expect(warn.textContent).toContain('the payout rows total ₹2,950.00 but the upload total is ₹3,000.00');
+    expect(warn.textContent).toContain('Upload total ₹3,000.00 vs payout rows ₹2,950.00 (difference ₹50.00)');
+    expect(screen.getByTestId('payout-status-not-reconciled-notes').textContent).toContain(
+      'The upload total differs from the payout rows created.',
+    );
+    // the notes are not shown a second time in the amber list
+    expect(screen.queryByTestId('payout-status-notes')).toBeNull();
+  });
+
+  it('no red warning when the figures reconcile (even with notes)', async () => {
+    stub({ success: true, data: DATA });
+    render(<PayoutStatusBreakdown batchId="b1" refreshKey={0} onPick={vi.fn()} />);
+    await screen.findByTestId('breakdown-overall');
+    expect(screen.queryByTestId('payout-status-not-reconciled')).toBeNull();
+    expect(screen.getByTestId('payout-status-notes')).toBeInTheDocument();
   });
 
   it('a failed load shows the server error with Retry, and Retry reloads', async () => {

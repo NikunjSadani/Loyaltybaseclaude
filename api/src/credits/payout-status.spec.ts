@@ -70,6 +70,19 @@ describe('buildPayoutStatus', () => {
   it('says out loud when the upload header total differs from the payout rows created', () => {
     const s = buildPayoutStatus({ batch: batch({ totalPayoutPaise: 20000n }), entries: [row('PENDING', 15000)], visibilityFieldIds: new Set(), notApplied: [] });
     expect(s.notes[0]).toMatch(/differs from the payout rows created/);
+    expect(s.reconciles).toBe(false); // the screen's "do not add up" warning is real, not dead
+  });
+
+  it('a FAILED row is re-banked only when payable: held by a pending reversal / KYC hold are counted apart', () => {
+    const s = buildPayoutStatus({
+      batch: batch({ totalPayoutPaise: 6000n }),
+      entries: [row('FAILED', 1000), row('FAILED', 2000, { heldByReversal: true }), row('FAILED', 3000, { kycHold: true })],
+      visibilityFieldIds: new Set(),
+      notApplied: [],
+    });
+    expect(s.overall.buckets.FAILED).toEqual({ count: 3, paise: 6000 });
+    expect(s.overall.failedHeldByReversal).toEqual({ count: 1, paise: 2000 });
+    expect(s.overall.failedKycHold).toEqual({ count: 1, paise: 3000 });
   });
 
   it('points are shown apart (credited points, not money), net of rows not credited at confirm', () => {

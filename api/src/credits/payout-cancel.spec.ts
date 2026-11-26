@@ -34,6 +34,7 @@ interface World {
   recovery?: Row[];
   invoices?: Row[];
   gst?: Row[];
+  visibilityFieldIds?: string[];
 }
 
 function inList(v: unknown, f: any): boolean {
@@ -81,6 +82,7 @@ function fake(w: World) {
       }),
     },
     auditLog: { create: jest.fn(async ({ data }: any) => { audits.push(data); return data; }) },
+    creditField: { findMany: jest.fn(async () => (w.visibilityFieldIds ?? []).map((id) => ({ id }))) },
   };
   return { tx, audits };
 }
@@ -241,7 +243,7 @@ describe('cancel failed — bank-file side effects', () => {
 });
 
 describe('self-billed SERVICE invoice', () => {
-  const inv = (over: Row = {}) => ({ id: 'i1', clientId: 'bajaj', invoiceNumber: 'TGSL-VIS-O1-202611-1', outletCode: 'O1', period: periodNow(), status: 'GENERATED', lockedAt: null, totalPaise: 11800n, ...over });
+  const inv = (over: Row = {}) => ({ id: 'i1', clientId: 'bajaj', invoiceNumber: 'TGSL-VIS-O1-202611-1', outletCode: 'O1', period: periodNow(), status: 'GENERATED', invoiceKind: 'SERVICE', voidedAt: null, lockedAt: null, totalPaise: 11800n, ...over });
 
   it('voided in the same transaction when every payout on it is cancelled; its HELD GST becomes VOID', async () => {
     const w: World = {
@@ -256,6 +258,44 @@ describe('self-billed SERVICE invoice', () => {
     expect(w.invoices![0].voidReason).toMatch(/Wrong amount uploaded/);
     expect(w.gst![0].status).toBe('VOID');
     expect(audits[0].metadata.invoicesVoided).toHaveLength(1);
+  });
+
+  describe('an invoice made by the manual "Generate invoices" run (rows NOT linked to it)', () => {
+    const vis = (over: Row = {}) => entry({ fieldId: 'f-vis', tdsSection: 'SEC_194C', ...over });
+    it('is voided (+ HELD GST) when every visibility payout of its outlet + month is being cancelled', async () => {
+      const w: World = {
+        entries: [vis({ id: 'v1' }), vis({ id: 'v2', fieldId: 'f-vis' }), entry({ id: 'x', fieldId: 'f-incentive' })],
+        invoices: [inv({ id: 'm1', invoiceNumber: 'TGSL-VIS-O1-MANUAL' })],
+        gst: [{ autoInvoiceId: 'm1', status: 'HELD', gstPaise: 1800n }],
+        visibilityFieldIds: ['f-vis'],
+      };
+      const { tx } = fake(w);
+      const res = await run(tx, [item('v1', 'PENDING', 10000n), item('v2', 'PENDING', 10000n)]);
+      expect(res.invoicesVoided.map((i) => i.id)).toEqual(['m1']);
+      expect(w.invoices![0].status).toBe('VOID');
+      expect(w.gst![0].status).toBe('VOID');
+      // The invoice row was locked before the decision (batches → entries → invoices).
+      expect(tx.$queryRaw).toHaveBeenCalledTimes(3);
+    });
+    it('is refused (named) — never left silently live — when another visibility payout of that outlet + month stays payable', async () => {
+      const w: World = {
+        entries: [vis({ id: 'v1' }), vis({ id: 'v2', status: 'PROCESSING', downloadId: 'd1' })],
+        invoices: [inv({ id: 'm1', invoiceNumber: 'TGSL-VIS-O1-MANUAL' })],
+        visibilityFieldIds: ['f-vis'],
+      };
+      const { tx } = fake(w);
+      const blocked = await refusalOf(run(tx, [item('v1', 'PENDING', 10000n)]));
+      expect(blocked).toEqual([expect.objectContaining({ entryId: 'v1', code: 'INVOICE_SHARED' })]);
+      expect((blocked[0] as any).reason).toMatch(/TGSL-VIS-O1-MANUAL/);
+      expect(w.invoices![0].status).toBe('GENERATED');
+    });
+    it('a non-visibility payout of the same outlet + month is not covered by the invoice (no void, no refusal)', async () => {
+      const w: World = { entries: [entry({ id: 'x', fieldId: 'f-incentive' })], invoices: [inv({ id: 'm1' })], visibilityFieldIds: ['f-vis'] };
+      const { tx } = fake(w);
+      const res = await run(tx, [item('x', 'PENDING', 10000n)]);
+      expect(res.invoicesVoided).toEqual([]);
+      expect(w.invoices![0].status).toBe('GENERATED');
+    });
   });
 
   it.each([

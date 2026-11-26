@@ -136,7 +136,7 @@ export class CreditsController {
   cancelUpload(
     @CurrentUser() user: JwtPayload,
     @UploadedFile() file: Express.Multer.File,
-    @Body() body: { reason?: string; apply?: string; acknowledgedRowNums?: string } = {},
+    @Body() body: { reason?: string; apply?: string; acknowledgedRowNums?: string; previewedEntryIds?: string } = {},
   ) {
     return this.cancels.uploadFile(user, file, body);
   }

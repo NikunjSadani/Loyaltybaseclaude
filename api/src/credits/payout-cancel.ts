@@ -321,58 +321,18 @@ export async function evaluateCancellation(db: Db, clientId: string, items: Canc
     okEntries.push(e);
   }
 
-  // SERVICE invoices: void only when every payout on it ends cancelled / reversed.
-  const invoicesToVoid: InvoiceVoidPlan[] = [];
-  const invIds = [...new Set(okEntries.map((e) => e.autoInvoiceId).filter((x): x is string => !!x))].sort();
-  if (invIds.length > 0) {
-    const okIds = new Set(okEntries.map((e) => e.id));
-    const [invoices, linked, gst] = await Promise.all([
-      db.autoInvoice.findMany({
-        where: { id: { in: invIds }, clientId },
-        select: { id: true, invoiceNumber: true, outletCode: true, period: true, status: true, lockedAt: true, totalPaise: true },
-      }),
-      db.creditPayoutEntry.findMany({ where: { autoInvoiceId: { in: invIds } }, select: { id: true, autoInvoiceId: true, status: true } }),
-      db.gstReimbursement.findMany({ where: { autoInvoiceId: { in: invIds } }, select: { autoInvoiceId: true, status: true, gstPaise: true } }),
-    ]);
-    const badInvoice = new Map<string, { code: CancelBlockCode; extra: string }>();
-    for (const inv of invoices) {
-      const g = gst.find((x) => x.autoInvoiceId === inv.id);
-      if (String(inv.status) === 'VOID') continue; // already void (nothing left to do)
-      if (String(inv.status) !== 'GENERATED' || inv.lockedAt != null) {
-        badInvoice.set(inv.id, { code: 'INVOICE_LOCKED', extra: `invoice ${inv.invoiceNumber}` });
-        continue;
-      }
-      if (g && String(g.status) === 'RELEASED') {
-        badInvoice.set(inv.id, { code: 'GST_RELEASED', extra: `invoice ${inv.invoiceNumber}` });
-        continue;
-      }
-      const stays = linked.filter(
-        (l) => l.autoInvoiceId === inv.id && !okIds.has(l.id) && String(l.status) !== 'CANCELLED' && String(l.status) !== 'REVERSED',
-      );
-      if (stays.length > 0) {
-        badInvoice.set(inv.id, { code: 'INVOICE_SHARED', extra: `invoice ${inv.invoiceNumber} — ${stays.length} other payout${stays.length === 1 ? '' : 's'}` });
-        continue;
-      }
-      invoicesToVoid.push({
-        id: inv.id,
-        invoiceNumber: inv.invoiceNumber,
-        outletCode: inv.outletCode,
-        period: inv.period,
-        totalPaise: Number(inv.totalPaise),
-        gstHeldPaise: g && String(g.status) === 'HELD' ? Number(g.gstPaise) : 0,
-      });
-    }
-    if (badInvoice.size > 0) {
-      for (let i = okEntries.length - 1; i >= 0; i--) {
-        const e = okEntries[i];
-        const bad = e.autoInvoiceId ? badInvoice.get(e.autoInvoiceId) : undefined;
-        if (!bad) continue;
-        blocked.push({ entryId: e.id, code: bad.code, reason: cancelBlockText(bad.code, bad.extra), row: view(e) });
-        okEntries.splice(i, 1);
-      }
-      // An invoice is voided only when ALL its rows are cancelled in this request → drop any plan touched by a refusal.
-      const stillOk = new Set(okEntries.map((e) => e.autoInvoiceId));
-      for (let i = invoicesToVoid.length - 1; i >= 0; i--) if (!stillOk.has(invoicesToVoid[i].id)) invoicesToVoid.splice(i, 1);
+  // SERVICE invoices (owner 2026-11-25/26): void only when every payout it covers ends cancelled / reversed; otherwise
+  // refuse naming the invoice — never leave it silently live. An invoice covers (a) the rows linked to it
+  // (autoInvoiceId, set at confirm) AND (b) every visibility 194C payout of its outlet + month — the manual
+  // "Generate invoices" run sums those without linking them.
+  const { invoicesToVoid, badByEntry } = await planInvoiceVoids(db, clientId, okEntries);
+  if (badByEntry.size > 0) {
+    for (let i = okEntries.length - 1; i >= 0; i--) {
+      const e = okEntries[i];
+      const bad = badByEntry.get(e.id);
+      if (!bad) continue;
+      blocked.push({ entryId: e.id, code: bad.code, reason: cancelBlockText(bad.code, bad.extra), row: view(e) });
+      okEntries.splice(i, 1);
     }
   }
 
@@ -384,6 +344,102 @@ export async function evaluateCancellation(db: Db, clientId: string, items: Canc
     invoicesToVoid,
     totals: { unpaid: sum(ok.filter((r) => r.kind === 'UNPAID')), failed: sum(ok.filter((r) => r.kind === 'FAILED')), all: sum(ok) },
   };
+}
+
+type InvoiceRowRef = Pick<EntryRow, 'id' | 'outletId' | 'period' | 'fieldId' | 'tdsSection' | 'autoInvoiceId'>;
+
+/** Visibility 194C payouts (frozen 194C, or a legacy visibility row without a section) are the ones invoiced. */
+async function visibilityFieldIds(db: Db, clientId: string): Promise<Set<string>> {
+  const rows = await db.creditField.findMany({ where: { clientId, payoutStream: 'VISIBILITY' }, select: { id: true } });
+  return new Set((rows ?? []).map((r) => r.id));
+}
+const invoicedRow = (e: Pick<EntryRow, 'fieldId' | 'tdsSection'>, vis: Set<string>) =>
+  vis.has(e.fieldId) && (e.tdsSection === 'SEC_194C' || e.tdsSection == null);
+
+/**
+ * The LIVE SERVICE invoices the given rows touch: linked to a row (autoInvoiceId) or for the outlet + month of an
+ * invoiced (visibility 194C) row — the manual "Generate invoices" run does not link rows. Read-only.
+ */
+export async function touchedInvoiceIds(db: Db, clientId: string, rows: InvoiceRowRef[]): Promise<string[]> {
+  if (rows.length === 0) return [];
+  const vis = await visibilityFieldIds(db, clientId);
+  const linked = [...new Set(rows.map((r) => r.autoInvoiceId).filter((x): x is string => !!x))];
+  const pairs = [...new Map(rows.filter((r) => invoicedRow(r, vis)).map((r) => [`${r.outletId}|${r.period}`, { outletCode: r.outletId, period: r.period }])).values()];
+  if (linked.length === 0 && pairs.length === 0) return [];
+  const inv = await db.autoInvoice.findMany({
+    where: { clientId, invoiceKind: 'SERVICE', voidedAt: null, OR: [...(linked.length ? [{ id: { in: linked } }] : []), ...pairs] },
+    select: { id: true },
+  });
+  return [...new Set((inv ?? []).map((i) => i.id))].sort();
+}
+
+/** Decide, for the rows about to be cancelled, which SERVICE invoices are voided and which rows must be refused. */
+async function planInvoiceVoids(
+  db: Db,
+  clientId: string,
+  okEntries: InvoiceRowRef[],
+): Promise<{ invoicesToVoid: InvoiceVoidPlan[]; badByEntry: Map<string, { code: CancelBlockCode; extra: string }> }> {
+  const badByEntry = new Map<string, { code: CancelBlockCode; extra: string }>();
+  const ids = await touchedInvoiceIds(db, clientId, okEntries);
+  if (ids.length === 0) return { invoicesToVoid: [], badByEntry };
+  const vis = await visibilityFieldIds(db, clientId);
+  const [invoices, gst] = await Promise.all([
+    db.autoInvoice.findMany({
+      where: { id: { in: ids }, clientId },
+      select: { id: true, invoiceNumber: true, outletCode: true, period: true, status: true, lockedAt: true, totalPaise: true },
+    }),
+    db.gstReimbursement.findMany({ where: { autoInvoiceId: { in: ids } }, select: { autoInvoiceId: true, status: true, gstPaise: true } }),
+  ]);
+  const covered = await db.creditPayoutEntry.findMany({
+    where: {
+      clientId,
+      OR: [{ autoInvoiceId: { in: ids } }, ...invoices.map((i) => ({ outletId: i.outletCode, period: i.period }))],
+    },
+    select: { id: true, autoInvoiceId: true, status: true, outletId: true, period: true, fieldId: true, tdsSection: true },
+  });
+  const covers = (inv: { id: string; outletCode: string; period: string }, e: InvoiceRowRef) =>
+    e.autoInvoiceId === inv.id || (e.outletId === inv.outletCode && e.period === inv.period && invoicedRow(e, vis));
+
+  let ok = new Set(okEntries.map((e) => e.id));
+  let plans: InvoiceVoidPlan[] = [];
+  // Iterate until stable: refusing one invoice's rows can never make another invoice voidable, but it can make one
+  // shared (its other row is no longer being cancelled).
+  for (let round = 0; round < 5; round++) {
+    plans = [];
+    let changed = false;
+    for (const inv of invoices) {
+      const mine = okEntries.filter((e) => ok.has(e.id) && covers(inv, e));
+      if (mine.length === 0) continue;
+      const g = gst.find((x) => x.autoInvoiceId === inv.id);
+      let bad: { code: CancelBlockCode; extra: string } | null = null;
+      if (String(inv.status) !== 'GENERATED' || inv.lockedAt != null) bad = { code: 'INVOICE_LOCKED', extra: `invoice ${inv.invoiceNumber}` };
+      else if (g && String(g.status) === 'RELEASED') bad = { code: 'GST_RELEASED', extra: `invoice ${inv.invoiceNumber}` };
+      else {
+        const stays = covered.filter(
+          (l) => covers(inv, l) && !ok.has(l.id) && String(l.status) !== 'CANCELLED' && String(l.status) !== 'REVERSED',
+        );
+        if (stays.length > 0) {
+          bad = { code: 'INVOICE_SHARED', extra: `invoice ${inv.invoiceNumber} — ${stays.length} other payout${stays.length === 1 ? '' : 's'} stay payable` };
+        }
+      }
+      if (bad) {
+        for (const e of mine) badByEntry.set(e.id, bad);
+        changed = true;
+        continue;
+      }
+      plans.push({
+        id: inv.id,
+        invoiceNumber: inv.invoiceNumber,
+        outletCode: inv.outletCode,
+        period: inv.period,
+        totalPaise: Number(inv.totalPaise),
+        gstHeldPaise: g && String(g.status) === 'HELD' ? Number(g.gstPaise) : 0,
+      });
+    }
+    if (!changed) break;
+    ok = new Set([...ok].filter((id) => !badByEntry.has(id)));
+  }
+  return { invoicesToVoid: plans, badByEntry };
 }
 
 /** The refusal thrown when any row is not cancellable — the whole request is refused, every row listed. */
@@ -444,11 +500,12 @@ export async function applyCancellation(tx: Db, input: ApplyCancellationInput): 
     await tx.$queryRaw`SELECT id FROM credit_batches WHERE "clientId" = ${clientId} AND id IN (${Prisma.join(batchIds)}) ORDER BY id FOR UPDATE`;
   }
   await tx.$queryRaw`SELECT id FROM credit_payout_entries WHERE "clientId" = ${clientId} AND id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`;
-  const invRows = await tx.creditPayoutEntry.findMany({
-    where: { clientId, id: { in: ids }, autoInvoiceId: { not: null } },
-    select: { autoInvoiceId: true },
+  // Every live SERVICE invoice these rows touch (linked, or the outlet + month a manual "Generate invoices" run made).
+  const lockedRows = await tx.creditPayoutEntry.findMany({
+    where: { clientId, id: { in: ids } },
+    select: { id: true, outletId: true, period: true, fieldId: true, tdsSection: true, autoInvoiceId: true },
   });
-  const invIds = [...new Set(invRows.map((r) => r.autoInvoiceId!))].sort();
+  const invIds = await touchedInvoiceIds(tx, clientId, lockedRows);
   if (invIds.length > 0) {
     await tx.$queryRaw`SELECT id FROM auto_invoices WHERE "clientId" = ${clientId} AND id IN (${Prisma.join(invIds)}) ORDER BY id FOR UPDATE`;
   }

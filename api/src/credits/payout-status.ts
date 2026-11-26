@@ -38,11 +38,16 @@ export interface Breakdown {
   paidSettledByTds: Money;
   /** Within PENDING: rows held out of bank files by a pending reversal request. */
   pendingHeldByReversal: Money;
+  /** Within FAILED: rows the next bank file will NOT re-bank, and why (the rest are re-banked). */
+  failedHeldByReversal: Money;
+  failedKycHold: Money;
 }
 
 export interface StatusEntryRow extends CreditEntryRow {
   tdsDeductedPaise: bigint;
   heldByReversal: boolean;
+  /** The outlet's partner is not payable now (KYC not approved / inactive / deleted) — held out of bank files. */
+  kycHold?: boolean;
 }
 
 function emptyBreakdown(): Breakdown {
@@ -53,6 +58,8 @@ function emptyBreakdown(): Breakdown {
     paidTdsWithheldPaise: 0,
     paidSettledByTds: zero(),
     pendingHeldByReversal: zero(),
+    failedHeldByReversal: zero(),
+    failedKycHold: zero(),
   };
 }
 
@@ -72,6 +79,8 @@ function addRow(b: Breakdown, e: StatusEntryRow): void {
     if (e.utr && e.utr.startsWith('TDS-WITHHELD-')) add(b.paidSettledByTds, paise);
   }
   if (st === 'PENDING' && e.heldByReversal) add(b.pendingHeldByReversal, paise);
+  if (st === 'FAILED' && e.heldByReversal) add(b.failedHeldByReversal, paise);
+  else if (st === 'FAILED' && e.kycHold) add(b.failedKycHold, paise);
 }
 
 export interface FundView {
@@ -163,7 +172,12 @@ export function buildPayoutStatus(input: {
       .sort((a, b) => a.fieldName.localeCompare(b.fieldName)),
     entriesTotalPaise,
     uploadTotalPaise,
-    reconciles: sumBuckets === entriesTotalPaise && fund.committed.paise + fund.paid.paise + fund.returned.paise + fund.excludedVendorImport.paise === entriesTotalPaise,
+    // The upload's own total vs the payout rows created (+ the buckets and the Fund view over the same rows). For an
+    // unconfirmed upload there are no rows yet, so nothing to compare.
+    reconciles:
+      sumBuckets === entriesTotalPaise &&
+      fund.committed.paise + fund.paid.paise + fund.returned.paise + fund.excludedVendorImport.paise === entriesTotalPaise &&
+      (!confirmed || entriesTotalPaise === uploadTotalPaise),
     notes,
     fund,
     points: {

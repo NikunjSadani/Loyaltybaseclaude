@@ -6,8 +6,11 @@
  *  - Download template → the unpaid / failed rows (xlsx) to mark Y.
  *  - Upload → preview (apply='false'): header error, rows to cancel (Unpaid vs Failed), every refused row with its row
  *    number + reason, rows not marked Y (kept).
- *  - Apply → the SAME file again with apply='true' + acknowledgedRowNums (every refused row must be acknowledged). A
- *    409 refusal (details.blocked) is shown with its list — nothing was cancelled.
+ *  - Apply → the SAME file again with apply='true' + acknowledgedRowNums (every refused row must be acknowledged) +
+ *    previewedEntryIds (the rows of the preview shown). A 409 refusal (details.blocked, or details.added/removed when
+ *    the rows differ from the preview) is shown with its list — nothing was cancelled.
+ *  - Any change to the file or the reason clears the preview + acknowledgements: Apply only ever runs on the preview
+ *    currently shown.
  */
 import { useId, useRef, useState } from 'react';
 import { downloadBlob } from '@/lib/download';
@@ -40,6 +43,27 @@ interface FileApplied {
   notCancelled: FileBlockedRow[];
 }
 
+/** 409 drift: the rows the server would cancel now differ from the preview that was shown. */
+interface DriftAdded { entryId: string; rowNum: number; outletId: string }
+interface DriftRemoved { entryId: string }
+
+interface Refusal {
+  message: string;
+  blocked: FileBlockedRow[];
+  added: DriftAdded[];
+  removed: DriftRemoved[];
+}
+
+function driftFromDetails(details?: Record<string, unknown>): { added: DriftAdded[]; removed: DriftRemoved[] } | null {
+  const added = details?.added;
+  const removed = details?.removed;
+  if (!Array.isArray(added) && !Array.isArray(removed)) return null;
+  return {
+    added: Array.isArray(added) ? (added as DriftAdded[]) : [],
+    removed: Array.isArray(removed) ? (removed as DriftRemoved[]) : [],
+  };
+}
+
 interface Props {
   /** Per-upload shortcut: limit the template to this upload (and field). Absent = client-wide. */
   batchId?: string;
@@ -67,9 +91,11 @@ export default function CancelPayoutsFileSection({ batchId, batchCode, fieldId, 
   const [acked, setAcked] = useState<Set<number>>(() => new Set());
   const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [refusal, setRefusal] = useState<{ message: string; blocked: FileBlockedRow[] } | null>(null);
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [applied, setApplied] = useState<FileApplied | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  /** Bumped on every input change — a file check that answers for older inputs is discarded. */
+  const inputsVersionRef = useRef(0);
 
   async function downloadTemplate() {
     setDownloading(true);
@@ -97,30 +123,42 @@ export default function CancelPayoutsFileSection({ batchId, batchCode, fieldId, 
     }
   }
 
-  function resetResult() {
+  /** Any change to what feeds the preview: the shown preview + acknowledgements no longer apply — clear them. */
+  function invalidatePreview() {
+    inputsVersionRef.current += 1;
     setPreview(null);
     setAcked(new Set());
     setConfirmed(false);
-    setError(null);
     setRefusal(null);
+    setChecking(false);
+  }
+
+  function resetResult() {
+    invalidatePreview();
+    setError(null);
     setApplied(null);
   }
 
-  function formFor(apply: boolean, ackRowNums?: number[]): FormData {
+  function formFor(apply: boolean, ackRowNums?: number[], previewedEntryIds?: string[]): FormData {
     const fd = new FormData();
     fd.append('file', file as File);
     const r = reason.trim();
     if (r) fd.append('reason', r);
     fd.append('apply', apply ? 'true' : 'false');
-    if (apply) fd.append('acknowledgedRowNums', JSON.stringify(ackRowNums ?? []));
+    if (apply) {
+      fd.append('acknowledgedRowNums', JSON.stringify(ackRowNums ?? []));
+      fd.append('previewedEntryIds', JSON.stringify(previewedEntryIds ?? []));
+    }
     return fd;
   }
 
   async function checkFile() {
     if (!file) return;
     resetResult();
+    const version = inputsVersionRef.current;
     setChecking(true);
     const r = await apiJson<FilePreview>(UPLOAD_URL, { method: 'POST', body: formFor(false) });
+    if (version !== inputsVersionRef.current) return; // the inputs changed meanwhile — this answer is stale
     setChecking(false);
     if (!r.ok || !Array.isArray(r.data?.ok)) {
       setError(r.ok ? 'The file check came back empty.' : r.error);
@@ -134,7 +172,8 @@ export default function CancelPayoutsFileSection({ batchId, batchCode, fieldId, 
     setApplying(true);
     setError(null);
     setRefusal(null);
-    const r = await apiJson<FileApplied>(UPLOAD_URL, { method: 'POST', body: formFor(true, [...acked]) });
+    const previewedEntryIds = preview.ok.map((row) => row.entryId);
+    const r = await apiJson<FileApplied>(UPLOAD_URL, { method: 'POST', body: formFor(true, [...acked], previewedEntryIds) });
     setApplying(false);
     if (r.ok) {
       setApplied(r.data);
@@ -145,8 +184,15 @@ export default function CancelPayoutsFileSection({ batchId, batchCode, fieldId, 
       return;
     }
     const blocked = blockedFromDetails<FileBlockedRow>(r.details);
-    if (r.status === 409 || blocked) {
-      setRefusal({ message: r.error, blocked: blocked ?? [] });
+    const drift = driftFromDetails(r.details);
+    if (r.status === 409 || blocked || drift) {
+      // Nothing was cancelled — the preview shown is no longer what would be applied; it must be previewed again.
+      if (drift) {
+        setPreview(null);
+        setAcked(new Set());
+        setConfirmed(false);
+      }
+      setRefusal({ message: r.error, blocked: blocked ?? [], added: drift?.added ?? [], removed: drift?.removed ?? [] });
       return;
     }
     setError(`Not cancelled: ${r.error}`);
@@ -214,6 +260,7 @@ export default function CancelPayoutsFileSection({ batchId, batchCode, fieldId, 
             type="file"
             accept=".xlsx"
             aria-label="Cancellation file"
+            disabled={applying}
             onChange={(e) => { setFile(e.target.files?.[0] ?? null); resetResult(); }}
             className="text-xs"
           />
@@ -224,7 +271,8 @@ export default function CancelPayoutsFileSection({ batchId, batchCode, fieldId, 
             type="text"
             value={reason}
             maxLength={CANCEL_REASON_MAX}
-            onChange={(e) => setReason(e.target.value)}
+            disabled={applying}
+            onChange={(e) => { setReason(e.target.value); invalidatePreview(); }}
             aria-label="Reason for the whole file"
             className="border border-gray-300 rounded-lg px-2 py-1.5"
           />
@@ -259,8 +307,33 @@ export default function CancelPayoutsFileSection({ batchId, batchCode, fieldId, 
         <div role="alert" data-testid="cancel-file-refused" className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-xs text-red-800 space-y-2">
           <p className="font-semibold">Nothing was cancelled. {refusal.message}</p>
           {refusal.blocked.length > 0 && <FileBlockedList rows={refusal.blocked} />}
-          <button type="button" onClick={() => void checkFile()} className="px-3 py-1.5 rounded-lg bg-white border border-red-300 hover:bg-red-50">
-            Check the file again
+          {(refusal.added.length > 0 || refusal.removed.length > 0) && (
+            <div data-testid="cancel-file-drift" className="space-y-1">
+              <p>The rows that would be cancelled are no longer the ones in the preview you checked. Preview the file again before cancelling.</p>
+              {refusal.added.length > 0 && (
+                <div>
+                  <p className="font-medium">{plural(refusal.added.length, 'row', 'rows')} would now be cancelled that were not in the preview:</p>
+                  <ul className="space-y-0.5 max-h-32 overflow-y-auto" data-testid="cancel-file-drift-added">
+                    {refusal.added.map((a) => (
+                      <li key={a.entryId}>Row {a.rowNum}{a.outletId ? ` · ${a.outletId}` : ''}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {refusal.removed.length > 0 && (
+                <div>
+                  <p className="font-medium">{plural(refusal.removed.length, 'row', 'rows')} in the preview can no longer be cancelled this way:</p>
+                  <ul className="space-y-0.5 max-h-32 overflow-y-auto font-mono" data-testid="cancel-file-drift-removed">
+                    {refusal.removed.map((r) => (
+                      <li key={r.entryId}>{r.entryId}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+          <button type="button" onClick={() => void checkFile()} disabled={!file || checking} className="px-3 py-1.5 rounded-lg bg-white border border-red-300 hover:bg-red-50 disabled:opacity-50">
+            {refusal.added.length > 0 || refusal.removed.length > 0 ? 'Preview again' : 'Check the file again'}
           </button>
         </div>
       )}

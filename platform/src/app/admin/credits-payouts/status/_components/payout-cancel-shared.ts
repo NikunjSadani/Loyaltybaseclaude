@@ -21,6 +21,10 @@ export interface Breakdown {
   paidTdsWithheldPaise: number;
   paidSettledByTds: Money;
   pendingHeldByReversal: Money;
+  /** FAILED rows held out of the next bank file by a pending reversal request. */
+  failedHeldByReversal: Money;
+  /** FAILED rows on KYC / partner hold — not re-banked until KYC is approved. */
+  failedKycHold: Money;
 }
 
 export interface PayoutStatusData {

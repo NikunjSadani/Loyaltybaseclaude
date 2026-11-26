@@ -32,10 +32,14 @@ interface Props {
   canCancel: boolean;
   /** Something was cancelled — the page may refresh its own list. */
   onCancelled?: () => void;
+  /** Bumped by the page after a client-wide cancellation — everything here reloads. */
+  externalRefresh?: number;
 }
 
-export default function BatchPayoutPanel({ batchId, batchCode, canCancel, onCancelled }: Props) {
-  const [refreshKey, setRefreshKey] = useState(0);
+export default function BatchPayoutPanel({ batchId, batchCode, canCancel, onCancelled, externalRefresh = 0 }: Props) {
+  const [localRefresh, setLocalRefresh] = useState(0);
+  // Own cancellations (dialog / per-upload file) + the page's client-wide cancellations both reload every child.
+  const refreshKey = localRefresh + externalRefresh;
   const [status, setStatus] = useState('');
   const [fieldId, setFieldId] = useState('');
   const [fields, setFields] = useState<Array<{ fieldId: string; fieldName: string }>>([]);
@@ -47,7 +51,7 @@ export default function BatchPayoutPanel({ batchId, batchCode, canCancel, onCanc
   }, []);
 
   const refreshAll = useCallback(() => {
-    setRefreshKey((k) => k + 1);
+    setLocalRefresh((k) => k + 1);
     onCancelled?.();
   }, [onCancelled]);
 

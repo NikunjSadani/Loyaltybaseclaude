@@ -592,6 +592,29 @@ describe('InvoicesService', () => {
       expect(where.outletCode).toBe('O1');
     });
 
+    it('audit fix 2026-11-26: the re-run only ever looks up / refreshes the SERVICE invoice — a TDS invoice of the same outlet + month (or a locked one) is never touched', async () => {
+      mockPrisma.autoInvoice.count.mockResolvedValue(2);
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([{ outletId: 'O1', amountPaise: 500000n }]);
+      mockPrisma.outlet.findMany.mockResolvedValue([kycApprovedWBOutlet]);
+      const p2002 = new Prisma.PrismaClientKnownRequestError('x', { code: 'P2002', clientVersion: '5.0.0' });
+      mockPrisma.autoInvoice.create.mockRejectedValue(p2002);
+      // Only the TDS invoice exists for this outlet + month; the SERVICE-filtered lookup must not see it as the tuple.
+      const tdsInvoice = { id: 'tds1', invoiceKind: 'TDS', status: 'GENERATED', lockedAt: new Date() };
+      mockPrisma.autoInvoice.findFirst.mockImplementation(async (a: any) => (a?.where?.invoiceKind === 'SERVICE' ? null : tdsInvoice));
+      mockPrisma.autoInvoice.updateMany.mockResolvedValue({ count: 0 });
+
+      const result = await service.generateForPeriod(admin, { period: '2025-01' });
+
+      for (const c of mockPrisma.autoInvoice.findFirst.mock.calls) expect(c[0].where.invoiceKind).toBe('SERVICE');
+      for (const c of mockPrisma.autoInvoice.updateMany.mock.calls) {
+        expect(c[0].where).toMatchObject({ invoiceKind: 'SERVICE', status: 'GENERATED', lockedAt: null, voidedAt: null });
+      }
+      // No SERVICE tuple → treated as a number collision and retried, never a refresh of the TDS invoice.
+      expect(mockPrisma.autoInvoice.updateMany).not.toHaveBeenCalled();
+      expect(result.skipped).toEqual([expect.objectContaining({ outletCode: 'O1', reason: expect.stringMatching(/unique invoice number/) })]);
+    });
+
     it('SELF-HEAL: a refresh that (re)gains GST creates the missing HELD reimbursement', async () => {
       mockPrisma.autoInvoice.count.mockResolvedValue(1);
       mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);

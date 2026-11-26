@@ -35,6 +35,8 @@ function build(rows: Array<Record<string, any>>) {
     tdsRecoveryEntry: { findMany: jest.fn(async () => []) },
     autoInvoice: { findMany: jest.fn(async () => []), updateMany: jest.fn() },
     gstReimbursement: { findMany: jest.fn(async () => []), updateMany: jest.fn() },
+    creditField: { findMany: jest.fn(async () => []) },
+    outlet: { findMany: jest.fn(async () => []) },
     auditLog: { create: jest.fn(async ({ data }: any) => { audits.push(data); return data; }) },
   };
   tx.$transaction = jest.fn(async (fn: any) => fn(tx));
@@ -71,12 +73,12 @@ describe('PayoutCancelService — file flow', () => {
   it('apply is refused until every unusable row is acknowledged; then cancels in one transaction + stores the file', async () => {
     const rows = entries();
     const { svc, storage, audits } = build(rows);
-    await expect(svc.uploadFile(gifsy as any, file(), { reason: 'Uploaded twice', apply: 'true' })).rejects.toBeInstanceOf(ConflictException);
+    await expect(svc.uploadFile(gifsy as any, file(), { reason: 'Uploaded twice', apply: 'true', previewedEntryIds: '["e1"]' })).rejects.toBeInstanceOf(ConflictException);
     expect(rows[0].status).toBe('PENDING');
     expect(storage.uploadFile).not.toHaveBeenCalled();
     expect(audits.at(-1)).toMatchObject({ action: 'REJECT', entityType: 'CREDIT_PAYOUT_CANCELLATION' });
 
-    const res: any = await svc.uploadFile(gifsy as any, file(), { reason: 'Uploaded twice', apply: 'true', acknowledgedRowNums: '[3]' });
+    const res: any = await svc.uploadFile(gifsy as any, file(), { reason: 'Uploaded twice', apply: 'true', acknowledgedRowNums: '[3]', previewedEntryIds: '["e1"]' });
     expect(res.applied).toBe(true);
     expect(res.cancelled.map((r: any) => r.entryId)).toEqual(['e1']);
     expect(rows[0]).toMatchObject({ status: 'CANCELLED', cancelReason: 'Uploaded twice', cancelledById: 'g1' });
@@ -85,6 +87,23 @@ describe('PayoutCancelService — file flow', () => {
     const ok = audits.find((a) => a.action === 'UPDATE');
     expect(ok.metadata).toMatchObject({ source: 'FILE', file: { key: 'payout-cancellations/bajaj/2026-11/k-file.xlsx', name: 'cancel.xlsx' } });
     expect(ok.metadata.acknowledgedNotCancelled).toHaveLength(1);
+  });
+
+  it('apply is tied to the preview: refused (with the lists) when the rows it would cancel differ from the previewed ones', async () => {
+    const rows = entries();
+    rows[1].status = 'PENDING'; // e2 became cancellable after the preview showed only e1
+    rows[1].downloadId = null;
+    const { svc, storage } = build(rows);
+    let err: any;
+    try {
+      await svc.uploadFile(gifsy as any, file(), { reason: 'Uploaded twice', apply: 'true', previewedEntryIds: '["e1"]' });
+    } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(ConflictException);
+    expect(err.getResponse().details).toEqual({ added: [expect.objectContaining({ entryId: 'e2', rowNum: 3 })], removed: [] });
+    expect(rows.map((r) => r.status)).toEqual(['PENDING', 'PENDING']);
+    expect(storage.uploadFile).not.toHaveBeenCalled();
+    // …and an apply without the previewed list is refused too.
+    await expect(svc.uploadFile(gifsy as any, file(), { reason: 'r', apply: 'true' })).rejects.toThrow(/Preview the file first/);
   });
 
   it('every write is GIFSY_ADMIN-in-a-client only (client admin / un-assumed Gifsy refused before any read)', async () => {

@@ -11,6 +11,7 @@ import {
   RotateCcw,
   AlertTriangle,
 } from 'lucide-react';
+import Link from 'next/link';
 import { useAdminSession } from '@/lib/admin-session';
 import { jsonToSheetSafe } from '@/lib/xlsx-safe';
 import { downloadBlob } from '@/lib/download';
@@ -202,6 +203,8 @@ export default function PayoutStatusPage() {
   const session = useAdminSession();
   // Payout cancellation: GIFSY_ADMIN working inside the client only (the server re-checks).
   const canCancelPayouts = useCanCancelPayouts();
+  /** Bumped after a client-wide cancellation by file — every open upload's payout panel reloads. */
+  const [payoutRefresh, setPayoutRefresh] = useState(0);
 
   const [batches,      setBatches]      = useState<BatchSummary[]>([]);
   const [batchDetails, setBatchDetails] = useState<Record<string, BatchDetail>>({});
@@ -601,7 +604,15 @@ export default function PayoutStatusPage() {
       <WalletsInDebtSection />
 
       {/* Owner 2026-11-25: bulk cancel of unpaid / failed payouts by Excel — client-wide. */}
-      {canCancelPayouts && <CancelPayoutsFileSection />}
+      {canCancelPayouts && <CancelPayoutsFileSection onApplied={() => setPayoutRefresh((n) => n + 1)} />}
+
+      {session.role === 'GIFSY_ADMIN' && (
+        <p className="text-xs">
+          <Link href="/admin/credits-payouts/tds-old-timing" className="text-[var(--brand-primary)] hover:underline" data-testid="tds-old-timing-link">
+            Check: 194C TDS raised at the bank file on payouts never paid
+          </Link>
+        </p>
+      )}
 
       {/* Filter */}
       {periods.length > 1 && (
@@ -708,7 +719,12 @@ export default function PayoutStatusPage() {
                     {/* Payout status breakdown, row drill-down, cancellations (confirmed uploads only — an
                         unconfirmed upload has no payout rows yet). */}
                     {isConfirmed && (
-                      <BatchPayoutPanel batchId={batch.id} batchCode={batch.batchCode} canCancel={canCancelPayouts} />
+                      <BatchPayoutPanel
+                        batchId={batch.id}
+                        batchCode={batch.batchCode}
+                        canCancel={canCancelPayouts}
+                        externalRefresh={payoutRefresh}
+                      />
                     )}
 
                     {detail && detail.rows.some(isDeductionRow) && (() => {

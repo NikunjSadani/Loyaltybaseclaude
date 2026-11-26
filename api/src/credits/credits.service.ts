@@ -866,6 +866,8 @@ export class CreditsService {
       methodology: TdsMethodology;
       entityType: string | null;
       entries: typeof engineEntries;
+      /** PAID basis zero-event GROSS_UP group: the outlet to name on the TDS invoice. */
+      repOutletId?: string;
     };
     const groups = new Map<string, Grp>();
     const panSet = new Set<string>();
@@ -911,6 +913,20 @@ export class CreditsService {
       }
       g.entries.push(e);
     }
+    // PAID basis (audit fix 2026-11-26): a PAN whose just-paid 194C rows are all DEDUCT still gets its GROSS_UP due
+    // re-evaluated — the DEDUCT base counts toward the combined threshold, which can make gross-up TDS due on the PAN's
+    // earlier gross-up payouts (possibly another client's). A zero-event GROSS_UP group does that (event base 0; the
+    // representative for the invoice is the paying outlet).
+    if (basis === 'PAID') {
+      for (const g of [...groups.values()]) {
+        if (g.methodology !== TdsMethodology.DEDUCT) continue;
+        const gk = `${g.panNumber}${SEP}${g.section}${SEP}${TdsMethodology.GROSS_UP}`;
+        if (!groups.has(gk)) {
+          groups.set(gk, { panNumber: g.panNumber, section: g.section, methodology: TdsMethodology.GROSS_UP, entityType: g.entityType, entries: [], repOutletId: g.entries[0]?.outletId } as Grp);
+        }
+      }
+    }
+
     // ── 194R: WHOLE-YEAR TRUE-UP on the SHARED definition (owner 2026-11-18, D2/D3/D6/D9, Q1/Q3) ──
     // Only visibility payouts on the client's CURRENT DEDUCT method are ever withheld (10% PAN / 20% no-PAN);
     // under GROSS_UP nothing is withheld and nothing is written (D7). The threshold is tested on ALL
@@ -1198,7 +1214,8 @@ export class CreditsService {
           }))
           .filter((r) => r.tenantSharePaise !== 0n);
 
-        const rep = outletTaxMap.get(g.entries[0].outletId)!;
+        const repCode = g.entries[0]?.outletId ?? g.repOutletId!;
+        const rep = outletTaxMap.get(repCode)!;
         plan.grossUpInvoices.push({
           panNumber: g.panNumber,
           section: g.section,
@@ -1208,7 +1225,7 @@ export class CreditsService {
           isAnchor,
           bodyPaise: delta,
           panBasePaise: methodologyCumulativeBase,
-          representative: { ...rep, outletCode: g.entries[0].outletId },
+          representative: { ...rep, outletCode: repCode },
           recovery,
         });
       }
@@ -1411,9 +1428,10 @@ export class CreditsService {
       const p = (e.payeePan ?? '').trim();
       pans.set(e.outletId, p && !p.startsWith(CreditsService.NO_PAN_KEY) ? p.toUpperCase() : null);
     }
-    // NO gross-up / no-PAN 194C rows on a DEDUCT PAN payout (its TDS was withheld at the bank file).
-    const raising = candidates.filter((e) => e.tdsMethodology !== TdsMethodology.DEDUCT || !pans.get(e.outletId));
-    if (raising.length === 0) return { invoices: 0, recoveryRows: 0 };
+    // A DEDUCT PAN payout is withheld at the bank file and raises no gross-up of its OWN — but it still counts toward
+    // the PAN's combined yearly base, so it can make the gross-up due on the PAN's OTHER (gross-up) payouts — possibly
+    // another client's (audit fix 2026-11-26). Every PAID 194C event therefore re-evaluates the PAN's gross-up due.
+    const raising = candidates;
     const vis = await tx.creditField.findMany({ where: { clientId, payoutStream: 'VISIBILITY' }, select: { id: true } });
     const visIds = new Set((vis ?? []).map((f) => f.id));
     const live = raising

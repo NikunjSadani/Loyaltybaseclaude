@@ -3535,9 +3535,7 @@ describe('CreditsService', () => {
       }));
       // Queue the hook's own two reads ONLY when it will make them (194C gross-up or no-PAN rows) — a queued value it
       // never reads would leak into the next test.
-      const raises = paidEntries.some(
-        (e: any) => e.tdsSection === 'SEC_194C' && e.tdsMethodology && (e.tdsMethodology !== 'DEDUCT' || e.payeePan.startsWith('__NO_PAN__')),
-      );
+      const raises = paidEntries.some((e: any) => e.tdsSection === 'SEC_194C' && e.tdsMethodology);
       if (raises) {
         mockTx.creditField.findMany.mockResolvedValueOnce([...new Set(events.map((e: any) => e.fieldId))].map((id) => ({ id })));
         mockTx.outlet.findMany.mockResolvedValueOnce(outlets);
@@ -3901,6 +3899,27 @@ describe('CreditsService', () => {
         const recovery = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data as Array<{ clientId: string; tenantSharePaise: bigint }>;
         expect(recovery.map((r) => r.clientId).sort()).toEqual(['deoleo', 'other']);
         expect(recovery.reduce((s, r) => s + r.tenantSharePaise, 0n)).toBe(106100n);
+      });
+
+      it('audit fix 2026-11-26: a DEDUCT payout PAID by this client that crosses the PAN’s combined base raises the gross-up due on ANOTHER client’s gross-up base', async () => {
+        // other: ₹90k GROSS_UP already PAID (alone below ₹1L). deoleo now pays ₹20k DEDUCT (withheld at its own bank
+        // file) → combined ₹1.1L crosses → the GROSS_UP due on other's ₹90k = grossUp(₹90k, 1/99) = ₹909 → all to other.
+        mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]);
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([secEntry(2000000n, 'SEC_194C', 'DEDUCT')]);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { clientId: 'other', outletId: 'OX', amountPaise: 9000000n, tdsSection: 'SEC_194C', tdsMethodology: 'GROSS_UP' },
+        ]);
+        wirePan1BothTenants();
+        mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]);
+        mockTx.autoInvoice.findMany.mockResolvedValue([]);
+
+        await download(); // the bank file withholds deoleo's DEDUCT TDS; then the payout is PAID (payNow)
+
+        expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(
+          mockTx, expect.objectContaining({ panNumber: 'PAN1', bodyPaise: 90900n, outletCode: 'O1' }),
+        );
+        const recovery = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data as Array<{ clientId: string; tenantSharePaise: bigint; raisedOn: string }>;
+        expect(recovery).toEqual([expect.objectContaining({ clientId: 'other', tenantSharePaise: 90900n, raisedOn: 'PAID' })]);
       });
 
       it('D7: a 194R GROSS_UP client crossing on ITS OWN aggregate raises NO TDS invoice and NO recovery row (report-only)', async () => {

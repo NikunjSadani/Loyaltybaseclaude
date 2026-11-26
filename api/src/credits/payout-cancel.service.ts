@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
 import { formatINR } from '../common/money';
+import { resolveEffectiveKycStatus } from '../kyc/kyc-eligibility';
 import {
   applyCancellation,
   assertGifsyAssumed,
@@ -77,10 +78,34 @@ export class PayoutCancelService {
     const m = confirmRow?.metadata && typeof confirmRow.metadata === 'object' && !Array.isArray(confirmRow.metadata)
       ? (confirmRow.metadata as Record<string, unknown>)
       : null;
+    // A FAILED row is re-banked by the next bank file only when its partner is payable (the bank file's own gate:
+    // active, not deleted, KYC APPROVED) and no pending reversal holds it — the screen says which are not, and why.
+    const failedCodes = [...new Set(rows.filter((e) => String(e.status) === 'FAILED').map((e) => e.outletId))];
+    const payable = new Map<string, boolean>();
+    if (failedCodes.length > 0) {
+      const outlets = await this.prisma.outlet.findMany({
+        where: { clientId: user.clientId, outletCode: { in: failedCodes } },
+        select: {
+          outletCode: true,
+          partner: {
+            select: {
+              isActive: true,
+              deletedAt: true,
+              kycSubmissions: { orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }, { id: 'desc' }], select: { id: true, status: true, createdAt: true, updatedAt: true } },
+            },
+          },
+        },
+      });
+      for (const o of outlets ?? []) {
+        const p = o.partner;
+        payable.set(o.outletCode, !!p && p.isActive !== false && p.deletedAt == null && resolveEffectiveKycStatus(p.kycSubmissions ?? []) === 'APPROVED');
+      }
+    }
     const entries: StatusEntryRow[] = rows.map((e) => ({
       ...e,
       status: String(e.status),
       heldByReversal: e.reversalAllocations.some((a) => a.state === 'RESERVED'),
+      kycHold: String(e.status) === 'FAILED' && payable.get(e.outletId) !== true,
     }));
     return buildPayoutStatus({
       batch,
@@ -298,7 +323,7 @@ export class PayoutCancelService {
   async uploadFile(
     user: JwtPayload,
     file: Express.Multer.File | undefined,
-    body: { reason?: string; apply?: string; acknowledgedRowNums?: string },
+    body: { reason?: string; apply?: string; acknowledgedRowNums?: string; previewedEntryIds?: string },
   ) {
     assertGifsyAssumed(user);
     if (!file) throw new BadRequestException('No file uploaded');
@@ -316,12 +341,37 @@ export class PayoutCancelService {
   private async applyFile(
     user: JwtPayload,
     file: Express.Multer.File,
-    body: { acknowledgedRowNums?: string },
+    body: { acknowledgedRowNums?: string; previewedEntryIds?: string },
     fileReason: string | null,
     plan: Awaited<ReturnType<PayoutCancelService['planFile']>>,
   ) {
     if (plan.preview.headerError) throw new BadRequestException(plan.preview.headerError);
     if (plan.items.length === 0) throw new BadRequestException('No row in the file can be cancelled — nothing to apply.');
+    // The apply is tied to the preview the admin confirmed: the exact rows it would cancel must equal the previewed ones.
+    let previewed: string[];
+    try {
+      const raw = body?.previewedEntryIds ? JSON.parse(body.previewedEntryIds) : null;
+      if (!Array.isArray(raw)) throw new Error('not a list');
+      previewed = raw.map((x) => String(x));
+    } catch {
+      throw new BadRequestException('Preview the file first — the apply must name the rows you previewed (previewedEntryIds).');
+    }
+    const want = new Set(plan.items.map((i) => i.id));
+    const saw = new Set(previewed);
+    const added = [...want].filter((id) => !saw.has(id));
+    const removed = [...saw].filter((id) => !want.has(id));
+    if (added.length > 0 || removed.length > 0) {
+      const rowOf = new Map(plan.preview.ok.map((o) => [o.entryId, o]));
+      throw new ConflictException({
+        message:
+          `Nothing was cancelled — the rows this file would cancel now differ from the preview you confirmed ` +
+          `(${added.length} new, ${removed.length} no longer included). Preview the file again.`,
+        details: {
+          added: added.map((id) => ({ entryId: id, rowNum: rowOf.get(id)?.rowNum ?? null, outletId: rowOf.get(id)?.outletId ?? null })),
+          removed: removed.map((id) => ({ entryId: id })),
+        },
+      });
+    }
     // Every row that cannot be cancelled must be explicitly acknowledged (never a silent skip).
     let acked: number[] = [];
     try {

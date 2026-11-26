@@ -113,6 +113,15 @@ function readNotApplied(v: unknown): UtrNotAppliedRow[] {
     }));
 }
 
+/** Tolerant read of the apply response's `tdsRaisedOnPaid` (sent only when > 0) — null when absent / nothing raised. */
+function readTdsRaisedOnPaid(v: unknown): { invoices: number; recoveryRows: number } | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  const invoices = Math.max(0, Number(o.invoices) || 0);
+  const recoveryRows = Math.max(0, Number(o.recoveryRows) || 0);
+  return invoices > 0 || recoveryRows > 0 ? { invoices, recoveryRows } : null;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getPreviousMonth(): string {
@@ -508,6 +517,8 @@ function PayoutPageInner() {
     notApplied: UtrNotAppliedRow[];
     /** Policy round B: TDS credit given back because the payout it covered failed (sent only when any). */
     tdsCreditReleased: Array<{ entryId: string; amountPaise: number; note: string }>;
+    /** 194C TDS raised at payment time by this apply (sent only when > 0). */
+    tdsRaisedOnPaid: { invoices: number; recoveryRows: number } | null;
   } | null>(null);
   const [utrMsg,         setUtrMsg]         = useState('');
   const [expandedUtr,    setExpandedUtr]    = useState(false);
@@ -759,6 +770,7 @@ function PayoutPageInner() {
         message: serverMsg,
         notApplied: readNotApplied(json.data?.notApplied),
         tdsCreditReleased: Array.isArray(json.data?.tdsCreditReleased) ? json.data.tdsCreditReleased : [],
+        tdsRaisedOnPaid: readTdsRaisedOnPaid(json.data?.tdsRaisedOnPaid),
       });
       setUtrMsg(
         noop
@@ -1301,6 +1313,15 @@ function PayoutPageInner() {
                 <ul className="list-disc pl-5 space-y-0.5">
                   {utrApplyResult.tdsCreditReleased.map((r) => <li key={r.entryId}>{r.note}</li>)}
                 </ul>
+              </div>
+            )}
+
+            {utrApplied && utrApplyResult?.tdsRaisedOnPaid && (
+              <div role="status" data-testid="utr-tds-raised-on-paid" className="rounded-xl p-4 border bg-blue-50 border-blue-200 text-xs text-blue-800">
+                194C TDS raised on payment: {utrApplyResult.tdsRaisedOnPaid.invoices.toLocaleString('en-IN')} TDS invoice
+                {utrApplyResult.tdsRaisedOnPaid.invoices === 1 ? '' : 's'},{' '}
+                {utrApplyResult.tdsRaisedOnPaid.recoveryRows.toLocaleString('en-IN')} recovery row
+                {utrApplyResult.tdsRaisedOnPaid.recoveryRows === 1 ? '' : 's'}
               </div>
             )}
 
