@@ -608,9 +608,12 @@ export function parseTargetUploadBuffer(
      * Absent (achievement upload) → the previous behaviour.
      */
     strict?: boolean;
+    /** strict: the word for a value cell in the rejection reason ("target" — default; "value" for the sales upload). */
+    valueNoun?: string;
   },
 ): ParseResult {
   const strict = opts?.strict === true;
+  const valueNoun = opts?.valueNoun ?? 'target';
   const scope = opts?.scope;
   let ignoredOutOfScope = 0;
   const enabled = getEnabledKpis(kpis);
@@ -978,7 +981,7 @@ export function parseTargetUploadBuffer(
             const kpiLabel = enabled.find((k) => k.code === code)?.label ?? code;
             const shown = String(rawVal).trim();
             cellErrors.push(
-              `${kpiLabel} target must be a number — got '${shown.length > 60 ? `${shown.slice(0, 60)}…` : shown}'` +
+              `${kpiLabel} ${valueNoun} must be a number — got '${shown.length > 60 ? `${shown.slice(0, 60)}…` : shown}'` +
                 (monthBlocks.length > 1 ? ` (${headerRow1[monthBlocks[bi].startCol]})` : ''),
             );
             continue;

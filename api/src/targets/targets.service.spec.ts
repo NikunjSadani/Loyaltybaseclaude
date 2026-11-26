@@ -2146,6 +2146,44 @@ describe('TargetsService', () => {
       mockTx.outletSalesRecord.upsert.mockResolvedValue({});
     });
 
+    describe('NO SILENT DROP (owner 2026-11-26): same checks as the target upload', () => {
+      const sheet = (row2: string[], rows: (string | number | null)[][]) => {
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+          ['', '', '', WRITABLE_MONTH.label, ...row2.slice(4).map(() => '')], row2, ...rows,
+        ]), 'Targets');
+        return { buffer: XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer, originalname: 'a.xlsx', mimetype: 'x' } as Express.Multer.File;
+      };
+      const COLS = ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1'];
+
+      it('text in a number cell rejects THAT row with the reason (in the result); the other row is saved', async () => {
+        const r = await service.uploadAchievements(admin, sheet(COLS, [
+          ['O001', 'Outlet One', 'RETAIL', 10, 'R3TEST Brand'],
+          ['O002', 'Outlet Two', 'HORECA', 5, 2],
+        ]));
+        expect(r.rejectedCount).toBe(1);
+        expect(r.problemRows).toEqual([expect.objectContaining({
+          outletCode: 'O001', status: 'rejected_kpi', remarks: "Focus Pack - 1 value must be a number — got 'R3TEST Brand' — row rejected",
+        })]);
+        expect(mockTx.outletSalesRecord.upsert).toHaveBeenCalledTimes(1);
+        expect(mockTx.outletSalesRecord.upsert.mock.calls[0][0].create.outletCode).toBe('O002');
+      });
+
+      it('an unknown column WITH data refuses the file (nothing written); an EMPTY one → ignoredColumnNotes', async () => {
+        await expect(service.uploadAchievements(admin, sheet([...COLS, 'Bonus'], [['O001', 'Outlet One', 'RETAIL', 10, 5, 3]])))
+          .rejects.toThrow(/column F "Bonus" .* 1 filled cell.*Nothing was saved\./);
+        expect(mockTx.salesUploadBatch.create).not.toHaveBeenCalled();
+        const r = await service.uploadAchievements(admin, sheet([...COLS, 'Bonus'], [['O001', 'Outlet One', 'RETAIL', 10, 5, null]]));
+        expect(r.ignoredColumnNotes).toEqual(['Column F "Bonus" was not recognised and was ignored — re-download the template.']);
+      });
+
+      it('a clean file has no new response key (Deoleo response unchanged)', async () => {
+        const r = await service.uploadAchievements(admin, sheet(COLS, [['O001', 'Outlet One', 'RETAIL', 10, 5]]));
+        expect(r).not.toHaveProperty('ignoredColumnNotes');
+        expect(r.rejectedCount).toBe(0);
+      });
+    });
+
     it('throws BadRequestException when no file is provided', async () => {
       await expect(
         service.uploadAchievements(admin, undefined as unknown as Express.Multer.File),

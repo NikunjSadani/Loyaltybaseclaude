@@ -82,6 +82,8 @@ interface UploadResult {
   skippedBlankCount?:   number;
   /** Sales Import: KPI columns in the file that are importer-owned and were NOT written (absent for most tenants). */
   skippedImporterOwnedKpis?: string[];
+  /** Owner 2026-11-26: unrecognised EMPTY columns, e.g. 'Column F "Bonus" was not recognised and was ignored — …'. */
+  ignoredColumnNotes?: string[];
   /** APPLIES-TO D1: values ignored because the KPI does not apply to that outlet (absent on older API builds). */
   ignoredOutOfScope?: number;
 }
@@ -784,6 +786,13 @@ export default function SalesUploadPage() {
                 <strong>{uploadResult.skippedImporterOwnedKpis!.join(', ')}</strong>. Their stored values were not changed.
                 All other columns were saved as usual.
               </span>
+            </div>
+          )}
+
+          {(uploadResult.ignoredColumnNotes?.length ?? 0) > 0 && (
+            <div role="alert" data-testid="sales-upload-ignored-columns" className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-900 space-y-0.5">
+              <p className="font-semibold flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5" /> Columns not read from this file</p>
+              {uploadResult.ignoredColumnNotes!.map((n) => <p key={n}>{n}</p>)}
             </div>
           )}
 

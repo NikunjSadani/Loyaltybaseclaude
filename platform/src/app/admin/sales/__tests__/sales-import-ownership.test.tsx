@@ -59,12 +59,26 @@ describe('achievements page — Sales Import ownership', () => {
     expect(notice).toHaveTextContent(/come from Sales Import/);
   });
 
+  it('owner 2026-11-26: an unrecognised EMPTY column is shown in amber; a rejected text cell is listed with its reason', async () => {
+    stubFetch({ batches: [], upload: uploadResult({
+      rejectedCount: 1, problemRowCount: 1, problemRowsTruncated: false,
+      problemRows: [{ rowIndex: 3, outletCode: 'O1', status: 'rejected_kpi', remarks: "Focus Pack - 1 value must be a number — got 'R3TEST Brand' — row rejected" }],
+      ignoredColumnNotes: ['Column F "Bonus" was not recognised and was ignored — re-download the template.'],
+    }) });
+    render(<SalesUploadPage />);
+    await upload();
+    expect(await screen.findByTestId('sales-upload-ignored-columns'))
+      .toHaveTextContent('Column F "Bonus" was not recognised and was ignored — re-download the template.');
+    expect(screen.getByText(/Focus Pack - 1 value must be a number — got 'R3TEST Brand'/)).toBeInTheDocument();
+  });
+
   it('no notice and no label for a tenant without Sales Import data (byte-identical UX)', async () => {
     stubFetch({ batches: [batch({})], upload: uploadResult() });
     render(<SalesUploadPage />);
     await upload();
     expect(await screen.findByText('Upload Result')).toBeInTheDocument();
     expect(screen.queryByTestId('skipped-importer-owned-kpis')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('sales-upload-ignored-columns')).not.toBeInTheDocument();
     // an all-unscoped tenant's response has NO ignoredOutOfScope key → no notice
     expect(screen.queryByTestId('ignored-out-of-scope')).not.toBeInTheDocument();
     expect(screen.queryByText('Sales Import')).not.toBeInTheDocument();
