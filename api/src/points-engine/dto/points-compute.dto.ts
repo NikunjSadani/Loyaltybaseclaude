@@ -10,11 +10,14 @@
 import { Allow, IsIn, IsOptional, IsString, Matches } from 'class-validator';
 import type { AwardType, RoundingSpec, RuleAttachment } from '../points-engine.types';
 
-/** Strict YYYY-MM (01-12) — rejects 2026-13 etc. (mirrors achievements export). */
-const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+/**
+ * Strict YYYY-MM (01-12) — rejects 2026-13 etc. (mirrors achievements export) — OR a financial-year quarter
+ * `YYYY-Qn` (YYYY = FY start year: 2026-Q3 = Oct–Dec 2026, 2026-Q4 = Jan–Mar 2027), which computes QUARTERLY rules only.
+ */
+const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2]|Q[1-4])$/;
 
 export class PreviewComputeDto {
-  @Matches(PERIOD_RE, { message: 'period must be a valid YYYY-MM month' })
+  @Matches(PERIOD_RE, { message: 'period must be a valid YYYY-MM month or a YYYY-Qn financial-year quarter' })
   period!: string;
 
   /** Optional: restrict the run to outlets whose programName matches this value. */
@@ -88,8 +91,8 @@ export class SimulateComputeDto {
   effectiveTo?: string | null;
 
   @IsOptional()
-  @IsIn(['PERIOD_AGGREGATE'])
-  evaluationBasis?: 'PERIOD_AGGREGATE';
+  @IsIn(['PERIOD_AGGREGATE', 'QUARTER'])
+  evaluationBasis?: 'PERIOD_AGGREGATE' | 'QUARTER';
 
   /** One sample evaluation context: achievements/targets by kpiCode + the outlet's segment facet. */
   @Allow()
@@ -99,5 +102,11 @@ export class SimulateComputeDto {
     segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
     /** Test visibility values for `visibility:*` inputs (design §3a); a missing key = absent → nullAs. */
     visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null; inScope?: number | null };
+    /**
+     * QUARTERLY rules: 3 months of test values (month 1, 2, 3 of the quarter). `label` optional (defaults
+     * "Month 1"…); `quarterLabel` optional (defaults "the quarter").
+     */
+    quarterLabel?: string;
+    months?: Array<{ label?: string; achievements?: Record<string, number | null>; targets?: Record<string, number | null> }>;
   };
 }

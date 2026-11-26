@@ -63,6 +63,11 @@ export interface ComputePreviewRow {
   /** One-line human explanation of the math (from the evaluator trace) for the preview report. */
   explanation?: string;
   /**
+   * QUARTER runs only: the credit narration naming the quarter ("Consistency bonus Oct–Dec 2026") — carried into the
+   * credit-upload file's narration cell and the direct-credit batch row. Absent on monthly rows (unchanged).
+   */
+  narration?: string;
+  /**
    * The outlet's visibility (POSM) values the rule read (design §3a) — present only when the rule declares a
    * `visibility:*` input AND the tenant has usable visibility data. `scope` tells a real "0 approved" (IN_SCOPE)
    * apart from an outlet outside the visibility programme (NOT_IN_SCOPE) or with no uploaded status (NO_RECORD).
@@ -109,8 +114,21 @@ export interface ComputeCommitResult {
 /** A full compute run's preview for one (clientId × period), before any crediting. */
 export interface ComputePreview {
   clientId: string;
-  /** "YYYY-MM" period the achievements/targets were read for. */
+  /** "YYYY-MM" period the achievements/targets were read for — or "YYYY-Qn" for a quarter run (see `quarter`). */
   period: string;
+  /**
+   * QUARTER runs only (owner-approved 2026-11-25): the FY quarter computed. `creditPeriod` = its LAST month — the
+   * month a direct-credit batch is filed under (credit batches are month-keyed); the sourceKey still hashes the
+   * `YYYY-Qn` period, so a quarter run never collides with that month's monthly run.
+   */
+  quarter?: {
+    key: string;
+    label: string;
+    fyLabel: string;
+    months: string[];
+    monthLabels: string[];
+    creditPeriod: string;
+  };
   /** Optional filters the run was scoped to. */
   filter?: { program?: string | null; kpiCode?: string | null };
   counts: { total: number; ok: number; skip: number; error: number; noRule: number };

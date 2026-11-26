@@ -1,0 +1,209 @@
+// QUARTER compute runs (owner-approved 2026-11-25): PointsComputeService with `period: 'YYYY-Qn'`.
+// Real evaluator; Prisma / rule store / settings / credits mocked (same pattern as points-compute.service.spec.ts).
+// Covers: the 3-month load, quarterly-only rule resolution (and monthly runs never picking a quarterly rule), the
+// BSC consistency bonus end-to-end (120% cap per month), missing month → SKIP naming the month, narration naming the
+// quarter, distinct + stable idempotency keys, direct-credit idempotency + month-keyed batch, the credit-upload file.
+// Run: npx jest src/points-engine/points-compute.quarter.spec.ts
+
+import * as XLSX from 'xlsx';
+import { PointsComputeService } from './points-compute.service';
+import { PointsEngineService } from './points-engine.service';
+import { writeCreditUploadXlsx } from './points-compute-export.helper';
+import { collectXlsx } from '../exports/kinds/batch2/parity.support-spec';
+import type { JwtPayload } from '../common/decorators/current-user.decorator';
+import type { PointsRule } from '@prisma/client';
+
+const mockPrisma = {
+  pointsRule: { findMany: jest.fn() },
+  outlet: { findMany: jest.fn() },
+  outletSalesRecord: { findMany: jest.fn() },
+  outletTarget: { findMany: jest.fn() },
+  creditBatch: { findFirst: jest.fn(), count: jest.fn(), create: jest.fn() },
+  creditField: { findMany: jest.fn() },
+  kpiDef: { findMany: jest.fn() },
+  auditLog: { create: jest.fn(), findFirst: jest.fn() },
+};
+const mockEngine = { getActiveForAttachment: jest.fn() };
+const mockSettings = { getEffectiveSettings: jest.fn(), getPointsEngineFlagsUncached: jest.fn() };
+const mockCredits = { createBatch: jest.fn() };
+const mockTenant = { resolveVisibilityEnabled: jest.fn(), resolveVisibilityCaptureMode: jest.fn() };
+
+const admin: JwtPayload = { sub: 'u1', role: 'CLIENT_ADMIN', clientId: 'bajaj', phone: '1', name: 'A' };
+
+const term = (m: number) => `cases_m${m} * min(1, 1.2 * tot_tgt_m${m} / tot_ach_m${m})`;
+function bscRow(partial: Partial<PointsRule> = {}): PointsRule {
+  const M = [1, 2, 3];
+  return {
+    id: 'row_q', ruleId: 'rule_bsc_q', clientId: 'bajaj', version: 2, status: 'published',
+    effectiveFrom: new Date('2026-04-01T00:00:00.000Z'), effectiveTo: null, evaluationBasis: 'QUARTER',
+    attachsTo: { scope: 'program_kpi', program: null, programCategory: null, kpiCode: 'BSC_CASES' } as never,
+    output: { awardType: 'POINTS', fieldId: 'cf_bsc', narration: 'Consistency bonus' } as never,
+    rounding: { mode: 'half_up', scale: 0 } as never,
+    inputs: [
+      ...M.flatMap((m) => [
+        { ref: `tot_ach_m${m}`, source: 'achievement:TOTAL', month: m, type: 'number', nullAs: 'reject' },
+        { ref: `tot_tgt_m${m}`, source: 'target:TOTAL', month: m, type: 'number', nullAs: 'reject' },
+        { ref: `cases_m${m}`, source: 'achievement:BSC_CASES', month: m, type: 'number', nullAs: 'reject' },
+      ]),
+      { ref: 'cases_q', source: 'achievement:BSC_CASES', type: 'number', nullAs: 'reject' },
+    ] as never,
+    pipeline: [
+      { type: 'segmentFilter', id: 'ws', field: 'outletType', allow: ['WS'], onFail: 'zero' },
+      ...M.flatMap((m) => [
+        { type: 'gate', id: `tgt${m}`, onFail: 'zero', failAs: 'zero', when: { op: 'gt', left: { var: `tot_tgt_m${m}` }, right: { lit: 0 } }, failReason: `{m${m}}: TOTAL target is 0` },
+        { type: 'gate', id: `met${m}`, onFail: 'zero', failAs: 'zero', when: { op: 'gte', left: { var: `tot_ach_m${m}` }, right: { var: `tot_tgt_m${m}` } }, failReason: `{m${m}}: TOTAL below target` },
+      ]),
+      { type: 'gate', id: 'cases', onFail: 'zero', failAs: 'zero', when: { op: 'gt', left: { var: 'cases_q' }, right: { lit: 0 } }, failReason: 'No BSC cases in {quarter}' },
+      { type: 'formula', id: 'bonus', output: 'add', expr: `5 * (${term(1)} + ${term(2)} + ${term(3)})` },
+    ] as never,
+    kpiCode: 'BSC_CASES', program: null, programCategory: null,
+    createdAt: new Date(), updatedAt: new Date(), createdBy: 'u1',
+    ...partial,
+  } as PointsRule;
+}
+
+const outlet = (code: string) => ({ outletCode: code, name: `Outlet ${code}`, programName: 'BSC', programCategory: null, metro: null, outletType: { code: 'WS' } });
+const MONTHS = ['2026-10', '2026-11', '2026-12'];
+/** per outlet: [TOTAL ach, TOTAL tgt, BSC cases] for Oct, Nov, Dec (undefined month = no row). */
+function load(data: Record<string, Array<[number, number, number] | undefined>>) {
+  const sales: unknown[] = [];
+  const targets: unknown[] = [];
+  for (const [code, months] of Object.entries(data)) {
+    months.forEach((v, i) => {
+      if (!v) return;
+      sales.push({ outletCode: code, month: MONTHS[i], kpiValues: { TOTAL: v[0], BSC_CASES: v[2] } });
+      targets.push({ outletCode: code, month: MONTHS[i], targetValues: { TOTAL: v[1] } });
+    });
+  }
+  mockPrisma.outlet.findMany.mockResolvedValue(Object.keys(data).map(outlet));
+  mockPrisma.outletSalesRecord.findMany.mockResolvedValue(sales);
+  mockPrisma.outletTarget.findMany.mockResolvedValue(targets);
+}
+
+describe('PointsEngineService.getActiveForAttachment — monthly vs quarterly', () => {
+  it('a monthly lookup never returns a quarterly rule and vice versa (query unchanged)', async () => {
+    const monthly = { ...bscRow({ id: 'm', ruleId: 'm', evaluationBasis: 'PERIOD_AGGREGATE' }) };
+    const quarterly = bscRow();
+    const prisma = { pointsRule: { findMany: jest.fn(async () => [quarterly, monthly]) } };
+    const svc = new PointsEngineService(prisma as never);
+    const d = new Date('2026-10-01T00:00:00.000Z');
+    expect((await svc.getActiveForAttachment('bajaj', 'BSC', null, 'BSC_CASES', d))?.ruleId).toBe('m');
+    expect((await svc.getActiveForAttachment('bajaj', 'BSC', null, 'BSC_CASES', d, 'QUARTER'))?.ruleId).toBe('rule_bsc_q');
+    prisma.pointsRule.findMany.mockResolvedValue([quarterly]);
+    expect(await svc.getActiveForAttachment('bajaj', 'BSC', null, 'BSC_CASES', d)).toBeNull();
+  });
+});
+
+describe('PointsComputeService — QUARTER runs', () => {
+  let service: PointsComputeService;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockSettings.getEffectiveSettings.mockResolvedValue({ pointsEngine: { enabled: true, directCreditEnabled: true } });
+    mockSettings.getPointsEngineFlagsUncached.mockResolvedValue({ enabled: true, directCreditEnabled: true });
+    mockPrisma.pointsRule.findMany.mockResolvedValue([
+      { kpiCode: 'BSC_CASES', evaluationBasis: 'QUARTER' },
+      { kpiCode: 'TOTAL', evaluationBasis: 'PERIOD_AGGREGATE' }, // a monthly rule — never part of a quarter run
+    ]);
+    mockPrisma.kpiDef.findMany.mockResolvedValue([]);
+    mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'cf_bsc', name: 'BSC Consistency', isActive: true, outletTypeAwards: { WS: 'POINTS' } }]);
+    mockEngine.getActiveForAttachment.mockResolvedValue(bscRow());
+    mockPrisma.creditBatch.findFirst.mockResolvedValue(null);
+    mockPrisma.creditBatch.count.mockResolvedValue(0);
+    mockCredits.createBatch.mockResolvedValue({ id: 'b1', batchCode: 'CB-2026-12-001', status: 'PENDING_CONFIRM', period: '2026-12', totalPoints: 275, totalOutlets: 1 });
+    service = new PointsComputeService(mockPrisma as never, mockEngine as never, mockSettings as never, mockCredits as never, mockTenant as never);
+  });
+
+  it('loads the 3 months, resolves QUARTERLY rules only, pays the capped bonus and names the quarter', async () => {
+    load({
+      W1: [[1000, 1000, 10], [1600, 1000, 20], [1150, 1000, 30]], // Nov at 160% → scaled 0.75 → 275
+      W2: [[1000, 1000, 10], [999, 1000, 20], [1200, 1000, 30]], // Nov below target → 0, named
+      W3: [[1000, 1000, 10], undefined, [1200, 1000, 30]], // no Nov data at all → SKIP, named
+    });
+    const p = await service.previewCompute(admin, { period: '2026-Q3' });
+
+    expect(mockPrisma.outletSalesRecord.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { clientId: 'bajaj', month: { in: MONTHS } } }));
+    expect(mockPrisma.outletTarget.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { clientId: 'bajaj', month: { in: MONTHS } } }));
+    // Only the quarterly KPI is computed; resolution asks for QUARTER rules effective on the quarter's first day.
+    expect(new Set(p.rows.map((r) => r.kpiCode))).toEqual(new Set(['BSC_CASES']));
+    expect(mockEngine.getActiveForAttachment).toHaveBeenCalledWith('bajaj', 'BSC', null, 'BSC_CASES', new Date('2026-10-01T00:00:00.000Z'), 'QUARTER');
+
+    expect(p.quarter).toEqual({ key: '2026-Q3', label: 'Oct–Dec 2026', fyLabel: 'Q3 FY2026-27', months: MONTHS, monthLabels: ['Oct 2026', 'Nov 2026', 'Dec 2026'], creditPeriod: '2026-12' });
+    const by = new Map(p.rows.map((r) => [r.outletCode, r]));
+    expect(by.get('W1')).toMatchObject({ status: 'OK', points: 275, achievement: 60, narration: 'Consistency bonus Oct–Dec 2026' });
+    expect(by.get('W1')!.explanation).toMatch(/^Oct–Dec 2026 \(BSC_CASES by month: Oct 10, Nov 20, Dec 30\)/);
+    expect(by.get('W2')).toMatchObject({ status: 'OK', points: 0, reason: 'Nov 2026: TOTAL below target' });
+    expect(by.get('W3')!.status).toBe('SKIP');
+    expect(by.get('W3')!.reason).toContain('Nov 2026: no TOTAL target');
+    expect(by.get('W3')!.achievement).toBeNull(); // a quarter total with a blank month is never a partial sum
+    expect(p.totalPoints).toBe(275);
+
+    const upload = PointsComputeService.mapPreviewToUploadRows(p).filter((r) => r.amount > 0);
+    expect(upload).toEqual([expect.objectContaining({ outletId: 'W1', amount: 275, narration: 'Consistency bonus Oct–Dec 2026' })]);
+  });
+
+  it('a quarter run and the same-numbers MONTHLY run can never share a key; a repeated quarter run is stable', async () => {
+    load({ W1: [[1000, 1000, 10], [1000, 1000, 10], [1000, 1000, 10]] });
+    const a = await service.previewCompute(admin, { period: '2026-Q3' });
+    const b = await service.previewCompute(admin, { period: '2026-Q3' });
+    expect(a.sourceKey).toBe(b.sourceKey);
+    expect(a.rows).toEqual(b.rows);
+    // Same creditable rows, but a different period string is hashed → different idempotency key.
+    const asMonth = await service.previewCompute(admin, { period: '2026-12' }).catch(() => null);
+    expect(asMonth?.sourceKey).not.toBe(a.sourceKey);
+  });
+
+  it('a MONTHLY run never resolves a quarterly rule (its KPI is not even listed)', async () => {
+    mockPrisma.pointsRule.findMany.mockResolvedValue([{ kpiCode: 'BSC_CASES', evaluationBasis: 'QUARTER' }]);
+    load({ W1: [[1000, 1000, 10]] });
+    const p = await service.previewCompute(admin, { period: '2026-10' });
+    expect(p.rows).toEqual([]);
+    expect(p.quarter).toBeUndefined();
+    expect(mockEngine.getActiveForAttachment).not.toHaveBeenCalled();
+  });
+
+  it('direct credit: batch filed under the quarter’s LAST month with the quarter key; a repeat is an idempotent hit', async () => {
+    load({ W1: [[1000, 1000, 10], [1600, 1000, 20], [1150, 1000, 30]] });
+    const first = await service.commitCompute(admin, { period: '2026-Q3' });
+    const [, dto, source] = mockCredits.createBatch.mock.calls[0];
+    expect(dto).toMatchObject({ period: '2026-12', totalPoints: 275, totalOutlets: 1 });
+    expect(dto.rows[0]).toMatchObject({ outletId: 'W1', amount: 275, narration: 'Consistency bonus Oct–Dec 2026' });
+    expect(source).toEqual({ kind: 'POINTS_ENGINE', key: first.sourceKey });
+    expect(first.idempotentHit).toBe(false);
+    expect(mockPrisma.creditBatch.count).toHaveBeenCalledWith({ where: { clientId: 'bajaj', period: '2026-12', id: { not: 'b1' } } });
+
+    mockPrisma.creditBatch.findFirst.mockResolvedValue({ id: 'b1' });
+    const again = await service.commitCompute(admin, { period: '2026-Q3', expectedKey: first.sourceKey });
+    expect(again.sourceKey).toBe(first.sourceKey);
+    expect(again.idempotentHit).toBe(true);
+    expect(mockCredits.createBatch.mock.calls[1][2]).toEqual({ kind: 'POINTS_ENGINE', key: first.sourceKey });
+  });
+
+  it('credit-upload file: title names the quarter + the month to upload under; narration cell names the quarter', async () => {
+    load({ W1: [[1000, 1000, 10], [1000, 1000, 10], [1000, 1000, 10]] });
+    const p = await service.previewCompute(admin, { period: '2026-Q3' });
+    const buf = await collectXlsx(async (w) => void (await writeCreditUploadXlsx(p, w)));
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    const aoa = XLSX.utils.sheet_to_json<(string | number)[]>(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' });
+    expect(String(aoa[0][0])).toMatch(/Oct–Dec 2026 \(Q3 FY2026-27\) — upload under Dec 2026/);
+    expect(aoa[1]).toEqual(['Outlet ID', 'Outlet Name', 'BSC Consistency', 'BSC Consistency Narration']);
+    expect(aoa[2]).toEqual(['W1', 'Outlet W1', 150, 'Consistency bonus Oct–Dec 2026']);
+  });
+
+  it('simulator: a quarterly rule takes 3 months of test values (and refuses fewer)', () => {
+    const r = bscRow();
+    const dto = {
+      attachsTo: r.attachsTo, output: r.output, rounding: r.rounding, inputs: r.inputs, pipeline: r.pipeline,
+      evaluationBasis: 'QUARTER',
+    } as never as Parameters<PointsComputeService['simulate']>[1];
+    const months = [
+      { label: 'Oct 2026', achievements: { TOTAL: 1500, BSC_CASES: 10 }, targets: { TOTAL: 1000 } },
+      { label: 'Nov 2026', achievements: { TOTAL: 2000, BSC_CASES: 21 }, targets: { TOTAL: 1000 } },
+      { label: 'Dec 2026', achievements: { TOTAL: 2400, BSC_CASES: 33 }, targets: { TOTAL: 1000 } },
+    ];
+    const ok = service.simulate(admin, { ...dto, context: { segment: { outletType: 'WS' }, quarterLabel: 'Oct–Dec 2026', months } });
+    expect(ok.valid).toBe(true);
+    expect(ok.outcome).toMatchObject({ status: 'OK', points: 186 }); // 37.1 × 5 = 185.5 → half-up once
+    const bad = service.simulate(admin, { ...dto, context: { segment: { outletType: 'WS' }, months: months.slice(0, 2) } });
+    expect(bad).toEqual({ valid: false, errors: ['A quarterly rule needs test values for all 3 months of the quarter.'] });
+  });
+});

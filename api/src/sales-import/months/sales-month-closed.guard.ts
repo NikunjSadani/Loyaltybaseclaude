@@ -11,6 +11,7 @@ import type { JwtPayload } from '../../common/decorators/current-user.decorator'
 import { currentMonthKey } from '../../targets/targets.helpers';
 import { isMonthKey, monthLabel, resolveMonthState } from './month-state';
 import { salesMonthEntityId } from './sales-months.service';
+import { parseQuarter } from '../../points-engine/points-engine.quarter';
 
 /**
  * D-1 (owner: A). Refuses the CREDITABLE / APPROVABLE points-compute artefacts — export, commit, preview-report,
@@ -49,7 +50,11 @@ export class SalesMonthClosedGuard implements CanActivate {
     const user = req.user;
     if (!user?.clientId) return true; // unauthenticated requests are rejected by the global JWT guard
     const period = (req.body && typeof req.body === 'object' ? req.body.period : undefined) ?? req.query?.period;
-    if (!isMonthKey(period)) return true;
+    // A points-engine QUARTER run (`YYYY-Qn`, owner-approved 2026-11-25) reads all 3 months → EVERY one of them must be
+    // closed. A monthly period behaves exactly as before (one month).
+    const quarter = !isMonthKey(period) && typeof period === 'string' ? parseQuarter(period) : null;
+    if (!isMonthKey(period) && !quarter) return true;
+    const months: string[] = quarter ? [...quarter.months] : [period as string];
     const clientId = user.clientId;
 
     // 1. Is Sales Import involved for this tenant / month at all? (re-check L5: one retry, then the last flag value this
@@ -60,7 +65,10 @@ export class SalesMonthClosedGuard implements CanActivate {
     if (flagOn !== true) {
       let applied: boolean;
       try {
-        applied = !!(await this.prisma.salesImportApply.findFirst({ where: { clientId, month: period }, select: { id: true } }));
+        applied = !!(await this.prisma.salesImportApply.findFirst({
+          where: { clientId, month: quarter ? { in: months } : (period as string) },
+          select: { id: true },
+        }));
       } catch (e) {
         // Involvement cannot be shown → fail OPEN (a tenant that never used Sales Import must not get a 503 from it).
         this.logger.warn(`D-1 guard: apply lookup failed for ${clientId}/${period}; allowing: ${(e as Error)?.message}`);
@@ -69,17 +77,23 @@ export class SalesMonthClosedGuard implements CanActivate {
       if (!applied) return true; // no Sales Import involvement for this month → inert (Deoleo)
     }
 
-    // 2. Involved → the month must be CLOSED; a failed read now fails CLOSED.
-    let state: ReturnType<typeof resolveMonthState>;
-    try {
-      const override = await this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month: period } } });
-      state = resolveMonthState(period, currentMonthKey(), override);
-    } catch (e) {
-      this.logger.error(`D-1 guard could not read the month state for ${clientId}/${period}: ${(e as Error)?.message}`);
-      throw new ServiceUnavailableException('Could not check whether this month is closed in Sales Import. Try again in a moment.');
-    }
-    if (state.state === 'OPEN') {
-      throw new ConflictException(`${monthLabel(period)} is still OPEN. Close it in Sales Import first.`);
+    // 2. Involved → the month (every month of a quarter) must be CLOSED; a failed read now fails CLOSED.
+    for (const month of months) {
+      let state: ReturnType<typeof resolveMonthState>;
+      try {
+        const override = await this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } } });
+        state = resolveMonthState(month, currentMonthKey(), override);
+      } catch (e) {
+        this.logger.error(`D-1 guard could not read the month state for ${clientId}/${month}: ${(e as Error)?.message}`);
+        throw new ServiceUnavailableException('Could not check whether this month is closed in Sales Import. Try again in a moment.');
+      }
+      if (state.state === 'OPEN') {
+        throw new ConflictException(
+          quarter
+            ? `${monthLabel(month)} is still OPEN (part of ${quarter.label}). Close it in Sales Import first.`
+            : `${monthLabel(month)} is still OPEN. Close it in Sales Import first.`,
+        );
+      }
     }
 
     // 3. Record a SUCCESSFUL export / report (not commit) once the response has gone out with a 2xx.
@@ -91,7 +105,7 @@ export class SalesMonthClosedGuard implements CanActivate {
         // 202 = the file was only QUEUED on the Downloads page (nothing produced yet): the export kind records it
         // once, when the file is actually built (exports/kinds/batch2/points-compute.kinds.ts) — never twice.
         if (code < 200 || code >= 300 || code === 202) return;
-        void this.recordExport(clientId, period, user.sub, route);
+        void this.recordExport(clientId, period as string, user.sub, route);
       });
     }
     return true;
@@ -117,17 +131,22 @@ export class SalesMonthClosedGuard implements CanActivate {
 
   /** AuditLog EXPORT on the month entity (best effort; never affects the response). */
   async recordExport(clientId: string, period: string, actorId: string, route: string): Promise<void> {
-    await this.prisma.auditLog
-      .create({
-        data: {
-          action: 'EXPORT',
-          entityType: 'SALES_MONTH',
-          entityId: salesMonthEntityId(clientId, period),
-          actorId,
-          newValues: { route, period },
-          metadata: { clientId, month: period, route },
-        },
-      })
-      .catch((e: unknown) => this.logger.warn(`D-1 guard: export record failed: ${(e as Error)?.message}`));
+    // A quarter export is recorded on EACH of its months (a later reopen of any of them warns), naming the quarter.
+    const quarter = isMonthKey(period) ? null : parseQuarter(period);
+    const months = quarter ? [...quarter.months] : [period];
+    for (const month of months) {
+      await this.prisma.auditLog
+        .create({
+          data: {
+            action: 'EXPORT',
+            entityType: 'SALES_MONTH',
+            entityId: salesMonthEntityId(clientId, month),
+            actorId,
+            newValues: { route, period },
+            metadata: quarter ? { clientId, month, route, quarter: period } : { clientId, month: period, route },
+          },
+        })
+        .catch((e: unknown) => this.logger.warn(`D-1 guard: export record failed: ${(e as Error)?.message}`));
+    }
   }
 }

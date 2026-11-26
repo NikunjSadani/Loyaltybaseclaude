@@ -37,6 +37,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { platformWide } from '../common/tenant-scope';
 import { validateRule } from './points-engine.helper';
+import { isQuarterBasis } from './points-engine.quarter';
 import {
   AppliesTo,
   intersectAppliesTo,
@@ -46,6 +47,7 @@ import {
 } from '../common/applies-to/applies-to';
 import type {
   AwardType,
+  EvaluationBasis,
   PipelineNode,
   PointsRuleConfig,
   RoundingSpec,
@@ -63,7 +65,7 @@ import {
 interface RuleConfigInput {
   effectiveFrom: string;
   effectiveTo?: string | null;
-  evaluationBasis?: 'PERIOD_AGGREGATE';
+  evaluationBasis?: EvaluationBasis;
   attachsTo: RuleAttachment;
   output: { awardType: AwardType; fieldId: string };
   rounding: RoundingSpec;
@@ -216,6 +218,9 @@ export class PointsEngineService {
         },
       });
       for (const other of others) {
+        // A QUARTERLY rule and a MONTHLY rule on the same attachment never compete — they run in different
+        // compute runs (YYYY-Qn vs YYYY-MM) — so only rules of the same kind clash.
+        if (isQuarterBasis(other.evaluationBasis) !== isQuarterBasis(row.evaluationBasis)) continue;
         const progClash =
           other.program === row.program || other.program === null || row.program === null;
         const catClash =
@@ -303,8 +308,10 @@ export class PointsEngineService {
     programCategory: string | null | undefined,
     kpiCode: string,
     periodDate: Date,
+    /** 'MONTH' (default — every existing caller) resolves monthly rules only; 'QUARTER' resolves quarterly rules only. */
+    kind: 'MONTH' | 'QUARTER' = 'MONTH',
   ): Promise<PointsRule | null> {
-    const candidates = await this.prisma.pointsRule.findMany({
+    const all = await this.prisma.pointsRule.findMany({
       where: {
         clientId,
         status:        'published',
@@ -319,6 +326,9 @@ export class PointsEngineService {
       // Deterministic pre-sort (the JS rank below is authoritative, but this makes the input order stable).
       orderBy: [{ effectiveFrom: 'desc' }, { version: 'desc' }, { ruleId: 'asc' }],
     });
+    // Filtered in JS (not in the query) so the monthly lookup's query is unchanged: a monthly run never resolves a
+    // quarterly rule and vice versa.
+    const candidates = (all ?? []).filter((r) => isQuarterBasis(r.evaluationBasis) === (kind === 'QUARTER'));
     if (candidates.length === 0) return null;
     if (candidates.length === 1) return candidates[0];
 
@@ -516,7 +526,7 @@ export class PointsEngineService {
       effectiveFrom:   formatDate(row.effectiveFrom),
       effectiveTo:     row.effectiveTo ? formatDate(row.effectiveTo) : null,
       attachsTo:       row.attachsTo as unknown as RuleAttachment,
-      evaluationBasis: row.evaluationBasis as 'PERIOD_AGGREGATE',
+      evaluationBasis: row.evaluationBasis as EvaluationBasis,
       output:          row.output as unknown as { awardType: AwardType; fieldId: string },
       rounding:        row.rounding as unknown as RoundingSpec,
       inputs:          row.inputs as unknown as RuleInput[],

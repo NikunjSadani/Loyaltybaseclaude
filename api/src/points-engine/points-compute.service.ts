@@ -32,9 +32,12 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { CreditsService } from '../credits/credits.service';
 import { PointsEngineService } from './points-engine.service';
 import { evaluateRule, isVisibilityInput, ruleWarnings, validateRule } from './points-engine.helper';
+import { isQuarterBasis, parseQuarter, quarterStartDate } from './points-engine.quarter';
 import type {
   AwardType,
   EvalContext,
+  EvaluationBasis,
+  QuarterMonthValues,
   PipelineNode,
   PointsRuleConfig,
   RoundingSpec,
@@ -118,7 +121,22 @@ export class PointsComputeService {
     // The period month maps to its first calendar day for the rule effective-window test
     // (effectiveFrom <= periodDate <= effectiveTo). effectiveFrom/To are @db.Date business days;
     // using the month's first day means a rule effective from the 1st covers the whole month.
-    const periodDate = new Date(`${period}-01T00:00:00.000Z`);
+    // QUARTER run (`YYYY-Qn`, owner-approved 2026-11-25): computes QUARTERLY rules only, over the 3 months of the FY
+    // quarter; a monthly run computes monthly rules only (byte-identical to before). Effective-window test date = the
+    // quarter's first day.
+    const quarter = parseQuarter(period);
+    const ruleKind: 'MONTH' | 'QUARTER' = quarter ? 'QUARTER' : 'MONTH';
+    const periodDate = quarter ? quarterStartDate(quarter) : new Date(`${period}-01T00:00:00.000Z`);
+    const quarterInfo = quarter
+      ? {
+          key: quarter.key,
+          label: quarter.label,
+          fyLabel: quarter.fyLabel,
+          months: [...quarter.months],
+          monthLabels: [...quarter.monthLabels],
+          creditPeriod: quarter.creditPeriod,
+        }
+      : undefined;
 
     const settings = await this.tenantSettings.getEffectiveSettings(clientId);
     const engineDisabled = !settings.pointsEngine.enabled;
@@ -139,9 +157,14 @@ export class PointsComputeService {
           effectiveFrom: { lte: periodDate },
           OR: [{ effectiveTo: null }, { effectiveTo: { gte: periodDate } }],
         },
-        select: { kpiCode: true },
+        select: { kpiCode: true, evaluationBasis: true },
       });
-      activeKpiCodes = [...new Set(ruleRows.map((r) => r.kpiCode))];
+      // Only the rules of THIS run's kind (monthly vs quarterly) decide its KPIs.
+      activeKpiCodes = [
+        ...new Set(
+          ruleRows.filter((r) => isQuarterBasis(r.evaluationBasis) === (ruleKind === 'QUARTER')).map((r) => r.kpiCode),
+        ),
+      ];
     }
 
     const emptyPreview: ComputePreview = {
@@ -157,6 +180,7 @@ export class PointsComputeService {
       ruleVersionsUsed: [],
       sourceKey: computeSourceKey(clientId, period, { program: programFilter, kpiCode: kpiFilter }, [], []),
       payoutKey: computePayoutKey(clientId, period, { program: programFilter, kpiCode: kpiFilter }, []),
+      ...(quarterInfo ? { quarter: quarterInfo } : {}),
     };
     if (activeKpiCodes.length === 0) return emptyPreview;
 
@@ -178,14 +202,25 @@ export class PointsComputeService {
         },
         orderBy: { outletCode: 'asc' },
       }),
-      this.prisma.outletSalesRecord.findMany({
-        where: { clientId, month: period },
-        select: { outletCode: true, kpiValues: true },
-      }),
-      this.prisma.outletTarget.findMany({
-        where: { clientId, month: period },
-        select: { outletCode: true, targetValues: true },
-      }),
+      // Monthly: the period month (query unchanged). Quarter: the 3 months in one query per source (still no N+1).
+      quarter
+        ? this.prisma.outletSalesRecord.findMany({
+            where: { clientId, month: { in: [...quarter.months] } },
+            select: { outletCode: true, kpiValues: true, month: true },
+          })
+        : this.prisma.outletSalesRecord.findMany({
+            where: { clientId, month: period },
+            select: { outletCode: true, kpiValues: true },
+          }),
+      quarter
+        ? this.prisma.outletTarget.findMany({
+            where: { clientId, month: { in: [...quarter.months] } },
+            select: { outletCode: true, targetValues: true, month: true },
+          })
+        : this.prisma.outletTarget.findMany({
+            where: { clientId, month: period },
+            select: { outletCode: true, targetValues: true },
+          }),
     ]);
     // APPLIES-TO scope (D5) of EVERY KPI a rule could reference: the active (attached) KPIs plus every
     // KPI code present in this period's stored achievement / target values (a rule's bonus inputs —
@@ -227,6 +262,23 @@ export class PointsComputeService {
     const targetsByCode = new Map(
       targetRows.map((r) => [r.outletCode, normalizeValues(r.targetValues)]),
     );
+    // Quarter: outletCode → month → values (a month with no row stays absent → each input's nullAs, naming the month).
+    const byCodeMonth = (rows: Array<{ outletCode: string; month?: string; values: unknown }>) => {
+      const m = new Map<string, Map<string, Record<string, number | null>>>();
+      if (!quarter) return m;
+      for (const r of rows) {
+        let inner = m.get(r.outletCode);
+        if (!inner) m.set(r.outletCode, (inner = new Map()));
+        inner.set(r.month ?? '', normalizeValues(r.values));
+      }
+      return m;
+    };
+    const salesByCodeMonth = byCodeMonth(
+      (salesRows as Array<{ outletCode: string; kpiValues: unknown; month?: string }>).map((r) => ({ outletCode: r.outletCode, month: r.month, values: r.kpiValues })),
+    );
+    const targetsByCodeMonth = byCodeMonth(
+      (targetRows as Array<{ outletCode: string; targetValues: unknown; month?: string }>).map((r) => ({ outletCode: r.outletCode, month: r.month, values: r.targetValues })),
+    );
     // Outlet type per code — needed to resolve the LIVE CreditField classification per outlet (below).
     const outletTypeByCode = new Map(
       outlets.map((o) => [o.outletCode, o.outletType?.code ?? null]),
@@ -249,6 +301,7 @@ export class PointsComputeService {
         programCategory,
         kpiCode,
         periodDate,
+        ...(quarter ? (['QUARTER'] as const) : ([] as const)),
       );
       ruleCache.set(key, rule);
       return rule;
@@ -275,12 +328,21 @@ export class PointsComputeService {
       };
       const facets: AppliesToOutletFacets = { outletType: segment.outletType, program, subProgram: programCategory };
       // Masked by each KPI's own scope for THIS outlet (out-of-scope KPI values read as absent).
-      const achievements = maskByScope(salesByCode.get(outlet.outletCode) ?? {}, facets);
-      const targets = maskByScope(targetsByCode.get(outlet.outletCode) ?? {}, facets);
+      // Quarter: per-month values (each masked by KPI scope like the monthly maps); the monthly maps stay empty.
+      const quarterMonths = quarter
+        ? quarter.months.map((m, i) => ({
+            label: quarter.monthLabels[i],
+            achievements: maskByScope(salesByCodeMonth.get(outlet.outletCode)?.get(m) ?? {}, facets),
+            targets: maskByScope(targetsByCodeMonth.get(outlet.outletCode)?.get(m) ?? {}, facets),
+          }))
+        : null;
+      const achievements = quarter ? {} : maskByScope(salesByCode.get(outlet.outletCode) ?? {}, facets);
+      const targets = quarter ? {} : maskByScope(targetsByCode.get(outlet.outletCode) ?? {}, facets);
 
       for (const kpiCode of activeKpiCodes) {
-        const achievement = toNumOrNull(achievements[kpiCode]);
-        const target = toNumOrNull(targets[kpiCode]);
+        // Quarter rows echo the QUARTER TOTAL of the attached KPI (null when any month is blank).
+        const achievement = quarterMonths ? quarterSum(quarterMonths.map((m) => m.achievements[kpiCode])) : toNumOrNull(achievements[kpiCode]);
+        const target = quarterMonths ? quarterSum(quarterMonths.map((m) => m.targets[kpiCode])) : toNumOrNull(targets[kpiCode]);
 
         const base = {
           outletCode: outlet.outletCode,
@@ -345,9 +407,31 @@ export class PointsComputeService {
           targets,
           segment,
           ...(usesVisibility ? { visibility: visibilityContext(visFacts) } : {}),
+          ...(quarter && quarterMonths
+            ? {
+                quarter: {
+                  label: quarter.label,
+                  months: quarterMonths as [QuarterMonthValues, QuarterMonthValues, QuarterMonthValues],
+                },
+              }
+            : {}),
           meta: { outletCode: outlet.outletCode, period },
         };
         const outcome = evaluateRule(config, ctx);
+        // Quarter rows: the credit narration names the quarter ("Consistency bonus Oct–Dec 2026") and the explanation
+        // opens with the quarter + the attached KPI per month (a formula trace does not echo its inputs).
+        const quarterRow =
+          quarter && quarterMonths
+            ? {
+                narration: `${(config.output?.narration ?? '').trim() || 'Quarterly points'} ${quarter.label}`,
+              }
+            : {};
+        const quarterPrefix =
+          quarter && quarterMonths
+            ? `${quarter.label} (${kpiCode} by month: ${quarterMonths
+                .map((m) => `${m.label.slice(0, 3)} ${m.achievements[kpiCode] ?? '—'}`)
+                .join(', ')}) · `
+            : '';
         const visRow = visFacts
           ? {
               visibility: {
@@ -379,10 +463,11 @@ export class PointsComputeService {
             points: outcome.points,
             // Why the rule paid 0 (opt-in gate failReason, or the missing skipRule input) — never a bare 0.
             ...(outcome.reason ? { reason: outcome.reason } : {}),
-            explanation: `${visPrefix}${explainTrace(outcome.trace, outcome.points)}${
+            explanation: `${quarterPrefix}${visPrefix}${explainTrace(outcome.trace, outcome.points)}${
               visUnavailable ? ` (visibility: ${visUnavailable})` : ''
             }`,
             ...visRow,
+            ...quarterRow,
           });
         } else if (outcome.status === 'SKIP') {
           rows.push({
@@ -394,6 +479,7 @@ export class PointsComputeService {
             status: 'SKIP',
             reason: `${outcome.reason}${visUnavailable ? ` — ${visUnavailable}` : ''}`,
             ...visRow,
+            ...quarterRow,
           });
         } else {
           rows.push({
@@ -538,6 +624,7 @@ export class PointsComputeService {
       ruleVersionsUsed,
       sourceKey: '', // set below
       payoutKey: '', // set below
+      ...(quarterInfo ? { quarter: quarterInfo } : {}),
       // Present ONLY when a rule read visibility — the month's visibility setup + counts, shown on the preview so
       // an unusable setup (switched off / no scope) is loud. Absent for every run that never touches visibility.
       ...(visibilityLoad ? { visibility: summarizeVisibility(await visibilityLoad, visibilityOutletCodes) } : {}),
@@ -662,10 +749,14 @@ export class PointsComputeService {
       select: { id: true },
     });
 
+    // Credit batches are MONTH-keyed (batch code, upload window, TDS FY all parse YYYY-MM): a quarter run files its batch
+    // under the quarter's LAST month. It can never be confused with that month's monthly run — its sourceKey hashes the
+    // `YYYY-Qn` period (distinct idempotency key) and every row's narration names the quarter.
+    const batchPeriod = preview.quarter?.creditPeriod ?? preview.period;
     const batch = await this.credits.createBatch(
       user,
       {
-        period: preview.period,
+        period: batchPeriod,
         totalOutlets,
         totalPoints,
         totalPayoutPaise: 0,
@@ -688,7 +779,7 @@ export class PointsComputeService {
     const priorBatchesThisPeriod = await this.prisma.creditBatch.count({
       where: {
         clientId: user.clientId,
-        period: preview.period,
+        period: batchPeriod,
         id: { not: batch.id },
       },
     });
@@ -725,12 +816,14 @@ export class PointsComputeService {
       pipeline: unknown;
       effectiveFrom?: string;
       effectiveTo?: string | null;
-      evaluationBasis?: 'PERIOD_AGGREGATE';
+      evaluationBasis?: EvaluationBasis;
       context: {
         achievements?: Record<string, number | null>;
         targets?: Record<string, number | null>;
         segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
         visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null; inScope?: number | null };
+        quarterLabel?: string;
+        months?: Array<{ label?: string; achievements?: Record<string, number | null>; targets?: Record<string, number | null> }>;
       };
     },
   ): {
@@ -770,11 +863,34 @@ export class PointsComputeService {
             inScope: toNumOrNull(rawVis.inScope),
           }
         : undefined;
+    // A QUARTERLY rule is simulated on 3 months of test values (month 1, 2, 3 of the quarter).
+    let quarterCtx: EvalContext['quarter'] | undefined;
+    if (config.evaluationBasis === 'QUARTER') {
+      const months = Array.isArray(dto.context?.months) ? dto.context.months : [];
+      if (months.length !== 3) {
+        return { valid: false, errors: ['A quarterly rule needs test values for all 3 months of the quarter.'] };
+      }
+      const toVals = (r: unknown): Record<string, number | null> => {
+        if (!r || typeof r !== 'object' || Array.isArray(r)) return {};
+        const out: Record<string, number | null> = {};
+        for (const [k, v] of Object.entries(r as Record<string, unknown>)) out[k] = toNumOrNull(v);
+        return out;
+      };
+      quarterCtx = {
+        label: (typeof dto.context?.quarterLabel === 'string' && dto.context.quarterLabel.trim()) || 'the quarter',
+        months: months.map((m, i) => ({
+          label: (typeof m?.label === 'string' && m.label.trim()) || `Month ${i + 1}`,
+          achievements: toVals(m?.achievements),
+          targets: toVals(m?.targets),
+        })) as [QuarterMonthValues, QuarterMonthValues, QuarterMonthValues],
+      };
+    }
     const ctx: EvalContext = {
       achievements: dto.context?.achievements ?? {},
       targets: dto.context?.targets ?? {},
       segment: dto.context?.segment ?? {},
       ...(visibility ? { visibility } : {}),
+      ...(quarterCtx ? { quarter: quarterCtx } : {}),
       meta: {},
     };
     // Test values must be possible ones (§3a): non-negative whole numbers, approved / inScope in {0,1},
@@ -901,7 +1017,8 @@ export class PointsComputeService {
       // Whole points (no ×100). PAYOUT-output rules would need paise handling at the Wave-2
       // credit boundary; Wave 1 is points-focused and the evaluator guarantees a whole integer.
       dto.amount = Math.round(row.points ?? 0);
-      dto.narration = '';
+      // Quarter rows name the quarter ("Consistency bonus Oct–Dec 2026"); monthly rows carry none (unchanged).
+      dto.narration = row.narration ?? '';
       dto.awardType = (row.awardType ?? 'POINTS') as CreditAwardType;
       dto.status = UploadRowStatus.OK;
       dto.errors = [];
@@ -923,7 +1040,7 @@ function rowToConfig(row: PointsRule): PointsRuleConfig {
     effectiveFrom: formatDate(row.effectiveFrom),
     effectiveTo: row.effectiveTo ? formatDate(row.effectiveTo) : null,
     attachsTo: row.attachsTo as unknown as RuleAttachment,
-    evaluationBasis: row.evaluationBasis as 'PERIOD_AGGREGATE',
+    evaluationBasis: row.evaluationBasis as EvaluationBasis,
     output: row.output as unknown as { awardType: AwardType; fieldId: string },
     rounding: row.rounding as unknown as RoundingSpec,
     inputs: row.inputs as unknown as RuleInput[],
@@ -1064,6 +1181,17 @@ function computePayoutKey(
     payout,
   });
   return `pp_${createHash('sha256').update(payload).digest('hex')}`;
+}
+
+/** Quarter total of one KPI across the 3 months — null when ANY month is blank (never a partial sum). */
+function quarterSum(values: Array<number | null | undefined>): number | null {
+  let sum = 0;
+  for (const v of values) {
+    const n = toNumOrNull(v);
+    if (n === null) return null;
+    sum += n;
+  }
+  return sum;
 }
 
 /** A finite number, else null (the evaluator's "absent" that triggers each input's nullAs). */

@@ -31,6 +31,7 @@ import { TenantSettingsService } from '../../../tenant/tenant-settings.service';
 import type { ExportAccess, ExportKindDef, ExportRunContext } from '../../export-kinds';
 import type { XlsxStreamWriter } from '../../../common/xlsx-stream';
 import { monthWords, parseQueryDto, serviceOf } from './kind-support';
+import { parseQuarter } from '../../../points-engine/points-engine.quarter';
 
 export interface PointsComputeParams {
   period: string;
@@ -94,7 +95,8 @@ function pointsKind(opts: {
     parseParams: (raw: unknown) => parse(raw),
     // The whole-tenant compute runs on every download → always in the background worker.
     isHeavy: () => true,
-    describeParams: (p) => [monthWords(p.period), ...(p.program ? [p.program] : []), ...(p.kpiCode ? [p.kpiCode] : [])].join(' · '),
+    describeParams: (p) =>
+      [parseQuarter(p.period)?.label ?? monthWords(p.period), ...(p.program ? [p.program] : []), ...(p.kpiCode ? [p.kpiCode] : [])].join(' · '),
     fileName: (p) => opts.fileName(p.period),
     async run(ctx: ExportRunContext, p: PointsComputeParams, out: XlsxStreamWriter) {
       const guard = new SalesMonthClosedGuard(ctx.prisma);
