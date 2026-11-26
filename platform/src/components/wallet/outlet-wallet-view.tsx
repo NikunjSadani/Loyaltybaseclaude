@@ -202,6 +202,9 @@ export function PayoutSummary({ payouts, inclActivationNote = false }: { payouts
   // payoutAmountPaise is already NET (gross − TDS withheld). B-L6: a fully withheld latest payout is labelled.
   const lastMonthAmt   = (lastPaid?.payoutAmountPaise ?? 0) / 100;
   const lastMonthLabel = lastPaid ? monthLabel(lastPaid.period) : '—';
+  // B2 (owner 2026-11-26): off-portal gifts stay IN these totals — said under each figure so it is never read as cash only.
+  const lifetimeGift = useMemo(() => paidEntries.filter((p) => p.gift).reduce((s, p) => s + p.payoutAmountPaise, 0) / 100, [paidEntries]);
+  const lastMonthGift = lastPaid?.gift ? lastMonthAmt : 0;
 
   return (
     <div data-testid="payout-summary" className="rounded-2xl p-5 text-white" style={{ background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)' }}>
@@ -215,7 +218,12 @@ export function PayoutSummary({ payouts, inclActivationNote = false }: { payouts
         ) : (
           <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Lifetime Payout</p>
         )}
-        <p className="text-3xl font-extrabold tracking-tight">{fmtInr(lifetimePaid)}</p>
+        <div className="text-right">
+          <p className="text-3xl font-extrabold tracking-tight">{fmtInr(lifetimePaid)}</p>
+          {lifetimeGift > 0 && (
+            <p data-testid="payout-lifetime-gift" className="text-[10px] text-slate-400 mt-0.5">includes {fmtInr(lifetimeGift)} Gift (off-portal)</p>
+          )}
+        </div>
       </div>
       <div data-testid="payout-last-month" className="bg-white/10 rounded-xl px-4 py-3 flex items-center justify-between">
         <div>
@@ -225,7 +233,12 @@ export function PayoutSummary({ payouts, inclActivationNote = false }: { payouts
         {lastPaid?.settledByTds ? (
           <p className="text-sm font-bold text-amber-300">{fmtInr(0)} — withheld as TDS</p>
         ) : (
-          <p className="text-xl font-bold text-white">{fmtInr(lastMonthAmt)}</p>
+          <div className="text-right">
+            <p className="text-xl font-bold text-white">{fmtInr(lastMonthAmt)}</p>
+            {lastMonthGift > 0 && (
+              <p data-testid="payout-last-month-gift" className="text-[10px] text-slate-400">includes {fmtInr(lastMonthGift)} Gift (off-portal)</p>
+            )}
+          </div>
         )}
       </div>
     </div>

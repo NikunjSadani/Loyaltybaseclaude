@@ -433,15 +433,18 @@ describe('TDS — Admin TDS page API wiring', () => {
 
   // Off-portal payments register: per-row figures + note, and a LOUD shortfall banner when TDS was not withheld.
   it('TDS21: 194R off-portal not-withheld → banner + row lines + note; none → no banner', async () => {
-    const row = { ...CONTRACT.r194.rows[0], offPortalPaidPaise: '500000', offPortalNotWithheldPaise: '200000',
+    const row = { ...CONTRACT.r194.rows[0], offPortalPaidPaise: '500000', offPortalNotWithheldPaise: '200000', offPortalShortfallTdsPaise: '20000',
       note: 'TDS NOT WITHHELD — SHORTFALL: ₹2,000.00 of visibility was paid off-portal on the Deduct method.' };
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ success: true, data: { ...CONTRACT.r194, rows: [row],
-        summary: { ...CONTRACT.r194.summary, totalOffPortalPaidPaise: '500000', totalOffPortalNotWithheldPaise: '200000', offPortalNotWithheldRetailerCount: 1 } } }),
+        summary: { ...CONTRACT.r194.summary, totalOffPortalPaidPaise: '500000', totalOffPortalNotWithheldPaise: '200000', totalOffPortalShortfallTdsPaise: '20000', offPortalNotWithheldRetailerCount: 1 } } }),
     }));
     const { unmount } = render(<AdminTdsPage />);
     const banner = await screen.findByTestId('r194-offportal-shortfall');
+    expect(screen.getByTestId('r194-offportal-shortfall-tds')).toHaveTextContent('TDS shortfall ₹200.00');
+    expect(screen.getByTestId('r194-offportal-shortfall')).toHaveTextContent('TDS shortfall ₹200.00');
+    expect(screen.getByTestId('r194-offportal-row-shortfall')).toHaveTextContent('TDS shortfall ₹200.00');
     expect(banner).toHaveTextContent('TDS not withheld on off-portal payments — shortfall');
     expect(banner).toHaveTextContent('₹2,000.00');
     expect(banner).toHaveTextContent('1 payee');
@@ -462,7 +465,7 @@ describe('TDS — Admin TDS page API wiring', () => {
 
   it('TDS22: 194C rows show the note + off-portal lines; the banner sums the rows', async () => {
     mockUseAdminSession.mockReturnValue({ role: 'GIFSY_ADMIN', name: 'Op', canManageSchemes: false } as ReturnType<typeof useAdminSession>);
-    const c = { ...CONTRACT.r194c, rows: [{ ...CONTRACT.r194c.rows[0], offPortalPaidPaise: '300000', offPortalNotWithheldPaise: '300000', note: 'Includes ₹3,000.00 paid off-portal in full.' }] };
+    const c = { ...CONTRACT.r194c, rows: [{ ...CONTRACT.r194c.rows[0], offPortalPaidPaise: '300000', offPortalNotWithheldPaise: '300000', offPortalShortfallTdsPaise: '3000', note: 'Includes ₹3,000.00 paid off-portal in full.' }] };
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) =>
       Promise.resolve({ ok: true, json: () => Promise.resolve(url.includes('/194c') ? { success: true, data: c } : MOCK_194R) }),
     ));
@@ -471,6 +474,8 @@ describe('TDS — Admin TDS page API wiring', () => {
     expect(await screen.findByTestId('r194c-offportal-shortfall')).toHaveTextContent('₹3,000.00');
     expect(screen.getByTestId('r194c-note')).toHaveTextContent('Includes ₹3,000.00 paid off-portal in full.');
     expect(screen.getByTestId('r194c-offportal')).toHaveTextContent('Paid outside the portal: ₹3,000.00');
+    expect(screen.getByTestId('r194c-offportal-row-shortfall')).toHaveTextContent('TDS shortfall ₹30.00');
+    expect(screen.getByTestId('r194c-offportal-shortfall-tds')).toHaveTextContent('TDS shortfall ₹30.00');
   });
 
   // Fix round B (D1/D3/M2) — a PAN with a reversed payout carries an amber flag + the API's notes; others unchanged.

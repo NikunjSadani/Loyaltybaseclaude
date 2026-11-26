@@ -21,7 +21,8 @@ export type FundFlag =
   | 'TDS_INCLUDES_EARLIER'
   | 'TDS_RUN_UNMATCHED'
   | 'TDS_OTHER_CLIENT_RUN'
-  | 'TDS_PAYOUTS_REVERSED';
+  | 'TDS_PAYOUTS_REVERSED'
+  | 'GIFT_NO_AGENCY_FEE';
 
 /** Plain words for the last daily low-balance check status (re-audit B2). */
 export function alertCheckLabel(status: string): string {
@@ -83,6 +84,7 @@ export const FLAG_TEXT: Record<FundFlag, { chip: string; detail: string }> = {
   TDS_RUN_UNMATCHED: { chip: 'Bank run not identified', detail: 'An older TDS entry whose bank run could not be identified — it is charged in full on the day it was recorded and shown as paid.' },
   TDS_OTHER_CLIENT_RUN: { chip: 'Other client run', detail: "Recovered with a payout run outside this client's statement (the payee's PAN is shared with another client) — charged on the day it was recorded." },
   TDS_PAYOUTS_REVERSED: { chip: 'Payouts reversed', detail: 'The payouts of this bank run were reversed. TDS on a reversed payout stays deposited. It is absorbed only if the same PAN/outlet gets more 194C payouts later in the same financial year; otherwise it is not recovered.' },
+  GIFT_NO_AGENCY_FEE: { chip: 'Gift — no fee', detail: 'Off-portal gift — no agency fee charged' },
 };
 
 export function flagDetail(flag: string): string {
@@ -321,7 +323,10 @@ export function parseRupees(input: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-export type FundResult<T> = { ok: true; data: T } | { ok: false; message: string; status?: number };
+/** `details` = the server's opt-in error details (e.g. a refused confirm's `missingAcknowledgements`), when sent. */
+export type FundResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; message: string; status?: number; details?: Record<string, unknown> };
 
 /** Server error text: `{ success:false, error }` or Nest `{ message }` (string or string[]). */
 function errorText(body: unknown, status: number): string {
@@ -349,7 +354,13 @@ export async function call<T>(url: string, init?: RequestInit): Promise<FundResu
   try { body = await res.json(); } catch { body = null; }
   const status = typeof res.status === 'number' ? res.status : 0;
   const success = (body as { success?: unknown } | null)?.success;
-  if (!res.ok || success === false) return { ok: false, status, message: errorText(body, status) };
+  if (!res.ok || success === false) {
+    const d = (body as { details?: unknown } | null)?.details;
+    return {
+      ok: false, status, message: errorText(body, status),
+      ...(d && typeof d === 'object' && !Array.isArray(d) ? { details: d as Record<string, unknown> } : {}),
+    };
+  }
   const data = body && typeof body === 'object' && 'data' in body ? (body as { data: T }).data : (body as T);
   if (data == null) return { ok: false, status, message: 'The server reply was empty. Please refresh the page.' };
   return { ok: true, data };

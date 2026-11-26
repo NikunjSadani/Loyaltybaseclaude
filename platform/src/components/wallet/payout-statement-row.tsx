@@ -63,7 +63,7 @@ export function PayoutStatementRow({ entry: p }: { entry: PayoutLedgerEntry }) {
                 data-testid="payout-gift-badge"
                 className="inline-block text-[9px] font-semibold uppercase tracking-wide text-violet-700 bg-violet-50 border border-violet-100 rounded px-1.5 py-0.5"
               >
-                Gift
+                Gift (off-portal)
               </span>
             )}
           </span>

@@ -48,6 +48,7 @@ import { useTenantFeatures, ADMIN_FEATURES_URL } from '@/lib/tenant-features';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import { useTodayLabel } from '@/lib/use-today-label';
 import { useAdminSession, adminRoleLabel } from '@/lib/admin-session';
+import { useOffPortalNavVisible } from '@/lib/off-portal-payments';
 import { RequireAuth } from '@/components/auth/require-auth';
 import { logout, PORTAL_ROLES, getStoredUser } from '@/lib/auth-client';
 import { useAssumedContext } from '@/lib/use-assumed-context';
@@ -252,6 +253,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   // hydration — the same post-mount tick in which the role-gated items (adminSession) appear.
   const visibilityEnabled = useGifsySettings().visibilityEnabled === true;
   const todayLabel = useTodayLabel();
+  // Off-portal payments register nav (B7): GIFSY_ADMIN always; CLIENT_ADMIN only when the client has entries.
+  const offPortalNavVisible = useOffPortalNavVisible(adminSession.role);
 
   // RBAC Option-X (P5 UI/UX audit M2): a GIFSY_STAFF reaches the admin shell ONLY while assumed
   // into a granted brand. An un-assumed staff who lands on /admin/* has no coherent state here
@@ -304,8 +307,8 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
           && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'GIFSY_STAFF'
           && adminSession.role !== 'CLIENT_ADMIN') return false;
         // offPortalAdmin items (Off-portal Payments) — GIFSY_ADMIN + CLIENT_ADMIN only (hidden from GIFSY_STAFF + MIS_USER).
-        if ((item as { offPortalAdmin?: boolean }).offPortalAdmin
-          && adminSession.role !== 'GIFSY_ADMIN' && adminSession.role !== 'CLIENT_ADMIN') return false;
+        // B7: a CLIENT_ADMIN sees it only once the client has entries (fail-open on a failed presence read).
+        if ((item as { offPortalAdmin?: boolean }).offPortalAdmin && !offPortalNavVisible) return false;
         // salesImportAdmin items (Sales Import) — GIFSY_ADMIN, GIFSY_STAFF (owner 2026-11-25: Project Manager uploads +
         // applies; AdminRouteGuard checks targets:read, the backend re-checks each action) and CLIENT_ADMIN; also gated
         // on the tenant featureFlag below.
@@ -323,7 +326,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         if (!item.featureFlag) return true;
         return !!(features as unknown as Record<string, boolean>)[item.featureFlag];
       }),
-    [features, adminSession.canManageSchemes, adminSession.role, visibilityEnabled],
+    [features, adminSession.canManageSchemes, adminSession.role, visibilityEnabled, offPortalNavVisible],
   );
 
   // Auto-expand the parent whose child matches the current path. Scans ALL_NAV_ITEMS (not the

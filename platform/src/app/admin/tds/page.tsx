@@ -86,6 +86,8 @@ interface Tds194RRow {
   offPortalPaidPaise?: number | string;
   /** Of which paid in full on the Deduct method — TDS NOT withheld (a shortfall). */
   offPortalNotWithheldPaise?: number | string;
+  /** The TDS amount short on those off-portal payments. */
+  offPortalShortfallTdsPaise?: number | string;
 }
 
 interface Tds194RResponse {
@@ -106,6 +108,7 @@ interface Tds194RResponse {
     /** Off-portal payments register (only when any row has off-portal payments). */
     totalOffPortalPaidPaise?: number | string;
     totalOffPortalNotWithheldPaise?: number | string;
+    totalOffPortalShortfallTdsPaise?: number | string;
     offPortalNotWithheldRetailerCount?: number;
   };
   rows: Tds194RRow[];
@@ -127,6 +130,7 @@ interface Tds194CRow {
   /** Off-portal payments register (only on rows that have any). */
   offPortalPaidPaise?:        number | string;
   offPortalNotWithheldPaise?: number | string;
+  offPortalShortfallTdsPaise?: number | string;
   /** API-authored explanation — shown verbatim. */
   note?:                   string;
 }
@@ -277,13 +281,18 @@ function ReversalFlagCell({ flag }: { flag?: TdsReversalFlag }) {
  * Off-portal payments register — the loud banner when payments made OUTSIDE the portal were paid in full on the
  * Deduct method (TDS NOT withheld): that TDS is a shortfall the client has to cover.
  */
-function OffPortalShortfallBanner({ paise, retailers, testId }: { paise: number; retailers?: number; testId: string }) {
-  if (!(paise > 0)) return null;
+function OffPortalShortfallBanner({
+  paise, shortfallTdsPaise, retailers, testId,
+}: { paise: number; shortfallTdsPaise?: number; retailers?: number; testId: string }) {
+  if (!(paise > 0) && !((shortfallTdsPaise ?? 0) > 0)) return null;
   return (
     <div role="alert" data-testid={testId} className="flex items-start gap-2 bg-red-50 border border-red-300 rounded-xl px-4 py-3 text-sm text-red-800">
       <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden />
       <div>
         <p className="font-semibold">TDS not withheld on off-portal payments — shortfall</p>
+        {shortfallTdsPaise !== undefined && (
+          <p className="mt-0.5 font-semibold" data-testid={`${testId}-tds`}>TDS shortfall {formatINR(shortfallTdsPaise)}</p>
+        )}
         <p className="text-xs mt-0.5">
           {formatINR(paise)} was paid outside the portal on the Deduct method without withholding TDS
           {retailers != null && retailers > 0 ? ` (${retailers} payee${retailers === 1 ? '' : 's'})` : ''}. Where the payee is
@@ -296,8 +305,10 @@ function OffPortalShortfallBanner({ paise, retailers, testId }: { paise: number;
 }
 
 /** Off-portal figures on a 194R / 194C row (only when the row has any). */
-function OffPortalRowLines({ row, testId }: { row: { offPortalPaidPaise?: number | string; offPortalNotWithheldPaise?: number | string }; testId: string }) {
-  if (row.offPortalPaidPaise === undefined && row.offPortalNotWithheldPaise === undefined) return null;
+function OffPortalRowLines({
+  row, testId,
+}: { row: { offPortalPaidPaise?: number | string; offPortalNotWithheldPaise?: number | string; offPortalShortfallTdsPaise?: number | string }; testId: string }) {
+  if (row.offPortalPaidPaise === undefined && row.offPortalNotWithheldPaise === undefined && row.offPortalShortfallTdsPaise === undefined) return null;
   return (
     <div className="mt-1 font-sans text-[11px] leading-snug" data-testid={testId}>
       {row.offPortalPaidPaise !== undefined && (
@@ -305,6 +316,9 @@ function OffPortalRowLines({ row, testId }: { row: { offPortalPaidPaise?: number
       )}
       {p(row.offPortalNotWithheldPaise ?? 0) > 0 && (
         <div className="font-semibold text-red-700">TDS not withheld on {formatINR(p(row.offPortalNotWithheldPaise))} paid off-portal</div>
+      )}
+      {p(row.offPortalShortfallTdsPaise ?? 0) > 0 && (
+        <div className="font-semibold text-red-700" data-testid={`${testId}-row-shortfall`}>TDS shortfall {formatINR(p(row.offPortalShortfallTdsPaise))}</div>
       )}
     </div>
   );
@@ -794,6 +808,7 @@ export default function AdminTdsPage() {
             <OffPortalShortfallBanner
               testId="r194-offportal-shortfall"
               paise={p(r194.summary.totalOffPortalNotWithheldPaise ?? 0)}
+              shortfallTdsPaise={r194.summary.totalOffPortalShortfallTdsPaise !== undefined ? p(r194.summary.totalOffPortalShortfallTdsPaise) : undefined}
               retailers={r194.summary.offPortalNotWithheldRetailerCount}
             />
           )}
@@ -959,6 +974,11 @@ export default function AdminTdsPage() {
             <OffPortalShortfallBanner
               testId="r194c-offportal-shortfall"
               paise={r194c.rows.reduce((s, r) => s + p(r.offPortalNotWithheldPaise ?? 0), 0)}
+              shortfallTdsPaise={
+                r194c.rows.some((r) => r.offPortalShortfallTdsPaise !== undefined)
+                  ? r194c.rows.reduce((s, r) => s + p(r.offPortalShortfallTdsPaise ?? 0), 0)
+                  : undefined
+              }
               retailers={r194c.rows.filter((r) => p(r.offPortalNotWithheldPaise ?? 0) > 0).length}
             />
           )}

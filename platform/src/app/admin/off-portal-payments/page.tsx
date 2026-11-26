@@ -398,6 +398,14 @@ function VoidDialog({ payment, onClose, onVoided }: { payment: OffPortalPayment;
   );
 }
 
+/** B8: "Recorded N · voided M · counting N−M (₹…)" — the counting figures come from the API (recorded − voided). */
+function historyCountingText(u: OffPortalUpload): string {
+  const voided = u.voidedCount ?? 0;
+  const counting = u.countingCount ?? u.recordedCount - voided;
+  const countingPaise = u.countingPaise ?? u.totalPaise;
+  return `Recorded ${u.recordedCount} · voided ${voided} · counting ${counting} (${formatPaiseString(countingPaise)})`;
+}
+
 function UploadHistory({ refreshKey, onShow }: { refreshKey: number; onShow: (uploadId: string) => void }) {
   const [rows, setRows] = useState<OffPortalUpload[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -426,8 +434,8 @@ function UploadHistory({ refreshKey, onShow }: { refreshKey: number; onShow: (up
             <thead className="bg-gray-50 text-left text-gray-600">
               <tr>
                 <th className="px-3 py-2">Uploaded</th><th className="px-3 py-2">File</th><th className="px-3 py-2 text-right">Rows in file</th>
-                <th className="px-3 py-2 text-right">Recorded</th><th className="px-3 py-2 text-right">Not recorded (errors)</th>
-                <th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Warnings ticked</th><th className="px-3 py-2">By</th>
+                <th className="px-3 py-2">Recorded · voided · counting</th><th className="px-3 py-2 text-right">Not recorded (errors)</th>
+                <th className="px-3 py-2 text-right">Amount recorded</th><th className="px-3 py-2">Warnings ticked</th><th className="px-3 py-2">By</th>
                 <th className="px-3 py-2"><span className="sr-only">Show</span></th>
               </tr>
             </thead>
@@ -439,7 +447,9 @@ function UploadHistory({ refreshKey, onShow }: { refreshKey: number; onShow: (up
                     <td className="px-3 py-2 whitespace-nowrap">{formatISTDateTime(u.createdAt)}</td>
                     <td className="px-3 py-2 break-all">{u.fileName}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{u.rowsInFile}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{u.recordedCount}</td>
+                    <td className="px-3 py-2 whitespace-nowrap tabular-nums" data-testid="opp-history-counting">
+                      {historyCountingText(u)}
+                    </td>
                     <td className={`px-3 py-2 text-right tabular-nums ${u.skippedCount ? 'font-semibold text-red-700' : ''}`}>{u.skippedCount}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{formatPaiseString(u.totalPaise)}</td>
                     <td className="px-3 py-2">{acks.length ? acks.map(([c, n]) => `${categoryShort(c)} (${n})`).join(', ') : 'None'}</td>

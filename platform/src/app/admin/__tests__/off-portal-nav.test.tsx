@@ -5,8 +5,8 @@
  * Run: npx vitest run src/app/admin/__tests__/off-portal-nav.test.tsx
  */
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
 
 vi.mock('next/navigation', () => ({
   usePathname: () => '/admin/dashboard',
@@ -62,6 +62,53 @@ describe('Admin nav — Off-portal Payments', () => {
     roleRef.current = role;
     render(<AdminLayout><div /></AdminLayout>);
     expect(link()).not.toBeInTheDocument();
+  });
+
+  describe('B7 — presence gate for CLIENT_ADMIN', () => {
+    const presence = (res: { ok: boolean; status: number; body: unknown } | 'throw') =>
+      vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('/off-portal-payments/presence')) {
+          if (res === 'throw') throw new TypeError('network');
+          return { ok: res.ok, status: res.status, json: () => Promise.resolve(res.body) };
+        }
+        return { ok: true, status: 200, json: () => Promise.resolve({ success: true, data: {} }) };
+      });
+    afterEach(() => { vi.unstubAllGlobals(); });
+
+    it('hidden when the client has no off-portal payments', async () => {
+      vi.stubGlobal('fetch', presence({ ok: true, status: 200, body: { success: true, data: { hasEntries: false, canWrite: false } } }));
+      render(<AdminLayout><div /></AdminLayout>);
+      await waitFor(() => expect(link()).not.toBeInTheDocument());
+    });
+
+    it('shown when the client has entries', async () => {
+      const fn = presence({ ok: true, status: 200, body: { success: true, data: { hasEntries: true, canWrite: false } } });
+      vi.stubGlobal('fetch', fn);
+      render(<AdminLayout><div /></AdminLayout>);
+      await waitFor(() => expect(fn.mock.calls.some((c) => String(c[0]).includes('/presence'))).toBe(true));
+      expect(link()).toHaveAttribute('href', '/admin/off-portal-payments');
+    });
+
+    it.each([['an error reply', { ok: false, status: 500, body: { success: false, error: 'boom' } }], ['a network failure', 'throw' as const]])(
+      'fail-open: shown after %s',
+      async (_l, res) => {
+        const fn = presence(res);
+        vi.stubGlobal('fetch', fn);
+        render(<AdminLayout><div /></AdminLayout>);
+        await waitFor(() => expect(fn.mock.calls.some((c) => String(c[0]).includes('/presence'))).toBe(true));
+        await new Promise((r) => setTimeout(r, 0));
+        expect(link()).toHaveAttribute('href', '/admin/off-portal-payments');
+      },
+    );
+
+    it('GIFSY_ADMIN always sees it, with no presence request', async () => {
+      roleRef.current = 'GIFSY_ADMIN';
+      const fn = presence({ ok: true, status: 200, body: { success: true, data: { hasEntries: false, canWrite: true } } });
+      vi.stubGlobal('fetch', fn);
+      render(<AdminLayout><div /></AdminLayout>);
+      expect(link()).toHaveAttribute('href', '/admin/off-portal-payments');
+      expect(fn.mock.calls.some((c) => String(c[0]).includes('/presence'))).toBe(false);
+    });
   });
 
   it('route permission is payouts:read', () => {

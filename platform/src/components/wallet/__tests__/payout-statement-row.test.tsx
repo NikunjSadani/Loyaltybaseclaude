@@ -48,6 +48,6 @@ describe('PayoutStatementRow — off-portal payments register', () => {
   it('off-portal gift row: both badges', () => {
     render(<PayoutStatementRow entry={{ ...base, offPortal: true, gift: true }} />);
     expect(screen.getByTestId('payout-offportal-badge')).toBeInTheDocument();
-    expect(screen.getByTestId('payout-gift-badge')).toHaveTextContent('Gift');
+    expect(screen.getByTestId('payout-gift-badge')).toHaveTextContent('Gift (off-portal)');
   });
 });
