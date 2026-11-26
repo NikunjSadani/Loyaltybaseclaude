@@ -16,6 +16,7 @@ import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { assertVendorPriceBounds, VendorPriceError } from './vendor-pricing.helper';
 import { applyVendorPiiRetention } from './vendor-pii.helper';
 import { hasIssuedVoucher, transitionOrderStatusOrConflict } from '../rewards/order-status-transition';
+import { lockRewardStock, recordStockEdit } from '../rewards/reward-stock';
 import {
   assertVoucherCodeReusableInTx,
   canFillStoredVoucher,
@@ -345,27 +346,39 @@ export class VendorPortalService {
     const status = dto.stockQuantity === 0 ? 'OUT_OF_STOCK' : 'ACTIVE';
     const code = await this.uniqueVendorCode(scope.clientId, scope.vendorId);
 
-    const created = await this.prisma.rewardCatalog.create({
-      data: {
-        clientId: scope.clientId,
-        categoryId: rewardCategoryId,
-        giftCategoryId: dto.categoryId,
-        sourceType: 'VENDOR',
-        vendorId: scope.vendorId,
-        code,
-        name: dto.name,
-        description: dto.description,
-        imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
-        pointsCost,
-        sellingValuePaise: dto.sellingValuePaise,
-        mrpPaise: dto.mrpPaise,
-        redemptionMode: dto.redemptionMode,
-        stockQuantity: dto.stockQuantity,
-        status,
-        moderationStatus,
-        metadata: { fulfilmentChannel: dto.fulfilmentChannel } as Prisma.InputJsonValue,
-      },
-      include: { giftCategory: { select: { id: true, name: true } } },
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.rewardCatalog.create({
+        data: {
+          clientId: scope.clientId,
+          categoryId: rewardCategoryId,
+          giftCategoryId: dto.categoryId,
+          sourceType: 'VENDOR',
+          vendorId: scope.vendorId,
+          code,
+          name: dto.name,
+          description: dto.description,
+          imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
+          pointsCost,
+          sellingValuePaise: dto.sellingValuePaise,
+          mrpPaise: dto.mrpPaise,
+          redemptionMode: dto.redemptionMode,
+          stockQuantity: dto.stockQuantity,
+          status,
+          moderationStatus,
+          metadata: { fulfilmentChannel: dto.fulfilmentChannel } as Prisma.InputJsonValue,
+        },
+        include: { giftCategory: { select: { id: true, name: true } } },
+      });
+      // Stock history (same tx): the vendor's first figure = OPENING.
+      await recordStockEdit(tx, {
+        rewardId: row.id,
+        clientId: row.clientId,
+        oldQty: null,
+        newQty: row.stockQuantity ?? null,
+        actorId: user.sub ?? null,
+        source: 'vendor portal create',
+      });
+      return row;
     });
     await this.audit(user, scope, 'CREATE', created.id, {
       sellingValuePaise: dto.sellingValuePaise,
@@ -439,10 +452,26 @@ export class VendorPortalService {
       data.moderationReason = null;
     }
 
-    const updated = await this.prisma.rewardCatalog.update({
-      where: { id },
-      data,
-      include: { giftCategory: { select: { id: true, name: true } } },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      // Stock edit: read the stock UNDER a row lock so the ADJUSTED "old" figure is exact.
+      const stockEdit = dto.stockQuantity !== undefined;
+      const oldQty = stockEdit ? await lockRewardStock(tx, id) : null;
+      const row = await tx.rewardCatalog.update({
+        where: { id },
+        data,
+        include: { giftCategory: { select: { id: true, name: true } } },
+      });
+      if (stockEdit) {
+        await recordStockEdit(tx, {
+          rewardId: id,
+          clientId: row.clientId,
+          oldQty,
+          newQty: row.stockQuantity ?? null,
+          actorId: user.sub ?? null,
+          source: 'vendor portal edit',
+        });
+      }
+      return row;
     });
     await this.audit(user, scope, 'UPDATE', id, {
       before: { sellingValuePaise: existing.sellingValuePaise },
@@ -487,26 +516,39 @@ export class VendorPortalService {
 
         const rewardCategoryId = await this.ensureTenantRewardCategory(scope.clientId, giftCat);
         const code = await this.uniqueVendorCode(scope.clientId, scope.vendorId);
-        const created = await this.prisma.rewardCatalog.create({
-          data: {
-            clientId: scope.clientId,
-            categoryId: rewardCategoryId,
-            giftCategoryId: giftCat.id,
-            sourceType: 'VENDOR',
-            vendorId: scope.vendorId,
-            code,
-            name: row.name,
-            description: row.description,
-            imageUrls: row.imageUrls as Prisma.InputJsonValue,
-            pointsCost: this.derivePointsCost(row.sellingValuePaise as number, rate),
-            sellingValuePaise: row.sellingValuePaise,
-            mrpPaise: row.mrpPaise,
-            redemptionMode: row.redemptionMode as never,
-            stockQuantity: row.stockQuantity,
-            status: row.stockQuantity === 0 ? 'OUT_OF_STOCK' : 'ACTIVE',
-            moderationStatus,
-            metadata: { fulfilmentChannel: row.fulfilmentChannel } as Prisma.InputJsonValue,
-          },
+        const name = row.name; // narrowed above (required) — kept for the closure below
+        const created = await this.prisma.$transaction(async (tx) => {
+          const item = await tx.rewardCatalog.create({
+            data: {
+              clientId: scope.clientId,
+              categoryId: rewardCategoryId,
+              giftCategoryId: giftCat.id,
+              sourceType: 'VENDOR',
+              vendorId: scope.vendorId,
+              code,
+              name,
+              description: row.description,
+              imageUrls: row.imageUrls as Prisma.InputJsonValue,
+              pointsCost: this.derivePointsCost(row.sellingValuePaise as number, rate),
+              sellingValuePaise: row.sellingValuePaise,
+              mrpPaise: row.mrpPaise,
+              redemptionMode: row.redemptionMode as never,
+              stockQuantity: row.stockQuantity,
+              status: row.stockQuantity === 0 ? 'OUT_OF_STOCK' : 'ACTIVE',
+              moderationStatus,
+              metadata: { fulfilmentChannel: row.fulfilmentChannel } as Prisma.InputJsonValue,
+            },
+          });
+          // Stock history (same tx): the uploaded figure = OPENING.
+          await recordStockEdit(tx, {
+            rewardId: item.id,
+            clientId: item.clientId,
+            oldQty: null,
+            newQty: item.stockQuantity ?? null,
+            actorId: user.sub ?? null,
+            source: 'vendor catalogue upload',
+          });
+          return item;
         });
         results.push({ rowIndex: row.rowIndex, created: created.id });
       } catch (e) {

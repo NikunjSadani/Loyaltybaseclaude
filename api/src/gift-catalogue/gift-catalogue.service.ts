@@ -13,6 +13,7 @@ import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import { StorageService } from '../storage/storage.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { derivePointsCost as derivePointsCostHelper } from '../rewards/derive-points-cost.helper';
+import { recordStockEdit } from '../rewards/reward-stock';
 import { isGifsyOperator, platformWide, tenantScope } from '../common/tenant-scope';
 import { sniffFileType } from '../common/file-signature';
 import {
@@ -752,7 +753,8 @@ export class GiftCatalogueService {
           );
         }
 
-        const created = await this.prisma.rewardCatalog.create({
+        const created = await this.prisma.$transaction(async (tx) => {
+          const row = await tx.rewardCatalog.create({
           data: {
             clientId: target.clientId,
             categoryId: rewardCategoryId,
@@ -775,6 +777,17 @@ export class GiftCatalogueService {
             stockQuantity: master.stockQuantity,
             status: 'ACTIVE',
           },
+          });
+          // Stock history (same tx): the tenant row's first figure (copied from the master) = OPENING.
+          await recordStockEdit(tx, {
+            rewardId: row.id,
+            clientId: row.clientId,
+            oldQty: null,
+            newQty: row.stockQuantity ?? null,
+            actorId: user.sub ?? null,
+            source: 'platform publish',
+          });
+          return row;
         });
         results.push({
           clientId: target.clientId,

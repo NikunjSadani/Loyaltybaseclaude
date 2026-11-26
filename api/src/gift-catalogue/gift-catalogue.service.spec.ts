@@ -12,6 +12,8 @@ const mockPrisma = {
   giftMaster: { findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn() },
   rewardCategory: { findFirst: jest.fn(), create: jest.fn() },
   rewardCatalog: { findFirst: jest.fn(), findMany: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+  // Stock history (reward-stock.ts): publish-create writes the OPENING row in the same tx.
+  rewardStockMovement: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) },
   client: { findMany: jest.fn(), findUnique: jest.fn() },
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   $transaction: jest.fn((arg: any) =>

@@ -1780,6 +1780,68 @@ model RewardCatalog {
   @@map("reward_catalog")
 }
 
+/// Reward STOCK HISTORY (owner-approved 2026-11-26, all clients): an append-only ledger of every change to a
+/// tracked RewardCatalog.stockQuantity, written in the SAME transaction as the stock change. Per-tenant
+/// (clientId = the RewardCatalog row's tenant; GiftMaster stock is a platform template, never consumed).
+///   OPENING  — first known figure (creation / first tracking / the "baseline at go-live" row the migration wrote)
+///   REDEEMED — a confirmed redemption took stock (quantity < 0, orderId set)
+///   RETURNED — a cancelled / failed / returned order gave its stock back (quantity > 0, orderId set; at most ONE
+///              per order — partial unique index in SQL)
+///   ADJUSTED — an admin / vendor edit (quantity = new − old; balanceAfter null = tracking turned off)
+/// No FKs on purpose (rows outlive a deleted reward / order). History starts at deploy.
+model RewardStockMovement {
+  id           String                  @id @default(cuid())
+  clientId     String
+  rewardId     String
+  type         RewardStockMovementType
+  quantity     Int
+  balanceAfter Int?
+  orderId      String?
+  reason       String?
+  actorId      String?
+  createdAt    DateTime                @default(now())
+
+  @@index([clientId, rewardId, createdAt])
+  @@index([rewardId, createdAt])
+  @@index([orderId])
+  @@map("reward_stock_movements")
+}
+
+enum RewardStockMovementType {
+  OPENING
+  REDEEMED
+  RETURNED
+  ADJUSTED
+}
+
+/// A cancelled / failed / returned order whose stock MAY have been taken before stock history existed (confirmed
+/// before the reward's first ledger row) — never auto-returned; listed for an admin to decide (Return to stock /
+/// Keep as is). One row per order. resolvedById / resolvedAt / resolutionNote record the decision.
+model RewardStockReview {
+  id             String                  @id @default(cuid())
+  clientId       String
+  rewardId       String
+  orderId        String                  @unique
+  orderNumber    String
+  quantity       Int
+  orderStatus    RedemptionStatus
+  status         RewardStockReviewStatus @default(OPEN)
+  resolvedById   String?
+  resolvedAt     DateTime?
+  resolutionNote String?
+  createdAt      DateTime                @default(now())
+
+  @@index([clientId, status])
+  @@index([rewardId])
+  @@map("reward_stock_reviews")
+}
+
+enum RewardStockReviewStatus {
+  OPEN
+  RETURNED
+  KEPT
+}
+
 /// Persistent PARTNER WISHLIST — a partner's bookmarked catalogue rewards (the member
 /// "save for later"). One row per (partner × reward); additive + safe — an empty wishlist
 /// (every existing tenant at rest) is today's behaviour. Scoped by the owning partner's

@@ -26,6 +26,9 @@ const mockTx = {
   },
   // Shared order-status transition writes the status-history row inside the same tx.
   redemptionStatusHistory: { create: jest.fn() },
+  // Stock history (reward-stock.ts) — default: no ledger rows (nothing taken → nothing returned).
+  rewardStockMovement: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) },
+  rewardStockReview: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
   // DELIVERED moves also snapshot the TDS payee (owner rule 2026-11-18) — one raw UPDATE.
   $executeRaw: jest.fn().mockResolvedValue(1),
   // capture-bank-at-redemption: the PAID/FAILED verify-stamp updates the partner's

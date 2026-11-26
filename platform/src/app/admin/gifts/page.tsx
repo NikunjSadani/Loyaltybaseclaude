@@ -54,6 +54,7 @@ import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rup
 import { MaskedPin } from '@/components/operator/masked-pin';
 import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/UploadTruncationNote';
 import { formatISTDateTime } from '@/lib/ist-date';
+import { StockHistoryPanel, StockReviewBanner } from './stock-history';
 
 /* ─── Backend shapes ─────────────────────────────────────────────────────────── */
 
@@ -605,6 +606,8 @@ interface ItemFormState {
   maxRedemptionPoints: string;
   stockTracked: boolean;
   stockQuantity: number;
+  /** Optional reason saved on the stock-history row when this save changes the stock. */
+  stockReason: string;
   termsAndConditions: string;
   status: CatalogStatus;
   /** Hubble Money productId — enables auto-issuance for a GIFT_CARD item (optional). */
@@ -620,7 +623,7 @@ function blankItemForm(categoryId: string): ItemFormState {
     redemptionMode: 'GIFT_CARD', voucherMode: 'FIXED',
     mrpRupees: '', sellingValueRupees: '',
     minRedemptionPoints: '', maxRedemptionPoints: '',
-    stockTracked: false, stockQuantity: 0,
+    stockTracked: false, stockQuantity: 0, stockReason: '',
     termsAndConditions: '', status: 'ACTIVE',
     hubbleProductId: '',
     hubbleDenominations: [],
@@ -672,6 +675,7 @@ function ItemModal({
       maxRedemptionPoints: editing.maxRedemptionPoints != null ? String(editing.maxRedemptionPoints) : '',
       stockTracked: editing.stockQuantity != null,
       stockQuantity: editing.stockQuantity ?? 0,
+      stockReason: '',
       termsAndConditions: editing.termsAndConditions ?? '',
       status: editing.status,
       hubbleProductId: editing.metadata?.hubbleProductId ?? '',
@@ -859,6 +863,7 @@ function ItemModal({
 
   const submit = () => {
     if (!validate()) return;
+    const stockChanged = (form.stockTracked ? form.stockQuantity : null) !== (editing ? editing.stockQuantity ?? null : null);
     // Build the backend payload following the FIXED / FREE_AMOUNT voucher convention.
     const payload: Record<string, unknown> = {
       categoryId: form.categoryId,
@@ -871,6 +876,8 @@ function ItemModal({
       stockQuantity: form.stockTracked ? form.stockQuantity : null,
       termsAndConditions: form.termsAndConditions.trim() || undefined,
     };
+    // Stock history: an optional reason rides along only when this save changes the stock.
+    if (stockChanged && form.stockReason.trim()) payload.stockReason = form.stockReason.trim();
     // Hubble auto-issuance productId — only meaningful for a GIFT_CARD voucher. Send it
     // (even empty, to CLEAR) whenever editing a gift card; a blank disables auto-issuance.
     if (form.redemptionMode === 'GIFT_CARD') {
@@ -1286,7 +1293,25 @@ function ItemModal({
             ) : (
               <p className="text-[10px] text-gray-400">Untracked — always considered in stock.</p>
             )}
+            {(form.stockTracked ? form.stockQuantity : null) !== (editing ? editing.stockQuantity ?? null : null) && (
+              <div className="space-y-1">
+                <label className="text-xs text-gray-500" htmlFor="stock-reason">
+                  Reason for the stock change (optional — saved in Stock history)
+                </label>
+                <input
+                  id="stock-reason"
+                  value={form.stockReason}
+                  onChange={(e) => set('stockReason', e.target.value)}
+                  maxLength={300}
+                  placeholder="e.g. Restocked from vendor"
+                  className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
+                />
+              </div>
+            )}
           </div>
+
+          {/* Stock history (existing rewards only) */}
+          {editing && <StockHistoryPanel rewardId={editing.id} />}
 
           {/* T&C */}
           <div className="space-y-1">
@@ -1371,6 +1396,7 @@ function DeleteModal({ item, onConfirm, onClose }: { item: CatalogItem; onConfir
    ════════════════════════════════════════════════════════════════════════════ */
 
 function CatalogueTab() {
+  const perms = usePermissions();
   const [categories, setCategories] = useState<RewardCategory[]>([]);
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1480,6 +1506,9 @@ function CatalogueTab() {
   return (
     <div className="space-y-5">
       <CategorySection categories={categories} onReload={() => { loadCategories(); loadCatalog(); }} />
+
+      {/* Stock returns to review — never silent: orders confirmed before stock history started. */}
+      <StockReviewBanner canDecide={perms.has('rewards:manage_inventory')} onChanged={() => { void loadCatalog(); }} />
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

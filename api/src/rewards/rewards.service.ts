@@ -40,6 +40,7 @@ import {
   transitionOrderStatus,
   transitionOrderStatusOrConflict,
 } from './order-status-transition';
+import { lockRewardStock, recordStockEdit, takeStockForOrder } from './reward-stock';
 import {
   canFillStoredVoucher,
   combineGuards,
@@ -2275,25 +2276,16 @@ export class RewardsService {
         tx,
       );
 
-      // Guarded stock claim — concurrent confirms of the last unit can't oversell.
+      // Guarded stock claim — concurrent confirms of the last unit can't oversell. Writes the
+      // REDEEMED stock-history row in this tx (reward-stock.ts).
       if (order.reward?.stockQuantity != null) {
-        const stockClaim = await tx.rewardCatalog.updateMany({
-          where: { id: order.rewardId, stockQuantity: { gte: order.quantity } },
-          data: { stockQuantity: { decrement: order.quantity } },
+        await takeStockForOrder(tx, {
+          rewardId: order.rewardId,
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          quantity: order.quantity,
+          actorId: user.sub,
         });
-        if (stockClaim.count === 0) {
-          throw new BadRequestException('Reward is out of stock');
-        }
-        const fresh = await tx.rewardCatalog.findFirst({
-          where: { id: order.rewardId },
-          select: { stockQuantity: true },
-        });
-        if (fresh?.stockQuantity != null && fresh.stockQuantity <= 0) {
-          await tx.rewardCatalog.update({
-            where: { id: order.rewardId },
-            data: { status: 'OUT_OF_STOCK' },
-          });
-        }
       }
 
       // P6 BRIDGE — unbatched PayoutTransaction for cash modes (UPI/BANK_TRANSFER).
@@ -2901,24 +2893,15 @@ export class RewardsService {
       // H1 — guarded stock claim: only decrement if enough stock remains, so
       // concurrent confirms of the last unit can't oversell. If the claim fails,
       // the whole tx (incl. debit) rolls back → order stays PENDING, no debit.
+      // + the REDEEMED stock-history row in this tx (reward-stock.ts).
       if (order.reward?.stockQuantity != null) {
-        const stockClaim = await tx.rewardCatalog.updateMany({
-          where: { id: order.rewardId, stockQuantity: { gte: order.quantity } },
-          data: { stockQuantity: { decrement: order.quantity } },
+        await takeStockForOrder(tx, {
+          rewardId: order.rewardId,
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+          quantity: order.quantity,
+          actorId: user.sub,
         });
-        if (stockClaim.count === 0) {
-          throw new BadRequestException('Reward is out of stock');
-        }
-        const fresh = await tx.rewardCatalog.findFirst({
-          where: { id: order.rewardId },
-          select: { stockQuantity: true },
-        });
-        if (fresh?.stockQuantity != null && fresh.stockQuantity <= 0) {
-          await tx.rewardCatalog.update({
-            where: { id: order.rewardId },
-            data: { status: 'OUT_OF_STOCK' },
-          });
-        }
       }
 
       // P6 BRIDGE — create an unbatched PayoutTransaction for cash redemptions
@@ -3328,9 +3311,8 @@ export class RewardsService {
       // (pointsDeducted > 0 → 0). Only the tx that wins the claim re-credits, so
       // two concurrent refund-bound transitions can't double-refund. The amount is the
       // in-tx value read under the row lock (not the pre-tx read).
-      // STOCK: intentionally NOT restored here (owner decision 2026-08-19) — a
-      // confirmed redemption consumes its stock unit permanently; cancel / return
-      // / failed refunds POINTS only. See the STOCK RULE note near the catalog CRUD.
+      // STOCK: returned (once per order) by transitionOrderStatusOrConflict above — the shared
+      // status write path (owner 2026-11-26, supersedes 2026-08-19). See the STOCK RULE note.
       if (isRefundTarget && moved.pointsDeducted > 0) {
         const refundClaim = await tx.redemptionOrder.updateMany({
           where: { id, pointsDeducted: { gt: 0 } },
@@ -6396,12 +6378,14 @@ export class RewardsService {
   // → rejects the last-unit race, oversell-safe) and flip status to OUT_OF_STOCK
   // when it reaches 0.
   //
-  // ⚠️ DELIBERATE, NON-OBVIOUS (owner decision 2026-08-19): a confirmed
-  // redemption CONSUMES its stock unit PERMANENTLY. Stock is intentionally NOT
-  // restored on cancel/return/failed — `transitionOrder` refunds the POINTS only
-  // and never re-increments stockQuantity. An item that flipped OUT_OF_STOCK
-  // stays out until an admin explicitly re-stocks / re-activates it. This is by
-  // design (not a gap) — do NOT add a stock-restore to the refund path.
+  // STOCK HISTORY + RETURN (owner-approved 2026-11-26, all clients — SUPERSEDES the
+  // 2026-08-19 "stock is never restored" rule): every stock change writes a
+  // RewardStockMovement row in the same tx (reward-stock.ts). A move to CANCELLED /
+  // FAILED / RETURNED returns the order's taken stock ONCE (transitionOrderStatus →
+  // returnStockForOrder); a sold-out item (OUT_OF_STOCK at 0) returns to ACTIVE and the
+  // history row says so. Orders confirmed before the history existed are never
+  // auto-returned — they are listed in RewardStockReview for an admin to decide.
+  // Admin edits write OPENING / ADJUSTED (old → new, actor, optional reason).
   // ───────────────────────────────────────────────────────────────────────────
 
   /** POST /v1/admin/rewards/categories — create a tenant-scoped category. */
@@ -6622,8 +6606,8 @@ export class RewardsService {
 
     // Stock decrement lives in the CONFIRM path (confirmRedeem /
     // confirmRedeemForOutlet): guarded atomic decrement + OUT_OF_STOCK flip at 0.
-    // This CRUD path only sets the initial value. By design, stock is NOT restored
-    // on cancel/return/failed (owner 2026-08-19) — see the STOCK RULE note above.
+    // This CRUD path sets the initial value + its OPENING history row (same tx) — see
+    // the STOCK RULE note above.
     // AUDIT-FIX (byte-identical / defense-in-depth): persist a Hubble productId ONLY for a
     // tenant with the Hubble flag ON (Bajaj). A non-Hubble tenant (Deoleo) can therefore
     // never carry a hubbleProductId, so isHubbleEligible short-circuits for its items with
@@ -6636,31 +6620,44 @@ export class RewardsService {
           } as Prisma.InputJsonValue)
         : undefined;
 
-    const item = await this.prisma.rewardCatalog.create({
-      data: {
-        clientId: user.clientId,
-        categoryId: dto.categoryId,
-        code: dto.code,
-        name: dto.name,
-        description: dto.description,
-        imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
-        // DERIVED (pure derive) — FIXED: round(sellingValue/100 × rate); FREE_AMOUNT: 0.
-        pointsCost,
-        mrpPaise: dto.mrpPaise,
-        // Cost basis for the rate-independent slash + rate-immune 194R freeze (+ the FIXED
-        // price driver the pointsCost above is derived from).
-        sellingValuePaise: dto.sellingValuePaise,
-        redemptionMode: dto.redemptionMode,
-        status,
-        // = the DTO band, except a Hubble amounts list derives it (see above).
-        minRedemptionPoints,
-        maxRedemptionPoints,
-        stockQuantity: dto.stockQuantity,
-        termsAndConditions: dto.termsAndConditions,
-        sortOrder: dto.sortOrder ?? 0,
-        // Hubble auto-issuance config (GIFT_CARD only, Bajaj-only — see hubbleMetadata above).
-        metadata: hubbleMetadata,
-      },
+    const item = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.rewardCatalog.create({
+        data: {
+          clientId: user.clientId,
+          categoryId: dto.categoryId,
+          code: dto.code,
+          name: dto.name,
+          description: dto.description,
+          imageUrls: (dto.imageUrls ?? undefined) as Prisma.InputJsonValue | undefined,
+          // DERIVED (pure derive) — FIXED: round(sellingValue/100 × rate); FREE_AMOUNT: 0.
+          pointsCost,
+          mrpPaise: dto.mrpPaise,
+          // Cost basis for the rate-independent slash + rate-immune 194R freeze (+ the FIXED
+          // price driver the pointsCost above is derived from).
+          sellingValuePaise: dto.sellingValuePaise,
+          redemptionMode: dto.redemptionMode,
+          status,
+          // = the DTO band, except a Hubble amounts list derives it (see above).
+          minRedemptionPoints,
+          maxRedemptionPoints,
+          stockQuantity: dto.stockQuantity,
+          termsAndConditions: dto.termsAndConditions,
+          sortOrder: dto.sortOrder ?? 0,
+          // Hubble auto-issuance config (GIFT_CARD only, Bajaj-only — see hubbleMetadata above).
+          metadata: hubbleMetadata,
+        },
+      });
+      // Stock history: a tracked item's first figure = OPENING (same tx).
+      await recordStockEdit(tx, {
+        rewardId: created.id,
+        clientId: created.clientId,
+        oldQty: null,
+        newQty: created.stockQuantity ?? null,
+        actorId: user.sub ?? null,
+        source: 'catalogue create',
+        reason: dto.stockReason,
+      });
+      return created;
     });
     return { item };
   }
@@ -6828,9 +6825,14 @@ export class RewardsService {
       metadataUpdate = base as Prisma.InputJsonValue;
     }
 
-    const item = await this.prisma.rewardCatalog.update({
-      where: { id },
-      data: {
+    const item = await this.prisma.$transaction(async (tx) => {
+      // Stock edits: lock the row and read the stock UNDER the lock, so the ADJUSTED row's
+      // "old" figure is exact even if a redemption confirmed between the read above and now.
+      const stockEdit = dto.stockQuantity !== undefined;
+      const oldQty = stockEdit ? await lockRewardStock(tx, id) : null;
+      const updated = await tx.rewardCatalog.update({
+        where: { id },
+        data: {
         metadata: metadataUpdate,
         categoryId: dto.categoryId,
         code: dto.code,
@@ -6855,7 +6857,21 @@ export class RewardsService {
         stockQuantity: dto.stockQuantity,
         termsAndConditions: dto.termsAndConditions,
         sortOrder: dto.sortOrder,
-      },
+        },
+      });
+      // Stock history (same tx): OPENING on the first figure, else ADJUSTED old → new + actor.
+      if (stockEdit) {
+        await recordStockEdit(tx, {
+          rewardId: id,
+          clientId: updated.clientId,
+          oldQty,
+          newQty: updated.stockQuantity ?? null,
+          actorId: user.sub ?? null,
+          source: 'catalogue edit',
+          reason: dto.stockReason,
+        });
+      }
+      return updated;
     });
     return { item };
   }
