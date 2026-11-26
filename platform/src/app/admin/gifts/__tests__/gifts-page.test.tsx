@@ -606,6 +606,54 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
     expect(svInput.value).toBe('400');
   });
 
+  describe('GIF-STK — stock history wiring (owner 2026-11-26)', () => {
+    const STOCKED = { ...CATALOG_ITEMS[0], id: 'r-stk', sellingValuePaise: 40000, stockQuantity: 5 };
+    const serveStocked = (url: string, init?: RequestInit) =>
+      url === '/api/admin/rewards/catalog?page=1&limit=200'
+        ? jsonOk({ items: [STOCKED], pagination: { page: 1, limit: 200, total: 1, pages: 1 } })
+        : init?.method === 'PATCH'
+          ? jsonOk({ item: STOCKED })
+          : undefined;
+
+    const openEditor = async () => {
+      await userEvent.click(await screen.findByRole('button', { name: /edit reward/i }));
+      const dialog = await screen.findByText('Edit Reward', { selector: 'h2' });
+      return within(dialog.closest('div.relative') as HTMLElement);
+    };
+
+    it('GIF-STK1: saving other fields NEVER sends the stock (a stale window cannot overwrite a redemption) — no reason box', async () => {
+      const { calls } = installFetch(serveStocked);
+      render(<AdminGiftsPage />);
+      const scope = await openEditor();
+      expect(scope.queryByLabelText(/Reason for the stock change/)).toBeNull();
+      await userEvent.click(scope.getByRole('button', { name: /save changes/i }));
+      await waitFor(() => {
+        const patch = calls.find((c) => c.url === '/api/admin/rewards/catalog/r-stk' && c.init?.method === 'PATCH');
+        expect(patch).toBeTruthy();
+        const body = JSON.parse(String(patch!.init!.body));
+        expect('stockQuantity' in body).toBe(false);
+        expect('stockReason' in body).toBe(false);
+      });
+    });
+
+    it('GIF-STK2: changing the stock shows the reason box and sends stock + reason', async () => {
+      const { calls } = installFetch(serveStocked);
+      render(<AdminGiftsPage />);
+      const scope = await openEditor();
+      const stock = scope.getByDisplayValue('5');
+      await userEvent.clear(stock);
+      await userEvent.type(stock, '8');
+      await userEvent.type(scope.getByLabelText(/Reason for the stock change/), 'Restocked');
+      await userEvent.click(scope.getByRole('button', { name: /save changes/i }));
+      await waitFor(() => {
+        const patch = calls.find((c) => c.url === '/api/admin/rewards/catalog/r-stk' && c.init?.method === 'PATCH');
+        expect(JSON.parse(String(patch!.init!.body))).toMatchObject({ stockQuantity: 8, stockReason: 'Restocked' });
+      });
+      // the stock history panel was asked for this reward
+      expect(calls.some((c) => c.url === '/api/admin/rewards/catalog/r-stk/stock-history')).toBe(true);
+    });
+  });
+
   it('GIF4: fulfilment upload POSTs the file and renders the per-row error list', async () => {
     let uploadBody: unknown;
     const { fn } = installFetch((url, init) => {

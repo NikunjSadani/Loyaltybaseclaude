@@ -31,6 +31,7 @@ function makeDb() {
     if (cond && typeof cond === 'object' && !(cond instanceof Date) && !Array.isArray(cond)) {
       const c = cond as Row;
       if ('gte' in c) return v != null && (v as number) >= c.gte;
+      if ('lte' in c) return v != null && (v as number) <= c.lte;
       if ('not' in c) return c.not === null ? v != null : v !== c.not;
       if ('notIn' in c) return !c.notIn.includes(v);
       if ('in' in c) return c.in.includes(v);
@@ -129,7 +130,10 @@ function makeDb() {
       update: async ({ where, data }: Row) => { const o = orders.find((x) => x.id === where.id)!; applyData(o, data); return { ...o }; },
       findUniqueOrThrow: async ({ where }: Row) => ({ ...orders.find((x) => x.id === where.id)! }),
     },
-    redemptionStatusHistory: { create: async ({ data }: Row) => { history.push(data); return data; } },
+    redemptionStatusHistory: {
+      create: async ({ data }: Row) => { const row = { ...data, createdAt: now() }; history.push(row); return row; },
+      findFirst: async ({ where, orderBy }: Row) => sortBy(history.filter((h) => matches(h, where)), orderBy)[0] ?? null,
+    },
     user: { findMany: async () => [{ id: 'admin1', name: 'Asha Admin' }] },
     $executeRaw: async () => 1,
     $queryRaw: async (_s: unknown, id: string) => {
@@ -177,6 +181,16 @@ describe('reward stock history — take on confirm', () => {
     await confirm(db, 'o1');
     expect(db.rewards[0]).toMatchObject({ stockQuantity: 0, status: 'OUT_OF_STOCK' });
     expect(db.moves.find((m) => m.type === 'REDEEMED')!.reason).toContain('status set to Out of stock');
+  });
+
+  it('an admin pause (INACTIVE) set before the last unit is taken is never overwritten with OUT_OF_STOCK', async () => {
+    const db = makeDb();
+    db.addReward({ id: 'r1', stockQuantity: 1, status: 'INACTIVE' });
+    db.addOrder({ id: 'o1', rewardId: 'r1', status: 'PENDING' });
+    await confirm(db, 'o1');
+    expect(db.rewards[0]).toMatchObject({ stockQuantity: 0, status: 'INACTIVE' });
+    await transitionOrderStatusOrConflict(db.tx as never, { orderId: 'o1', expectedFrom: RedemptionStatus.CONFIRMED, toStatus: RedemptionStatus.CANCELLED });
+    expect(db.rewards[0]).toMatchObject({ stockQuantity: 1, status: 'INACTIVE' });
   });
 
   it('not enough stock → 400 "Reward is out of stock" and NO history row', async () => {
@@ -332,15 +346,53 @@ describe('reward stock history — orders confirmed BEFORE stock history (pre-re
     ]);
   });
 
-  it('placed AFTER the reward’s history began but with no REDEEMED row (reward was unlimited then) → nothing to return, no review', async () => {
+  it('DEPLOY WINDOW: confirmed AFTER the baseline by the previous build (stock taken, no REDEEMED row) → review, never a silent skip', async () => {
     const db = makeDb();
     db.addReward({ id: 'r1', stockQuantity: 7 });
     db.moves.push({ id: 'b', rewardId: 'r1', clientId: 'bajaj', type: 'OPENING', quantity: 7, balanceAfter: 7, reason: STOCK_BASELINE_REASON, createdAt: db.now() });
-    db.addOrder({ id: 'new', rewardId: 'r1', status: 'CONFIRMED' });
-    await transitionOrderStatusOrConflict(db.tx as never, { orderId: 'new', expectedFrom: RedemptionStatus.CONFIRMED, toStatus: RedemptionStatus.CANCELLED });
-    expect(db.rewards[0].stockQuantity).toBe(7);
-    expect(db.moves).toHaveLength(1);
+    db.addOrder({ id: 'win', rewardId: 'r1', status: 'PENDING' });
+    // the old API build: status claim (+ history) and a bare decrement, no ledger row
+    await transitionOrderStatus(db.tx as never, { orderId: 'win', guard: { status: 'PENDING' }, fromStatus: RedemptionStatus.PENDING, toStatus: RedemptionStatus.CONFIRMED });
+    db.rewards[0].stockQuantity = 6;
+    await transitionOrderStatusOrConflict(db.tx as never, { orderId: 'win', expectedFrom: RedemptionStatus.CONFIRMED, toStatus: RedemptionStatus.CANCELLED });
+    expect(db.rewards[0].stockQuantity).toBe(6);
+    expect(db.reviews).toEqual([expect.objectContaining({ orderId: 'win', status: 'OPEN' })]);
+  });
+
+  it('confirmed while the ledger shows tracking OFF (unlimited) → provably not taken: no return, no review', async () => {
+    const db = makeDb();
+    db.addReward({ id: 'r1', stockQuantity: 7 });
+    db.moves.push({ id: 'b', rewardId: 'r1', clientId: 'bajaj', type: 'OPENING', quantity: 7, balanceAfter: 7, reason: STOCK_BASELINE_REASON, createdAt: db.now() });
+    await recordStockEdit(db.tx as never, { rewardId: 'r1', clientId: 'bajaj', oldQty: 7, newQty: null, actorId: 'admin1', source: 'catalogue edit' });
+    db.rewards[0].stockQuantity = null;
+    db.addOrder({ id: 'o1', rewardId: 'r1', status: 'PENDING' });
+    await transitionOrderStatus(db.tx as never, { orderId: 'o1', guard: { status: 'PENDING' }, fromStatus: RedemptionStatus.PENDING, toStatus: RedemptionStatus.CONFIRMED });
+    await recordStockEdit(db.tx as never, { rewardId: 'r1', clientId: 'bajaj', oldQty: null, newQty: 5, actorId: 'admin1', source: 'catalogue edit' });
+    db.rewards[0].stockQuantity = 5;
+    await transitionOrderStatusOrConflict(db.tx as never, { orderId: 'o1', expectedFrom: RedemptionStatus.CONFIRMED, toStatus: RedemptionStatus.CANCELLED });
+    expect(db.rewards[0].stockQuantity).toBe(5);
     expect(db.reviews).toHaveLength(0);
+  });
+
+  it('a reward created UNLIMITED after go-live, stock set later: an order from the unlimited period gets no review', async () => {
+    const db = makeDb();
+    db.addReward({ id: 'r1', stockQuantity: null });
+    db.addOrder({ id: 'o1', rewardId: 'r1', status: 'PENDING' });
+    await transitionOrderStatus(db.tx as never, { orderId: 'o1', guard: { status: 'PENDING' }, fromStatus: RedemptionStatus.PENDING, toStatus: RedemptionStatus.CONFIRMED });
+    await recordStockEdit(db.tx as never, { rewardId: 'r1', clientId: 'bajaj', oldQty: null, newQty: 10, actorId: 'admin1', source: 'catalogue edit' });
+    db.rewards[0].stockQuantity = 10;
+    await transitionOrderStatusOrConflict(db.tx as never, { orderId: 'o1', expectedFrom: RedemptionStatus.CONFIRMED, toStatus: RedemptionStatus.CANCELLED });
+    expect(db.rewards[0].stockQuantity).toBe(10);
+    expect(db.reviews).toHaveLength(0);
+  });
+
+  it('a tracked reward with NO ledger row at all (created by the old build) → review (takes unknown)', async () => {
+    const db = makeDb();
+    db.addReward({ id: 'r1', stockQuantity: 4 });
+    db.addOrder({ id: 'o1', rewardId: 'r1', status: 'CONFIRMED' });
+    await transitionOrderStatusOrConflict(db.tx as never, { orderId: 'o1', expectedFrom: RedemptionStatus.CONFIRMED, toStatus: RedemptionStatus.FAILED });
+    expect(db.reviews).toHaveLength(1);
+    expect(db.rewards[0].stockQuantity).toBe(4);
   });
 
   it('an untracked reward never produces a review', async () => {
@@ -386,10 +438,12 @@ describe('reward stock history — admin / vendor edits (recordStockEdit)', () =
     await edit(db, 4, null);
     await edit(db, null, 9);
     expect(db.moves.map((m) => [m.type, m.quantity, m.balanceAfter])).toEqual([
-      ['OPENING', 4, 4], ['ADJUSTED', 0, null], ['ADJUSTED', 9, 9],
+      ['OPENING', 4, 4], ['ADJUSTED', -4, null], ['ADJUSTED', 9, 9],
     ]);
     expect(db.moves[1].reason).toContain('tracking turned off');
     expect(db.moves[2].reason).toContain('tracking turned on');
+    // the history still adds up to the current figure
+    expect(db.moves.reduce((s, m) => s + m.quantity, 0)).toBe(9);
   });
 });
 

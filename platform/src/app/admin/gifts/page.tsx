@@ -873,9 +873,11 @@ function ItemModal({
       imageUrls: form.imageUrls,
       redemptionMode: form.redemptionMode,
       status: form.status,
-      stockQuantity: form.stockTracked ? form.stockQuantity : null,
       termsAndConditions: form.termsAndConditions.trim() || undefined,
     };
+    // Stock: always on create; on an edit ONLY when the admin changed it in this window — a save of other fields
+    // from a window opened before a redemption must never write the old figure back (and log it as an edit).
+    if (!editing || stockChanged) payload.stockQuantity = form.stockTracked ? form.stockQuantity : null;
     // Stock history: an optional reason rides along only when this save changes the stock.
     if (stockChanged && form.stockReason.trim()) payload.stockReason = form.stockReason.trim();
     // Hubble auto-issuance productId — only meaningful for a GIFT_CARD voucher. Send it
@@ -1336,9 +1338,17 @@ function ItemModal({
                 <option value="ACTIVE">Active</option>
                 <option value="DRAFT">Draft</option>
                 <option value="INACTIVE">Inactive</option>
+                {/* Shown (not silently displayed as "Active") when the stored item is out of stock. */}
+                {editing?.status === 'OUT_OF_STOCK' && <option value="OUT_OF_STOCK">Out of stock</option>}
               </select>
               <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400 pointer-events-none" />
             </div>
+            {form.status === 'OUT_OF_STOCK' && form.stockTracked && form.stockQuantity > 0 && (
+              <p className="text-[11px] text-amber-700" role="note">
+                This reward is Out of stock. Raising the stock does not list it again by itself — choose Active above
+                to show it to members.
+              </p>
+            )}
           </div>
         </div>
 
@@ -1397,6 +1407,8 @@ function DeleteModal({ item, onConfirm, onClose }: { item: CatalogItem; onConfir
 
 function CatalogueTab() {
   const perms = usePermissions();
+  // Bumped after a reward save so the "Stock returns to review" list re-reads (its "Stock now" stays current).
+  const [stockReviewKey, setStockReviewKey] = useState(0);
   const [categories, setCategories] = useState<RewardCategory[]>([]);
   const [items, setItems] = useState<CatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1466,6 +1478,7 @@ function CatalogueTab() {
         });
       }
       setModal(false); setEditing(null);
+      setStockReviewKey((k) => k + 1);
       await loadCatalog();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Save failed');
@@ -1508,7 +1521,13 @@ function CatalogueTab() {
       <CategorySection categories={categories} onReload={() => { loadCategories(); loadCatalog(); }} />
 
       {/* Stock returns to review — never silent: orders confirmed before stock history started. */}
-      <StockReviewBanner canDecide={perms.has('rewards:manage_inventory')} onChanged={() => { void loadCatalog(); }} />
+      <StockReviewBanner
+        key={stockReviewKey}
+        canDecide={perms.has('rewards:manage_inventory')}
+        permissionsPending={perms.role === 'GIFSY_STAFF' && !perms.ready}
+        permissionsError={perms.error}
+        onChanged={() => { void loadCatalog(); }}
+      />
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

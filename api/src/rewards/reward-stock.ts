@@ -22,6 +22,8 @@ import { Prisma, RedemptionStatus } from '@prisma/client';
 type Tx = Prisma.TransactionClient;
 
 export const STOCK_BASELINE_REASON = 'Baseline at go-live of stock history';
+/** OPENING written for a reward that ALREADY tracked stock but had no ledger row yet (its earlier take is unknown). */
+export const STOCK_GAP_OPENING_REASON = 'Opening stock (first change recorded by stock history)';
 export const STOCK_BACK_IN_STOCK_NOTE = 'Back in stock: status changed from Out of stock to Active';
 export const STOCK_OUT_OF_STOCK_NOTE = 'Stock reached 0: status set to Out of stock';
 
@@ -63,7 +65,7 @@ async function ensureOpening(
       type: 'OPENING',
       quantity: balanceBefore,
       balanceAfter: balanceBefore,
-      reason: 'Opening stock (first change recorded by stock history)',
+      reason: STOCK_GAP_OPENING_REASON,
       actorId,
     },
   });
@@ -93,11 +95,13 @@ export async function takeStockForOrder(
   });
   let reason = `Redeemed on order ${args.orderNumber}`;
   if (fresh?.stockQuantity != null && fresh.stockQuantity <= 0) {
-    await tx.rewardCatalog.update({
-      where: { id: args.rewardId },
+    // Only an ACTIVE item flips: an admin pause (INACTIVE / DISCONTINUED) set concurrently is never overwritten
+    // with OUT_OF_STOCK — which a later return would otherwise turn back into ACTIVE.
+    const flip = await tx.rewardCatalog.updateMany({
+      where: { id: args.rewardId, status: 'ACTIVE' },
       data: { status: 'OUT_OF_STOCK' },
     });
-    reason = `${reason}. ${STOCK_OUT_OF_STOCK_NOTE}`;
+    if (flip.count > 0) reason = `${reason}. ${STOCK_OUT_OF_STOCK_NOTE}`;
   }
   if (!fresh?.clientId) return; // row vanished under the lock — impossible; nothing to attribute the row to
   const balanceAfter = fresh.stockQuantity ?? null;
@@ -157,12 +161,47 @@ async function addBack(
 }
 
 /**
+ * For an order with NO REDEEMED row: true only when the ledger proves the reward was UNTRACKED (unlimited) when the
+ * order was confirmed — the new code writes REDEEMED for every take, so a tracked reward without one means the
+ * take (if any) happened outside the ledger (before go-live, or by the old build during the deploy).
+ *   - latest ledger row at/before the confirm moment has balanceAfter null (tracking was off) → not taken
+ *   - no ledger row yet at that moment, and the reward's FIRST row is a creation / "tracking turned on" OPENING
+ *     (not the go-live baseline, not a gap-fill opening) → the reward was untracked before it → not taken
+ *   - otherwise → uncertain
+ * Confirm moment = the order's first CONFIRMED status-history row; legacy orders without one fall back to the
+ * order's creation time (earlier than any confirm, so the check stays on the cautious side).
+ */
+async function provablyNotTaken(tx: Tx, rewardId: string, orderId: string, orderCreatedAt: Date): Promise<boolean> {
+  const confirmedRow = await tx.redemptionStatusHistory.findFirst({
+    where: { orderId, toStatus: RedemptionStatus.CONFIRMED },
+    orderBy: { createdAt: 'asc' },
+    select: { createdAt: true },
+  });
+  const confirmedAt = confirmedRow?.createdAt ?? orderCreatedAt;
+  const latestBefore = await tx.rewardStockMovement.findFirst({
+    where: { rewardId, createdAt: { lte: confirmedAt } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    select: { balanceAfter: true },
+  });
+  if (latestBefore) return latestBefore.balanceAfter == null;
+  const first = await tx.rewardStockMovement.findFirst({
+    where: { rewardId },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: { type: true, reason: true },
+  });
+  if (!first) return false; // tracked reward with no ledger at all → its takes are unknown
+  const unknownBefore = first.reason === STOCK_BASELINE_REASON || first.reason === STOCK_GAP_OPENING_REASON;
+  return first.type === 'OPENING' && !unknownBefore;
+}
+
+/**
  * Called by transitionOrderStatus after a move to CANCELLED / FAILED / RETURNED actually landed (same tx; the
  * order row is locked by that write, so two concurrent refunds of ONE order serialize here and the second sees
  * the first's RETURNED row). Idempotent: never returns stock twice for the same order.
  *   - a REDEEMED row exists, no RETURNED row → add the taken quantity back + RETURNED row.
- *   - no REDEEMED row → stock was provably NOT taken if the reward's ledger started before the order was placed
- *     (nothing to do); otherwise (confirmed before stock history existed) → RewardStockReview row, no auto-return.
+ *   - no REDEEMED row → nothing to do when the ledger proves the reward was untracked at confirm time
+ *     (provablyNotTaken); otherwise (confirmed before stock history, or by the old build during the deploy)
+ *     → RewardStockReview row, no auto-return.
  */
 export async function returnStockForOrder(
   tx: Tx,
@@ -208,18 +247,15 @@ export async function returnStockForOrder(
     return;
   }
 
-  // No REDEEMED row. Was the order placed AFTER this reward's stock history began? Then stock was not taken.
+  // No REDEEMED row. Stock was PROVABLY not taken only when, per the ledger, the reward did not track stock at
+  // the moment the order was confirmed. Anything else (confirmed before stock history, or by the previous API
+  // build in the deploy window after the baseline) is uncertain → review, never a silent skip.
   const reward = order.reward;
-  if (!reward || reward.stockQuantity == null) return; // reward does not track stock → nothing to return
-  const first = await tx.rewardStockMovement.findFirst({
-    where: { rewardId: order.rewardId },
-    orderBy: { createdAt: 'asc' },
-    select: { createdAt: true },
-  });
-  if (first && order.createdAt >= first.createdAt) return;
+  if (!reward || reward.stockQuantity == null) return; // reward does not track stock now → nothing to return into
+  if (await provablyNotTaken(tx, order.rewardId, args.orderId, order.createdAt)) return;
 
-  // Confirmed before stock history existed → we cannot tell whether stock was taken. Do NOT auto-return:
-  // list it for an admin (shown loudly on the catalogue screen).
+  // We cannot tell whether stock was taken. Do NOT auto-return: list it for an admin (shown loudly on the
+  // catalogue screen and in the reward's Stock history).
   await tx.rewardStockReview.createMany({
     data: [
       {
@@ -280,7 +316,7 @@ export async function returnReviewedOrderStock(
  * value read UNDER THE ROW LOCK in the same tx (null for a create / an untracked reward). No-op when unchanged.
  *   first figure ever (no ledger rows)          → OPENING (a tracked reward with no row also gets its old figure first)
  *   unlimited → N                               → ADJUSTED (+N, "tracking turned on")
- *   N → unlimited                               → ADJUSTED (0, balanceAfter null, "tracking turned off")
+ *   N → unlimited                               → ADJUSTED (−N, balanceAfter null, "tracking turned off")
  *   N → M                                       → ADJUSTED (M − N)
  */
 export async function recordStockEdit(
@@ -323,7 +359,8 @@ export async function recordStockEdit(
     quantity = newQty as number;
     reason = `Stock tracking turned on (was unlimited): set to ${newQty} (${args.source})`;
   } else if (newQty == null) {
-    quantity = 0;
+    // −old so the history keeps adding up (opening − redeemed + returned + adjusted = current) across off / on.
+    quantity = -oldQty;
     reason = `Stock tracking turned off (now unlimited); was ${oldQty} (${args.source})`;
   } else {
     quantity = newQty - oldQty;

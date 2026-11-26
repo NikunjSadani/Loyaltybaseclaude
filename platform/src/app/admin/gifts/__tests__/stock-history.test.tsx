@@ -122,6 +122,10 @@ describe('STK — StockReviewBanner', () => {
     expect(await screen.findByText('Stock returns to review (1)')).toBeInTheDocument();
     expect(screen.getByText(/Their stock was NOT returned automatically/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Return 2 to stock' }));
+    // two-step: nothing is sent until the admin confirms (4 → 6 shown)
+    expect(calls.some((c) => c.init?.method === 'POST')).toBe(false);
+    expect(screen.getByText('Add 2 back to stock (4 → 6)?')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm return to stock' }));
     await waitFor(() => {
       const post = calls.find((c) => c.init?.method === 'POST');
       expect(post?.url).toBe('/api/admin/rewards/stock-reviews/rv1/resolve');
@@ -148,6 +152,25 @@ describe('STK — StockReviewBanner', () => {
       const post = calls.find((c) => c.init?.method === 'POST');
       expect(JSON.parse(String(post?.init?.body))).toEqual({ action: 'KEEP', note: 'Never physically stocked' });
     });
+  });
+
+  it('STK9: the list failing to load is said out loud, with Try again', async () => {
+    let fail = true;
+    vi.stubGlobal('fetch', vi.fn(() => (fail ? jsonRes('boom', false, 500) : jsonRes(REVIEWS))));
+    render(<StockReviewBanner canDecide />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('We could not check for orders that need a stock decision');
+    fail = false;
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Stock returns to review (1)')).toBeInTheDocument();
+  });
+
+  it('STK10: a staff member without the catalogue permission sees why they cannot decide; permissions still loading says so', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => jsonRes(REVIEWS)));
+    const { rerender } = render(<StockReviewBanner canDecide={false} />);
+    expect(await screen.findByText('Needs an admin who manages the catalogue')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Return/ })).toBeNull();
+    rerender(<StockReviewBanner canDecide={false} permissionsPending />);
+    expect(screen.getByText('Checking your permissions…')).toBeInTheDocument();
   });
 
   it('STK8: no open reviews → no banner', async () => {
