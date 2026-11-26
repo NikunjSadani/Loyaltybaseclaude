@@ -793,7 +793,7 @@ export interface FocusAcceptanceRequest {
   kpiCode: string;
   key: string;
 }
-/** POST admin/sales-months/:month/focus-acceptances/bulk: several names of ONE KPI, all or nothing. */
+/** POST admin/sales-months/:month/focus-acceptances/bulk: several keys of ONE KPI, all or nothing. */
 export interface FocusAcceptanceBulkRequest {
   kpiCode: string;
   keys: string[];
