@@ -218,15 +218,45 @@ No schema change (`evaluationBasis` is an existing string column). Code: `points
   under the quarter's LAST month (`creditPeriod`); its `sourceKey` hashes `YYYY-Qn`, so it never dedups against / collides
   with that month's monthly run. The credit-upload file's title says "… — upload under Dec 2026".
 - **D-1 guard.** Every month of the quarter must be CLOSED in Sales Import (409 names the open month); an export is
-  recorded on each month. **No "imported month" flag exists for points data** — the engine cannot refuse a quarter that
-  covers a month whose points were migrated (Bajaj: never compute imported months) — operator discipline for now.
+  recorded on each month. Independently of Sales Import, a quarter's export / credit is refused while any of its months
+  has not ENDED (`preview.quarter.openMonths`, red banner; the picker defaults to the latest fully-ended quarter).
+- **Quarter credits count for all three months.** A quarter batch's `sourceKind` is `POINTS_ENGINE_QUARTER:<YYYY-Qn>`;
+  `downstreamArtifacts` lists it on EVERY month of the quarter (`downstream.quarterCreditBatches`), so reopening Oct,
+  Nov or Dec warns "QUARTERLY credit batch CB-… (Oct–Dec 2026) …" and needs the acknowledgement.
+- **Versions never change kind** (audit fix): createDraft / updateDraft / publish refuse a version whose monthly ↔
+  quarterly kind differs from the rule's other versions ("Create a new rule for a quarterly bonus"); the builder locks
+  the switch on v2+. Switching a draft's period never strips settings — `draftIssues` blocks save instead.
+- **Version selection.** A published quarterly version applies to a quarter when its window OVERLAPS the quarter; two
+  overlapping versions at the same specificity → ERROR row naming them (`getQuarterRuleForAttachment`). An empty quarter
+  run says why (`preview.emptyReason`). Builder: a new quarterly rule defaults to the current quarter's first day.
+- **Prior batches** on commit are named + classified (`priorBatches`: quarterly / monthly engine / upload);
+  `likelyDuplicate` = same kind (same quarter) crediting a same credit field — shown in red.
+- **Reasons.** A later skip gate keeps every earlier failing month in the reason; a segment filter on a quarterly rule
+  may carry its own `failReason` ("Not a wholesaler outlet"), else plain words are generated.
+
+### 3c. Imported-months guard — "points engine first live month" (audit fix 2026-11-26; monthly AND quarterly runs)
+
+`pointsEngine.firstLiveMonth` (YYYY-MM, Gifsy-set on the Points Engine settings page; **null = no guard**, the default
+for every tenant). A run covering a month BEFORE it (data imported from the old system) shows a red banner
+(`preview.importedMonths` {firstLiveMonth, months, monthLabels, confirmKey}); the credit-upload file, the payout report
+and direct credit are REFUSED (409) unless a **GIFSY_ADMIN** sends `confirmImportedMonthsKey = confirmKey` (a hash of
+tenant + period + months + rule versions — a changed run must be re-confirmed). The confirmation ticks "I confirm
+<months> were imported from the old system and have not been paid on the portal / old system for <rules>"; it is
+written to `AuditLog` (`APPROVE`, `POINTS_ENGINE_IMPORTED_MONTHS_CONFIRMED`) BEFORE the batch / file exists, and a
+failed audit write refuses the action. The money gate reads the month UNCACHED. Omitting `firstLiveMonth` on a settings
+PUT keeps the stored value. (Owner has not decided how Oct 2026 BSC cases are handled — this allows a deliberate,
+recorded override, never a silent pass.)
+
+**Monthly runs unchanged** — `points-compute.monthly-snapshot.spec.ts` replays, against the pre-quarter service, every
+query of a monthly preview + direct credit, the batch period, the createBatch call and the prior-batch count (the only
+intentional difference — the active-rule lookup also selects `evaluationBasis` — is asserted separately).
 - **Builder / compute UI.** Rule period Monthly / Quarterly; per-input "Which month of the quarter"; a narration field;
   the simulator takes 3 months per KPI; the compute screen offers a quarter run with a quarter banner.
 
 **Bajaj BSC consistency bonus (worked example).** Wholesalers; per month m (1–3) inputs `tot_ach_m{m}`
 (`achievement:TOTAL`, month m, reject), `tot_tgt_m{m}` (`target:TOTAL`, month m, reject), `cases_m{m}`
 (`achievement:BSC_CASES`, month m, reject) + `cases_q` (`achievement:BSC_CASES`, quarter total, reject). Pipeline:
-segmentFilter outletType ∈ {wholesaler code} (onFail zero); per month gate `tot_tgt_m{m} > 0` failAs zero "{m{m}}: TOTAL
+segmentFilter outletType ∈ {wholesaler code} (onFail zero, failReason "Not a wholesaler outlet"); per month gate `tot_tgt_m{m} > 0` failAs zero "{m{m}}: TOTAL
 target is 0" and gate `tot_ach_m{m} ≥ tot_tgt_m{m}` failAs zero "{m{m}}: TOTAL below target"; gate `cases_q > 0` failAs
 zero "No BSC cases in {quarter}"; formula add
 `5 * (cases_m1 * min(1, 1.2 * tot_tgt_m1 / tot_ach_m1) + cases_m2 * min(1, 1.2 * tot_tgt_m2 / tot_ach_m2) + cases_m3 * min(1, 1.2 * tot_tgt_m3 / tot_ach_m3))`

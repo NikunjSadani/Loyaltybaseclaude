@@ -267,7 +267,7 @@ function NodeEditor({
                 hint={
                   soft
                     ? 'Only shown when the gate pays 0 or skips the row — switch “If the check fails” to Pay 0 to use a reason.'
-                    : `Shown on the row, the simulator and the reports — e.g. “Target is 0”, “NON ADHO below ₹400”. ${len}/${GATE_FAIL_REASON_MAX}`
+                    : `Shown on the row, the simulator and the reports — e.g. “Target is 0”, “NON ADHO below ₹400”. Quarterly rules: {m1} {m2} {m3} become the month names (“Nov 2026”) and {quarter} the quarter (“Oct–Dec 2026”). ${len}/${GATE_FAIL_REASON_MAX}`
                 }
               >
                 <TextField
@@ -322,6 +322,24 @@ function NodeEditor({
                 }
               />
             </Field>
+            {(node.onFail === 'zero' || !!node.failReason) && (
+              <Field
+                label="Reason shown when it fails (quarterly rules only, optional)"
+                className="sm:col-span-2"
+                hint="e.g. “Not a wholesaler outlet”. Blank = plain words are generated (“Outlet type RET is not one this rule pays (WS)”)."
+              >
+                <TextField
+                  value={node.failReason ?? ''}
+                  disabled={disabled}
+                  placeholder="e.g. Not a wholesaler outlet"
+                  onChange={(v) => {
+                    const { failReason: _old, ...rest } = node;
+                    void _old;
+                    onChange(v.trim() === '' ? rest : { ...rest, failReason: v });
+                  }}
+                />
+              </Field>
+            )}
           </div>
           {node.allow.length > 0 && (
             <div className="flex flex-wrap gap-1.5">

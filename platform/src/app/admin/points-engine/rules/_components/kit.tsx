@@ -480,6 +480,8 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
             blocking.push(`${where}: the reason is ${n.failReason.length} characters — keep it to ${GATE_FAIL_REASON_MAX}.`);
           if (n.failReason.trim() !== '' && !hard)
             blocking.push(`${where}: a reason is only shown when the gate pays 0 or skips the row — switch to "Pay 0" or remove the reason.`);
+          if (draft.evaluationBasis !== 'QUARTER' && QUARTER_PLACEHOLDERS.some((p) => n.failReason!.includes(p)))
+            blocking.push(`${where}: {m1} / {m2} / {m3} / {quarter} in a reason only work on a quarterly rule — make the rule Quarterly or remove them.`);
         }
         break;
       }
@@ -491,6 +493,8 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
           warnings.push(`${where}: no values allowed — every outlet is filtered out (0 points).`);
         if (n.onFail !== 'zero')
           warnings.push(`${where}: this filter won't withhold points on failure — only "Pay 0" withholds.`);
+        if (typeof n.failReason === 'string' && n.failReason.trim() !== '' && (draft.evaluationBasis !== 'QUARTER' || n.onFail !== 'zero'))
+          blocking.push(`${where}: a filter's reason is only shown on a quarterly rule whose filter pays 0 — remove it or make the rule Quarterly.`);
         break;
       case 'cap':
         if (n.max <= 0) warnings.push(`${where}: a cap of ${n.max} clamps every total to ${n.max}.`);
@@ -507,5 +511,12 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
     }
   });
 
+  // Quarter-only output setting kept on a monthly rule (never stripped silently) → must be removed or the rule made quarterly.
+  if (draft.evaluationBasis !== 'QUARTER' && typeof draft.output.narration === 'string' && draft.output.narration.trim() !== '')
+    blocking.push('Output: the credit narration is only used by quarterly rules — clear it or make the rule Quarterly.');
+
   return { blocking, warnings };
 }
+
+/** Gate-reason placeholders a QUARTERLY rule may use (mirror of the backend QUARTER_PLACEHOLDERS). */
+export const QUARTER_PLACEHOLDERS = ['{m1}', '{m2}', '{m3}', '{quarter}'] as const;

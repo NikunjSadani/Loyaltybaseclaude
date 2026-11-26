@@ -561,7 +561,12 @@ export interface SalesMonthRow {
    * Points artefacts already produced for this month: credit batches (any status) for the period and points-compute
    * export / report downloads. Non-zero → reopening needs SalesMonthReopenRequest.acknowledgeDownstream.
    */
-  downstream: { creditBatches: number; exports: number };
+  downstream: {
+    creditBatches: number;
+    exports: number;
+    /** Points-engine QUARTER credit batches covering this month (present only when any exist). */
+    quarterCreditBatches?: Array<{ batchCode: string; quarter: string; label: string }>;
+  };
   /**
    * Stored month history (SalesMonthHistory): the FINAL applied file lines of this month (programme outlets only),
    * written by each apply and kept for the history window (10 years while SALES_RETENTION_V2 is off; the current month

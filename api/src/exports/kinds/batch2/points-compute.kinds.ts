@@ -41,6 +41,8 @@ export interface PointsComputeParams {
   acceptVisibilityPendingKey?: string | null;
   /** The run key the operator reviewed (sourceKey for the credit file, payoutKey for the payout report). */
   expectedKey?: string | null;
+  /** preview.importedMonths.confirmKey — a Gifsy admin's confirmation for a run covering imported months. */
+  confirmImportedMonthsKey?: string | null;
 }
 
 /** Same as every points-compute download route: @Roles('GIFSY_ADMIN','CLIENT_ADMIN') + points_rules:read. */
@@ -57,6 +59,7 @@ function parse(raw: unknown): PointsComputeParams {
     kpiCode: q.kpiCode ?? null,
     ...(q.acceptVisibilityPendingKey !== undefined ? { acceptVisibilityPendingKey: q.acceptVisibilityPendingKey } : {}),
     ...(q.expectedKey !== undefined ? { expectedKey: q.expectedKey } : {}),
+    ...(q.confirmImportedMonthsKey !== undefined ? { confirmImportedMonthsKey: q.confirmImportedMonthsKey } : {}),
   };
 }
 
@@ -114,7 +117,14 @@ function pointsKind(opts: {
       });
       if (opts.expectedKeyOf) PointsComputeService.assertExpectedKey(opts.expectedKeyOf(preview), p.expectedKey, opts.label.toLowerCase());
       if (opts.requiresVisibilityAcceptance) {
+        // Money files: quarter must be over; imported months need the Gifsy confirmation (uncached first-live month).
+        await serviceOf(ctx, PointsComputeService).refreshImportedMonths(ctx.clientId, preview);
+        PointsComputeService.assertMoneyRunAllowed(preview, ctx.user, p.confirmImportedMonthsKey ?? null);
         PointsComputeService.assertVisibilityPendingAccepted(preview, p.acceptVisibilityPendingKey ?? null);
+        await PointsComputeService.recordImportedMonthsConfirmation(ctx.prisma, ctx.user, preview, {
+          route: opts.route,
+          entityId: ctx.requestId ?? `${ctx.clientId}:${p.period}`,
+        });
       }
       const rowCount = await opts.write(preview, out);
       if (opts.requiresVisibilityAcceptance) {

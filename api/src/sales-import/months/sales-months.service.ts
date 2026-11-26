@@ -27,6 +27,7 @@ import {
   tenantHasTargetNamesDef,
 } from '../kpi/focus-data';
 import { focusKey, splitFocusName } from '../kpi/focus-products';
+import { QUARTER_BATCH_SOURCE_PREFIX, parseQuarter, quarterKeyForMonth } from '../../points-engine/points-engine.quarter';
 
 /** Longest acceptance key accepted (a focus token key; real ones are a few characters). */
 export const FOCUS_ACCEPTANCE_MAX_KEY = 200;
@@ -63,6 +64,23 @@ export async function downstreamArtifacts(
   for (const e of exportRows) {
     const month = e.entityId.slice(clientId.length + 1);
     if (out.has(month)) out.get(month)!.exports = e._count._all;
+  }
+  // Points-engine QUARTER credits (filed under the quarter's last month) cover EVERY month of their quarter: list them
+  // on each month so reopening Oct / Nov / Dec after a quarter credit warns, naming the batch.
+  const quarterKinds = [...new Set(months.map((m) => `${QUARTER_BATCH_SOURCE_PREFIX}${quarterKeyForMonth(m)}`))];
+  const quarterBatches = await db.creditBatch.findMany({
+    where: { clientId, sourceKind: { in: quarterKinds } },
+    select: { batchCode: true, sourceKind: true },
+  });
+  for (const b of quarterBatches ?? []) {
+    const key = (b.sourceKind ?? '').slice(QUARTER_BATCH_SOURCE_PREFIX.length);
+    const q = parseQuarter(key);
+    if (!q) continue;
+    for (const m of q.months) {
+      const d = out.get(m);
+      if (!d) continue;
+      (d.quarterCreditBatches ??= []).push({ batchCode: b.batchCode, quarter: q.key, label: q.label });
+    }
   }
   return out;
 }
@@ -110,6 +128,11 @@ export function downstreamWarnings(month: string, d: Downstream): string[] {
   }
   if (d.exports > 0) {
     w.push(`Points reports / exports for ${monthLabel(month)} were downloaded ${d.exports} time(s); anything already sent to the client may no longer match.`);
+  }
+  for (const q of d.quarterCreditBatches ?? []) {
+    w.push(
+      `QUARTERLY credit batch ${q.batchCode} (${q.label}) already credited points computed from ${monthLabel(month)}; they will not change automatically. Use the reversal process if the new numbers differ.`,
+    );
   }
   return w;
 }

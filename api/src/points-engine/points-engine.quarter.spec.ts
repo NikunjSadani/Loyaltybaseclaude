@@ -157,7 +157,25 @@ describe('BSC consistency bonus (quarterly rule, 120% cap per month)', () => {
   it('a retailer (not a wholesaler) → 0, never paid', () => {
     const out = evaluateRule(rule, qctx([[1000, 1000, 10], [1000, 1000, 10], [1000, 1000, 10]], 'RET'));
     expect(out).toMatchObject({ status: 'OK', points: 0 });
-    expect((out as { reason?: string }).reason).toMatch(/outletType=RET/);
+    expect((out as { reason?: string }).reason).toBe('Outlet type RET is not one this rule pays (WS)'); // plain words
+    // …or the rule's own reason on the filter (quarterly rules only).
+    const own = bscConsistencyRule({
+      pipeline: bscConsistencyRule().pipeline.map((n) => (n.type === 'segmentFilter' ? { ...n, failReason: 'Not a wholesaler outlet' } : n)),
+    });
+    expect(validateRule(own)).toEqual([]);
+    expect(evaluateRule(own, qctx([[1000, 1000, 10], [1000, 1000, 10], [1000, 1000, 10]], 'RET'))).toMatchObject({ status: 'OK', points: 0, reason: 'Not a wholesaler outlet' });
+  });
+
+  it('AUDIT 7: a later SKIP gate keeps every earlier failing month in the reason', () => {
+    const r = bscConsistencyRule();
+    const withSkip = bscConsistencyRule({
+      pipeline: [
+        ...r.pipeline.filter((n) => n.type !== 'formula'),
+        { type: 'gate', id: 'late', onFail: 'zero', failAs: 'skip', when: { op: 'gt', left: { var: 'cases_q' }, right: { lit: 1000 } }, failReason: 'Cases need review' },
+      ],
+    });
+    const out = evaluateRule(withSkip, qctx([[900, 1000, 10], [1000, 1000, 20], [1000, 1000, 30]]));
+    expect(out).toMatchObject({ status: 'SKIP', reason: 'Oct 2026: TOTAL below target; Cases need review' });
   });
 
   it('a quarterly rule given no quarter (a monthly run / bad caller) → ERROR, never a 0', () => {
@@ -202,6 +220,12 @@ describe('quarterly validation', () => {
         }),
       ).join(' '),
     ).toMatch(/only work in a quarterly rule/);
+  });
+
+  it('a segment-filter reason on a monthly rule is refused (it would never show)', () => {
+    expect(
+      validateRule(monthly({ pipeline: [{ type: 'segmentFilter', id: 's', field: 'outletType', allow: ['WS'], onFail: 'zero', failReason: 'x' }] })).join(' '),
+    ).toMatch(/only shown on a quarterly rule/);
   });
 
   it('bad month value, unknown basis, visibility in a quarterly rule → refused', () => {

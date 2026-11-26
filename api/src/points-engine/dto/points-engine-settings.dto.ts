@@ -10,7 +10,7 @@
  * data boundary, exactly like tdsStatutory/notificationTemplates). Mirrors the TDS-config pattern.
  */
 
-import { IsBoolean, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, Matches, MinLength, ValidateIf } from 'class-validator';
 
 /** PUT body — the per-tenant Points Engine flags (Gifsy sets them for a tenant). */
 export class SetPointsEngineSettingsDto {
@@ -25,6 +25,15 @@ export class SetPointsEngineSettingsDto {
   /** Enables the in-portal direct-credit (compute → PENDING batch → operator confirm → wallet). */
   @IsBoolean()
   directCreditEnabled!: boolean;
+
+  /**
+   * "Points engine first live month" (YYYY-MM) — months BEFORE it were imported from the old system; runs covering them
+   * need an explicit Gifsy confirmation to export / credit. null = clear (no guard). OMITTED = keep the stored value.
+   */
+  @IsOptional()
+  @ValidateIf((_o, v) => v !== null)
+  @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, { message: 'firstLiveMonth must be a YYYY-MM month (or null to clear).' })
+  firstLiveMonth?: string | null;
 }
 
 /** GET query — optional tenant scope (GIFSY only; CLIENT_ADMIN is pinned to their own tenant). */

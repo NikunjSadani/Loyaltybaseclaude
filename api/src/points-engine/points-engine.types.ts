@@ -127,6 +127,11 @@ export interface SegmentFilterNode {
   field: string;
   allow: string[];
   onFail: OnFail;
+  /**
+   * QUARTERLY rules only (onFail 'zero'): the plain reason on a row the filter zeroed, e.g. "Not a wholesaler outlet".
+   * Absent → a generated plain reason ("Outlet type RET is not one this rule pays (WS)"). Monthly rules: refused.
+   */
+  failReason?: string;
 }
 
 /** L3 — a flat lump of points when a discrete threshold is reached. */

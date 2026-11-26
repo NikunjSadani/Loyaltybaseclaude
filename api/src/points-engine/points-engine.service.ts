@@ -102,11 +102,14 @@ export class PointsEngineService {
     if (ruleId) {
       const existing = await this.prisma.pointsRule.findMany({
         where: { clientId, ruleId },
-        select: { version: true, status: true },
+        select: { version: true, status: true, evaluationBasis: true },
       });
       if (existing.length === 0) {
         throw new NotFoundException(`No rule ${ruleId} exists for this tenant.`);
       }
+      // Publishing a version archives the prior versions — so a version must never switch monthly ↔ quarterly
+      // (that would retire the other kind of rule). A quarterly bonus is its own rule.
+      assertSameBasis(existing, dto.evaluationBasis);
       if (existing.some((r) => r.status === 'draft')) {
         throw new ConflictException(
           `Rule ${ruleId} already has an open draft — edit or publish it before creating another.`,
@@ -154,6 +157,14 @@ export class PointsEngineService {
       dto,
     );
     this.assertValid(config);
+    // A draft may change monthly ↔ quarterly only while it is the rule's ONLY version.
+    if (isQuarterBasis(row.evaluationBasis) !== isQuarterBasis(dto.evaluationBasis)) {
+      const siblings = await this.prisma.pointsRule.findMany({
+        where: { clientId: row.clientId, ruleId: row.ruleId, id: { not: row.id } },
+        select: { version: true, status: true, evaluationBasis: true },
+      });
+      assertSameBasis(siblings, dto.evaluationBasis);
+    }
 
     const { attachsTo } = dto;
     return this.prisma.pointsRule.update({
@@ -245,6 +256,15 @@ export class PointsEngineService {
         },
       });
 
+      // Never archive a rule of the OTHER kind (a monthly version must not retire a quarterly one, or vice versa).
+      const otherKind = priors.filter((p) => isQuarterBasis(p.evaluationBasis) !== isQuarterBasis(row.evaluationBasis));
+      if (otherKind.length > 0) {
+        throw new BadRequestException(
+          `This version is ${isQuarterBasis(row.evaluationBasis) ? 'quarterly' : 'monthly'} but version(s) ${otherKind
+            .map((p) => `v${p.version}`)
+            .join(', ')} of this rule are ${isQuarterBasis(row.evaluationBasis) ? 'monthly' : 'quarterly'} — publishing would retire them. Create a new rule for a quarterly bonus instead.`,
+        );
+      }
       for (const prior of priors) {
         if (!windowsOverlap(prior.effectiveFrom, prior.effectiveTo, newFrom, newTo)) continue;
         // Close the prior's window to just before the new one begins (keeps the historical,
@@ -348,6 +368,50 @@ export class PointsEngineService {
         // but defense-in-depth keeps resolution total-ordered.
         return a.ruleId < b.ruleId ? -1 : a.ruleId > b.ruleId ? 1 : 0;
       })[0];
+  }
+
+  /**
+   * QUARTER resolution (audit fix 2026-11-26): a published QUARTERLY rule applies to a quarter when its effective
+   * window OVERLAPS the quarter [qStart, qEnd] (not only when it is effective on the first day). Most specific
+   * attachment wins; if MORE THAN ONE published version / rule overlaps at that specificity the result is a
+   * `conflict` naming them — never a silent pick (the compute row becomes an ERROR with that text).
+   */
+  async getQuarterRuleForAttachment(
+    clientId: string,
+    program: string | null | undefined,
+    programCategory: string | null | undefined,
+    kpiCode: string,
+    qStart: Date,
+    qEnd: Date,
+  ): Promise<{ rule: PointsRule | null; conflict?: string }> {
+    const all = await this.prisma.pointsRule.findMany({
+      where: {
+        clientId,
+        status: 'published',
+        kpiCode,
+        evaluationBasis: 'QUARTER',
+        effectiveFrom: { lte: qEnd },
+        AND: [
+          { OR: [{ effectiveTo: null }, { effectiveTo: { gte: qStart } }] },
+          { OR: [{ program: program ?? null }, { program: null }] },
+          { OR: [{ programCategory: programCategory ?? null }, { programCategory: null }] },
+        ],
+      },
+      orderBy: [{ effectiveFrom: 'desc' }, { version: 'desc' }, { ruleId: 'asc' }],
+    });
+    const candidates = (all ?? []).filter((r) => isQuarterBasis(r.evaluationBasis));
+    if (candidates.length === 0) return { rule: null };
+    const top = Math.max(...candidates.map(specificity));
+    const best = candidates.filter((r) => specificity(r) === top);
+    if (best.length === 1) return { rule: best[0] };
+    const day = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : 'open-ended');
+    return {
+      rule: null,
+      conflict:
+        `More than one published quarterly rule version covers this quarter for ${kpiCode}: ` +
+        best.map((r) => `${r.ruleId} v${r.version} (${day(r.effectiveFrom)} → ${day(r.effectiveTo)})`).join('; ') +
+        ' — set the effective dates so exactly one version covers the whole quarter.',
+    };
   }
 
   // ─── archive ──────────────────────────────────────────────────────────────────
@@ -566,6 +630,20 @@ export class PointsEngineService {
 }
 
 // ─── pure helpers ───────────────────────────────────────────────────────────────
+
+/** Refuse a version whose monthly/quarterly kind differs from the rule's other versions. */
+function assertSameBasis(
+  others: Array<{ version: number; evaluationBasis: string | null }>,
+  basis: string | null | undefined,
+): void {
+  const clash = others.filter((o) => isQuarterBasis(o.evaluationBasis) !== isQuarterBasis(basis));
+  if (clash.length === 0) return;
+  throw new BadRequestException(
+    `A rule cannot switch between monthly and quarterly across versions (version(s) ${clash
+      .map((c) => `v${c.version}`)
+      .join(', ')} are ${isQuarterBasis(basis) ? 'monthly' : 'quarterly'}). Create a new rule for a quarterly bonus.`,
+  );
+}
 
 /** More specific attachment ranks higher (exact program + category beats wildcards). */
 function specificity(r: PointsRule): number {

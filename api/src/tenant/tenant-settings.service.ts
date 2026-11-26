@@ -143,6 +143,11 @@ export type OtpTemplatePurpose = 'login' | 'redemptionSelf' | 'kycConsent' | 're
 export interface PointsEngineSettings {
   enabled:             boolean;
   directCreditEnabled: boolean;
+  /**
+   * GIFSY-set "points engine first live month" (YYYY-MM; null = no guard — every tenant by default). Runs covering a
+   * month BEFORE it (data imported from the old system) are refused for export / credit unless a Gifsy admin confirms.
+   */
+  firstLiveMonth?:     string | null;
 }
 
 export interface CreditsPayoutsSettings {
@@ -447,6 +452,7 @@ export class TenantSettingsService {
       pointsEngine: {
         enabled:             false,
         directCreditEnabled: false,
+        firstLiveMonth:      null,
       },
       // Upload negative POINTS → wallet deductions — OFF by default (owner 2026-11-25: Bajaj only).
       creditUploadNegativeDeductions: false,
@@ -580,6 +586,22 @@ export class TenantSettingsService {
       this.logger.warn(`pointsEngine flags read failed for ${clientId}; treating as OFF: ${e}`);
       return { enabled: false, directCreditEnabled: false };
     }
+  }
+
+  /**
+   * UNCACHED read of the points engine "first live month" (YYYY-MM or null) — the imported-months MONEY gate on export /
+   * direct credit. A read error fails SAFE for money: the guard cannot be proven absent, so it throws (the export /
+   * credit is refused with a retry message) rather than silently skipping the guard.
+   */
+  async getPointsEngineFirstLiveMonthUncached(clientId: string): Promise<string | null> {
+    const row = await this.prisma.programSetting.findUnique({
+      where: { clientId_settingKey: { clientId, settingKey: 'pointsEngine' } },
+      select: { settingValue: true },
+    });
+    const v = row?.settingValue;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    const m = (v as Record<string, unknown>).firstLiveMonth;
+    return typeof m === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(m) ? m : null;
   }
 
   /**
@@ -819,6 +841,7 @@ export class TenantSettingsService {
             out.pointsEngine = {
               enabled:             this.bool(v.enabled,             base.pointsEngine.enabled),
               directCreditEnabled: this.bool(v.directCreditEnabled, base.pointsEngine.directCreditEnabled),
+              firstLiveMonth:      typeof v.firstLiveMonth === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(v.firstLiveMonth) ? v.firstLiveMonth : null,
             };
           }
           break;

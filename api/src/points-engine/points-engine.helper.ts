@@ -259,6 +259,23 @@ function resolveQuarterRaw(
 /** The placeholders a QUARTERLY gate's failReason may use: {m1} {m2} {m3} → "Oct 2026"…, {quarter} → "Oct–Dec 2026". */
 export const QUARTER_PLACEHOLDERS = ['{m1}', '{m2}', '{m3}', '{quarter}'] as const;
 
+const SEGMENT_FIELD_WORDS: Record<string, string> = {
+  outletType: 'Outlet type',
+  program: 'Program',
+  programCategory: 'Sub-program',
+  metro: 'Metro',
+};
+
+/** Plain words for a failed segment filter (quarterly rules): "Outlet type RET is not one this rule pays (WS)". */
+function segmentFailPlain(node: { field: string; allow: string[] }, ctx: EvalContext): string {
+  const raw = ctx.segment ? (ctx.segment as Record<string, unknown>)[node.field] : undefined;
+  const label = SEGMENT_FIELD_WORDS[node.field] ?? node.field;
+  const val = raw === undefined || raw === null || raw === '' ? null : String(raw);
+  return val === null
+    ? `${label} is blank — this rule only pays ${node.allow.join(' / ')}`
+    : `${label} ${val} is not one this rule pays (${node.allow.join(' / ')})`;
+}
+
 function fillQuarterPlaceholders(text: string, ctx: EvalContext): string {
   const q = ctx.quarter;
   if (!q) return text;
@@ -1028,20 +1045,31 @@ export function evaluateRule(rule: PointsRuleConfig, ctx: EvalContext): EvalOutc
       }
 
       // Failed → apply the opt-in failAs (gate only), else onFail exactly as before.
-      const rawReason = node.type === 'gate' && typeof node.failReason === 'string' && node.failReason.trim() ? node.failReason.trim() : undefined;
+      // A segmentFilter may carry its own reason in a QUARTERLY rule (e.g. "Not a wholesaler outlet").
+      const ownReason = (node as { failReason?: unknown }).failReason;
+      const rawReason =
+        (node.type === 'gate' || (quarterMode && node.type === 'segmentFilter')) && typeof ownReason === 'string' && ownReason.trim()
+          ? ownReason.trim()
+          : undefined;
       // Quarter placeholders ({m1} {m2} {m3} {quarter}) → the real month names. Monthly reasons are untouched.
       const failReason = rawReason && quarterMode ? fillQuarterPlaceholders(rawReason, ctx) : rawReason;
       const failAs = node.type === 'gate' ? node.failAs : undefined;
       if (failAs === 'skip') {
         trace.push(step(node, points, points, `${node.type} FAILED (${desc}) → skip row${failReason ? `: ${failReason}` : ''}`));
-        return { status: 'SKIP', reason: failReason ?? `gate "${node.id}" failed (${desc})`, trace };
+        const skipReason = failReason ?? `gate "${node.id}" failed (${desc})`;
+        // Quarter: a later skip keeps the month reasons already found (never drops an earlier failing month).
+        const reason = quarterMode && quarterZeroFails.length > 0 ? [...new Set([...quarterZeroFails, skipReason])].join('; ') : skipReason;
+        return { status: 'SKIP', reason, trace };
       }
       if (quarterMode && (failAs === 'zero' || node.onFail === 'zero')) {
         trace.push(
           step(node, points, 0, `${node.type} FAILED (${desc}) → ${failAs === 'zero' ? "failAs 'zero'" : "onFail 'zero'"}, rule → 0${failReason ? `: ${failReason}` : ''}`),
         );
         quarterZeroed = true;
-        quarterZeroFails.push(failReason ?? `${node.type} "${node.id}" failed (${desc})`);
+        quarterZeroFails.push(
+          failReason ??
+            (node.type === 'segmentFilter' ? segmentFailPlain(node, ctx) : `${node.type} "${node.id}" failed (${desc})`),
+        );
         continue; // keep checking: every failing month is named
       }
       if (failAs === 'zero' || node.onFail === 'zero') {
@@ -1482,6 +1510,12 @@ export function validateRule(rule: PointsRuleConfig): string[] {
           errs.push(`${w}: allow must be an array of strings.`);
         }
         if (!ON_FAIL.has(n.onFail)) errs.push(`${w}: onFail must be one of ${[...ON_FAIL].join(', ')}.`);
+        if (n.failReason !== undefined && n.failReason !== null) {
+          if (typeof n.failReason !== 'string' || n.failReason.length > 200) errs.push(`${w}: failReason must be text of at most 200 characters.`);
+          else if (n.failReason.trim() !== '' && (!quarterly || n.onFail !== 'zero')) {
+            errs.push(`${w}: a segment filter's reason is only shown on a quarterly rule whose filter pays 0 (onFail 'zero').`);
+          }
+        }
         break;
       case 'milestone':
         validatePredicate(n.when, declared, `${w}.when`, errs);

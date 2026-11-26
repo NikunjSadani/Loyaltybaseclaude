@@ -67,6 +67,7 @@ export class PointsComputeController {
       kpiCode: dto.kpiCode ?? null,
       expectedKey: dto.expectedKey ?? null,
       acceptVisibilityPendingKey: dto.acceptVisibilityPendingKey ?? null,
+      confirmImportedMonthsKey: dto.confirmImportedMonthsKey ?? null,
     });
   }
 

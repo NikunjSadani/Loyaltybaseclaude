@@ -45,6 +45,18 @@ export function parseQuarterKey(key: string): { months: string[]; monthLabels: s
   };
 }
 
+/** The FY quarter key before `key` ("2026-Q1" → "2025-Q4"). */
+export function previousQuarterKey(key: string): string {
+  const y = Number(key.slice(0, 4));
+  const q = Number(key.slice(6));
+  return q === 1 ? `${y - 1}-Q4` : `${y}-Q${q - 1}`;
+}
+
+/** The latest FY quarter whose 3 months have all ENDED (the quarter holding `currentMonth` has not). */
+export function latestEndedQuarterKey(currentMonth: string): string {
+  return previousQuarterKey(quarterKeyForMonth(currentMonth));
+}
+
 /** The FY quarter key a YYYY-MM month falls in ("2026-11" → "2026-Q3"; "2027-02" → "2026-Q4"). */
 export function quarterKeyForMonth(ym: string): string {
   const [y, mo] = ym.split('-').map(Number);
@@ -88,7 +100,11 @@ export interface GateNode {
   /** Opt-in: 'zero' = pay 0 with the reason; 'skip' = skip + flag the row. Absent = onFail decides (today). */
   failAs?: 'zero' | 'skip';
 }
-export interface SegmentFilterNode { type: 'segmentFilter'; id: string; field: string; allow: string[]; onFail: OnFail }
+export interface SegmentFilterNode {
+  type: 'segmentFilter'; id: string; field: string; allow: string[]; onFail: OnFail;
+  /** Quarterly rules only (onFail zero): the plain reason on a row the filter zeroed ("Not a wholesaler outlet"). */
+  failReason?: string;
+}
 export interface MilestoneNode { type: 'milestone'; id: string; when: Predicate; flat: number }
 export interface FloorNode { type: 'floor'; id: string; min: number }
 export interface CapNode { type: 'cap'; id: string; max: number }
@@ -228,7 +244,15 @@ export interface ComputePreview {
   /** YYYY-MM, or YYYY-Qn for a quarter run (see `quarter`). */
   period: string;
   /** Quarter runs only. `creditPeriod` = the last month — the month a direct-credit batch is filed under. */
-  quarter?: { key: string; label: string; fyLabel: string; months: string[]; monthLabels: string[]; creditPeriod: string };
+  quarter?: {
+    key: string; label: string; fyLabel: string; months: string[]; monthLabels: string[]; creditPeriod: string;
+    /** Months not ended yet — export / credit refused while any. */
+    openMonths: string[];
+  };
+  /** Months before the tenant's first live month (imported from the old system) — red banner + Gifsy confirmation. */
+  importedMonths?: { firstLiveMonth: string; months: string[]; monthLabels: string[]; confirmKey: string };
+  /** Quarter runs with nothing to compute: why. */
+  emptyReason?: string;
   filter?: { program?: string | null; kpiCode?: string | null };
   counts: { total: number; ok: number; skip: number; error: number; noRule: number };
   totalPoints: number;
@@ -281,6 +305,9 @@ export interface ComputeCommitResult {
   idempotentHit: boolean;
   /** Count of OTHER credit batches (engine OR manual) already in this period — the UI warns (Option A). */
   priorBatchesThisPeriod: number;
+  /** The other batches of the period, named; `likelyDuplicate` = same kind of engine run crediting a same field. */
+  priorBatches?: Array<{ batchCode: string; kind: 'QUARTER_ENGINE' | 'MONTHLY_ENGINE' | 'UPLOAD' | 'OTHER'; quarter?: string; likelyDuplicate: boolean }>;
+  quarter?: { key: string; label: string };
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────────
@@ -288,6 +315,8 @@ export interface PointsEngineSettings {
   clientId: string;
   enabled: boolean;
   directCreditEnabled: boolean;
+  /** Gifsy-set "points engine first live month" (YYYY-MM) — earlier months were imported; null = no guard. */
+  firstLiveMonth?: string | null;
 }
 
 /** Node-type UI metadata (label + the disclosure level, for the "Add step" menu). */

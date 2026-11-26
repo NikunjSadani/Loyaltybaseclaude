@@ -48,6 +48,15 @@ export class PreviewComputeDto {
   @IsOptional()
   @IsString()
   expectedKey?: string;
+
+  /**
+   * Imported-months guard: `preview.importedMonths.confirmKey` — a GIFSY ADMIN's confirmation that the run's months
+   * before the first live month have not been paid. Required for credit file / payout report / direct credit when the
+   * run covers such a month (server-enforced, audited). Ignored by preview / the review report.
+   */
+  @IsOptional()
+  @IsString()
+  confirmImportedMonthsKey?: string;
 }
 
 /**

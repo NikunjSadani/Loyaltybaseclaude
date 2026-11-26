@@ -296,3 +296,30 @@ describe('formulaVarRefs', () => {
     expect(formulaVarRefs('max(value, 10) + bonus')).toEqual(['value', 'bonus']);
   });
 });
+
+describe('Rule builder — rule period (audit fixes 2026-11-26)', () => {
+  it('Q-B1: the Monthly/Quarterly switch is locked on version 2+ (a version can never change kind)', async () => {
+    getRule.mockResolvedValue({ success: true, data: makeRow({ version: 2 }) });
+    render(<RuleBuilder ruleId="r1" />);
+    const sel = (await screen.findByLabelText('Rule period')) as HTMLSelectElement;
+    expect(sel.disabled).toBe(true);
+    expect(screen.getByText(/Create a new rule for a quarterly bonus/)).toBeInTheDocument();
+  });
+
+  it('Q-B2: switching a draft back to Monthly KEEPS the month settings and blocks save with a clear issue', async () => {
+    getRule.mockResolvedValue({
+      success: true,
+      data: makeRow({
+        evaluationBasis: 'QUARTER',
+        inputs: [{ ref: 'value', source: 'achievement:CASES_SOLD', month: 2, type: 'number', nullAs: 'reject' }],
+      }),
+    });
+    render(<RuleBuilder ruleId="r1" />);
+    const sel = (await screen.findByLabelText('Rule period')) as HTMLSelectElement;
+    expect(sel.disabled).toBe(false);
+    fireEvent.change(sel, { target: { value: 'PERIOD_AGGREGATE' } });
+    expect(await screen.findByText(/“month of the quarter” is only for quarterly rules/)).toBeInTheDocument();
+    fireEvent.change(sel, { target: { value: 'QUARTER' } });
+    expect((screen.getByLabelText('Which month of the quarter') as HTMLSelectElement).value).toBe('2'); // never stripped
+  });
+});

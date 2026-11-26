@@ -63,6 +63,14 @@ export function ruleKpiScopeWarning(
   return `KPI ${kpiCode} does not apply to this rule's ${parts.join(' or ')}. Outlets there are skipped in compute; the rest can earn.`;
 }
 
+/** First day (YYYY-MM-DD) of the FY quarter containing today — the default effective-from of a new quarterly rule. */
+function currentQuarterStart(): string {
+  const now = new Date();
+  const m = now.getMonth() + 1;
+  const first = m >= 4 ? 4 + Math.floor((m - 4) / 3) * 3 : 1;
+  return `${now.getFullYear()}-${String(first).padStart(2, '0')}-01`;
+}
+
 // Node types grouped by disclosure level for the "Add step" menu.
 const LEVEL_ORDER = ['Basic', 'Tiered', 'Conditional', 'Clamp', 'Advanced'] as const;
 const NODE_TYPES = Object.keys(NODE_META) as NodeType[];
@@ -292,22 +300,18 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
 
   const setInputs = (inputs: RuleInput[]) => patch({ inputs });
 
-  // Monthly ↔ quarterly. Going back to monthly drops the quarter-only settings (per-input month, narration) so the
-  // draft stays valid; the quarter placeholders in a gate reason are left for the author to edit (the validator says so).
+  // Monthly ↔ quarterly. Nothing is stripped silently: quarter-only settings (per-input month, narration, {m1}…
+  // placeholders) stay on the draft and "Fix these before saving" lists each one while the rule is Monthly.
+  // A brand-new quarterly rule defaults its effective-from to the first day of the current FY quarter.
+  // The period is fixed once a rule has more than one version (publishing a version retires the earlier ones).
   const quarterly = draft.evaluationBasis === 'QUARTER';
+  const basisLocked = version !== null && version > 1;
   const setBasis = (evaluationBasis: EvaluationBasis) => {
-    setDraft((d) => {
-      if (evaluationBasis === 'QUARTER') return { ...d, evaluationBasis };
-      const inputs = d.inputs.map((inp) => {
-        if (inp.month === undefined) return inp;
-        const next = { ...inp };
-        delete next.month;
-        return next;
-      });
-      const output = { ...d.output };
-      delete output.narration;
-      return { ...d, evaluationBasis, inputs, output };
-    });
+    setDraft((d) => ({
+      ...d,
+      evaluationBasis,
+      ...(evaluationBasis === 'QUARTER' && isNew ? { effectiveFrom: currentQuarterStart() } : {}),
+    }));
     setSaved(false);
     setDirty(true);
   };
@@ -646,14 +650,16 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
               <Field
                 label="Rule period"
                 hint={
-                  quarterly
-                    ? 'Computed only in a quarter run (FY quarters Apr–Jun, Jul–Sep, Oct–Dec, Jan–Mar). Inputs read month 1 / 2 / 3 of the quarter or the quarter total.'
-                    : 'Computed in each monthly run.'
+                  basisLocked
+                    ? 'Fixed: a rule cannot switch between monthly and quarterly across versions. Create a new rule for a quarterly bonus.'
+                    : quarterly
+                      ? 'Computed only in a quarter run (FY quarters Apr–Jun, Jul–Sep, Oct–Dec, Jan–Mar). Inputs read month 1 / 2 / 3 of the quarter or the quarter total.'
+                      : 'Computed in each monthly run.'
                 }
               >
                 <SelectField<EvaluationBasis>
                   value={draft.evaluationBasis ?? 'PERIOD_AGGREGATE'}
-                  disabled={readOnly}
+                  disabled={readOnly || basisLocked}
                   onChange={setBasis}
                   options={[
                     { value: 'PERIOD_AGGREGATE', label: 'Monthly' },
@@ -662,7 +668,11 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                 />
               </Field>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Effective from" required>
+                <Field
+                  label="Effective from"
+                  required
+                  hint={quarterly ? "Must start on or before the quarter's first day (1 Apr / 1 Jul / 1 Oct / 1 Jan). Only one version may cover a quarter." : undefined}
+                >
                   <input
                     type="date"
                     value={draft.effectiveFrom}
@@ -780,7 +790,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                 })()}
               </Field>
 
-              {quarterly && (
+              {(quarterly || !!draft.output.narration) && (
                 <Field
                   label="Credit narration"
                   className="sm:col-span-2"

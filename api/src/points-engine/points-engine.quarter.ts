@@ -69,6 +69,24 @@ export function parseQuarter(key: string): QuarterInfo | null {
   };
 }
 
+/** CreditBatch.sourceKind prefix of a QUARTER direct-credit batch: "POINTS_ENGINE_QUARTER:2026-Q3". */
+export const QUARTER_BATCH_SOURCE_PREFIX = 'POINTS_ENGINE_QUARTER:';
+
+/** The last calendar day of the quarter (UTC midnight). */
+export function quarterEndDate(info: QuarterInfo): Date {
+  const [y, m] = info.months[2].split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0));
+}
+
+/** The latest FY quarter whose three months have all ENDED before `currentMonth` ("YYYY-MM"). */
+export function latestEndedQuarterKey(currentMonth: string): string {
+  let key = quarterKeyForMonth(currentMonth);
+  // The quarter holding the current month has not ended — step back one quarter.
+  const [y, q] = [Number(key.slice(0, 4)), Number(key.slice(6))];
+  key = q === 1 ? `${y - 1}-Q4` : `${y}-Q${q - 1}`;
+  return key;
+}
+
 /** The FY quarter key a "YYYY-MM" month belongs to ("2026-11" → "2026-Q3", "2027-02" → "2026-Q4"). */
 export function quarterKeyForMonth(ym: string): string {
   const [y, m] = ym.split('-').map(Number);

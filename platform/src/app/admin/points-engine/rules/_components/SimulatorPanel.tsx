@@ -14,7 +14,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Play, AlertCircle, SkipForward, Sparkles, Loader2 } from 'lucide-react';
 import { simulate } from '@/lib/points-engine/api';
-import { VISIBILITY_SOURCES, type RuleConfigDraft, type SimulateResult, type TraceStep } from '@/lib/points-engine/types';
+import {
+  VISIBILITY_SOURCES,
+  latestEndedQuarterKey,
+  parseQuarterKey,
+  previousQuarterKey,
+  type RuleConfigDraft,
+  type SimulateResult,
+  type TraceStep,
+} from '@/lib/points-engine/types';
 import { labelCls } from './kit';
 
 interface SampleContext {
@@ -27,6 +35,12 @@ interface SampleContext {
 }
 
 const SIM_MONTHS = ['Month 1', 'Month 2', 'Month 3'] as const;
+
+/** Today's YYYY-MM (the default test quarter = the latest fully-ended FY quarter; labels only). */
+function currentMonthKeyLocal(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
 
 type VisKey = (typeof VISIBILITY_SOURCES)[number]['key'];
 
@@ -79,6 +93,18 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
     months: SIM_MONTHS.map(() => ({ achievements: {}, targets: {} })),
   });
   const quarterly = draft.evaluationBasis === 'QUARTER';
+  const quarterChoices = useMemo(() => {
+    const out: string[] = [];
+    let k = latestEndedQuarterKey(currentMonthKeyLocal());
+    for (let i = 0; i < 8; i++) {
+      out.push(k);
+      k = previousQuarterKey(k);
+    }
+    return out;
+  }, []);
+  const [simQuarter, setSimQuarter] = useState<string>(() => quarterChoices[0]);
+  const simQ = useMemo(() => parseQuarterKey(simQuarter), [simQuarter]);
+  const monthLabels = useMemo(() => (simQ ? simQ.monthLabels : [...SIM_MONTHS]), [simQ]);
   const [result, setResult] = useState<SimulateResult | null>(null);
   const [running, setRunning] = useState(false);
   const [callError, setCallError] = useState<string | null>(null);
@@ -101,7 +127,7 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
           for (const k of achKpis) a[k] = toNumOrNull(m.achievements[k] ?? '');
           const t: Record<string, number | null> = {};
           for (const k of tgtKpis) t[k] = toNumOrNull(m.targets[k] ?? '');
-          return { label: SIM_MONTHS[i], achievements: a, targets: t };
+          return { label: monthLabels[i], achievements: a, targets: t };
         })
       : null;
 
@@ -115,7 +141,7 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
       effectiveTo: draft.effectiveTo,
       ...(quarterly ? { evaluationBasis: 'QUARTER' as const } : {}),
       context: {
-        ...(months ? { months, quarterLabel: 'the quarter' } : {}),
+        ...(months ? { months, quarterLabel: simQ?.label ?? 'the quarter' } : {}),
         achievements,
         targets,
         segment: {
@@ -131,7 +157,7 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
     if (res.success) setResult(res.data);
     else setCallError(res.error ?? 'Simulation failed');
     setRunning(false);
-  }, [achKpis, tgtKpis, visKeys, ctx, draft, quarterly]);
+  }, [achKpis, tgtKpis, visKeys, ctx, draft, quarterly, monthLabels, simQ]);
 
   // Debounced auto-run whenever the draft or sample context changes.
   useEffect(() => {
@@ -185,7 +211,25 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
 
           {quarterly && (achKpis.length > 0 || tgtKpis.length > 0) && (
             <div className="space-y-2" data-testid="sim-quarter-months">
+              <div>
+                <label htmlFor="sim-quarter" className={labelCls}>Test quarter</label>
+                <select id="sim-quarter" value={simQuarter} onChange={(e) => setSimQuarter(e.target.value)} className={numCls}>
+                  {quarterChoices.map((k) => {
+                    const q = parseQuarterKey(k)!;
+                    return (
+                      <option key={k} value={k}>
+                        {q.label} ({q.fyLabel})
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
               <p className="text-[11px] text-gray-500">Quarterly rule — enter each month of the quarter (blank = missing for that month).</p>
+              <div className="grid grid-cols-3 gap-1.5 text-center text-[10px] font-semibold uppercase tracking-wide text-gray-500" data-testid="sim-month-labels">
+                {monthLabels.map((l) => (
+                  <span key={l}>{l}</span>
+                ))}
+              </div>
               {(
                 [
                   ...achKpis.map((k) => ({ which: 'achievements' as const, k, label: `Achievement · ${k}` })),
@@ -195,13 +239,13 @@ export function SimulatorPanel({ draft }: { draft: RuleConfigDraft }) {
                 <div key={`${which}-${k}`}>
                   <p className={labelCls}>{label}</p>
                   <div className="grid grid-cols-3 gap-1.5">
-                    {SIM_MONTHS.map((mLabel, i) => (
+                    {monthLabels.map((mLabel, i) => (
                       <input
                         key={mLabel}
                         type="number"
                         aria-label={`${label} · ${mLabel}`}
                         value={ctx.months[i][which][k] ?? ''}
-                        placeholder={`M${i + 1}`}
+                        placeholder={mLabel}
                         onChange={(e) => setMonth(i, which, k, e.target.value)}
                         className={numCls}
                       />

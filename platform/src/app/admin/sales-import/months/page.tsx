@@ -169,11 +169,13 @@ export default function SalesMonthsPage() {
     if (busyMonth) return;
     const label = monthLabel(row.month);
     const ds = row.downstream ?? { creditBatches: 0, exports: 0 };
-    const hasDownstream = ds.creditBatches > 0 || ds.exports > 0;
+    const quarterBatches = ds.quarterCreditBatches ?? [];
+    const hasDownstream = ds.creditBatches > 0 || ds.exports > 0 || quarterBatches.length > 0;
     const downstreamText = hasDownstream
       ? `\n\nPoints work already exists for ${label}: ${[
         ds.creditBatches ? `${ds.creditBatches} credit batch${ds.creditBatches === 1 ? '' : 'es'}` : '',
         ds.exports ? `${ds.exports} points export${ds.exports === 1 ? '' : 's'} / report download${ds.exports === 1 ? '' : 's'}` : '',
+        ...quarterBatches.map((q) => `QUARTERLY credit batch ${q.batchCode} (${q.label}) that used this month`),
       ].filter(Boolean).join(' and ')}. If the sales numbers change after reopening, those will no longer match and any ` +
         'difference must go through the existing reversal process. Reopen anyway?'
       : '';

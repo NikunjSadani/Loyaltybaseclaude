@@ -1,0 +1,422 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`MONTHLY compute — byte-identical to the pre-quarter service direct credit: queries, batch period, createBatch args, prior-batch count, result 1`] = `
+{
+  "commit": {
+    "batchCode": "CB-2026-02-003",
+    "batchId": "b1",
+    "counts": {
+      "error": 0,
+      "noRule": 0,
+      "ok": 2,
+      "skip": 1,
+      "total": 3,
+    },
+    "idempotentHit": false,
+    "period": "2026-02",
+    "priorBatchesThisPeriod": 2,
+    "sourceKey": "pe_19e2ef3720a26590ba8ba31e51ff4dccbbd0d6eac06ce7221f5cefb84c308875",
+    "status": "PENDING_CONFIRM",
+    "totalOutlets": 1,
+    "totalPoints": 200,
+  },
+  "createBatch": [
+    [
+      {
+        "period": "2026-02",
+        "rows": [
+          UploadRowDto {
+            "amount": 200,
+            "awardType": "POINTS",
+            "errors": [],
+            "fieldId": "cf1",
+            "fieldName": "Q1 Reward",
+            "narration": "",
+            "originalAmount": undefined,
+            "outletId": "O1",
+            "outletName": "Outlet O1",
+            "rowNum": 1,
+            "skipReason": undefined,
+            "status": "OK",
+          },
+        ],
+        "totalOutlets": 1,
+        "totalPayoutPaise": 0,
+        "totalPoints": 200,
+      },
+      {
+        "key": "pe_19e2ef3720a26590ba8ba31e51ff4dccbbd0d6eac06ce7221f5cefb84c308875",
+        "kind": "POINTS_ENGINE",
+      },
+    ],
+  ],
+  "creditBatchCount": [
+    [
+      {
+        "where": {
+          "clientId": "deoleo",
+          "id": {
+            "not": "b1",
+          },
+          "period": "2026-02",
+        },
+      },
+    ],
+  ],
+  "creditBatchFindFirst": [
+    [
+      {
+        "select": {
+          "id": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "sourceKey": "pe_19e2ef3720a26590ba8ba31e51ff4dccbbd0d6eac06ce7221f5cefb84c308875",
+        },
+      },
+    ],
+  ],
+  "creditFieldFindMany": [
+    [
+      {
+        "select": {
+          "id": true,
+          "isActive": true,
+          "name": true,
+          "outletTypeAwards": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "id": {
+            "in": [
+              "cf1",
+            ],
+          },
+        },
+      },
+    ],
+  ],
+  "getActiveForAttachment": [
+    [
+      "deoleo",
+      "GOLD",
+      null,
+      "CASES_SOLD",
+      2026-02-01T00:00:00.000Z,
+    ],
+  ],
+  "kpiDefFindMany": [
+    [
+      {
+        "select": {
+          "code": true,
+          "outletType": true,
+          "outletTypes": true,
+          "programs": true,
+          "subPrograms": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "code": {
+            "in": [
+              "CASES_SOLD",
+            ],
+          },
+        },
+      },
+    ],
+  ],
+  "outletFindMany": [
+    [
+      {
+        "orderBy": {
+          "outletCode": "asc",
+        },
+        "select": {
+          "metro": true,
+          "name": true,
+          "outletCode": true,
+          "outletType": {
+            "select": {
+              "code": true,
+            },
+          },
+          "programCategory": true,
+          "programName": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "deletedAt": null,
+        },
+      },
+    ],
+  ],
+  "pointsRuleFindMany": [
+    {
+      "select": {
+        "kpiCode": true,
+      },
+      "where": {
+        "OR": [
+          {
+            "effectiveTo": null,
+          },
+          {
+            "effectiveTo": {
+              "gte": "2026-02-01T00:00:00.000Z",
+            },
+          },
+        ],
+        "clientId": "deoleo",
+        "effectiveFrom": {
+          "lte": "2026-02-01T00:00:00.000Z",
+        },
+        "status": "published",
+      },
+    },
+  ],
+  "salesFindMany": [
+    [
+      {
+        "select": {
+          "kpiValues": true,
+          "outletCode": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "month": "2026-02",
+        },
+      },
+    ],
+  ],
+  "targetFindMany": [
+    [
+      {
+        "select": {
+          "outletCode": true,
+          "targetValues": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "month": "2026-02",
+        },
+      },
+    ],
+  ],
+}
+`;
+
+exports[`MONTHLY compute — byte-identical to the pre-quarter service preview: queries + result 1`] = `
+{
+  "createBatch": [],
+  "creditBatchCount": [],
+  "creditBatchFindFirst": [],
+  "creditFieldFindMany": [
+    [
+      {
+        "select": {
+          "id": true,
+          "isActive": true,
+          "name": true,
+          "outletTypeAwards": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "id": {
+            "in": [
+              "cf1",
+            ],
+          },
+        },
+      },
+    ],
+  ],
+  "getActiveForAttachment": [
+    [
+      "deoleo",
+      "GOLD",
+      null,
+      "CASES_SOLD",
+      2026-02-01T00:00:00.000Z,
+    ],
+  ],
+  "kpiDefFindMany": [
+    [
+      {
+        "select": {
+          "code": true,
+          "outletType": true,
+          "outletTypes": true,
+          "programs": true,
+          "subPrograms": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "code": {
+            "in": [
+              "CASES_SOLD",
+            ],
+          },
+        },
+      },
+    ],
+  ],
+  "outletFindMany": [
+    [
+      {
+        "orderBy": {
+          "outletCode": "asc",
+        },
+        "select": {
+          "metro": true,
+          "name": true,
+          "outletCode": true,
+          "outletType": {
+            "select": {
+              "code": true,
+            },
+          },
+          "programCategory": true,
+          "programName": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "deletedAt": null,
+        },
+      },
+    ],
+  ],
+  "pointsRuleFindMany": [
+    {
+      "select": {
+        "kpiCode": true,
+      },
+      "where": {
+        "OR": [
+          {
+            "effectiveTo": null,
+          },
+          {
+            "effectiveTo": {
+              "gte": "2026-02-01T00:00:00.000Z",
+            },
+          },
+        ],
+        "clientId": "deoleo",
+        "effectiveFrom": {
+          "lte": "2026-02-01T00:00:00.000Z",
+        },
+        "status": "published",
+      },
+    },
+  ],
+  "preview": {
+    "clientId": "deoleo",
+    "counts": {
+      "error": 0,
+      "noRule": 0,
+      "ok": 2,
+      "skip": 1,
+      "total": 3,
+    },
+    "directCreditEnabled": true,
+    "engineDisabled": false,
+    "filter": {
+      "kpiCode": null,
+      "program": null,
+    },
+    "payoutKey": "pp_d70937eba880e22952ab87d9f49492678a7d5b75908f36e92d60cf581d7db3ba",
+    "period": "2026-02",
+    "rows": [
+      {
+        "achievement": 100,
+        "awardType": "POINTS",
+        "explanation": "gate passed: target=80 > 0 → rate "n1": 100 × 2 → +200 → 200 pts",
+        "fieldId": "cf1",
+        "fieldName": "Q1 Reward",
+        "kpiCode": "CASES_SOLD",
+        "outletCode": "O1",
+        "outletName": "Outlet O1",
+        "points": 200,
+        "program": "GOLD",
+        "programCategory": null,
+        "ruleId": "rule_cases",
+        "ruleVersion": 3,
+        "status": "OK",
+        "target": 80,
+      },
+      {
+        "achievement": 50,
+        "awardType": "POINTS",
+        "explanation": "gate FAILED (target=0 > 0) → failAs 'zero', rule → 0: Target is 0 → 0 pts",
+        "fieldId": "cf1",
+        "fieldName": "Q1 Reward",
+        "kpiCode": "CASES_SOLD",
+        "outletCode": "O2",
+        "outletName": "Outlet O2",
+        "points": 0,
+        "program": "GOLD",
+        "programCategory": null,
+        "reason": "Target is 0",
+        "ruleId": "rule_cases",
+        "ruleVersion": 3,
+        "status": "OK",
+        "target": 0,
+      },
+      {
+        "achievement": null,
+        "awardType": "POINTS",
+        "fieldId": "cf1",
+        "fieldName": "Q1 Reward",
+        "kpiCode": "CASES_SOLD",
+        "outletCode": "O3",
+        "outletName": "Outlet O3",
+        "program": "GOLD",
+        "programCategory": null,
+        "reason": "Missing/invalid input(s): value (kpi:CASES_SOLD)",
+        "ruleId": "rule_cases",
+        "ruleVersion": 3,
+        "status": "SKIP",
+        "target": null,
+      },
+    ],
+    "ruleVersionsUsed": [
+      {
+        "ruleId": "rule_cases",
+        "version": 3,
+      },
+    ],
+    "sourceKey": "pe_19e2ef3720a26590ba8ba31e51ff4dccbbd0d6eac06ce7221f5cefb84c308875",
+    "totalPayoutRupees": 0,
+    "totalPoints": 200,
+  },
+  "salesFindMany": [
+    [
+      {
+        "select": {
+          "kpiValues": true,
+          "outletCode": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "month": "2026-02",
+        },
+      },
+    ],
+  ],
+  "targetFindMany": [
+    [
+      {
+        "select": {
+          "outletCode": true,
+          "targetValues": true,
+        },
+        "where": {
+          "clientId": "deoleo",
+          "month": "2026-02",
+        },
+      },
+    ],
+  ],
+}
+`;

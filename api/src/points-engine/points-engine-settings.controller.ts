@@ -43,6 +43,7 @@ export class PointsEngineSettingsController {
       clientId,
       enabled: s.pointsEngine.enabled,
       directCreditEnabled: s.pointsEngine.directCreditEnabled,
+      firstLiveMonth: s.pointsEngine.firstLiveMonth ?? null,
     };
   }
 
@@ -67,9 +68,18 @@ export class PointsEngineSettingsController {
         'You can only change Points Engine settings for the brand you are currently working in. Switch into that brand, or exit to an un-assumed Gifsy session.',
       );
     }
+    // firstLiveMonth omitted → keep the stored value (the flag toggles must never wipe the imported-months guard).
+    const firstLiveMonth =
+      dto.firstLiveMonth === undefined
+        ? await this.tenantSettings.getPointsEngineFirstLiveMonthUncached(dto.clientId)
+        : dto.firstLiveMonth;
     const settingDto: UpsertSettingDto = {
       key: 'pointsEngine',
-      value: { enabled: dto.enabled, directCreditEnabled: dto.directCreditEnabled },
+      value: {
+        enabled: dto.enabled,
+        directCreditEnabled: dto.directCreditEnabled,
+        ...(firstLiveMonth ? { firstLiveMonth } : {}),
+      },
       category: 'pointsEngine',
       description:
         'Points Compute Engine per-tenant flags (preview enabled + Gifsy-gated in-portal direct crediting).',
@@ -81,6 +91,7 @@ export class PointsEngineSettingsController {
       clientId: dto.clientId,
       enabled: dto.enabled,
       directCreditEnabled: dto.directCreditEnabled,
+      firstLiveMonth: firstLiveMonth ?? null,
     };
   }
 }

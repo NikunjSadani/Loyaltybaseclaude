@@ -12,7 +12,9 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import type { RuleConfigDraft, RuleInput } from '@/lib/points-engine/types';
-import { parseQuarterKey, quarterKeyForMonth } from '@/lib/points-engine/types';
+import { latestEndedQuarterKey, parseQuarterKey, quarterKeyForMonth } from '@/lib/points-engine/types';
+
+const nowYm = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
 
 vi.mock('@/lib/points-engine/api', () => ({ simulate: vi.fn() }));
 
@@ -70,8 +72,12 @@ describe('SimulatorPanel — quarterly', () => {
   it('Q2: asks for 3 months per KPI and sends evaluationBasis QUARTER + months', async () => {
     render(<SimulatorPanel draft={BSC} />);
     expect(screen.getByTestId('sim-quarter-months')).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('Achievement · TOTAL · Month 2'), { target: { value: '1600' } });
-    fireEvent.change(screen.getByLabelText('Achievement · BSC_CASES · Month 3'), { target: { value: '30' } });
+    // Columns are labelled with the test quarter's real months (default = the latest fully-ended FY quarter).
+    const labels = [...screen.getByTestId('sim-month-labels').querySelectorAll('span')].map((s) => s.textContent);
+    const expected = parseQuarterKey(latestEndedQuarterKey(nowYm()))!.monthLabels;
+    expect(labels).toEqual(expected);
+    fireEvent.change(screen.getByLabelText(`Achievement · TOTAL · ${expected[1]}`), { target: { value: '1600' } });
+    fireEvent.change(screen.getByLabelText(`Achievement · BSC_CASES · ${expected[2]}`), { target: { value: '30' } });
     await waitFor(() => {
       const last = simulate.mock.calls.at(-1)?.[0];
       expect(last?.evaluationBasis).toBe('QUARTER');
@@ -79,6 +85,8 @@ describe('SimulatorPanel — quarterly', () => {
       expect(last?.context.months?.[1].achievements).toEqual({ TOTAL: 1600, BSC_CASES: null });
       expect(last?.context.months?.[2].achievements).toEqual({ TOTAL: null, BSC_CASES: 30 });
       expect(last?.context.months?.[0].targets).toEqual({ TOTAL: null });
+      expect(last?.context.months?.map((m) => m.label)).toEqual(expected);
+      expect(last?.context.quarterLabel).toBe(parseQuarterKey(latestEndedQuarterKey(nowYm()))!.label);
     });
   });
 
@@ -107,5 +115,24 @@ describe('draftIssues + helpers — quarterly', () => {
     expect(parseQuarterKey('2026-11')).toBeNull();
     expect(quarterKeyForMonth('2027-01')).toBe('2026-Q4');
     expect(quarterKeyForMonth('2026-07')).toBe('2026-Q2');
+  });
+});
+
+describe('audit fixes — quarterly builder rules', () => {
+  it('A8/A9: a Monthly rule keeping quarter-only settings is BLOCKED with clear issues (nothing stripped silently)', () => {
+    const monthly: RuleConfigDraft = {
+      ...BSC,
+      evaluationBasis: 'PERIOD_AGGREGATE',
+      pipeline: [
+        { type: 'gate', id: 'g', when: { op: 'gt', left: { var: 'tot_tgt_m1' }, right: { lit: 0 } }, onFail: 'zero', failAs: 'zero', failReason: '{m1}: no target' },
+        { type: 'segmentFilter', id: 's', field: 'outletType', allow: ['WS'], onFail: 'zero', failReason: 'Not a wholesaler outlet' },
+      ],
+    };
+    const b = draftIssues(monthly).blocking.join(' | ');
+    expect(b).toMatch(/“month of the quarter” is only for quarterly rules/);
+    expect(b).toMatch(/\{m1\} \/ \{m2\} \/ \{m3\} \/ \{quarter\} in a reason only work on a quarterly rule/);
+    expect(b).toMatch(/filter's reason is only shown on a quarterly rule/);
+    expect(b).toMatch(/credit narration is only used by quarterly rules/);
+    expect(draftIssues({ ...monthly, evaluationBasis: 'QUARTER' }).blocking).toEqual([]);
   });
 });
