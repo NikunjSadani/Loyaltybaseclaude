@@ -21,7 +21,7 @@ import { useAdminSession } from '@/lib/admin-session';
 import type { PointsRuleRow, RuleStatus } from '@/lib/points-engine/types';
 import {
   StatusBadge, ruleTitle, creditFieldLabel, ruleNameIssue, duplicateRuleNameWarning, cleanRuleName,
-  RULE_NAME_PLACEHOLDER, inputCls, programCell, sortRules, type RuleSortKey,
+  RULE_NAME_PLACEHOLDER, inputCls, programCell, sortRules, type RuleSortKey, BLANK_LABEL, SUB_BLANK,
 } from './_components/kit';
 
 type CreditFieldLite = { id: string; name: string; isActive: boolean };
@@ -69,13 +69,16 @@ export default function PointsRulesPage() {
     setRenameError(null);
     setNotice(null);
   };
-  const submitRename = async () => {
+  /** Save a new name, or `clear` → "Remove name" (null). Renames every version, audited; no new version. */
+  const submitRename = async (clear = false) => {
     if (!renameFor) return;
-    const issue = ruleNameIssue(renameValue, true);
-    if (issue) { setRenameError(issue); return; }
+    if (!clear) {
+      const issue = ruleNameIssue(renameValue, true);
+      if (issue) { setRenameError(issue); return; }
+    }
     setRenameBusy(true);
     setRenameError(null);
-    const res = await renameRule(renameFor.id, cleanRuleName(renameValue));
+    const res = await renameRule(renameFor.id, clear ? '' : cleanRuleName(renameValue));
     if (res.success) {
       const newName = res.data.name ?? null;
       setRules((rs) => rs.map((x) => (x.ruleId === renameFor.ruleId ? { ...x, name: newName } : x)));
@@ -112,6 +115,7 @@ export default function PointsRulesPage() {
   }, [load]);
 
   // Sub-programme filter (client-side, case-insensitive contains; "all" matches rules with no sub-programme) + sort.
+  // '' = every rule; SUB_BLANK = rules with NO sub-programme (they apply to all); otherwise an exact value.
   const [subQ, setSubQ] = useState('');
   const [sortKey, setSortKey] = useState<RuleSortKey | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -120,10 +124,16 @@ export default function PointsRulesPage() {
     else { setSortKey(k); setSortDir('asc'); }
   };
   const shown = useMemo(() => {
-    const q = subQ.trim().toLowerCase();
-    const filtered = q ? rules.filter((r) => programCell(r.programCategory).toLowerCase().includes(q)) : rules;
+    const filtered =
+      subQ === '' ? rules
+        : subQ === SUB_BLANK ? rules.filter((r) => !r.programCategory?.trim())
+          : rules.filter((r) => (r.programCategory ?? '').trim() === subQ);
     return sortRules(filtered, sortKey, sortDir);
   }, [rules, subQ, sortKey, sortDir]);
+  const subOptions = useMemo(
+    () => [...new Set(rules.map((r) => (r.programCategory ?? '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b)),
+    [rules],
+  );
   const sortHeader = (k: RuleSortKey, label: string, cls: string) => (
     <th className={cls} aria-sort={sortKey === k ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
       <button
@@ -201,16 +211,18 @@ export default function PointsRulesPage() {
             className="w-44 rounded-xl border border-gray-200 py-2 pl-9 pr-3 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
           />
         </div>
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-          <input
-            value={subQ}
-            onChange={(e) => setSubQ(e.target.value)}
-            placeholder="Filter by sub-programme…"
-            aria-label="Filter by sub-programme"
-            className="w-48 rounded-xl border border-gray-200 py-2 pl-9 pr-3 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
-          />
-        </div>
+        <select
+          value={subQ}
+          onChange={(e) => setSubQ(e.target.value)}
+          aria-label="Filter by sub-programme"
+          className="w-52 rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
+        >
+          <option value="">Any sub-programme</option>
+          <option value={SUB_BLANK}>{BLANK_LABEL}</option>
+          {subOptions.map((v) => (
+            <option key={v} value={v}>{v}</option>
+          ))}
+        </select>
       </div>
 
       {notice && (
@@ -221,7 +233,7 @@ export default function PointsRulesPage() {
           <p className="text-sm font-semibold text-gray-900">
             Rename <span className="font-mono text-xs text-gray-500">{renameFor.ruleId}</span>
           </p>
-          <p className="text-xs text-gray-500">The name is shown in lists, previews and reports. Renaming does not create a new version and never changes what the rule pays.</p>
+          <p className="text-xs text-gray-500">The name is shown in lists, previews and reports. Renaming applies to EVERY version of this rule, does not create a new version, never changes what the rule pays, and is recorded in the audit log.</p>
           <input
             value={renameValue}
             autoFocus
@@ -245,6 +257,16 @@ export default function PointsRulesPage() {
             >
               {renameBusy ? 'Saving…' : 'Save name'}
             </button>
+            {cleanRuleName(renameFor.name) !== '' && (
+              <button
+                type="button"
+                onClick={() => { if (confirm('Remove the name from every version of this rule? It will show as “Unnamed rule”.')) void submitRename(true); }}
+                disabled={renameBusy}
+                className="rounded-xl border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-60"
+              >
+                Remove name
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setRenameFor(null)}

@@ -67,14 +67,23 @@ describe('Points rule name — store', () => {
     kpiDef: { findMany: jest.fn() },
     outlet: { findMany: jest.fn() },
     $transaction: jest.fn(),
+    $executeRaw: jest.fn(),
   };
   let svc: PointsEngineService;
+
+  /** The raw name UPDATE calls as { sql, values }. */
+  const rawCalls = () =>
+    prisma.$executeRaw.mock.calls.map(([strings, ...values]: [TemplateStringsArray, ...unknown[]]) => ({
+      sql: strings.join('?'),
+      values,
+    }));
 
   beforeEach(() => {
     jest.clearAllMocks();
     prisma.$transaction.mockImplementation(async (cb: (tx: typeof prisma) => unknown) => cb(prisma));
-    prisma.pointsRule.create.mockImplementation(async ({ data }: { data: unknown }) => data);
+    prisma.pointsRule.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => ({ id: 'row_new', ...data }));
     prisma.pointsRule.update.mockImplementation(async ({ data }: { data: unknown }) => data);
+    prisma.$executeRaw.mockResolvedValue(1);
     svc = new PointsEngineService(prisma as unknown as PrismaService);
   });
 
@@ -89,6 +98,7 @@ describe('Points rule name — store', () => {
   it('createDraft stores the trimmed name on a brand-new rule; a blank name is a 400 before any write', async () => {
     await svc.createDraft(clientAdmin, validDto({ name: '  Unnati – ADHO 2.5% ' }));
     expect(prisma.pointsRule.create.mock.calls[0][0].data.name).toBe('Unnati – ADHO 2.5%');
+    expect(prisma.auditLog.create).not.toHaveBeenCalled(); // a brand-new rule is not a rename
 
     await expect(svc.createDraft(clientAdmin, validDto({ name: '  ' }))).rejects.toThrow(BadRequestException);
     expect(prisma.pointsRule.create).toHaveBeenCalledTimes(1);
@@ -99,34 +109,56 @@ describe('Points rule name — store', () => {
     expect(prisma.pointsRule.create.mock.calls[0][0].data.name).toBeNull();
   });
 
-  it('a NEW VERSION inherits the latest version name by default; an explicit name overrides it', async () => {
-    prisma.pointsRule.findMany.mockResolvedValue([
-      { version: 1, status: 'archived', evaluationBasis: 'PERIOD_AGGREGATE', name: 'Old' },
-      { version: 2, status: 'published', evaluationBasis: 'PERIOD_AGGREGATE', name: 'Unnati – ADHO 2.5%' },
-    ]);
+  it('a NEW VERSION inherits the rule name; a DIFFERENT supplied name renames every version (audited, same tx)', async () => {
+    prisma.pointsRule.findMany
+      .mockResolvedValueOnce([
+        { version: 1, status: 'archived', evaluationBasis: 'PERIOD_AGGREGATE', name: 'Unnati – ADHO 2.5%' },
+        { version: 2, status: 'published', evaluationBasis: 'PERIOD_AGGREGATE', name: 'Unnati – ADHO 2.5%' },
+      ]);
     await svc.createDraft(clientAdmin, validDto({ ruleId: 'rule_cases' }));
-    let data = prisma.pointsRule.create.mock.calls[0][0].data;
+    const data = prisma.pointsRule.create.mock.calls[0][0].data;
     expect(data.version).toBe(3);
     expect(data.name).toBe('Unnati – ADHO 2.5%');
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
 
-    await svc.createDraft(clientAdmin, validDto({ ruleId: 'rule_cases', name: 'New name' }));
-    data = prisma.pointsRule.create.mock.calls[1][0].data;
-    expect(data.name).toBe('New name');
+    prisma.pointsRule.findMany
+      .mockResolvedValueOnce([{ version: 2, status: 'published', evaluationBasis: 'PERIOD_AGGREGATE', name: 'Old' }])
+      .mockResolvedValueOnce([{ id: 'row_2', version: 2, name: 'Old' }, { id: 'row_new', version: 3, name: 'Old' }]);
+    const out = await svc.createDraft(clientAdmin, validDto({ ruleId: 'rule_cases', name: 'New name' }));
+    expect(out.name).toBe('New name');
+    expect(rawCalls()[0].values).toEqual(['New name', 'deoleo', 'rule_cases']);
+    expect(prisma.auditLog.create.mock.calls[0][0].data.metadata.via).toBe('new_version');
   });
 
-  it('updateDraft: an omitted name keeps the stored one; a name edits it; null clears it', async () => {
-    prisma.pointsRule.findFirst.mockResolvedValue(ruleRow({ status: 'draft', name: 'Keep me' }));
-    await svc.updateDraft(clientAdmin, 'row_1', validDto());
+  it('updateDraft: omitted name → config only (no rename); a CHANGED name renames ALL versions (audited); null clears', async () => {
+    const draft = ruleRow({ id: 'row_3', version: 3, status: 'draft', name: 'Keep me' });
+    prisma.pointsRule.findFirst.mockResolvedValue(draft);
+    prisma.pointsRule.findMany.mockResolvedValue([
+      { id: 'row_3', version: 3, name: 'Keep me' },
+      { id: 'row_2', version: 2, name: 'Keep me' },
+    ]);
+
+    await svc.updateDraft(clientAdmin, 'row_3', validDto());
     expect('name' in prisma.pointsRule.update.mock.calls[0][0].data).toBe(false);
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
 
-    await svc.updateDraft(clientAdmin, 'row_1', validDto({ name: ' Edited ' }));
-    expect(prisma.pointsRule.update.mock.calls[1][0].data.name).toBe('Edited');
+    // Same name re-sent → nothing to rename, no audit row.
+    await svc.updateDraft(clientAdmin, 'row_3', validDto({ name: ' Keep me ' }));
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
+    expect(prisma.auditLog.create).not.toHaveBeenCalled();
 
-    await svc.updateDraft(clientAdmin, 'row_1', validDto({ name: null }));
-    expect(prisma.pointsRule.update.mock.calls[2][0].data.name).toBeNull();
+    await svc.updateDraft(clientAdmin, 'row_3', validDto({ name: ' Edited ' }));
+    expect('name' in prisma.pointsRule.update.mock.calls[2][0].data).toBe(false); // name never via the config update
+    expect(rawCalls()[0]).toMatchObject({ values: ['Edited', 'deoleo', 'rule_cases'] });
+    expect(prisma.auditLog.create.mock.calls[0][0].data).toMatchObject({
+      entityType: 'POINTS_RULE_RENAME', newValues: { name: 'Edited' }, metadata: { via: 'draft_save', versions: 2 },
+    });
+
+    await svc.updateDraft(clientAdmin, 'row_3', validDto({ name: null }));
+    expect(rawCalls()[1].values).toEqual([null, 'deoleo', 'rule_cases']);
   });
 
-  it('a PUBLISHED rule cannot be edited via updateDraft, but CAN be renamed — no new version, only `name` written, audited', async () => {
+  it('a PUBLISHED rule CAN be renamed — no new version, only `name` written (updatedAt untouched), audited', async () => {
     const published = ruleRow({ id: 'row_3', version: 3, status: 'published', name: null });
     prisma.pointsRule.findFirst
       .mockResolvedValueOnce(published) // loadForWrite
@@ -138,18 +170,16 @@ describe('Points rule name — store', () => {
 
     const out = await svc.rename(clientAdmin, 'row_3', '  Unnati – ADHO 2.5% ');
 
-    // Identity + version unchanged; nothing else written; no new version created.
     expect(out.version).toBe(3);
     expect(out.ruleId).toBe('rule_cases');
     expect(out.status).toBe('published');
     expect(prisma.pointsRule.create).not.toHaveBeenCalled();
     expect(prisma.pointsRule.update).not.toHaveBeenCalled();
-    expect(prisma.pointsRule.updateMany).toHaveBeenCalledTimes(1);
-    expect(prisma.pointsRule.updateMany).toHaveBeenCalledWith({
-      where: { clientId: 'deoleo', ruleId: 'rule_cases' },
-      data: { name: 'Unnati – ADHO 2.5%' },
-    });
-    // Audited with before/after per version.
+    expect(prisma.pointsRule.updateMany).not.toHaveBeenCalled(); // Prisma would bump @updatedAt
+    const [call] = rawCalls();
+    expect(call.sql).toMatch(/UPDATE "points_rules" SET "name" = \? WHERE "clientId" = \? AND "ruleId" = \?/);
+    expect(call.sql).not.toMatch(/updatedAt/);
+    expect(call.values).toEqual(['Unnati – ADHO 2.5%', 'deoleo', 'rule_cases']);
     const audit = prisma.auditLog.create.mock.calls[0][0].data;
     expect(audit).toMatchObject({
       action: 'UPDATE',
@@ -157,8 +187,19 @@ describe('Points rule name — store', () => {
       entityId: 'rule_cases',
       actorId: 'u_client',
       newValues: { name: 'Unnati – ADHO 2.5%' },
+      metadata: { via: 'rename' },
     });
     expect(audit.oldValues.names).toEqual([{ version: 3, name: null }, { version: 2, name: 'Legacy' }]);
+  });
+
+  it('"Remove name": rename to null clears every version and is audited', async () => {
+    const r = ruleRow({ name: 'Old' });
+    prisma.pointsRule.findFirst.mockResolvedValueOnce(r).mockResolvedValueOnce({ ...r, name: null });
+    prisma.pointsRule.findMany.mockResolvedValue([{ id: 'row_1', version: 3, name: 'Old' }]);
+    const out = await svc.rename(clientAdmin, 'row_1', null);
+    expect(out.name).toBeNull();
+    expect(rawCalls()[0].values).toEqual([null, 'deoleo', 'rule_cases']);
+    expect(prisma.auditLog.create.mock.calls[0][0].data.newValues).toEqual({ name: null });
   });
 
   it('rename is tenant-scoped (another tenant’s rule → 404, no write) and requires a name field', async () => {
@@ -167,7 +208,7 @@ describe('Points rule name — store', () => {
     expect(prisma.pointsRule.findFirst.mock.calls[0][0].where).toEqual({ id: 'other_tenant_row', clientId: 'deoleo' });
     await expect(svc.rename(clientAdmin, 'row_1', undefined)).rejects.toThrow(BadRequestException);
     await expect(svc.rename(clientAdmin, 'row_1', '   ')).rejects.toThrow(BadRequestException);
-    expect(prisma.pointsRule.updateMany).not.toHaveBeenCalled();
+    expect(prisma.$executeRaw).not.toHaveBeenCalled();
     expect(prisma.auditLog.create).not.toHaveBeenCalled();
   });
 
@@ -177,7 +218,7 @@ describe('Points rule name — store', () => {
     prisma.pointsRule.findMany.mockResolvedValue([{ id: 'row_1', version: 3, name: null }]);
     await svc.rename(owner, 'row_1', 'N');
     expect(prisma.pointsRule.findFirst.mock.calls[0][0].where).toEqual({ id: 'row_1' });
-    expect(prisma.pointsRule.updateMany.mock.calls[0][0].where).toEqual({ clientId: 'bajaj', ruleId: 'rule_cases' });
+    expect(rawCalls()[0].values).toEqual(['N', 'bajaj', 'rule_cases']);
   });
 });
 

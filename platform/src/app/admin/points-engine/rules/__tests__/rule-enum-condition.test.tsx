@@ -4,10 +4,10 @@
  * number-only field, so "metro = Non Metro" could not be entered.
  *
  *  - EC1: left = enum input → the Value control is a DROPDOWN of that input's allowed values (text, not a number)
- *  - EC2: comparison ops are limited to = / ≠ for a text comparison; an ordering op is switched to =
- *  - EC3: a number literal against an enum is replaced by the first allowed value
+ *  - EC2: comparison ops offered are = / ≠ for a text comparison
+ *  - EC3: picking an enum input NEVER silently changes the stored op / Value — a visible warning says what to fix
  *  - EC4: number inputs keep the number box and all six ops (unchanged)
- *  - EC5: switching Input → Value on an enum comparison starts at the first allowed value (never 0)
+ *  - EC5: switching Input → Value on an enum comparison starts EMPTY ("pick a value", flagged) — never a guessed value
  *  - EC6: draftIssues warns on enum comparisons that can never match (ordering op, number, unknown value)
  */
 
@@ -63,13 +63,24 @@ describe('Enum (text) conditions', () => {
     expect(state().op).toBe('neq');
   });
 
-  it('EC2b + EC3: picking an enum input on a ≥ 0 condition switches to = and the first allowed value', () => {
+  it('EC3: picking an enum input on a ≥ 0 condition keeps op + Value as stored and shows a visible warning until fixed', () => {
     const state = setup({ op: 'gte', left: { var: 'value' }, right: { lit: 0 } });
-    // Left var select = the one listing input refs.
     const leftVar = selects().find((s) => [...s.options].some((o) => o.value === 'metro'))!;
     fireEvent.change(leftVar, { target: { value: 'metro' } });
-    expect(state()).toEqual({ op: 'eq', left: { var: 'metro' }, right: { lit: 'Metro' } });
-    expect(screen.getByLabelText('Value for metro')).toHaveValue('Metro');
+    // Nothing silently changed.
+    expect(state()).toEqual({ op: 'gte', left: { var: 'metro' }, right: { lit: 0 } });
+    expect(screen.getByLabelText('Value for metro')).toHaveValue('0');
+    expect(screen.getByText('0 — value not in the allowed list')).toBeInTheDocument();
+    const warn = screen.getByTestId('condition-warning');
+    expect(warn).toHaveTextContent(/use = or ≠/);
+    expect(warn).toHaveTextContent(/compared with the number 0/);
+
+    // The author fixes it -> the warning disappears.
+    const opSelect = selects().find((s) => [...s.options].some((o) => o.value === 'neq'))!;
+    fireEvent.change(opSelect, { target: { value: 'eq' } });
+    fireEvent.change(screen.getByLabelText('Value for metro'), { target: { value: 'Non Metro' } });
+    expect(state()).toEqual({ op: 'eq', left: { var: 'metro' }, right: { lit: 'Non Metro' } });
+    expect(screen.queryByTestId('condition-warning')).not.toBeInTheDocument();
   });
 
   it('EC4: a number input keeps the number box and all six ops', () => {
@@ -79,17 +90,20 @@ describe('Enum (text) conditions', () => {
     expect(opSelect.options).toHaveLength(6);
   });
 
-  it('EC5: switching the right side from Input to Value on an enum comparison starts at the first allowed value', () => {
+  it('EC5: switching the right side from Input to Value on an enum comparison starts EMPTY and asks for a value', () => {
     const state = setup({ op: 'eq', left: { var: 'metro' }, right: { var: 'value' } });
     const rightKind = selects().filter((s) => [...s.options].some((o) => o.value === 'lit'))[1];
     fireEvent.change(rightKind, { target: { value: 'lit' } });
-    expect(state().right).toEqual({ lit: 'Metro' });
+    expect(state().right).toEqual({ lit: '' });
+    expect(screen.getByText('— pick a value —')).toBeInTheDocument();
+    expect(screen.getByTestId('condition-warning')).toHaveTextContent(/pick a value for "metro"/);
   });
 
   it('EC1b: a stored value outside the allowed list is shown and flagged (never silently replaced)', () => {
     setup({ op: 'eq', left: { var: 'metro' }, right: { lit: 'Urban' } });
     expect(screen.getByLabelText('Value for metro')).toHaveValue('Urban');
-    expect(screen.getByText('Urban (not an allowed value of metro)')).toBeInTheDocument();
+    expect(screen.getByText('Urban — value not in the allowed list')).toBeInTheDocument();
+    expect(screen.getByTestId('condition-warning')).toHaveTextContent(/value not in the allowed list/);
   });
 
   it('EC6: draftIssues warns (non-blocking) on enum comparisons that can never match', () => {
@@ -119,6 +133,6 @@ describe('Enum (text) conditions', () => {
     expect(bad.warnings.join(' ')).toMatch(/compared with the number 0/);
 
     const unknown = draftIssues(draft({ op: 'eq', left: { var: 'metro' }, right: { lit: 'Urban' } }));
-    expect(unknown.warnings.join(' ')).toMatch(/"Urban" is not an allowed value/);
+    expect(unknown.warnings.join(' ')).toMatch(/"Urban" — value not in the allowed list/);
   });
 });

@@ -246,8 +246,8 @@ export function OperandPicker({
   const litIsNumber = !isVarOperand(value) && typeof value.lit === 'number';
   const selCls = `${inputCls} disabled:bg-gray-100 disabled:text-gray-400`;
   const enumLit = !numericOnly && literal?.kind === 'enum' ? literal : null;
-  // A fresh Value defaults to the right TYPE: the first allowed value for an enum comparison, else 0.
-  const freshLit = (): Operand => (enumLit ? { lit: enumLit.values[0] ?? '' } : { lit: 0 });
+  // A fresh Value for an enum comparison starts EMPTY ("— pick a value —", flagged) — never a silently chosen value.
+  const freshLit = (): Operand => (enumLit ? { lit: '' } : { lit: 0 });
 
   return (
     <div className="flex gap-1.5">
@@ -291,7 +291,7 @@ export function OperandPicker({
               className={`${selCls} ${known ? '' : 'border-red-300 text-red-700'}`}
             >
               {!known && (
-                <option value={cur}>{cur === '' ? '— pick a value —' : `${cur} (not an allowed value of ${enumLit.ref})`}</option>
+                <option value={cur}>{cur === '' ? '— pick a value —' : `${cur} — value not in the allowed list`}</option>
               )}
               {enumLit.values.map((v) => (
                 <option key={v} value={v}>
@@ -525,7 +525,8 @@ export function enumConditionWarnings(p: Predicate, vars: VarOption[], where: st
     if (!TEXT_OPS.has(c.op)) out.push(`${where}: "${ev.ref}" is text — use = or ≠ (≥ ≤ > < never match text).`);
     if (!isVarOperand(other)) {
       if (typeof other.lit === 'number') out.push(`${where}: "${ev.ref}" is text but is compared with the number ${other.lit} — pick one of its values.`);
-      else if (!(ev.values ?? []).includes(other.lit)) out.push(`${where}: "${other.lit}" is not an allowed value of "${ev.ref}" (${(ev.values ?? []).join(', ')}), so it never matches.`);
+      else if (other.lit === '') out.push(`${where}: pick a value for "${ev.ref}" (${(ev.values ?? []).join(', ')}).`);
+      else if (!(ev.values ?? []).includes(other.lit)) out.push(`${where}: "${other.lit}" — value not in the allowed list of "${ev.ref}" (${(ev.values ?? []).join(', ')}), so it never matches.`);
     }
   }
   return out;
@@ -708,10 +709,12 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
 export const QUARTER_PLACEHOLDERS = ['{m1}', '{m2}', '{m3}', '{quarter}'] as const;
 
 // ── Rules list: program / sub-programme / KPI columns + sort ─────────────────────────
-/** Blank program / sub-programme on a rule = it matches ALL of them. */
-const ALL = 'All';
+/** Blank program / sub-programme on a rule = it matches ALL of them — shown as "All (blank)". */
+export const BLANK_LABEL = 'All (blank)';
+/** Sub-programme filter value meaning "rules with no sub-programme". */
+export const SUB_BLANK = '__blank__';
 export function programCell(v: string | null | undefined): string {
-  return v && v.trim() ? v : ALL;
+  return v && v.trim() ? v : BLANK_LABEL;
 }
 
 export type RuleSortKey = 'program' | 'subProgram' | 'kpi' | 'status';
@@ -720,15 +723,21 @@ const STATUS_ORDER: Record<RuleStatus, number> = { published: 0, draft: 1, archi
 /** Client-side sort of the loaded rows (stable; ties keep the server order: ruleId asc, version desc). */
 export function sortRules(rows: PointsRuleRow[], key: RuleSortKey | null, dir: 'asc' | 'desc'): PointsRuleRow[] {
   if (!key) return rows;
+  // Program / sub-programme: a BLANK ("All (blank)") always sorts FIRST, in either direction.
+  const blank = (r: PointsRuleRow): boolean =>
+    key === 'program' ? !r.program?.trim() : key === 'subProgram' ? !r.programCategory?.trim() : false;
   const val = (r: PointsRuleRow): string | number =>
-    key === 'program' ? programCell(r.program).toLowerCase()
-      : key === 'subProgram' ? programCell(r.programCategory).toLowerCase()
+    key === 'program' ? (r.program ?? '').trim().toLowerCase()
+      : key === 'subProgram' ? (r.programCategory ?? '').trim().toLowerCase()
         : key === 'kpi' ? (r.kpiCode ?? '').toLowerCase()
           : STATUS_ORDER[r.status] ?? 9;
   const sign = dir === 'asc' ? 1 : -1;
   return rows
     .map((r, i) => ({ r, i }))
     .sort((a, b) => {
+      const ba = blank(a.r);
+      const bb = blank(b.r);
+      if (ba !== bb) return ba ? -1 : 1;
       const va = val(a.r);
       const vb = val(b.r);
       if (va < vb) return -sign;

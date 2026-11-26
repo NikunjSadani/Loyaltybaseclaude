@@ -171,6 +171,9 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
   const [status, setStatus] = useState<RuleStatus | null>(null);
   const [version, setVersion] = useState<number | null>(null);
   const [storedRuleId, setStoredRuleId] = useState<string | null>(null);
+  // The name as last loaded / saved — a save sends `name` ONLY when the author changed it, so a stale tab never
+  // overwrites a rename made elsewhere (a changed name renames every version of the rule server-side, audited).
+  const [loadedName, setLoadedName] = useState<string>('');
 
   const [loading, setLoading] = useState(!isNew || !!duplicateFromId);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -215,6 +218,7 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
       setStatus(res.data.status);
       setVersion(res.data.version);
       setStoredRuleId(res.data.ruleId);
+      setLoadedName(res.data.name ?? '');
       setDirty(false);
     } else {
       setLoadError(res.error ?? 'Failed to load rule');
@@ -247,18 +251,26 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
   const [renameMsg, setRenameMsg] = useState<string | null>(null);
-  const handleRename = async () => {
-    const issue = ruleNameIssue(renameValue, true);
-    if (issue) { setRenameError(issue); return; }
+  /** Save a new name, or `clear` → "Remove name" (null). Both rename every version, audited; no new version. */
+  const handleRename = async (clear = false) => {
+    if (!clear) {
+      const issue = ruleNameIssue(renameValue, true);
+      if (issue) { setRenameError(issue); return; }
+    }
     setRenameBusy(true);
     setRenameError(null);
     setRenameMsg(null);
-    const res = await renameRule(ruleId, cleanRuleName(renameValue));
+    const res = await renameRule(ruleId, clear ? '' : cleanRuleName(renameValue));
     if (res.success) {
       setDraft((d) => ({ ...d, name: res.data.name ?? '' }));
+      setLoadedName(res.data.name ?? '');
       setAllRules((rs) => rs.map((r) => (r.ruleId === res.data.ruleId ? { ...r, name: res.data.name ?? null } : r)));
       setRenaming(false);
-      setRenameMsg('Renamed — every version of this rule now shows the new name. The rule logic and version are unchanged.');
+      setRenameMsg(
+        clear
+          ? 'Name removed — every version of this rule now shows as “Unnamed rule”. The rule logic and version are unchanged.'
+          : 'Renamed — every version of this rule now shows the new name. The rule logic and version are unchanged.',
+      );
     } else {
       setRenameError(res.error ?? 'Rename failed');
     }
@@ -414,12 +426,16 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
     setSaving(true);
     setSaveError(null);
     setSaved(false);
-    const res = isNew ? await createRule(draft) : await updateRule(ruleId, draft);
+    const nameChanged = cleanRuleName(draft.name) !== cleanRuleName(loadedName);
+    const res = isNew
+      ? await createRule(draft)
+      : await updateRule(ruleId, nameChanged ? draft : { ...draft, name: undefined });
     if (res.success) {
       if (isNew) {
         router.push(`/admin/points-engine/rules/${res.data.id}`);
         return;
       }
+      setLoadedName(res.data.name ?? '');
       setDraft(rowToDraft(res.data));
       setStatus(res.data.status);
       setVersion(res.data.version);
@@ -484,7 +500,8 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
     // current quarter's first day (back-dating is allowed; the author can change it).
     const today = new Date().toISOString().slice(0, 10);
     const from = draft.evaluationBasis === 'QUARTER' ? currentQuarterStart() : today;
-    const res = await createRule({ ...draft, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: from });
+    // name omitted → the new version starts with the rule's CURRENT server-side name (never a stale tab's copy).
+    const res = await createRule({ ...draft, name: undefined, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: from });
     if (res.success) {
       router.push(`/admin/points-engine/rules/${res.data.id}`);
       return;
@@ -723,7 +740,11 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
           <Field
             label="Rule name"
             required={isNew}
-            hint={`Shown in the rules list, compute preview and reports (max ${RULE_NAME_MAX} characters). Changing it never changes what the rule pays.`}
+            hint={
+              isNew
+                ? `Shown in the rules list, compute preview and reports (max ${RULE_NAME_MAX} characters). It never changes what the rule pays.`
+                : `Saving a changed name renames EVERY version of this rule (no new version; recorded in the audit log). Max ${RULE_NAME_MAX} characters; it never changes what the rule pays.`
+            }
           >
             <input
               value={draft.name ?? ''}
@@ -735,7 +756,7 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
           </Field>
         ) : renaming ? (
           <div className="space-y-2">
-            <Field label="Rule name" hint="Renaming does not create a new version and never changes what the rule pays.">
+            <Field label="Rule name" hint="Renames EVERY version of this rule — no new version, never changes what the rule pays; recorded in the audit log.">
               <input
                 value={renameValue}
                 placeholder={RULE_NAME_PLACEHOLDER}
@@ -760,6 +781,16 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
               >
                 {renameBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save name
               </button>
+              {cleanRuleName(loadedName) !== '' && (
+                <button
+                  type="button"
+                  onClick={() => { if (confirm('Remove the name from every version of this rule? It will show as “Unnamed rule”.')) void handleRename(true); }}
+                  disabled={renameBusy}
+                  className="rounded-xl border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-60"
+                >
+                  Remove name
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => { setRenaming(false); setRenameError(null); }}

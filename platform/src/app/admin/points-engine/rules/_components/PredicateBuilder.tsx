@@ -11,7 +11,7 @@
 import React from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import type { Condition, CompareOp, Operand, Predicate } from '@/lib/points-engine/types';
-import { OperandPicker, SelectField, TEXT_OPS, enumVarOf, isVarOperand, literalKindFor, type VarOption } from './kit';
+import { OperandPicker, SelectField, TEXT_OPS, enumConditionWarnings, enumVarOf, literalKindFor, type VarOption } from './kit';
 
 const OP_OPTIONS: ReadonlyArray<{ value: CompareOp; label: string }> = [
   { value: 'gte', label: '≥ (at least)' },
@@ -91,23 +91,10 @@ export function PredicateBuilder({
     emit({ ...model, combinator: c, conditions });
   };
 
-  /**
-   * Keep a condition well-typed when either side changes: comparing an ENUM (text) input → only = / ≠, and a Value
-   * on the other side becomes one of the input's allowed values (a number there could never match).
-   */
-  const fixTypes = (cond: Condition): Condition => {
-    const ev = enumVarOf(cond.left, vars) ?? enumVarOf(cond.right, vars);
-    if (!ev) return cond;
-    const next = { ...cond };
-    if (!TEXT_OPS.has(next.op)) next.op = 'eq';
-    const otherKey = enumVarOf(cond.left, vars) ? 'right' : 'left';
-    const other = next[otherKey];
-    if (!isVarOperand(other) && typeof other.lit === 'number') next[otherKey] = { lit: ev.values?.[0] ?? '' };
-    return next;
-  };
-
+  // NOTE: an enum (text) comparison is NEVER auto-corrected — the stored op / Value stay exactly as authored and a
+  // visible warning under the condition says what to fix (an ordering op, a number, or a value not in the list).
   const setCondition = (i: number, cond: Condition) => {
-    const conditions = model.conditions.map((c, idx) => (idx === i ? fixTypes(cond) : c));
+    const conditions = model.conditions.map((c, idx) => (idx === i ? cond : c));
     emit({ ...model, conditions });
   };
 
@@ -148,8 +135,10 @@ export function PredicateBuilder({
         {model.conditions.map((cond, i) => {
           const isText = !!(enumVarOf(cond.left, vars) ?? enumVarOf(cond.right, vars));
           const ops = isText ? OP_OPTIONS.filter((o) => TEXT_OPS.has(o.value)) : OP_OPTIONS;
+          const condWarnings = isText ? enumConditionWarnings(cond, vars, 'This condition') : [];
           return (
-          <div key={i} className="flex flex-wrap items-center gap-1.5 rounded-lg border border-gray-200 bg-white p-2">
+          <div key={i} className="rounded-lg border border-gray-200 bg-white p-2">
+          <div className="flex flex-wrap items-center gap-1.5">
             {model.combinator !== 'single' && (
               <span className="shrink-0 text-[10px] font-bold uppercase text-gray-400">
                 {i === 0 ? 'when' : model.combinator === 'all' ? 'and' : 'or'}
@@ -192,6 +181,14 @@ export function PredicateBuilder({
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             )}
+          </div>
+          {condWarnings.length > 0 && (
+            <ul role="alert" data-testid="condition-warning" className="mt-1.5 list-disc space-y-0.5 pl-5 text-[11px] font-semibold text-amber-700">
+              {condWarnings.map((w, j) => (
+                <li key={j}>{w.replace(/^This condition: /, '')}</li>
+              ))}
+            </ul>
+          )}
           </div>
           );
         })}

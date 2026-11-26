@@ -164,6 +164,18 @@ describe('Rules list — names', () => {
     expect(push.mock.calls).toEqual([]);
   });
 
+  it('RN4b: "Remove name" on the list clears the name (null) for every version', async () => {
+    listRules.mockResolvedValue({ success: true, data: [makeRow({ id: 'r1' })] });
+    renameRule.mockResolvedValue({ success: true, data: makeRow({ id: 'r1', name: null }) });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<PointsRulesPage />);
+    await screen.findByText('Unnati – ADHO 2.5%');
+    fireEvent.click(screen.getByRole('button', { name: /rename rule rule_b1c5e9fc/i }));
+    fireEvent.click(within(screen.getByTestId('rename-panel')).getByRole('button', { name: /remove name/i }));
+    await waitFor(() => expect(renameRule).toHaveBeenCalledWith('r1', ''));
+    expect(await screen.findByText('Unnamed rule')).toBeInTheDocument();
+  });
+
   it('RN7a: Duplicate on the list opens the builder as a new rule from that row', async () => {
     listRules.mockResolvedValue({ success: true, data: [makeRow()] });
     render(<PointsRulesPage />);
@@ -188,8 +200,8 @@ describe('Rules list — Program / Sub-programme / KPI columns', () => {
     for (const h of ['Program', 'Sub-programme', 'KPI', 'Status']) {
       expect(screen.getByRole('button', { name: `Sort by ${h}` })).toBeInTheDocument();
     }
-    expect(screen.getAllByTestId('rule-program').map((c) => c.textContent)).toEqual(['UNNATI', 'GOLD', 'All']);
-    expect(screen.getAllByTestId('rule-subprogram').map((c) => c.textContent)).toEqual(['All', 'Tier A', 'Tier B']);
+    expect(screen.getAllByTestId('rule-program').map((c) => c.textContent)).toEqual(['UNNATI', 'GOLD', 'All (blank)']);
+    expect(screen.getAllByTestId('rule-subprogram').map((c) => c.textContent)).toEqual(['All (blank)', 'Tier A', 'Tier B']);
     expect(screen.getAllByTestId('rule-kpi').map((c) => c.textContent)).toEqual(['ADHO', 'CASES', 'BSC']);
   });
 
@@ -199,23 +211,37 @@ describe('Rules list — Program / Sub-programme / KPI columns', () => {
     await screen.findByText('A');
     const names = () => screen.getAllByTestId('rule-name').map((c) => c.textContent);
     fireEvent.click(screen.getByRole('button', { name: 'Sort by Program' }));
-    expect(names()).toEqual(['C', 'B', 'A']); // All, GOLD, UNNATI
+    expect(names()).toEqual(['C', 'B', 'A']); // All (blank), GOLD, UNNATI
     fireEvent.click(screen.getByRole('button', { name: 'Sort by Program' }));
-    expect(names()).toEqual(['A', 'B', 'C']);
+    expect(names()).toEqual(['C', 'A', 'B']); // blanks stay FIRST in descending order too
     fireEvent.click(screen.getByRole('button', { name: 'Sort by KPI' }));
     expect(names()).toEqual(['A', 'C', 'B']); // ADHO, BSC, CASES
     fireEvent.click(screen.getByRole('button', { name: 'Sort by Status' }));
     expect(names()).toEqual(['A', 'B', 'C']); // published, draft, archived
   });
 
-  it('RC3: the sub-programme filter narrows rows (and "all" matches rules with none)', async () => {
+  it('RC3: the sub-programme filter is a dropdown of the actual values + "All (blank)" (exact match, not text search)', async () => {
     listRules.mockResolvedValue({ success: true, data: rows() });
     render(<PointsRulesPage />);
     await screen.findByText('A');
-    fireEvent.change(screen.getByLabelText('Filter by sub-programme'), { target: { value: 'tier b' } });
+    const sel = screen.getByLabelText('Filter by sub-programme') as HTMLSelectElement;
+    expect([...sel.options].map((o) => o.textContent)).toEqual(['Any sub-programme', 'All (blank)', 'Tier A', 'Tier B']);
+    fireEvent.change(sel, { target: { value: 'Tier B' } });
     expect(screen.getAllByTestId('rule-name').map((c) => c.textContent)).toEqual(['C']);
-    fireEvent.change(screen.getByLabelText('Filter by sub-programme'), { target: { value: 'all' } });
+    fireEvent.change(sel, { target: { value: '__blank__' } });
     expect(screen.getAllByTestId('rule-name').map((c) => c.textContent)).toEqual(['A']);
+    fireEvent.change(sel, { target: { value: '' } });
+    expect(screen.getAllByTestId('rule-name')).toHaveLength(3);
+  });
+
+  it('RC2b: sort by Sub-programme puts blanks first (labelled "All (blank)")', async () => {
+    listRules.mockResolvedValue({ success: true, data: rows() });
+    render(<PointsRulesPage />);
+    await screen.findByText('A');
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Sub-programme' }));
+    expect(screen.getAllByTestId('rule-subprogram').map((c) => c.textContent)).toEqual(['All (blank)', 'Tier A', 'Tier B']);
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Sub-programme' }));
+    expect(screen.getAllByTestId('rule-subprogram').map((c) => c.textContent)).toEqual(['All (blank)', 'Tier B', 'Tier A']);
   });
 
   it('RC4: the rule detail header shows program, sub-programme and KPI', async () => {
@@ -257,6 +283,40 @@ describe('Rule builder — names', () => {
     expect(await screen.findByTestId('rule-title')).toHaveTextContent('Renamed');
     expect(screen.getByText('v3')).toBeInTheDocument();
     expect(createRule).not.toHaveBeenCalled(); // no new version
+  });
+
+  it('RN6c: saving a draft sends `name` ONLY when the author changed it (no stale-tab overwrite)', async () => {
+    const updateRule = vi.mocked(api.updateRule);
+    getRule.mockResolvedValue({ success: true, data: makeRow({ status: 'draft', name: 'Loaded name' }) });
+    updateRule.mockImplementation(async (_id, d) => ({ success: true, data: makeRow({ status: 'draft', name: d.name ?? 'Loaded name' }) }));
+    render(<RuleBuilder ruleId="r1" />);
+    await screen.findByTestId('rule-title');
+    expect(screen.getByText(/renames EVERY version of this rule/i)).toBeInTheDocument();
+
+    // Change something else only -> name not sent.
+    fireEvent.change(screen.getByDisplayValue('2026-07-01'), { target: { value: '2026-08-01' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(updateRule).toHaveBeenCalledTimes(1));
+    expect(updateRule.mock.calls[0][1].name).toBeUndefined();
+
+    // Change the name -> sent.
+    fireEvent.change(screen.getByLabelText('Rule name'), { target: { value: 'New name' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(updateRule).toHaveBeenCalledTimes(2));
+    expect(updateRule.mock.calls[1][1].name).toBe('New name');
+  });
+
+  it('RN6d: "Remove name" on a published rule clears it without a new version', async () => {
+    getRule.mockResolvedValue({ success: true, data: makeRow({ version: 3 }) });
+    renameRule.mockResolvedValue({ success: true, data: makeRow({ version: 3, name: null }) });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<RuleBuilder ruleId="r1" />);
+    await screen.findByTestId('rule-title');
+    fireEvent.click(screen.getByRole('button', { name: /^rename$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /remove name/i }));
+    await waitFor(() => expect(renameRule).toHaveBeenCalledWith('r1', ''));
+    expect(await screen.findByTestId('rule-title')).toHaveTextContent('Unnamed rule');
+    expect(createRule).not.toHaveBeenCalled();
   });
 
   it('RN6b: an unnamed rule shows "Unnamed rule" + its ruleId; a missing output field is flagged', async () => {

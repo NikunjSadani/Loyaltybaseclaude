@@ -120,10 +120,8 @@ export class PointsEngineService {
         );
       }
       version = Math.max(...existing.map((r) => r.version)) + 1;
-      // A new version inherits the latest version's display name unless the caller supplies one.
-      if (dto.name === undefined) {
-        inheritedName = existing.reduce((a, b) => (b.version > a.version ? b : a)).name ?? null;
-      }
+      // The rule's current display name (latest version's) — the new version starts with it.
+      inheritedName = existing.reduce((a, b) => (b.version > a.version ? b : a)).name ?? null;
     } else {
       // Brand-new logical rule. ruleId is a distinct, caller-stable identity (separate from the
       // row's @default(cuid()) primary id), so mint one up-front.
@@ -134,11 +132,21 @@ export class PointsEngineService {
     this.assertValid(config);
 
     try {
-      return await this.prisma.pointsRule.create({
-        data: {
-          ...this.toCreateData(clientId, ruleId, version, 'draft', dto, user.sub),
-          name: suppliedName === undefined ? inheritedName : suppliedName,
-        },
+      const isNewVersion = version > 1;
+      const data = {
+        ...this.toCreateData(clientId, ruleId, version, 'draft', dto, user.sub),
+        // A new version starts with the rule's CURRENT name; a different supplied name is applied to every
+        // version (audited, same transaction) so versions never disagree.
+        name: isNewVersion ? inheritedName : suppliedName ?? null,
+      };
+      if (!(isNewVersion && suppliedName !== undefined && suppliedName !== inheritedName)) {
+        return await this.prisma.pointsRule.create({ data });
+      }
+      const newName = suppliedName;
+      return await this.prisma.$transaction(async (tx) => {
+        const created = await tx.pointsRule.create({ data });
+        await this.applyName(tx, user, created, newName, 'new_version');
+        return { ...created, name: newName };
       });
     } catch (e) {
       // Two concurrent createDraft on the same ruleId can both pass the version/open-draft check above
@@ -178,9 +186,14 @@ export class PointsEngineService {
     }
 
     const { attachsTo } = dto;
-    return this.prisma.pointsRule.update({
-      where: { id: row.id },
-      data: {
+    // Name: omitted = keep. A CHANGED name is applied to EVERY version of the logical rule through the same
+    // audited path as rename (so a draft and its published siblings never disagree). The client sends `name` only
+    // when the author changed it (a stale tab cannot overwrite a rename made elsewhere).
+    const newName = dto.name === undefined ? undefined : normalizeRuleName(dto.name);
+    return this.prisma.$transaction(async (tx) => {
+      await tx.pointsRule.update({
+        where: { id: row.id },
+        data: {
         effectiveFrom:   toDate(dto.effectiveFrom),
         effectiveTo:     dto.effectiveTo ? toDate(dto.effectiveTo) : null,
         evaluationBasis: dto.evaluationBasis ?? 'PERIOD_AGGREGATE',
@@ -193,9 +206,11 @@ export class PointsEngineService {
         kpiCode:         attachsTo.kpiCode,
         program:         attachsTo.program ?? null,
         programCategory: attachsTo.programCategory ?? null,
-        // Omitted name = keep the current one (a whole-object config replace must not silently clear it).
-        ...(dto.name === undefined ? {} : { name: normalizeRuleName(dto.name) }),
-      },
+        },
+      });
+      if (newName !== undefined) await this.applyName(tx, user, row, newName, 'draft_save');
+      const updated = await tx.pointsRule.findFirst({ where: { id: row.id } });
+      return updated as PointsRule;
     });
   }
 
@@ -206,36 +221,50 @@ export class PointsEngineService {
    * The name is DISPLAY-ONLY metadata: it is never read by compute and is not part of the rule's identity
    * (ruleId/version), config hash, or any idempotency / source key, so changing it cannot change what a rule
    * pays or re-open a credited run. Applied to EVERY version of the logical rule (same clientId + ruleId) so the
-   * Rules list / history / preview all show one name. Only `name` (and the @updatedAt stamp) is written. Audited
-   * (POINTS_RULE_RENAME) with the before/after name of each version.
+   * Rules list / history / preview all show one name. ONLY `name` is written — `updatedAt` is NOT bumped (a raw
+   * UPDATE bypasses Prisma's @updatedAt), so the list's "Updated" still means "config last changed". `null` clears
+   * the name. Audited (POINTS_RULE_RENAME) with the before/after name of each version; a no-op rename writes nothing.
    */
   async rename(user: JwtPayload, id: string, rawName: string | null | undefined): Promise<PointsRule> {
     if (rawName === undefined) throw new BadRequestException('name is required (send null to clear it).');
     const name = normalizeRuleName(rawName);
     const row = await this.loadForWrite(user, id);
     return this.prisma.$transaction(async (tx) => {
-      const versions = await tx.pointsRule.findMany({
-        where: { clientId: row.clientId, ruleId: row.ruleId },
-        select: { id: true, version: true, name: true },
-      });
-      await tx.pointsRule.updateMany({
-        where: { clientId: row.clientId, ruleId: row.ruleId },
-        data: { name },
-      });
-      await tx.auditLog.create({
-        data: {
-          action: 'UPDATE',
-          entityType: 'POINTS_RULE_RENAME',
-          entityId: row.ruleId,
-          actorId: user.sub,
-          oldValues: { names: versions.map((v) => ({ version: v.version, name: v.name ?? null })) } as Prisma.InputJsonValue,
-          newValues: { name } as Prisma.InputJsonValue,
-          metadata: { clientId: row.clientId, ruleId: row.ruleId, viaRowId: row.id, versions: versions.length } as Prisma.InputJsonValue,
-        },
-      });
+      await this.applyName(tx, user, row, name, 'rename');
       const updated = await tx.pointsRule.findFirst({ where: { id: row.id } });
       return updated ?? { ...row, name };
     });
+  }
+
+  /**
+   * The ONE write path for a rule name: sets `name` on every version of (clientId, ruleId) with a raw UPDATE (leaves
+   * `updatedAt` untouched) and writes a POINTS_RULE_RENAME audit row — only when some version's name actually changes.
+   */
+  private async applyName(
+    tx: Prisma.TransactionClient,
+    user: JwtPayload,
+    row: Pick<PointsRule, 'id' | 'clientId' | 'ruleId'>,
+    name: string | null,
+    via: 'rename' | 'draft_save' | 'new_version',
+  ): Promise<boolean> {
+    const versions = await tx.pointsRule.findMany({
+      where: { clientId: row.clientId, ruleId: row.ruleId },
+      select: { id: true, version: true, name: true },
+    });
+    if (versions.every((v) => (v.name ?? null) === name)) return false;
+    await tx.$executeRaw`UPDATE "points_rules" SET "name" = ${name} WHERE "clientId" = ${row.clientId} AND "ruleId" = ${row.ruleId}`;
+    await tx.auditLog.create({
+      data: {
+        action: 'UPDATE',
+        entityType: 'POINTS_RULE_RENAME',
+        entityId: row.ruleId,
+        actorId: user.sub,
+        oldValues: { names: versions.map((v) => ({ version: v.version, name: v.name ?? null })) } as Prisma.InputJsonValue,
+        newValues: { name } as Prisma.InputJsonValue,
+        metadata: { clientId: row.clientId, ruleId: row.ruleId, viaRowId: row.id, via, versions: versions.length } as Prisma.InputJsonValue,
+      },
+    });
+    return true;
   }
 
   // ─── publish ────────────────────────────────────────────────────────────────
