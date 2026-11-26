@@ -358,7 +358,11 @@ export default function CancelPayoutsFileSection({ batchId, batchCode, fieldId, 
               {preview.invoicesToVoid.length > 0 && (
                 <p className="text-xs text-gray-700">
                   {plural(preview.invoicesToVoid.length, 'invoice', 'invoices')} will be voided:{' '}
-                  {preview.invoicesToVoid.map((iv) => iv.invoiceNumber ?? iv.id).join(', ')}
+                  {preview.invoicesToVoid
+                    .map((iv) =>
+                      `${iv.invoiceNumber ?? iv.id}${iv.reissue ? ` (a new invoice is issued for the ${iv.reissue.remainingEntryIds.length} payout${iv.reissue.remainingEntryIds.length === 1 ? '' : 's'} that stay payable, ${inr(iv.reissue.basePaise)} before GST)` : ''}`,
+                    )
+                    .join(', ')}
                 </p>
               )}
             </>

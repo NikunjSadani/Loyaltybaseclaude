@@ -295,6 +295,8 @@ const mockTx = {
   creditPayoutEntry: { findMany: jest.fn().mockResolvedValue([]), updateMany: jest.fn() },
   outlet: { findMany: jest.fn().mockResolvedValue([]) },
   gstReimbursement: { create: jest.fn() },
+  // the per-(client, month) invoice lock (audit fix 2026-11-26)
+  $executeRaw: jest.fn().mockResolvedValue(1),
 };
 
 // ── Mock Prisma ────────────────────────────────────────────────────────────────
@@ -319,6 +321,7 @@ const mockPrisma = {
     deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
   },
   $transaction: jest.fn(async (cb: (tx: typeof mockTx) => unknown) => cb(mockTx)),
+  $executeRaw: jest.fn().mockResolvedValue(1),
 };
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -392,6 +395,23 @@ describe('InvoicesService', () => {
   // ── generateForPeriod ────────────────────────────────────────────────────────
 
   describe('generateForPeriod', () => {
+    // Audit fix 2026-11-26: the run is ONE transaction behind the per-(client, month) invoice lock — the tx here is the
+    // same mock client, so the existing expectations read the same calls.
+    beforeEach(() => {
+      mockPrisma.$transaction.mockImplementation(async (cb: any) => cb(mockPrisma));
+    });
+    afterEach(() => {
+      mockPrisma.$transaction.mockImplementation(async (cb: any) => cb(mockTx));
+    });
+
+    it('runs in one transaction behind the per-(client, month) invoice lock (shared with confirm + cancel); a P2002 is rolled back to a savepoint', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f1' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      await service.generateForPeriod(admin, { period: '2025-01' });
+      expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(mockPrisma.$executeRaw.mock.calls[0])).toContain('INVMONTH|deoleo|2025-01');
+    });
+
     it('returns early if no separate-payout fields exist', async () => {
       mockPrisma.creditField.findMany.mockResolvedValue([]);
 

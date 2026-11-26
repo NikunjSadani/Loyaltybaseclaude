@@ -97,6 +97,8 @@ export interface InvoiceToVoid {
   period: string | null;
   totalPaise: number;
   gstHeldPaise: number;
+  /** Some covered payouts stay payable → a fresh invoice is issued for them (owner decision 2026-11-26). */
+  reissue?: { remainingEntryIds: string[]; basePaise: number; newInvoiceNumber?: string };
 }
 
 export interface CancelTotals { unpaid: Money; failed: Money; all: Money }
@@ -113,6 +115,7 @@ export interface CancelResult {
   cancellationId: string;
   cancelled: CancelRow[];
   invoicesVoided: InvoiceToVoid[];
+  invoicesReissued?: Array<{ voidedNumber: string; newNumber: string; remainingEntryIds: string[]; basePaise: number }>;
   totals: CancelTotals;
 }
 

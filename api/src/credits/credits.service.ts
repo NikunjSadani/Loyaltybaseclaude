@@ -1329,9 +1329,12 @@ export class CreditsService {
     let recoveryRows = 0;
     // FIX-1: GROSS-UP monthly TOP-UP TDS invoices for the DELTA + the DELTA pro-rata recovery ledger.
     for (const gi of plan.grossUpInvoices) {
-      const rep = gi.representative;
+      // Audit fix 2026-11-26: the TDS invoice belongs to a client that BEARS the recovery — never to a client that owes
+      // none of it (e.g. a DEDUCT payout of client B that tipped the PAN's combined base over the threshold for client A's
+      // gross-up payouts must not put A's invoice in B's lists). The paying client keeps it when it bears a share.
+      const { invoiceClientId, rep } = await this.tdsInvoiceOwner(tx, clientId, gi);
       const inv = await this.invoicesService.createTdsInvoice(tx, {
-        clientId,
+        clientId: invoiceClientId,
         period,
         panNumber: gi.panNumber,
         fyLabel: gi.fyLabel,
@@ -1393,6 +1396,59 @@ export class CreditsService {
     return { invoices: plan.grossUpInvoices.length, recoveryRows };
   }
 
+  /**
+   * The client a 194C gross-up TDS invoice is issued under (audit fix 2026-11-26): the paying client when it bears a
+   * share of the recovery, else the client with the largest share — with one of THAT client's outlets for the PAN as
+   * the invoice's representative (so no client ever sees another client's outlet / payout on its invoice).
+   */
+  private async tdsInvoiceOwner(
+    tx: Prisma.TransactionClient,
+    payingClientId: string,
+    gi: PayoutTdsPlan['grossUpInvoices'][number],
+  ): Promise<{ invoiceClientId: string; rep: PayoutTdsPlan['grossUpInvoices'][number]['representative'] }> {
+    const bearers = gi.recovery.filter((r) => r.tenantSharePaise > 0n);
+    if (bearers.length === 0 || bearers.some((r) => r.clientId === payingClientId)) {
+      return { invoiceClientId: payingClientId, rep: gi.representative };
+    }
+    const owner = [...bearers].sort((a, b) => (b.tenantSharePaise > a.tenantSharePaise ? 1 : b.tenantSharePaise < a.tenantSharePaise ? -1 : a.clientId < b.clientId ? -1 : 1))[0].clientId;
+    const o = await tx.outlet.findFirst({
+      where: { clientId: owner, partner: { panNumber: { equals: gi.panNumber, mode: 'insensitive' }, isParent: false } },
+      orderBy: { outletCode: 'asc' },
+      select: {
+        outletCode: true, name: true, state: true,
+        partner: { select: { id: true, entityType: true, gstNumber: true, gstRegistrationType: true, businessName: true, ownerName: true, phone: true, bankName: true, bankAccountNumber: true, ifscCode: true } },
+      },
+    });
+    if (!o?.partner) {
+      // Never put the bearing client's invoice under the paying client: without an outlet of its own the invoice still
+      // goes to the bearing client, named by PAN only (no other client's outlet / partner details).
+      this.logger.warn(`[tds] no ${owner} outlet found for PAN …${gi.panNumber.slice(-4)} — TDS invoice issued without an outlet representative`);
+      return {
+        invoiceClientId: owner,
+        rep: { ...gi.representative, partnerId: gi.representative.partnerId, outletCode: '', outletName: '', businessName: null, ownerName: null, phone: null, bankName: null, accountNumber: null, ifscCode: null, retailerState: null, gstNumber: null },
+      };
+    }
+    const p = o.partner;
+    return {
+      invoiceClientId: owner,
+      rep: {
+        partnerId: p.id,
+        panNumber: gi.panNumber,
+        entityType: p.entityType ?? null,
+        gstNumber: p.gstNumber ?? null,
+        gstRegistrationType: p.gstRegistrationType ?? null,
+        businessName: p.businessName ?? null,
+        ownerName: p.ownerName ?? null,
+        phone: p.phone ?? null,
+        bankName: p.bankName ?? null,
+        accountNumber: p.bankAccountNumber ?? null,
+        ifscCode: p.ifscCode ?? null,
+        outletName: o.name,
+        retailerState: o.state ?? null,
+        outletCode: o.outletCode,
+      },
+    };
+  }
   /**
    * Owner 2026-11-25 ("TDS invoice only on success"): when visibility payouts become PAID, raise the 194C GROSS-UP TDS
    * invoice + recovery and the 194C no-PAN recovery for what was just paid — on a PAID-only yearly base (never FAILED,

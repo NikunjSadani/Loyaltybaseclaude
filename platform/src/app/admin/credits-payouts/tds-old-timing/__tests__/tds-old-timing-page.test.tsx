@@ -45,14 +45,22 @@ beforeEach(() => { vi.clearAllMocks(); });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('TDS old-timing check page', () => {
+  it('shows what the check cannot determine, and another client’s never-paid payouts inside a row', async () => {
+    asRole('GIFSY_ADMIN');
+    stub(ok({ success: true, data: { rows: [{ ...ROW, notPaidByClient: { deoleo: { count: 1, paise: 100000 } } }], limits: ['Rows before 24 Nov carry no bank-file link.'] } }));
+    render(<TdsOldTimingCheckPage />);
+    expect((await screen.findByTestId('tds-old-timing-limits')).textContent).toContain('no bank-file link');
+    expect(screen.getByTestId('tds-old-timing-byclient-r1').textContent).toContain('deoleo: 1');
+  });
+
   it('shows loading, then the rows', async () => {
     asRole('GIFSY_ADMIN');
     let resolve: (v: unknown) => void = () => {};
     const fn = stub(() => new Promise((r) => { resolve = r; }));
     render(<TdsOldTimingCheckPage />);
-    expect(screen.getByText('194C TDS raised at the bank file — check')).toBeInTheDocument();
+    expect(await screen.findByText('194C TDS raised at the bank file — check')).toBeInTheDocument();
     expect(await screen.findByText('Loading…')).toBeInTheDocument();
-    resolve({ ok: true, status: 200, json: async () => ({ success: true, data: [ROW] }) });
+    resolve({ ok: true, status: 200, json: async () => ({ success: true, data: { rows: [ROW], limits: [] } }) });
     const row = await screen.findByTestId('tds-old-timing-row-r1');
     expect(row.textContent).toContain('Sharma Traders');
     expect(row.textContent).toContain('₹1,234.50');
@@ -68,14 +76,14 @@ describe('TDS old-timing check page', () => {
     const fn = stub(ok({ success: false, error: 'Forbidden' }, 403));
     render(<TdsOldTimingCheckPage />);
     expect((await screen.findByTestId('tds-old-timing-error')).textContent).toContain('Forbidden');
-    fn.mockImplementation(ok({ success: true, data: [ROW] }));
+    fn.mockImplementation(ok({ success: true, data: { rows: [ROW], limits: [] } }));
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByTestId('tds-old-timing-row-r1')).toBeInTheDocument();
   });
 
   it('empty list → "Nothing to check" and Download disabled', async () => {
     asRole('GIFSY_ADMIN');
-    stub(ok({ success: true, data: [] }));
+    stub(ok({ success: true, data: { rows: [], limits: [] } }));
     render(<TdsOldTimingCheckPage />);
     expect((await screen.findByTestId('tds-old-timing-empty')).textContent).toBe('Nothing to check');
     expect(screen.getByRole('button', { name: 'Download (.xlsx)' })).toBeDisabled();
@@ -83,7 +91,7 @@ describe('TDS old-timing check page', () => {
 
   it('non-Gifsy admin → "Gifsy admins only", nothing fetched', async () => {
     asRole('CLIENT_ADMIN');
-    const fn = stub(ok({ success: true, data: [ROW] }));
+    const fn = stub(ok({ success: true, data: { rows: [ROW], limits: [] } }));
     render(<TdsOldTimingCheckPage />);
     expect(await screen.findByText('Gifsy admins only.')).toBeInTheDocument();
     expect(fn).not.toHaveBeenCalled();

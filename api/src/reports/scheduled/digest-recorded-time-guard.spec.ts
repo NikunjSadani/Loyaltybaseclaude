@@ -168,10 +168,15 @@ describe('Digest recorded-time clocks — no code path rewrites a settled payout
     // @updatedAt and re-count the old payment as paid today; a raw UPDATE leaves updatedAt alone.
     const reviewedMarker =
       /UPDATE "credit_payout_entries" SET "tdsBaseReversedAt" = \$\{new Date\(\)\}, "tdsBaseReversalId" = \$\{ctx\.creditReversalId\} WHERE "id" = \$\{e\.id\} AND "clientId" = \$\{e\.clientId\} AND "tdsBaseReversedAt" IS NULL`/g;
+    // REVIEWED raw UPDATE (payout cancellation, owner decision 2026-11-26): a SERVICE invoice re-issued for the payouts
+    // that stay payable re-links ONLY autoInvoiceId on those rows — raw so updatedAt (the digest clock) never moves.
+    const reviewedRelink =
+      /UPDATE "credit_payout_entries" SET "autoInvoiceId" = \$\{created\.id\} WHERE "clientId" = \$\{clientId\} AND "id" = ANY\(\$\{remaining\}::text\[\]\)`/g;
     const raw = /UPDATE\s+"?(credit_payout_entries|payout_transactions)"?/i;
     const hits = sourceFiles(SRC).filter((f) =>
-      raw.test(fs.readFileSync(f, 'utf8').replace(reviewed, '').replace(reviewedMarker, '')),
+      raw.test(fs.readFileSync(f, 'utf8').replace(reviewed, '').replace(reviewedMarker, '').replace(reviewedRelink, '')),
     );
+    expect(sourceFiles(SRC).flatMap((f) => fs.readFileSync(f, 'utf8').match(reviewedRelink) ?? [])).toHaveLength(1);
     expect(hits.map((h) => path.relative(SRC, h))).toEqual([]);
     const snapshotSites = sourceFiles(SRC).flatMap((f) => fs.readFileSync(f, 'utf8').match(reviewed) ?? []);
     expect(snapshotSites).toHaveLength(1);

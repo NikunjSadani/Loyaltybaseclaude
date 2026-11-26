@@ -143,6 +143,9 @@ export default function CancelPayoutsDialog({ request, onClose, onDone }: Props)
             <p className="font-semibold">
               Cancelled {plural(result.cancelled.length, 'payout', 'payouts')} · {inr(result.totals?.all?.paise ?? result.cancelled.reduce((s, r) => s + r.amountPaise, 0))}.
             </p>
+            {(result.invoicesReissued ?? []).length > 0 && (
+              <p>Re-issued: {(result.invoicesReissued ?? []).map((x) => `${x.voidedNumber} → ${x.newNumber}`).join(', ')}.</p>
+            )}
             {result.invoicesVoided.length > 0 && (
               <p>Voided {plural(result.invoicesVoided.length, 'invoice', 'invoices')}: {result.invoicesVoided.map(invoiceLabel).join(', ')}.</p>
             )}
@@ -191,6 +194,11 @@ export default function CancelPayoutsDialog({ request, onClose, onDone }: Props)
                     <li key={iv.id}>
                       {invoiceLabel(iv)} · {iv.outletCode ?? '—'} · {iv.period ?? '—'} · {inr(iv.totalPaise)}
                       {iv.gstHeldPaise > 0 && ` (GST held ${inr(iv.gstHeldPaise)} — no longer released)`}
+                      {iv.reissue && (
+                        <span className="block text-gray-600" data-testid={`cancel-reissue-${iv.id}`}>
+                          → a new invoice is issued for the {plural(iv.reissue.remainingEntryIds.length, 'payout', 'payouts')} that stay payable ({inr(iv.reissue.basePaise)} before GST)
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ul>

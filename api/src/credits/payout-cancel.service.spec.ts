@@ -24,6 +24,7 @@ function build(rows: Array<Record<string, any>>) {
   const match = (r: any, w: any) => Object.entries(w ?? {}).every(([k, f]: [string, any]) => (f && typeof f === 'object' && 'in' in f ? f.in.includes(r[k]) : f && typeof f === 'object' && 'not' in f ? r[k] !== f.not : r[k] === f));
   const tx: any = {
     $queryRaw: jest.fn(async () => []),
+    $executeRaw: jest.fn(async () => 1),
     creditPayoutEntry: {
       findMany: jest.fn(async ({ where }: any) => rows.filter((r) => match(r, where))),
       updateMany: jest.fn(async ({ where, data }: any) => { const h = rows.filter((r) => match(r, where)); h.forEach((r) => Object.assign(r, data)); return { count: h.length }; }),

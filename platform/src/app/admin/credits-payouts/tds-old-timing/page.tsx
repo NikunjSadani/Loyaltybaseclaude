@@ -24,6 +24,8 @@ export interface OldTimingRow {
   recordedAt: string;
   payouts: Record<string, MoneyCount>;
   notPaid: MoneyCount;
+  /** Never-paid payouts by client — another client's failed payout can sit inside this row (a PAN's 194C TDS is shared). */
+  notPaidByClient?: Record<string, MoneyCount>;
 }
 
 const inr = formatInrPaise;
@@ -42,7 +44,12 @@ function payoutsText(p: Record<string, MoneyCount> | null | undefined): string {
 
 export default function TdsOldTimingCheckPage() {
   const session = useAdminSession();
+  // The session hook starts from a neutral placeholder; wait for it before deciding who this is (never flash the
+  // "Gifsy admins only" message at a Gifsy admin).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
   const isGifsyAdmin = session.role === 'GIFSY_ADMIN';
+  const [limits, setLimits] = useState<string[]>([]);
   const [rows, setRows] = useState<OldTimingRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -57,11 +64,12 @@ export default function TdsOldTimingCheckPage() {
       const res = await fetch('/api/admin/credits/tds-recovery/old-timing-check');
       const json = await res.json().catch(() => null);
       if (req !== reqRef.current) return;
-      if (!json?.success || !Array.isArray(json.data)) {
+      if (!json?.success || !Array.isArray(json.data?.rows)) {
         setError(json?.error ?? `Request failed (HTTP ${res.status})`);
         return;
       }
-      setRows(json.data as OldTimingRow[]);
+      setRows(json.data.rows as OldTimingRow[]);
+      setLimits(Array.isArray(json.data.limits) ? (json.data.limits as string[]) : []);
     } catch (e) {
       if (req !== reqRef.current) return;
       setError(`Network error — ${String((e as Error)?.message ?? e)}`);
@@ -71,8 +79,8 @@ export default function TdsOldTimingCheckPage() {
   }, []);
 
   useEffect(() => {
-    if (isGifsyAdmin) void load();
-  }, [isGifsyAdmin, load]);
+    if (mounted && isGifsyAdmin) void load();
+  }, [mounted, isGifsyAdmin, load]);
 
   function download() {
     if (!rows || rows.length === 0) return;
@@ -90,6 +98,7 @@ export default function TdsOldTimingCheckPage() {
           'Payouts by status': payoutsText(r.payouts),
           'Not paid (rows)': r.notPaid?.count ?? 0,
           'Not paid (₹)': (r.notPaid?.paise ?? 0) / 100,
+          'Not paid by client': payoutsText(r.notPaidByClient),
           'Recovery ID': r.recoveryId,
         })));
         const wb = XLSX.utils.book_new();
@@ -99,6 +108,10 @@ export default function TdsOldTimingCheckPage() {
         downloadBlob(blob, 'tds-194c-old-timing-check.xlsx');
       })
       .catch((e) => setDownloadErr(`Download failed: ${String((e as Error)?.message ?? e)}`));
+  }
+
+  if (!mounted) {
+    return <p role="status" className="max-w-4xl mx-auto text-xs text-gray-500 animate-pulse">Loading…</p>;
   }
 
   if (!isGifsyAdmin) {
@@ -130,6 +143,13 @@ export default function TdsOldTimingCheckPage() {
           Download (.xlsx)
         </button>
       </div>
+
+      {limits.length > 0 && (
+        <div data-testid="tds-old-timing-limits" className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-xs text-amber-900">
+          <p className="font-semibold">What this check cannot determine</p>
+          <ul className="list-disc pl-4 mt-1 space-y-0.5">{limits.map((l, i) => <li key={i}>{l}</li>)}</ul>
+        </div>
+      )}
 
       {downloadErr && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{downloadErr}</p>}
 
@@ -169,6 +189,11 @@ export default function TdsOldTimingCheckPage() {
                   <td className="px-3 py-2 text-gray-700">{payoutsText(r.payouts)}</td>
                   <td className="px-3 py-2 text-right text-amber-800 whitespace-nowrap">
                     {(r.notPaid?.count ?? 0).toLocaleString('en-IN')} · {inr(r.notPaid?.paise ?? 0)}
+                    {r.notPaidByClient && Object.keys(r.notPaidByClient).some((c) => c !== r.clientId) && (
+                      <span className="block text-[11px] text-gray-600" data-testid={`tds-old-timing-byclient-${r.recoveryId}`}>
+                        by client: {payoutsText(r.notPaidByClient)}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}

@@ -36,6 +36,8 @@ import { BadRequestException, ConflictException, ForbiddenException } from '@nes
 import { Prisma } from '@prisma/client';
 import { formatINR } from '../common/money';
 import { fyLabelForPeriod } from '../tds/tds.helpers';
+import { lockInvoiceMonths } from '../invoices/invoice-lock';
+import { buildInvoiceDescription, computeGST, formatPeriodLabel, generateInvoiceNumber, TECH_GIFSY } from '../invoices/invoice.helpers';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
 
 export const CANCELLATION_AUDIT_ENTITY = 'CREDIT_PAYOUT_CANCELLATION';
@@ -113,6 +115,10 @@ export interface InvoiceVoidPlan {
   period: string;
   totalPaise: number;
   gstHeldPaise: number;
+  /** The cancelled rows this invoice covers (linked, or a visibility 194C payout of its outlet + month). */
+  entryIds: string[];
+  /** Some covered payouts stay payable → a fresh invoice is issued for them (owner decision 2026-11-26). */
+  reissue?: { remainingEntryIds: string[]; basePaise: number; newInvoiceId?: string; newInvoiceNumber?: string };
 }
 
 export interface CancelEvaluation {
@@ -348,9 +354,12 @@ export async function evaluateCancellation(db: Db, clientId: string, items: Canc
 
 type InvoiceRowRef = Pick<EntryRow, 'id' | 'outletId' | 'period' | 'fieldId' | 'tdsSection' | 'autoInvoiceId'>;
 
-/** Visibility 194C payouts (frozen 194C, or a legacy visibility row without a section) are the ones invoiced. */
+/**
+ * Visibility 194C payouts (frozen 194C, or a legacy visibility row without a section) of ACTIVE visibility fields are
+ * the ones a SERVICE invoice covers — the same field set the "Generate invoices" run sums (isActive).
+ */
 async function visibilityFieldIds(db: Db, clientId: string): Promise<Set<string>> {
-  const rows = await db.creditField.findMany({ where: { clientId, payoutStream: 'VISIBILITY' }, select: { id: true } });
+  const rows = await db.creditField.findMany({ where: { clientId, payoutStream: 'VISIBILITY', isActive: true }, select: { id: true } });
   return new Set((rows ?? []).map((r) => r.id));
 }
 const invoicedRow = (e: Pick<EntryRow, 'fieldId' | 'tdsSection'>, vis: Set<string>) =>
@@ -373,7 +382,16 @@ export async function touchedInvoiceIds(db: Db, clientId: string, rows: InvoiceR
   return [...new Set((inv ?? []).map((i) => i.id))].sort();
 }
 
-/** Decide, for the rows about to be cancelled, which SERVICE invoices are voided and which rows must be refused. */
+/**
+ * Decide, for the rows about to be cancelled, what happens to each SERVICE invoice they touch (owner decision
+ * 2026-11-26):
+ *  - every payout it covers ends cancelled / reversed → VOID (+ its HELD GST);
+ *  - some covered payouts stay payable → VOID the old one AND issue a fresh invoice (same outlet + month, new number)
+ *    for exactly the payouts that stay (`reissue`), in the same transaction;
+ *  - locked / paid, or its GST already released → the rows are refused (named).
+ * An invoice covers the rows linked to it AND every visibility 194C payout of its outlet + month (`covers`), and each
+ * plan lists the cancelled rows it covers (`entryIds`) — the audit row and the history use that same test.
+ */
 async function planInvoiceVoids(
   db: Db,
   clientId: string,
@@ -395,51 +413,103 @@ async function planInvoiceVoids(
       clientId,
       OR: [{ autoInvoiceId: { in: ids } }, ...invoices.map((i) => ({ outletId: i.outletCode, period: i.period }))],
     },
-    select: { id: true, autoInvoiceId: true, status: true, outletId: true, period: true, fieldId: true, tdsSection: true },
+    select: { id: true, autoInvoiceId: true, status: true, outletId: true, period: true, fieldId: true, tdsSection: true, amountPaise: true },
   });
   const covers = (inv: { id: string; outletCode: string; period: string }, e: InvoiceRowRef) =>
     e.autoInvoiceId === inv.id || (e.outletId === inv.outletCode && e.period === inv.period && invoicedRow(e, vis));
 
-  let ok = new Set(okEntries.map((e) => e.id));
-  let plans: InvoiceVoidPlan[] = [];
-  // Iterate until stable: refusing one invoice's rows can never make another invoice voidable, but it can make one
-  // shared (its other row is no longer being cancelled).
-  for (let round = 0; round < 5; round++) {
-    plans = [];
-    let changed = false;
-    for (const inv of invoices) {
-      const mine = okEntries.filter((e) => ok.has(e.id) && covers(inv, e));
-      if (mine.length === 0) continue;
-      const g = gst.find((x) => x.autoInvoiceId === inv.id);
-      let bad: { code: CancelBlockCode; extra: string } | null = null;
-      if (String(inv.status) !== 'GENERATED' || inv.lockedAt != null) bad = { code: 'INVOICE_LOCKED', extra: `invoice ${inv.invoiceNumber}` };
-      else if (g && String(g.status) === 'RELEASED') bad = { code: 'GST_RELEASED', extra: `invoice ${inv.invoiceNumber}` };
-      else {
-        const stays = covered.filter(
-          (l) => covers(inv, l) && !ok.has(l.id) && String(l.status) !== 'CANCELLED' && String(l.status) !== 'REVERSED',
-        );
-        if (stays.length > 0) {
-          bad = { code: 'INVOICE_SHARED', extra: `invoice ${inv.invoiceNumber} — ${stays.length} other payout${stays.length === 1 ? '' : 's'} stay payable` };
-        }
-      }
-      if (bad) {
-        for (const e of mine) badByEntry.set(e.id, bad);
-        changed = true;
-        continue;
-      }
-      plans.push({
-        id: inv.id,
-        invoiceNumber: inv.invoiceNumber,
-        outletCode: inv.outletCode,
-        period: inv.period,
-        totalPaise: Number(inv.totalPaise),
-        gstHeldPaise: g && String(g.status) === 'HELD' ? Number(g.gstPaise) : 0,
-      });
+  const ok = new Set(okEntries.map((e) => e.id));
+  const plans: InvoiceVoidPlan[] = [];
+  for (const inv of invoices) {
+    const mine = okEntries.filter((e) => covers(inv, e));
+    if (mine.length === 0) continue;
+    const g = gst.find((x) => x.autoInvoiceId === inv.id);
+    let bad: { code: CancelBlockCode; extra: string } | null = null;
+    if (String(inv.status) !== 'GENERATED' || inv.lockedAt != null) bad = { code: 'INVOICE_LOCKED', extra: `invoice ${inv.invoiceNumber}` };
+    else if (g && String(g.status) === 'RELEASED') bad = { code: 'GST_RELEASED', extra: `invoice ${inv.invoiceNumber}` };
+    if (bad) {
+      for (const e of mine) badByEntry.set(e.id, bad);
+      continue;
     }
-    if (!changed) break;
-    ok = new Set([...ok].filter((id) => !badByEntry.has(id)));
+    const stays = covered.filter(
+      (l) => covers(inv, l) && !ok.has(l.id) && String(l.status) !== 'CANCELLED' && String(l.status) !== 'REVERSED',
+    );
+    plans.push({
+      id: inv.id,
+      invoiceNumber: inv.invoiceNumber,
+      outletCode: inv.outletCode,
+      period: inv.period,
+      totalPaise: Number(inv.totalPaise),
+      gstHeldPaise: g && String(g.status) === 'HELD' ? Number(g.gstPaise) : 0,
+      entryIds: mine.map((e) => e.id),
+      ...(stays.length > 0
+        ? { reissue: { remainingEntryIds: stays.map((s) => s.id), basePaise: stays.reduce((s, r) => s + Number(r.amountPaise), 0) } }
+        : {}),
+    });
   }
-  return { invoicesToVoid: plans, badByEntry };
+  // A refused row leaves its invoice untouched; an invoice touched by both refused and accepted rows can't happen
+  // (a refusal here is per invoice), so the plans stand as computed.
+  return { invoicesToVoid: plans.filter((p) => p.entryIds.every((id) => !badByEntry.has(id))), badByEntry };
+}
+
+/**
+ * Owner decision 2026-11-26: a SERVICE invoice that also covers payouts that stay payable is VOIDED (caller) and a
+ * FRESH invoice is issued here for exactly those payouts — same outlet + month + frozen retailer snapshot, a new
+ * number, GST recomputed on the new base, its own HELD GST row — and the remaining rows are linked to it. The link is
+ * a reviewed raw UPDATE of autoInvoiceId only: a Prisma update would bump updatedAt, which the daily digest uses as the
+ * recorded time of PAID / FAILED payouts (digest-recorded-time-guard.spec).
+ */
+async function reissueServiceInvoice(
+  tx: Db,
+  clientId: string,
+  plan: InvoiceVoidPlan,
+  now: Date,
+): Promise<{ id: string; invoiceNumber: string; gstPaise: number }> {
+  const old = await tx.autoInvoice.findFirst({
+    where: { id: plan.id, clientId },
+    select: { partnerId: true, outletCode: true, period: true, snapshot: true },
+  });
+  if (!old || !plan.reissue) throw new ConflictException(`Invoice ${plan.invoiceNumber} could not be re-issued — nothing was cancelled; retry.`);
+  const snap = (old.snapshot && typeof old.snapshot === 'object' ? old.snapshot : {}) as Record<string, unknown>;
+  const base = BigInt(plan.reissue.basePaise);
+  const gst = computeGST(base, (snap.gstRegistrationType as string | null) ?? null, (snap.retailerGstin as string | null) ?? null);
+  const description = buildInvoiceDescription(formatPeriodLabel(old.period));
+  let seq = (await tx.autoInvoice.count({ where: { clientId, period: old.period } })) + 1;
+  let invoiceNumber = generateInvoiceNumber(old.outletCode, old.period, seq);
+  for (let i = 0; i < 200 && (await tx.autoInvoice.findFirst({ where: { invoiceNumber }, select: { id: true } })); i++) {
+    seq += 1;
+    invoiceNumber = generateInvoiceNumber(old.outletCode, old.period, seq);
+  }
+  const created = await tx.autoInvoice.create({
+    data: {
+      clientId,
+      invoiceNumber,
+      partnerId: old.partnerId,
+      outletCode: old.outletCode,
+      period: old.period,
+      invoiceDate: now,
+      status: 'GENERATED',
+      invoiceKind: 'SERVICE',
+      invoiceNumberEdited: false,
+      lineItems: [{ description, sacCode: TECH_GIFSY.sacCode, amountPaise: Number(base) }] as unknown as Prisma.InputJsonValue,
+      subtotalPaise: base,
+      gstPaise: gst.gstPaise,
+      gstType: gst.gstType ?? null,
+      totalPaise: gst.totalPaise,
+      snapshot: { ...snap, description, reissuedFrom: plan.invoiceNumber } as unknown as Prisma.InputJsonValue,
+    },
+    select: { id: true },
+  });
+  if (gst.gstApplicable) {
+    await tx.gstReimbursement.create({
+      data: { clientId, autoInvoiceId: created.id, partnerId: old.partnerId, outletCode: old.outletCode, gstPaise: gst.gstPaise, status: 'HELD' },
+    });
+  }
+  const remaining = plan.reissue.remainingEntryIds;
+  if (remaining.length > 0) {
+    await tx.$executeRaw`UPDATE "credit_payout_entries" SET "autoInvoiceId" = ${created.id} WHERE "clientId" = ${clientId} AND "id" = ANY(${remaining}::text[])`;
+  }
+  return { id: created.id, invoiceNumber, gstPaise: Number(gst.gstPaise) };
 }
 
 /** The refusal thrown when any row is not cancellable — the whole request is refused, every row listed. */
@@ -470,6 +540,7 @@ export interface ApplyCancellationResult {
   cancellationId: string;
   cancelled: CancelRowView[];
   invoicesVoided: InvoiceVoidPlan[];
+  invoicesReissued: Array<{ voidedId: string; voidedNumber: string; newId: string; newNumber: string; remainingEntryIds: string[]; basePaise: number; gstPaise: number }>;
   totals: CancelEvaluation['totals'];
 }
 
@@ -493,6 +564,9 @@ export async function applyCancellation(tx: Db, input: ApplyCancellationInput): 
     }
   }
   const ids = [...new Set(items.map((i) => i.id))].sort();
+  // The per-(client, month) SERVICE-invoice lock FIRST (the manual run and the confirm-time generation take it too).
+  const months = await tx.creditPayoutEntry.findMany({ where: { clientId, id: { in: ids } }, select: { period: true } });
+  await lockInvoiceMonths(tx, clientId, (months ?? []).map((m) => m.period));
   // Lock order (reversal engine §5): credit_batches → credit_payout_entries → auto_invoices, each ascending id.
   const batchRows = await tx.creditPayoutEntry.findMany({ where: { clientId, id: { in: ids } }, select: { batchId: true } });
   const batchIds = [...new Set(batchRows.map((b) => b.batchId))].sort();
@@ -537,16 +611,36 @@ export async function applyCancellation(tx: Db, input: ApplyCancellationInput): 
   }
 
   const voidReason = `All payouts on this invoice were cancelled before payment: ${input.reason}`.slice(0, CANCEL_REASON_MAX + 80);
+  const reissued: Array<{ voidedId: string; voidedNumber: string; newId: string; newNumber: string; remainingEntryIds: string[]; basePaise: number; gstPaise: number }> = [];
   for (const inv of ev.invoicesToVoid) {
     const v = await tx.autoInvoice.updateMany({
-      where: { id: inv.id, clientId, status: 'GENERATED', lockedAt: null },
-      data: { status: 'VOID', voidedAt: now, voidedById: input.actorId, voidReason },
+      where: { id: inv.id, clientId, status: 'GENERATED', lockedAt: null, voidedAt: null },
+      data: {
+        status: 'VOID',
+        voidedAt: now,
+        voidedById: input.actorId,
+        voidReason: inv.reissue ? `Re-issued without the payouts cancelled before payment: ${input.reason}`.slice(0, CANCEL_REASON_MAX + 80) : voidReason,
+      },
     });
     if (v.count !== 1) throw new ConflictException(`Invoice ${inv.invoiceNumber} changed while it was being voided — nothing was cancelled; retry.`);
     await tx.gstReimbursement.updateMany({
       where: { autoInvoiceId: inv.id, status: 'HELD' },
-      data: { status: 'VOID', notes: `Invoice voided ${now.toISOString().slice(0, 10)} — the payouts were cancelled before payment.` },
+      data: { status: 'VOID', notes: `Invoice voided ${now.toISOString().slice(0, 10)} — payouts on it were cancelled before payment.` },
     });
+    if (inv.reissue) {
+      const fresh = await reissueServiceInvoice(tx, clientId, inv, now);
+      inv.reissue.newInvoiceId = fresh.id;
+      inv.reissue.newInvoiceNumber = fresh.invoiceNumber;
+      reissued.push({
+        voidedId: inv.id,
+        voidedNumber: inv.invoiceNumber,
+        newId: fresh.id,
+        newNumber: fresh.invoiceNumber,
+        remainingEntryIds: inv.reissue.remainingEntryIds,
+        basePaise: inv.reissue.basePaise,
+        gstPaise: fresh.gstPaise,
+      });
+    }
   }
 
   // Audit: one row per upload (batch) so the upload's history shows it; all share the cancellation id.
@@ -573,14 +667,16 @@ export async function applyCancellation(tx: Db, input: ApplyCancellationInput): 
           amountPaise: rows.reduce((s, r) => s + r.amountPaise, 0),
           requestTotals: ev.totals,
           rows: rows.map((r) => ({ ...r, reason: reasonOf.get(r.entryId) ?? input.reason })),
-          invoicesVoided: ev.invoicesToVoid.filter((i) => rows.some((r) => r.autoInvoiceId === i.id)),
+          // Same covers() test as the void plan (linked OR the outlet + month of a visibility 194C row).
+          invoicesVoided: ev.invoicesToVoid.filter((i) => rows.some((r) => i.entryIds.includes(r.entryId))),
+          invoicesReissued: reissued.filter((x) => ev.invoicesToVoid.some((i) => i.id === x.voidedId && rows.some((r) => i.entryIds.includes(r.entryId)))),
           file: input.file ? { key: input.file.key, name: input.file.name } : null,
           acknowledgedNotCancelled: input.file?.acknowledgedBlocked ?? [],
         }),
       },
     });
   }
-  return { cancellationId, cancelled: ev.ok, invoicesVoided: ev.invoicesToVoid, totals: ev.totals };
+  return { cancellationId, cancelled: ev.ok, invoicesVoided: ev.invoicesToVoid, invoicesReissued: reissued, totals: ev.totals };
 }
 
 /** JSON-safe (BigInt → string) metadata for an audit row. */

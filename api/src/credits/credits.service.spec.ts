@@ -3913,13 +3913,48 @@ describe('CreditsService', () => {
         mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]);
         mockTx.autoInvoice.findMany.mockResolvedValue([]);
 
+        mockTx.outlet.findFirst.mockResolvedValueOnce({
+          outletCode: 'OX', name: 'Other Store', state: 'Maharashtra',
+          partner: { id: 'p2', entityType: 'INDIVIDUAL', gstNumber: null, gstRegistrationType: 'UNREGISTERED', businessName: 'X Ent', ownerName: 'X Owner', phone: '8', bankName: 'SBI', bankAccountNumber: '2', ifscCode: 'S' },
+        });
+
         await download(); // the bank file withholds deoleo's DEDUCT TDS; then the payout is PAID (payNow)
 
+        // Issued under the client that BEARS the recovery ('other'), with other's own outlet — never deoleo's.
         expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledWith(
-          mockTx, expect.objectContaining({ panNumber: 'PAN1', bodyPaise: 90900n, outletCode: 'O1' }),
+          mockTx, expect.objectContaining({ clientId: 'other', panNumber: 'PAN1', bodyPaise: 90900n, outletCode: 'OX', partnerId: 'p2' }),
         );
+        expect(mockTx.outlet.findFirst.mock.calls[0][0].where).toMatchObject({ clientId: 'other' });
         const recovery = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data as Array<{ clientId: string; tenantSharePaise: bigint; raisedOn: string }>;
         expect(recovery).toEqual([expect.objectContaining({ clientId: 'other', tenantSharePaise: 90900n, raisedOn: 'PAID' })]);
+      });
+
+      it('re-audit 2026-11-26: Bajaj gross-up ₹60k (paid) + Deoleo DEDUCT ₹50k now PAID → the TDS invoice is Bajaj’s (it bears all of it); Deoleo gets no invoice', async () => {
+        mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]);
+        mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([secEntry(5000000n, 'SEC_194C', 'DEDUCT')]);
+        mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+          { clientId: 'bajaj', outletId: 'BJ1', amountPaise: 6000000n, tdsSection: 'SEC_194C', tdsMethodology: 'GROSS_UP' },
+        ]);
+        mockTx.outlet.findMany.mockResolvedValue([
+          { outletCode: 'O1', clientId: 'deoleo', partnerId: 'p1' },
+          { outletCode: 'BJ1', clientId: 'bajaj', partnerId: 'p2' },
+        ]);
+        mockTx.channelPartner.findMany.mockResolvedValue([{ id: 'p1', panNumber: 'PAN1' }, { id: 'p2', panNumber: 'PAN1' }]);
+        mockTx.tdsRecoveryEntry.findMany.mockResolvedValue([]);
+        mockTx.autoInvoice.findMany.mockResolvedValue([]);
+        mockTx.outlet.findFirst.mockResolvedValueOnce({
+          outletCode: 'BJ1', name: 'Bajaj Store', state: 'Rajasthan',
+          partner: { id: 'p2', entityType: 'INDIVIDUAL', gstNumber: null, gstRegistrationType: 'UNREGISTERED', businessName: 'B Ent', ownerName: 'B Owner', phone: '7', bankName: 'ICICI', bankAccountNumber: '3', ifscCode: 'C' },
+        });
+
+        await download();
+
+        // grossUp(₹60,000, 1/99) = ₹606 — all recovered from Bajaj, invoice under Bajaj with Bajaj's outlet.
+        expect(mockInvoicesService.createTdsInvoice).toHaveBeenCalledTimes(1);
+        const arg = (mockInvoicesService.createTdsInvoice.mock.calls[0] as unknown[])[1];
+        expect(arg).toMatchObject({ clientId: 'bajaj', outletCode: 'BJ1', partnerId: 'p2', outletName: 'Bajaj Store', bodyPaise: 60600n });
+        const recovery = mockTx.tdsRecoveryEntry.createMany.mock.calls[0][0].data as Array<{ clientId: string }>;
+        expect(recovery.map((r) => r.clientId)).toEqual(['bajaj']);
       });
 
       it('D7: a 194R GROSS_UP client crossing on ITS OWN aggregate raises NO TDS invoice and NO recovery row (report-only)', async () => {

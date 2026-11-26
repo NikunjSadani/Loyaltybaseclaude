@@ -52,6 +52,7 @@ function fake(w: World) {
   const match = (row: Row, where: Row) => Object.entries(where).every(([k, f]) => (k === 'OR' ? (f as Row[]).some((o) => match(row, o)) : inList(row[k], f)));
   const tx: any = {
     $queryRaw: jest.fn(async () => []),
+    $executeRaw: jest.fn(async () => 1),
     creditPayoutEntry: {
       findMany: jest.fn(async ({ where }: any) => w.entries.filter((e) => match(e, where))),
       updateMany: jest.fn(async ({ where, data }: any) => {
@@ -67,6 +68,13 @@ function fake(w: World) {
     tdsRecoveryEntry: { findMany: jest.fn(async ({ where }: any) => (w.recovery ?? []).filter((r) => match(r, where))) },
     autoInvoice: {
       findMany: jest.fn(async ({ where }: any) => (w.invoices ?? []).filter((r) => match(r, where))),
+      findFirst: jest.fn(async ({ where }: any) => (w.invoices ?? []).find((r) => match(r, where)) ?? null),
+      count: jest.fn(async ({ where }: any) => (w.invoices ?? []).filter((r) => match(r, where)).length),
+      create: jest.fn(async ({ data }: any) => {
+        const row = { id: `new-${(w.invoices ?? []).length + 1}`, voidedAt: null, lockedAt: null, ...data };
+        (w.invoices ??= []).push(row);
+        return { id: row.id };
+      }),
       updateMany: jest.fn(async ({ where, data }: any) => {
         const hit = (w.invoices ?? []).filter((r) => match(r, where));
         hit.forEach((r) => Object.assign(r, data));
@@ -75,6 +83,7 @@ function fake(w: World) {
     },
     gstReimbursement: {
       findMany: jest.fn(async ({ where }: any) => (w.gst ?? []).filter((r) => match(r, where))),
+      create: jest.fn(async ({ data }: any) => { (w.gst ??= []).push(data); return data; }),
       updateMany: jest.fn(async ({ where, data }: any) => {
         const hit = (w.gst ?? []).filter((r) => match(r, where));
         hit.forEach((r) => Object.assign(r, data));
@@ -269,25 +278,40 @@ describe('self-billed SERVICE invoice', () => {
         gst: [{ autoInvoiceId: 'm1', status: 'HELD', gstPaise: 1800n }],
         visibilityFieldIds: ['f-vis'],
       };
-      const { tx } = fake(w);
+      const { tx, audits } = fake(w);
       const res = await run(tx, [item('v1', 'PENDING', 10000n), item('v2', 'PENDING', 10000n)]);
       expect(res.invoicesVoided.map((i) => i.id)).toEqual(['m1']);
+      // The audit row / history name the manual-path invoice (same covers() test as the void plan).
+      expect(audits[0].metadata.invoicesVoided).toEqual([expect.objectContaining({ id: 'm1', entryIds: ['v1', 'v2'] })]);
       expect(w.invoices![0].status).toBe('VOID');
       expect(w.gst![0].status).toBe('VOID');
       // The invoice row was locked before the decision (batches → entries → invoices).
       expect(tx.$queryRaw).toHaveBeenCalledTimes(3);
     });
-    it('is refused (named) — never left silently live — when another visibility payout of that outlet + month stays payable', async () => {
+    it('owner decision 2026-11-26: when another visibility payout of that outlet + month stays payable, the old invoice is VOIDED and a FRESH one issued for what stays — recorded in the audit row', async () => {
       const w: World = {
-        entries: [vis({ id: 'v1' }), vis({ id: 'v2', status: 'PROCESSING', downloadId: 'd1' })],
-        invoices: [inv({ id: 'm1', invoiceNumber: 'TGSL-VIS-O1-MANUAL' })],
+        entries: [
+          vis({ id: 'v1' }),
+          vis({ id: 'v2', batchId: 'b2', status: 'PROCESSING', downloadId: 'd1', amountPaise: 25000n }),
+        ],
+        invoices: [inv({ id: 'm1', invoiceNumber: 'TGSL-VIS-O1-MANUAL', partnerId: 'p1', snapshot: { gstRegistrationType: 'REGULAR', retailerGstin: '19ABCDE1234F1Z5' } })],
+        gst: [{ autoInvoiceId: 'm1', status: 'HELD', gstPaise: 6300n }],
         visibilityFieldIds: ['f-vis'],
       };
-      const { tx } = fake(w);
-      const blocked = await refusalOf(run(tx, [item('v1', 'PENDING', 10000n)]));
-      expect(blocked).toEqual([expect.objectContaining({ entryId: 'v1', code: 'INVOICE_SHARED' })]);
-      expect((blocked[0] as any).reason).toMatch(/TGSL-VIS-O1-MANUAL/);
-      expect(w.invoices![0].status).toBe('GENERATED');
+      const { tx, audits } = fake(w);
+      const res = await run(tx, [item('v1', 'PENDING', 10000n)]);
+      // Old invoice voided (+ its HELD GST), a fresh one for the ₹250 that stays (GST recomputed, own HELD row).
+      expect(w.invoices![0]).toMatchObject({ status: 'VOID' });
+      expect(w.invoices![0].voidReason).toMatch(/Re-issued without/);
+      const fresh = w.invoices![1];
+      expect(fresh).toMatchObject({ status: 'GENERATED', invoiceKind: 'SERVICE', outletCode: 'O1', subtotalPaise: 25000n, gstPaise: 4500n });
+      expect(fresh.invoiceNumber).not.toBe('TGSL-VIS-O1-MANUAL');
+      expect(w.gst!.map((g) => g.status)).toEqual(['VOID', 'HELD']);
+      // The remaining row is relinked by the reviewed raw UPDATE (no updatedAt bump).
+      expect(JSON.stringify(tx.$executeRaw.mock.calls)).toContain('v2');
+      expect(res.invoicesReissued).toEqual([expect.objectContaining({ voidedNumber: 'TGSL-VIS-O1-MANUAL', newNumber: fresh.invoiceNumber, remainingEntryIds: ['v2'], basePaise: 25000 })]);
+      expect(audits[0].metadata.invoicesVoided.map((i: any) => i.id)).toEqual(['m1']);
+      expect(audits[0].metadata.invoicesReissued).toHaveLength(1);
     });
     it('a non-visibility payout of the same outlet + month is not covered by the invoice (no void, no refusal)', async () => {
       const w: World = { entries: [entry({ id: 'x', fieldId: 'f-incentive' })], invoices: [inv({ id: 'm1' })], visibilityFieldIds: ['f-vis'] };
@@ -299,7 +323,6 @@ describe('self-billed SERVICE invoice', () => {
   });
 
   it.each([
-    ['INVOICE_SHARED', [inv()], [], [entry({ id: 'e9', autoInvoiceId: 'i1', status: 'PAID' })]],
     ['INVOICE_LOCKED', [inv({ lockedAt: daysAgo(1) })], [], []],
     ['GST_RELEASED', [inv()], [{ autoInvoiceId: 'i1', status: 'RELEASED', gstPaise: 1800n }], []],
   ])('refuses when the invoice cannot be voided (%s) — nothing cancelled, invoice untouched', async (code, invoices, gst, others) => {
