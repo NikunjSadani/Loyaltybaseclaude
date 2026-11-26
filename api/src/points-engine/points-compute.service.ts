@@ -347,6 +347,8 @@ export class PointsComputeService {
 
     const rows: ComputePreviewRow[] = [];
     const ruleVersions = new Map<string, { ruleId: string; version: number }>();
+    // ruleId → display name (named rules only). Display-only; kept OUT of ruleVersionsUsed so no key can see it.
+    const ruleNames: Record<string, string> = {};
 
     // Visibility (POSM) inputs (§3a): loaded lazily, ONCE, the first time a resolved rule declares a
     // `visibility:*` input — a run whose rules never read visibility issues no visibility query at all.
@@ -419,6 +421,8 @@ export class PointsComputeService {
           ruleId: rule.ruleId,
           version: rule.version,
         });
+        const rn = ruleNameField(rule).ruleName;
+        if (rn) ruleNames[rule.ruleId] = rn;
 
         const config = rowToConfig(rule);
         const awardType = config.output?.awardType;
@@ -432,6 +436,7 @@ export class PointsComputeService {
             ...base,
             ruleId: rule.ruleId,
             ruleVersion: rule.version,
+            ...ruleNameField(rule),
             awardType,
             fieldId,
             status: 'ERROR',
@@ -505,6 +510,7 @@ export class PointsComputeService {
             ...base,
             ruleId: rule.ruleId,
             ruleVersion: rule.version,
+            ...ruleNameField(rule),
             awardType,
             fieldId,
             status: 'OK',
@@ -522,6 +528,7 @@ export class PointsComputeService {
             ...base,
             ruleId: rule.ruleId,
             ruleVersion: rule.version,
+            ...ruleNameField(rule),
             awardType,
             fieldId,
             status: 'SKIP',
@@ -534,6 +541,7 @@ export class PointsComputeService {
             ...base,
             ruleId: rule.ruleId,
             ruleVersion: rule.version,
+            ...ruleNameField(rule),
             awardType,
             fieldId,
             status: 'ERROR',
@@ -670,6 +678,7 @@ export class PointsComputeService {
       engineDisabled,
       directCreditEnabled,
       ruleVersionsUsed,
+      ...(Object.keys(ruleNames).length > 0 ? { ruleNames } : {}),
       sourceKey: '', // set below
       payoutKey: '', // set below
       ...(quarterInfo ? { quarter: quarterInfo } : {}),
@@ -1284,6 +1293,15 @@ export class PointsComputeService {
 }
 
 // ─── pure helpers ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The rule's DISPLAY name for a preview row — added only when the rule has one, so an unnamed rule's row is
+ * byte-identical to before. Display-only: never read by evaluation, never part of any hash / source key.
+ */
+function ruleNameField(rule: Pick<PointsRule, 'name'>): { ruleName?: string } {
+  const n = typeof rule.name === 'string' ? rule.name.trim() : '';
+  return n ? { ruleName: n } : {};
+}
 
 /** Reconstruct a PointsRuleConfig from a stored PointsRule row (Date → YYYY-MM-DD; Json casts). */
 function rowToConfig(row: PointsRule): PointsRuleConfig {

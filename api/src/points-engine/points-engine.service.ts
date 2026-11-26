@@ -30,6 +30,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  PreconditionFailedException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { Prisma, PointsRule } from '@prisma/client';
@@ -58,6 +59,7 @@ import type {
 import {
   CreatePointsRuleDto,
   ListPointsRulesQueryDto,
+  RULE_NAME_MAX,
   UpdatePointsRuleDto,
 } from './dto/points-rule.dto';
 
@@ -98,11 +100,14 @@ export class PointsEngineService {
 
     let ruleId = dto.ruleId?.trim();
     let version = 1;
+    // Validate the name up-front (400 on blank / too long) before any DB work.
+    const suppliedName = dto.name === undefined ? undefined : normalizeRuleName(dto.name);
+    let inheritedName: string | null = null;
 
     if (ruleId) {
       const existing = await this.prisma.pointsRule.findMany({
         where: { clientId, ruleId },
-        select: { version: true, status: true, evaluationBasis: true },
+        select: { version: true, status: true, evaluationBasis: true, name: true },
       });
       if (existing.length === 0) {
         throw new NotFoundException(`No rule ${ruleId} exists for this tenant.`);
@@ -116,6 +121,8 @@ export class PointsEngineService {
         );
       }
       version = Math.max(...existing.map((r) => r.version)) + 1;
+      // The rule's current display name (latest version's) — the new version starts with it.
+      inheritedName = existing.reduce((a, b) => (b.version > a.version ? b : a)).name ?? null;
     } else {
       // Brand-new logical rule. ruleId is a distinct, caller-stable identity (separate from the
       // row's @default(cuid()) primary id), so mint one up-front.
@@ -126,8 +133,21 @@ export class PointsEngineService {
     this.assertValid(config);
 
     try {
-      return await this.prisma.pointsRule.create({
-        data: this.toCreateData(clientId, ruleId, version, 'draft', dto, user.sub),
+      const isNewVersion = version > 1;
+      const data = {
+        ...this.toCreateData(clientId, ruleId, version, 'draft', dto, user.sub),
+        // A new version starts with the rule's CURRENT name; a different supplied name is applied to every
+        // version (audited, same transaction) so versions never disagree.
+        name: isNewVersion ? inheritedName : suppliedName ?? null,
+      };
+      if (!(isNewVersion && suppliedName !== undefined && suppliedName !== inheritedName)) {
+        return await this.prisma.pointsRule.create({ data });
+      }
+      const newName = suppliedName;
+      return await this.prisma.$transaction(async (tx) => {
+        const created = await tx.pointsRule.create({ data });
+        await this.applyName(tx, user, created, newName, 'new_version');
+        return { ...created, name: newName };
       });
     } catch (e) {
       // Two concurrent createDraft on the same ruleId can both pass the version/open-draft check above
@@ -167,9 +187,14 @@ export class PointsEngineService {
     }
 
     const { attachsTo } = dto;
-    return this.prisma.pointsRule.update({
-      where: { id: row.id },
-      data: {
+    // Name: omitted = keep. A CHANGED name is applied to EVERY version of the logical rule through the same
+    // audited path as rename (so a draft and its published siblings never disagree). The client sends `name` only
+    // when the author changed it (a stale tab cannot overwrite a rename made elsewhere).
+    const newName = dto.name === undefined ? undefined : normalizeRuleName(dto.name);
+    return this.prisma.$transaction(async (tx) => {
+      await tx.pointsRule.update({
+        where: { id: row.id },
+        data: {
         effectiveFrom:   toDate(dto.effectiveFrom),
         effectiveTo:     dto.effectiveTo ? toDate(dto.effectiveTo) : null,
         evaluationBasis: dto.evaluationBasis ?? 'PERIOD_AGGREGATE',
@@ -182,8 +207,65 @@ export class PointsEngineService {
         kpiCode:         attachsTo.kpiCode,
         program:         attachsTo.program ?? null,
         programCategory: attachsTo.programCategory ?? null,
+        },
+      });
+      if (newName !== undefined) await this.applyName(tx, user, row, newName, 'draft_save');
+      const updated = await tx.pointsRule.findFirst({ where: { id: row.id } });
+      return updated as PointsRule;
+    });
+  }
+
+  // ─── rename (display-only) ──────────────────────────────────────────────────
+
+  /**
+   * Rename a logical rule WITHOUT creating a new version — works on a PUBLISHED (or archived) rule too.
+   * The name is DISPLAY-ONLY metadata: it is never read by compute and is not part of the rule's identity
+   * (ruleId/version), config hash, or any idempotency / source key, so changing it cannot change what a rule
+   * pays or re-open a credited run. Applied to EVERY version of the logical rule (same clientId + ruleId) so the
+   * Rules list / history / preview all show one name. ONLY `name` is written — `updatedAt` is NOT bumped (a raw
+   * UPDATE bypasses Prisma's @updatedAt), so the list's "Updated" still means "config last changed". `null` clears
+   * the name. Audited (POINTS_RULE_RENAME) with the before/after name of each version; a no-op rename writes nothing.
+   */
+  async rename(user: JwtPayload, id: string, rawName: string | null | undefined): Promise<PointsRule> {
+    if (rawName === undefined) throw new BadRequestException('name is required (send null to clear it).');
+    const name = normalizeRuleName(rawName);
+    const row = await this.loadForWrite(user, id);
+    return this.prisma.$transaction(async (tx) => {
+      await this.applyName(tx, user, row, name, 'rename');
+      const updated = await tx.pointsRule.findFirst({ where: { id: row.id } });
+      return updated ?? { ...row, name };
+    });
+  }
+
+  /**
+   * The ONE write path for a rule name: sets `name` on every version of (clientId, ruleId) with a raw UPDATE (leaves
+   * `updatedAt` untouched) and writes a POINTS_RULE_RENAME audit row — only when some version's name actually changes.
+   */
+  private async applyName(
+    tx: Prisma.TransactionClient,
+    user: JwtPayload,
+    row: Pick<PointsRule, 'id' | 'clientId' | 'ruleId'>,
+    name: string | null,
+    via: 'rename' | 'draft_save' | 'new_version',
+  ): Promise<boolean> {
+    const versions = await tx.pointsRule.findMany({
+      where: { clientId: row.clientId, ruleId: row.ruleId },
+      select: { id: true, version: true, name: true },
+    });
+    if (versions.every((v) => (v.name ?? null) === name)) return false;
+    await tx.$executeRaw`UPDATE "points_rules" SET "name" = ${name} WHERE "clientId" = ${row.clientId} AND "ruleId" = ${row.ruleId}`;
+    await tx.auditLog.create({
+      data: {
+        action: 'UPDATE',
+        entityType: 'POINTS_RULE_RENAME',
+        entityId: row.ruleId,
+        actorId: user.sub,
+        oldValues: { names: versions.map((v) => ({ version: v.version, name: v.name ?? null })) } as Prisma.InputJsonValue,
+        newValues: { name } as Prisma.InputJsonValue,
+        metadata: { clientId: row.clientId, ruleId: row.ruleId, viaRowId: row.id, via, versions: versions.length } as Prisma.InputJsonValue,
       },
     });
+    return true;
   }
 
   // ─── publish ────────────────────────────────────────────────────────────────
@@ -194,7 +276,7 @@ export class PointsEngineService {
    * effectiveTo to the day before this rule's effectiveFrom) and flips this row to 'published'.
    * A published version is never mutated afterwards.
    */
-  async publish(user: JwtPayload, id: string): Promise<PointsRule> {
+  async publish(user: JwtPayload, id: string, opts: { confirmGap?: boolean } = {}): Promise<PointsRule> {
     const row = await this.loadForWrite(user, id);
     if (row.status === 'published') {
       throw new BadRequestException('Rule is already published.');
@@ -264,6 +346,22 @@ export class PointsEngineService {
             .map((p) => `v${p.version}`)
             .join(', ')} of this rule are ${isQuarterBasis(row.evaluationBasis) ? 'monthly' : 'quarterly'} — publishing would retire them. Create a new rule for a quarterly bonus instead.`,
         );
+      }
+      // VERSION GAP (owner trap 2026-11-26): superseding ARCHIVES the prior version, and archived versions never
+      // resolve — so a new version starting AFTER the prior's start leaves [prior start, new start − 1] with NO rule.
+      // If that gap touches a period that has already started (gap start ≤ today), require an explicit confirmation.
+      if (!opts.confirmGap) {
+        const today = todayIst();
+        const gaps = priors
+          .filter((p) => windowsOverlap(p.effectiveFrom, p.effectiveTo, newFrom, newTo))
+          .filter((p) => p.effectiveFrom < newFrom && p.effectiveFrom <= today)
+          .map((p) => versionGapMessage(p, row));
+        if (gaps.length > 0) {
+          throw new PreconditionFailedException({
+            message: `${gaps.join(' ')} Confirm to publish anyway, or set this version's effective-from back.`,
+            code: 'VERSION_GAP',
+          });
+        }
       }
       for (const prior of priors) {
         if (!windowsOverlap(prior.effectiveFrom, prior.effectiveTo, newFrom, newTo)) continue;
@@ -643,6 +741,25 @@ export function longDay(d: Date): string {
   return `${d.getUTCDate()} ${MONTH_LONG[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
 
+/** DD-MM-YYYY of a @db.Date (UTC calendar day) — the format the owner reads in the builder. */
+export function dmy(d: Date): string {
+  return `${String(d.getUTCDate()).padStart(2, '0')}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${d.getUTCFullYear()}`;
+}
+
+/** Today's business date (Asia/Kolkata) as a UTC-midnight Date, comparable with @db.Date columns. */
+function todayIst(): Date {
+  const ist = new Date(Date.now() + 330 * 60 * 1000);
+  return new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate()));
+}
+
+/** "Version 1 covered from 01-11-2026; this version starts 26-11-2026 — periods in between will have no rule." */
+export function versionGapMessage(
+  prior: Pick<PointsRule, 'version' | 'effectiveFrom'>,
+  next: Pick<PointsRule, 'effectiveFrom'>,
+): string {
+  return `Version ${prior.version} covered from ${dmy(prior.effectiveFrom)}; this version starts ${dmy(next.effectiveFrom)} — periods in between will have no rule.`;
+}
+
 /** Why an overlapping quarterly version does not pay a quarter (it starts after / ends before it), with the fix. */
 export function notCoveringReason(r: Pick<PointsRule, 'ruleId' | 'version' | 'effectiveFrom' | 'effectiveTo'>, qStart: Date, qEnd: Date): string {
   const who = `${r.ruleId} v${r.version}`;
@@ -650,6 +767,21 @@ export function notCoveringReason(r: Pick<PointsRule, 'ruleId' | 'version' | 'ef
     return `Rule ${who} starts ${longDay(r.effectiveFrom)}, after the quarter began ${longDay(qStart)} — back-date its effective-from to ${longDay(qStart)} to cover this quarter.`;
   }
   return `Rule ${who} ends ${longDay(r.effectiveTo!)}, before the quarter ends ${longDay(qEnd)} — a quarterly rule must be effective for the whole quarter.`;
+}
+
+/**
+ * Normalise a rule display name: trimmed; null clears it; a provided name must be non-empty after trimming and
+ * ≤ RULE_NAME_MAX characters. Duplicates across rules are allowed (the UI warns).
+ */
+export function normalizeRuleName(raw: string | null): string | null {
+  if (raw === null) return null;
+  if (typeof raw !== 'string') throw new BadRequestException('Rule name must be text.');
+  const t = raw.replace(/\s+/g, ' ').trim();
+  if (t === '') throw new BadRequestException('Rule name cannot be blank — enter a name or clear it.');
+  if (t.length > RULE_NAME_MAX) {
+    throw new BadRequestException(`Rule name is ${t.length} characters — the limit is ${RULE_NAME_MAX}.`);
+  }
+  return t;
 }
 
 /** Refuse a version whose monthly/quarterly kind differs from the rule's other versions. */

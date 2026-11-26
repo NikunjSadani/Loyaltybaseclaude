@@ -33,15 +33,35 @@ export function listRules(q?: { status?: string; program?: string; kpiCode?: str
   return api.get<PointsRuleRow[]>(`${RULES}${qs ? `?${qs}` : ''}`);
 }
 export const getRule = (id: string) => api.get<PointsRuleRow>(`${RULES}/${id}`);
-export const createRule = (draft: RuleConfigDraft) => api.post<PointsRuleRow>(RULES, draft);
+/**
+ * The name as the API wants it: trimmed; blank → null (clear) on an update, omitted on a create (a new version then
+ * inherits the previous version's name server-side). The backend rejects a blank string, so never send ''.
+ */
+function wireName(name: string | null | undefined, mode: 'create' | 'update'): { name?: string | null } {
+  if (name === undefined) return {};
+  const t = (name ?? '').trim();
+  if (t === '') return mode === 'update' ? { name: null } : {};
+  return { name: t };
+}
+export function createRule(draft: RuleConfigDraft): Promise<ApiResponse<PointsRuleRow>> {
+  const { name, ...rest } = draft;
+  return api.post<PointsRuleRow>(RULES, { ...rest, ...wireName(name, 'create') });
+}
 export function updateRule(id: string, draft: RuleConfigDraft): Promise<ApiResponse<PointsRuleRow>> {
   // STRIP ruleId: the PATCH (updateDraft) DTO has no ruleId and the backend pipe is forbidNonWhitelisted,
   // so sending it 400s. A loaded draft carries ruleId (identity), so remove it from the update body.
-  const { ruleId: _omit, ...body } = draft;
+  const { ruleId: _omit, name, ...body } = draft;
   void _omit;
-  return api.patch<PointsRuleRow>(`${RULES}/${id}`, body);
+  return api.patch<PointsRuleRow>(`${RULES}/${id}`, { ...body, ...wireName(name, 'update') });
 }
-export const publishRule = (id: string) => api.post<PointsRuleRow>(`${RULES}/${id}/publish`, {});
+/** Rename a rule (any status, incl. published) WITHOUT a new version — display-only; applies to every version. */
+export function renameRule(id: string, name: string): Promise<ApiResponse<PointsRuleRow>> {
+  const t = name.trim();
+  return api.patch<PointsRuleRow>(`${RULES}/${id}/name`, { name: t === '' ? null : t });
+}
+/** 412 = VERSION_GAP (already-started periods would have no rule) — resend with `confirmGap: true` after the author confirms. */
+export const publishRule = (id: string, opts: { confirmGap?: boolean } = {}) =>
+  api.post<PointsRuleRow>(`${RULES}/${id}/publish`, opts.confirmGap ? { confirmGap: true } : {});
 export const archiveRule = (id: string) => api.post<PointsRuleRow>(`${RULES}/${id}/archive`, {});
 
 // ── Simulate (authoring aid) ────────────────────────────────────────────────────────

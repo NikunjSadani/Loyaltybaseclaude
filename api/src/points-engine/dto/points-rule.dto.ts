@@ -9,7 +9,7 @@
  * node grammar as nested class-validator classes here (it would fork the contract).
  */
 
-import { Allow, IsIn, IsOptional, IsString, Matches } from 'class-validator';
+import { Allow, IsBoolean, IsIn, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import type { AwardType, RoundingSpec, RuleAttachment, RuleStatus } from '../points-engine.types';
 
 /**
@@ -24,6 +24,9 @@ import type { AwardType, RoundingSpec, RuleAttachment, RuleStatus } from '../poi
 /** Calendar day, no time component — matches the @db.Date columns. */
 const DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 
+/** Max length of a rule's display name (after trimming). */
+export const RULE_NAME_MAX = 120;
+
 /**
  * Create a DRAFT rule.
  *   - Omit `ruleId` to create a brand-new logical rule (version 1).
@@ -34,6 +37,16 @@ export class CreatePointsRuleDto {
   @IsString()
   @IsOptional()
   ruleId?: string;
+
+  /**
+   * Display name (DISPLAY-ONLY metadata — never read by compute, never part of identity/hashes/keys).
+   * Trimmed server-side; must be non-empty when provided. Omit to keep the current name (a new version of an
+   * existing rule inherits the latest version's name); `null` clears it.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000) // raw-input guard only; the real ≤RULE_NAME_MAX check runs on the TRIMMED value (normalizeRuleName)
+  name?: string | null;
 
   @IsString()
   @Matches(DATE_RE, { message: 'effectiveFrom must be a YYYY-MM-DD date' })
@@ -80,6 +93,16 @@ export class CreatePointsRuleDto {
  * ruleId/version/status are NOT editable — identity & lifecycle are server-owned.
  */
 export class UpdatePointsRuleDto {
+  /**
+   * Display name (DISPLAY-ONLY metadata — never read by compute, never part of identity/hashes/keys).
+   * Trimmed server-side; must be non-empty when provided. Omit to keep the current name (a new version of an
+   * existing rule inherits the latest version's name); `null` clears it.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000) // raw-input guard only; the real ≤RULE_NAME_MAX check runs on the TRIMMED value (normalizeRuleName)
+  name?: string | null;
+
   @IsString()
   @Matches(DATE_RE, { message: 'effectiveFrom must be a YYYY-MM-DD date' })
   effectiveFrom!: string;
@@ -109,6 +132,24 @@ export class UpdatePointsRuleDto {
 
   @Allow()
   pipeline!: unknown;
+}
+
+/**
+ * Rename a rule (any status, incl. PUBLISHED) WITHOUT creating a new version — the name is display-only.
+ * `null` clears the name ("Unnamed rule").
+ */
+export class RenamePointsRuleDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000) // raw-input guard only; the real ≤RULE_NAME_MAX check runs on the TRIMMED value (normalizeRuleName)
+  name!: string | null;
+}
+
+/** Publish options. `confirmGap` = the author confirmed publishing a version that leaves a coverage gap (412 VERSION_GAP). */
+export class PublishPointsRuleDto {
+  @IsOptional()
+  @IsBoolean()
+  confirmGap?: boolean;
 }
 
 /** List filter — all optional, tenant scope is applied server-side from the JWT. */

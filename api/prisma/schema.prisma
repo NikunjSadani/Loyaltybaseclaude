@@ -4015,6 +4015,9 @@ model OfferTile {
 model PointsRule {
   id              String    @id @default(cuid())
   ruleId          String // stable logical identity across versions
+  // Human-readable display name (≤120, trimmed). DISPLAY-ONLY: never read by compute, never part of identity,
+  // hashes or idempotency keys; renamable on a published version without a new version. null = "Unnamed rule".
+  name            String?
   clientId        String
   version         Int // monotonic per (clientId, ruleId)
   status          String    @default("draft") // draft | published | archived

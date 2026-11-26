@@ -703,7 +703,9 @@ export default function PointsComputePage() {
                   I confirm {imported.monthLabels.join(', ')} {imported.monthLabels.length === 1 ? 'was' : 'were'} imported from the old system and
                   {' '}{imported.monthLabels.length === 1 ? 'has' : 'have'} not been paid on the portal or the old system for{' '}
                   {preview.ruleVersionsUsed.length === 1 ? 'this rule' : 'these rules'} (
-                  {preview.ruleVersionsUsed.map((v) => `${v.ruleId} v${v.version}`).join(', ') || '—'}). Gifsy admin only.
+                  {preview.ruleVersionsUsed
+                    .map((v) => `${preview.ruleNames?.[v.ruleId] ?? v.ruleId} v${v.version}`)
+                    .join(', ') || '—'}). Gifsy admin only.
                 </span>
               </label>
               {!isGifsyAdmin && (
@@ -873,9 +875,21 @@ export default function PointsComputePage() {
               {preview.ruleVersionsUsed.map((rv) => (
                 <span
                   key={`${rv.ruleId}@${rv.version}`}
-                  className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 font-mono text-[11px] text-gray-600"
+                  title={`${rv.ruleId}@${rv.version}`}
+                  data-testid="rule-version-chip"
+                  className={`rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] text-gray-600 ${
+                    preview.ruleNames?.[rv.ruleId] ? '' : 'font-mono'
+                  }`}
                 >
-                  {rv.ruleId}@{rv.version}
+                  {/* The rule's NAME when it has one (ruleId on hover / for Gifsy admins); unnamed → the ruleId. */}
+                  {preview.ruleNames?.[rv.ruleId] ? (
+                    <>
+                      <span className="font-semibold">{preview.ruleNames[rv.ruleId]}</span> v{rv.version}
+                      {isGifsyAdmin && <span className="ml-1 font-mono text-[10px] text-gray-400">{rv.ruleId}</span>}
+                    </>
+                  ) : (
+                    <>{rv.ruleId}@{rv.version}</>
+                  )}
                 </span>
               ))}
             </div>

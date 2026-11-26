@@ -24,6 +24,8 @@ export interface ComputePreviewRow {
   /** Resolved rule identity (absent when NO_RULE). */
   ruleId?: string;
   ruleVersion?: number;
+  /** The rule's display name (absent when unnamed / NO_RULE). DISPLAY-ONLY — never part of a hash or key. */
+  ruleName?: string;
   /** The credit bucket the points would land in (from rule.output) — for the upload/export. */
   awardType?: 'POINTS' | 'PAYOUT';
   fieldId?: string;
@@ -166,6 +168,8 @@ export interface ComputePreview {
   directCreditEnabled: boolean;
   /** Rule-version content-hash set used — frozen into a batch later (Wave 2). */
   ruleVersionsUsed: Array<{ ruleId: string; version: number }>;
+  /** ruleId → display name for the rules this run resolved (named rules only). DISPLAY-ONLY — never in any key. */
+  ruleNames?: Record<string, string>;
   /** Deterministic content hash of this run's creditable rows — the UI passes it back as `expectedKey`
    *  on commit so a run that changed since it was previewed is rejected (review→commit TOCTOU guard). */
   sourceKey: string;

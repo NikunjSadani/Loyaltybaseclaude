@@ -12,18 +12,21 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
-  ArrowLeft, Plus, Save, Rocket, Archive, Copy, AlertCircle, CheckCircle2, Loader2, Lock, Link2,
+  ArrowLeft, Plus, Save, Rocket, Archive, Copy, AlertCircle, CheckCircle2, Loader2, Lock, Link2, Pencil, CopyPlus,
 } from 'lucide-react';
 import {
-  getRule, createRule, updateRule, publishRule, archiveRule,
+  getRule, createRule, updateRule, publishRule, archiveRule, listRules, renameRule,
 } from '@/lib/points-engine/api';
+import { useAdminSession } from '@/lib/admin-session';
 import type {
-  RuleConfigDraft, PipelineNode, NodeType, RuleStatus, RuleInput, AwardType, RoundingSpec, EvaluationBasis,
+  PointsRuleRow, RuleConfigDraft, PipelineNode, NodeType, RuleStatus, RuleInput, AwardType, RoundingSpec, EvaluationBasis,
 } from '@/lib/points-engine/types';
 import { NODE_META } from '@/lib/points-engine/types';
 import {
   Field, NumberField, SelectField, TextField, StatusBadge, cardCls,
-  blankDraft, rowToDraft, defaultNode, firstNumericVar, draftIssues, inputCls,
+  blankDraft, rowToDraft, defaultNode, firstNumericVar, draftIssues, inputCls, labelCls,
+  RULE_NAME_MAX, RULE_NAME_PLACEHOLDER, ruleNameIssue, duplicateRuleNameWarning, ruleTitle, creditFieldLabel,
+  duplicateDraft, cleanRuleName, programCell, versionGapWarning,
 } from './kit';
 import { InputsCard } from './InputsCard';
 import { NodeCard } from './NodeCard';
@@ -156,16 +159,23 @@ function AddStepMenu({ onAdd, disabled }: { onAdd: (t: NodeType) => void; disabl
   );
 }
 
-export function RuleBuilder({ ruleId }: { ruleId: string }) {
+export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; duplicateFromId?: string }) {
   const router = useRouter();
   const isNew = ruleId === 'new';
+  const session = useAdminSession();
+  const isGifsyAdmin = session?.role === 'GIFSY_ADMIN';
+  // "Duplicate rule": the source rule this NEW rule was pre-filled from (display only — never sent on save).
+  const [duplicatedFrom, setDuplicatedFrom] = useState<{ title: string; ruleId: string; version: number } | null>(null);
 
   const [draft, setDraft] = useState<RuleConfigDraft>(() => blankDraft());
   const [status, setStatus] = useState<RuleStatus | null>(null);
   const [version, setVersion] = useState<number | null>(null);
   const [storedRuleId, setStoredRuleId] = useState<string | null>(null);
+  // The name as last loaded / saved — a save sends `name` ONLY when the author changed it, so a stale tab never
+  // overwrites a rename made elsewhere (a changed name renames every version of the rule server-side, audited).
+  const [loadedName, setLoadedName] = useState<string>('');
 
-  const [loading, setLoading] = useState(!isNew);
+  const [loading, setLoading] = useState(!isNew || !!duplicateFromId);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [saving, setSaving] = useState(false);
@@ -184,7 +194,22 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
   const readOnly = status !== null && status !== 'draft';
 
   const load = useCallback(async () => {
-    if (isNew) return;
+    if (isNew) {
+      if (!duplicateFromId) return;
+      // Duplicate: pre-fill a NEW draft from the source rule. Nothing is saved until Save draft.
+      setLoading(true);
+      setLoadError(null);
+      const src = await getRule(duplicateFromId);
+      if (src.success) {
+        setDraft(duplicateDraft(src.data));
+        setDuplicatedFrom({ title: ruleTitle(src.data).title, ruleId: src.data.ruleId, version: src.data.version });
+        setDirty(true);
+      } else {
+        setLoadError(`Couldn't load the rule to duplicate: ${src.error ?? 'not found'}`);
+      }
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setLoadError(null);
     const res = await getRule(ruleId);
@@ -193,21 +218,70 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
       setStatus(res.data.status);
       setVersion(res.data.version);
       setStoredRuleId(res.data.ruleId);
+      setLoadedName(res.data.name ?? '');
       setDirty(false);
     } else {
       setLoadError(res.error ?? 'Failed to load rule');
     }
     setLoading(false);
-  }, [isNew, ruleId]);
+  }, [isNew, ruleId, duplicateFromId]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  // Every rule in scope — only to warn when this name is already used by ANOTHER rule (duplicates are allowed).
+  const [allRules, setAllRules] = useState<PointsRuleRow[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await listRules();
+        if (!cancelled && res.success && Array.isArray(res.data)) setAllRules(res.data);
+      } catch {
+        /* no duplicate warning without the list — never blocks */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Rename (published / archived rules — no new version; display-only, audited server-side).
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [renameMsg, setRenameMsg] = useState<string | null>(null);
+  /** Save a new name, or `clear` → "Remove name" (null). Both rename every version, audited; no new version. */
+  const handleRename = async (clear = false) => {
+    if (!clear) {
+      const issue = ruleNameIssue(renameValue, true);
+      if (issue) { setRenameError(issue); return; }
+    }
+    setRenameBusy(true);
+    setRenameError(null);
+    setRenameMsg(null);
+    const res = await renameRule(ruleId, clear ? '' : cleanRuleName(renameValue));
+    if (res.success) {
+      setDraft((d) => ({ ...d, name: res.data.name ?? '' }));
+      setLoadedName(res.data.name ?? '');
+      setAllRules((rs) => rs.map((r) => (r.ruleId === res.data.ruleId ? { ...r, name: res.data.name ?? null } : r)));
+      setRenaming(false);
+      setRenameMsg(
+        clear
+          ? 'Name removed — every version of this rule now shows as “Unnamed rule”. The rule logic and version are unchanged.'
+          : 'Renamed — every version of this rule now shows the new name. The rule logic and version are unchanged.',
+      );
+    } else {
+      setRenameError(res.error ?? 'Rename failed');
+    }
+    setRenameBusy(false);
+  };
+
   // ── Credit-field options for the Output dropdown (resolves the opaque field id → its name, so an
   //    author never has to discover/paste a cuid). Active fields only; a stored-but-now-inactive
   //    field on an existing rule is still shown so it isn't silently lost. ──
   const [creditFields, setCreditFields] = useState<{ id: string; name: string; isActive: boolean }[]>([]);
+  const [creditFieldsLoaded, setCreditFieldsLoaded] = useState(false);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -220,6 +294,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
               id: f.id, name: f.name, isActive: f.isActive,
             })),
           );
+          setCreditFieldsLoaded(true);
         }
       } catch {
         /* leave empty — the Output field falls back to a "create a field first" prompt */
@@ -333,7 +408,18 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
   const removeNode = (i: number) => patch({ pipeline: draft.pipeline.filter((_, idx) => idx !== i) });
 
   // ── lifecycle ───────────────────────────────────────────────────────────────────
-  const issues = draftIssues(draft);
+  const baseIssues = draftIssues(draft);
+  // Coverage gap vs the version this draft will supersede (publishing archives it; archived versions never pay).
+  const gapWarning = !isNew && status === 'draft' && version !== null && version > 1 && storedRuleId
+    ? versionGapWarning(draft.effectiveFrom, version, allRules.filter((r) => r.ruleId === storedRuleId))
+    : null;
+  // Name: REQUIRED for a new rule (soft — Save draft is blocked with a clear issue), optional for an existing one.
+  const nameIssue = ruleNameIssue(draft.name, isNew);
+  const nameDupWarning = duplicateRuleNameWarning(draft.name, storedRuleId ?? draft.ruleId ?? null, allRules);
+  const issues = {
+    blocking: nameIssue ? [nameIssue, ...baseIssues.blocking] : baseIssues.blocking,
+    warnings: [...(gapWarning ? [gapWarning] : []), ...(nameDupWarning ? [nameDupWarning] : []), ...baseIssues.warnings],
+  };
   const canSave =
     draft.effectiveFrom.trim() !== '' &&
     draft.attachsTo.kpiCode.trim() !== '' &&
@@ -344,12 +430,16 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
     setSaving(true);
     setSaveError(null);
     setSaved(false);
-    const res = isNew ? await createRule(draft) : await updateRule(ruleId, draft);
+    const nameChanged = cleanRuleName(draft.name) !== cleanRuleName(loadedName);
+    const res = isNew
+      ? await createRule(draft)
+      : await updateRule(ruleId, nameChanged ? draft : { ...draft, name: undefined });
     if (res.success) {
       if (isNew) {
         router.push(`/admin/points-engine/rules/${res.data.id}`);
         return;
       }
+      setLoadedName(res.data.name ?? '');
       setDraft(rowToDraft(res.data));
       setStatus(res.data.status);
       setVersion(res.data.version);
@@ -365,7 +455,16 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
     if (isNew) return;
     setPublishing(true);
     setPublishError(null);
-    const res = await publishRule(ruleId);
+    let res = await publishRule(ruleId);
+    // 412 VERSION_GAP: this version would leave already-started periods with no rule — say so and ask explicitly.
+    if (!res.success && res.status === 412) {
+      if (confirm(`${res.error}\n\nPublish anyway?`)) res = await publishRule(ruleId, { confirmGap: true });
+      else {
+        setPublishError(`Not published — ${res.error}`);
+        setPublishing(false);
+        return;
+      }
+    }
     if (res.success) {
       // Refresh the editor from the publish response so the on-screen config matches what is now live.
       setDraft(rowToDraft(res.data));
@@ -407,14 +506,13 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
   const handleEditAsNewVersion = async () => {
     setSaving(true);
     setSaveError(null);
-    // Carry the same ruleId → the backend mints version+1 as a fresh draft. Default the new version's
-    // effective-from to TODAY (the author can change it) so publishing it doesn't collapse the prior
-    // published version to a 1-day window by reusing its effectiveFrom.
-    // A QUARTERLY version pays a quarter only if it starts on or before the quarter's first day, so it defaults to the
-    // current quarter's first day (back-dating is allowed; the author can change it).
-    const today = new Date().toISOString().slice(0, 10);
-    const from = draft.evaluationBasis === 'QUARTER' ? currentQuarterStart() : today;
-    const res = await createRule({ ...draft, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: from });
+    // Carry the same ruleId → the backend mints version+1 as a fresh draft. The new version's effective-from is
+    // pre-filled from THIS (source) version (owner trap 2026-11-26: defaulting to TODAY left 1st–25th of the month
+    // with no rule once the source version was archived on publish). The author may change it; a later start date
+    // shows a coverage-gap warning and publishing it then needs an explicit confirmation.
+    const from = draft.effectiveFrom;
+    // name omitted → the new version starts with the rule's CURRENT server-side name (never a stale tab's copy).
+    const res = await createRule({ ...draft, name: undefined, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: from });
     if (res.success) {
       router.push(`/admin/points-engine/rules/${res.data.id}`);
       return;
@@ -449,7 +547,14 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
     );
   }
 
-  const title = isNew ? 'New rule' : storedRuleId ?? draft.ruleId ?? 'Rule';
+  const shownTitle = ruleTitle({ name: draft.name });
+  const title = isNew ? (cleanRuleName(draft.name) || 'New rule') : shownTitle.title;
+  // ruleId is shown small: always for an unnamed rule (it is the only handle), and to Gifsy admins for every rule.
+  const showRuleId = !isNew && !!storedRuleId && (shownTitle.unnamed || isGifsyAdmin);
+  const openDuplicate = () => {
+    if (dirty && !confirm('You have unsaved changes. The copy is made from the SAVED version of this rule — continue?')) return;
+    router.push(`/admin/points-engine/rules/new?from=${encodeURIComponent(ruleId)}`);
+  };
 
   return (
     <div className="space-y-5 pb-10">
@@ -461,10 +566,22 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
           </Link>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-xl font-bold text-gray-900">{title}</h1>
+              <h1 className={`text-xl font-bold ${!isNew && shownTitle.unnamed ? 'italic text-gray-500' : 'text-gray-900'}`} data-testid="rule-title">
+                {title}
+              </h1>
               {status && <StatusBadge status={status} />}
               {version !== null && <span className="text-xs font-semibold text-gray-400">v{version}</span>}
             </div>
+            {showRuleId && (
+              <p className="font-mono text-[10px] text-gray-400" data-testid="rule-id-small">{storedRuleId}</p>
+            )}
+            {!isNew && (
+              <p className="mt-0.5 text-xs text-gray-600" data-testid="rule-attachment-summary">
+                Program <span className="font-semibold">{programCell(draft.attachsTo.program)}</span>
+                {' · '}Sub-programme <span className="font-semibold">{programCell(draft.attachsTo.programCategory)}</span>
+                {' · '}KPI <span className="font-mono font-semibold">{draft.attachsTo.kpiCode || '—'}</span>
+              </p>
+            )}
             <p className="mt-0.5 text-xs text-gray-500">
               {isNew
                 ? 'Define the attachment, inputs and point pipeline. Save a draft, then publish.'
@@ -490,6 +607,13 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                   Edit as new version
                 </button>
               )}
+              <button
+                type="button"
+                onClick={openDuplicate}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-50"
+              >
+                <CopyPlus className="h-4 w-4" /> Duplicate rule
+              </button>
               {status !== 'archived' && (
                 <button
                   type="button"
@@ -523,6 +647,13 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                   >
                     {publishing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
                     Publish
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openDuplicate}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 px-3 py-2 text-sm font-semibold text-gray-600 transition hover:bg-gray-50"
+                  >
+                    <CopyPlus className="h-4 w-4" /> Duplicate rule
                   </button>
                   <button
                     type="button"
@@ -602,6 +733,105 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
             : 'This rule is archived and read-only.'}
         </div>
       )}
+
+      {duplicatedFrom && (
+        <div className="flex items-start gap-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm text-sky-800" data-testid="duplicate-banner">
+          <CopyPlus className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            Duplicating <span className="font-semibold">{duplicatedFrom.title}</span>{' '}
+            <span className="font-mono text-[11px] text-sky-600">({duplicatedFrom.ruleId} v{duplicatedFrom.version})</span>. This is a
+            NEW rule — the original is unchanged, and nothing is saved until you click Save draft.
+          </span>
+        </div>
+      )}
+
+      {/* Rule name (display-only — never changes what the rule pays) */}
+      <section className={`${cardCls} p-5`} data-testid="rule-name-card">
+        {!readOnly ? (
+          <Field
+            label="Rule name"
+            required={isNew}
+            hint={
+              isNew
+                ? `Shown in the rules list, compute preview and reports (max ${RULE_NAME_MAX} characters). It never changes what the rule pays.`
+                : `Saving a changed name renames EVERY version of this rule (no new version; recorded in the audit log). Max ${RULE_NAME_MAX} characters; it never changes what the rule pays.`
+            }
+          >
+            <input
+              value={draft.name ?? ''}
+              placeholder={RULE_NAME_PLACEHOLDER}
+              aria-label="Rule name"
+              onChange={(e) => patch({ name: e.target.value })}
+              className={inputCls}
+            />
+          </Field>
+        ) : renaming ? (
+          <div className="space-y-2">
+            <Field label="Rule name" hint="Renames EVERY version of this rule — no new version, never changes what the rule pays; recorded in the audit log.">
+              <input
+                value={renameValue}
+                placeholder={RULE_NAME_PLACEHOLDER}
+                aria-label="New rule name"
+                autoFocus
+                onChange={(e) => { setRenameValue(e.target.value); setRenameError(null); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') void handleRename(); if (e.key === 'Escape') setRenaming(false); }}
+                className={inputCls}
+              />
+            </Field>
+            {(() => {
+              const w = duplicateRuleNameWarning(renameValue, storedRuleId, allRules);
+              return w ? <p className="text-xs text-amber-700" role="status">{w}</p> : null;
+            })()}
+            {renameError && <p className="text-xs text-red-600" role="alert">{renameError}</p>}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => void handleRename()}
+                disabled={renameBusy}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--brand-primary)] px-3 py-1.5 text-xs font-semibold text-white transition hover:opacity-90 disabled:opacity-60"
+              >
+                {renameBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />} Save name
+              </button>
+              {cleanRuleName(loadedName) !== '' && (
+                <button
+                  type="button"
+                  onClick={() => { if (confirm('Remove the name from every version of this rule? It will show as “Unnamed rule”.')) void handleRename(true); }}
+                  disabled={renameBusy}
+                  className="rounded-xl border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-60"
+                >
+                  Remove name
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => { setRenaming(false); setRenameError(null); }}
+                className="rounded-xl border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-600 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className={labelCls}>Rule name</p>
+              <p className={`text-sm ${shownTitle.unnamed ? 'italic text-gray-400' : 'font-semibold text-gray-900'}`}>{shownTitle.title}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => { setRenameValue(draft.name ?? ''); setRenaming(true); setRenameMsg(null); }}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-gray-200 px-3 py-1.5 text-xs font-semibold text-gray-600 transition hover:bg-gray-50"
+            >
+              <Pencil className="h-3.5 w-3.5" /> Rename
+            </button>
+          </div>
+        )}
+        {renameMsg && (
+          <p className="mt-2 flex items-center gap-1.5 text-xs text-green-700" role="status">
+            <CheckCircle2 className="h-3.5 w-3.5" /> {renameMsg}
+          </p>
+        )}
+      </section>
 
       {/* Two-column layout */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
@@ -764,9 +994,15 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                   const selected = creditFields.find((f) => f.id === draft.output.fieldId);
                   const selectedMissing = draft.output.fieldId !== '' && !active.some((f) => f.id === draft.output.fieldId);
                   if (readOnly) {
+                    const fl = creditFieldsLoaded ? creditFieldLabel(draft.output.fieldId, creditFields) : null;
                     return (
-                      <div className="w-full rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">
-                        {selected?.name ?? (draft.output.fieldId || '—')}
+                      <div
+                        data-testid="rule-output-field"
+                        className={`w-full rounded-xl border px-3 py-2 text-sm ${
+                          fl?.problem ? 'border-red-200 bg-red-50 font-semibold text-red-700' : 'border-gray-200 bg-gray-50 text-gray-600'
+                        }`}
+                      >
+                        {fl ? fl.label : selected?.name ?? (draft.output.fieldId || '—')}
                       </div>
                     );
                   }

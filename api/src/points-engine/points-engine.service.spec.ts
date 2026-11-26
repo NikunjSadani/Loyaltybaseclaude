@@ -192,7 +192,9 @@ describe('PointsEngineService', () => {
       mockPrisma.pointsRule.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([priorV1]);
       mockPrisma.pointsRule.update.mockResolvedValue(row({ id: 'row_v2', version: 2, status: 'published' }));
 
-      await service.publish(clientAdmin, 'row_v2');
+      // v2 starts after v1 → Jan–Feb become a coverage gap (412 VERSION_GAP without confirmation; see
+      // points-rule-version-gap.spec.ts). This test is about the supersede mechanics, so it confirms the gap.
+      await service.publish(clientAdmin, 'row_v2', { confirmGap: true });
       const priorUpdate = mockPrisma.pointsRule.update.mock.calls.find((c) => c[0].where.id === 'row_v1');
       expect(priorUpdate).toBeDefined();
       expect(priorUpdate![0].data.status).toBe('archived');

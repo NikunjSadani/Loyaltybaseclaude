@@ -198,6 +198,16 @@ describe('Points Engine compute page', () => {
     expect(await screen.findByText('rule_cases_q3@7')).toBeInTheDocument();
   });
 
+  it('PE-C1n: a NAMED rule shows its name on the rule-versions chip (ruleId on hover; small for Gifsy admins)', async () => {
+    previewMock.mockResolvedValue({ success: true, data: makePreview({ ruleNames: { rule_cases_q3: 'Unnati – ADHO 2.5%' } }) });
+    render(<ComputePage />);
+    await runPreview();
+    const chip = await screen.findByTestId('rule-version-chip');
+    expect(chip).toHaveTextContent('Unnati – ADHO 2.5% v7');
+    expect(chip).toHaveAttribute('title', 'rule_cases_q3@7');
+    expect(chip).toHaveTextContent('rule_cases_q3'); // GIFSY_ADMIN session in this suite
+  });
+
   it('PE-C2: engineDisabled shows the amber banner', async () => {
     previewMock.mockResolvedValue({ success: true, data: makePreview({ engineDisabled: true }) });
     render(<ComputePage />);

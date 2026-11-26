@@ -156,6 +156,7 @@ export const PREVIEW_REPORT_COLUMNS = [
   'Status',
   'Points',
   'Reason / Explanation',
+  'Rule Name',
   'Rule ID',
   'Rule Version',
 ] as const;
@@ -224,6 +225,8 @@ export async function writePreviewReportXlsx(preview: ComputePreview, out: XlsxS
       Points: r.status === 'OK' ? num(r.points) : '',
       // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation` (+ a `reason` when they paid 0).
       'Reason / Explanation': reasonCell(r),
+      // Display name (blank when the rule is unnamed or there is no rule) — the Rule ID stays the identity.
+      'Rule Name': r.ruleName ?? '',
       'Rule ID': r.ruleId ?? '',
       'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
     });
@@ -261,6 +264,7 @@ export const PAYOUT_REPORT_COLUMNS = [
   'Status',
   'Payout (INR)',
   'Reason / Explanation',
+  'Rule Name',
   'Rule ID',
   'Rule Version',
 ] as const;
@@ -306,6 +310,8 @@ export async function writePayoutReportXlsx(preview: ComputePreview, out: XlsxSt
       'Payout (INR)': r.status === 'OK' ? num(r.payoutRupees) : '',
       // SKIP/ERROR/NO_RULE carry a `reason`; OK rows carry the trace `explanation` (+ a `reason` when they paid 0).
       'Reason / Explanation': reasonCell(r),
+      // Display name (blank when the rule is unnamed or there is no rule) — the Rule ID stays the identity.
+      'Rule Name': r.ruleName ?? '',
       'Rule ID': r.ruleId ?? '',
       'Rule Version': typeof r.ruleVersion === 'number' ? r.ruleVersion : '',
     });

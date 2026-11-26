@@ -471,6 +471,26 @@ describe('Gate / segmentFilter onFail', () => {
     expectSkip(evaluateRule(r, ctx({ achievements: { V: 100 }, segment: {} })));
   });
 
+  it('ENUM text comparisons (builder fix 2026-11-26): validateRule accepts a STRING literal; = and ≠ match the exact value', () => {
+    const mk = (op: 'eq' | 'neq') =>
+      rule({
+        inputs: [
+          { ref: 'v', kpiCode: 'V', type: 'number', nullAs: 'reject' },
+          { ref: 'metro', source: 'segment:metro', type: 'enum', values: ['Metro', 'Non Metro', 'Yes', 'No'], nullAs: 'reject' },
+        ],
+        pipeline: [
+          { type: 'gate', id: 'g', when: { op, left: { var: 'metro' }, right: { lit: 'Non Metro' } }, onFail: 'zero' },
+          { type: 'rate', id: 'r1', measure: { var: 'v' }, rate: 1 },
+        ],
+      });
+    expect(validateRule(mk('eq'))).toEqual([]);
+    expect(validateRule(mk('neq'))).toEqual([]);
+    expect(expectOk(evaluateRule(mk('eq'), ctx({ achievements: { V: 100 }, segment: { metro: 'Non Metro' } }))).points).toBe(100);
+    expect(expectOk(evaluateRule(mk('eq'), ctx({ achievements: { V: 100 }, segment: { metro: 'Metro' } }))).points).toBe(0);
+    expect(expectOk(evaluateRule(mk('neq'), ctx({ achievements: { V: 100 }, segment: { metro: 'Metro' } }))).points).toBe(100);
+    expect(expectOk(evaluateRule(mk('neq'), ctx({ achievements: { V: 100 }, segment: { metro: 'Non Metro' } }))).points).toBe(0);
+  });
+
   it('ADDITIVE/Deoleo-safe: a rule that does not reference metro computes IDENTICALLY whether or not the segment carries a metro value', () => {
     const r = rule({
       inputs,
