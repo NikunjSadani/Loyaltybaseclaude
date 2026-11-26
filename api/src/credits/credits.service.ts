@@ -4948,13 +4948,27 @@ export class CreditsService {
             partnerId: true,
             // The payout WhatsApp addresses the KYC-verified partner OWNER (name + phone) —
             // NOT the nullable master-file outlet.phone (matches the other two sends).
-            partner: { select: { ownerName: true, phone: true } },
+            partner: { select: { ownerName: true, phone: true, userId: true } },
           },
         });
         const phoneMap = new Map(outlets.map((o) => [o.outletCode, o]));
         for (const paid of toNotify) {
           const outlet = phoneMap.get(paid.outletId);
           const phone = outlet?.partner?.phone?.trim();
+          // Owner 2026-11-26 (every client): the owner's login user ALSO gets the bell + push (free channels) —
+          // sent separately below so the paid WhatsApp / SMS call stays byte-identical. Never "₹0 credited".
+          const loginUserId = outlet?.partner?.userId ?? null;
+          if (loginUserId && paid.bankCreditedPaise > 0n) {
+            await this.notifications
+              .notifyUser({
+                userId: loginUserId,
+                subject: 'Payout credited',
+                body: `Your payout of ${formatINR(paid.bankCreditedPaise)} for ${monthYearIST(download.period)} has been credited to your bank${paid.utr ? ` (UTR ${paid.utr})` : ''}.`,
+                url: '/partner/wallet',
+                event: 'PAYOUT_CREDITED',
+              })
+              .catch((e) => this.logger.warn(`[credit-notify] payout-credit bell/push failed (client ${user.clientId}): ${e}`));
+          }
           if (!phone) continue;
 
           // Owner payout-credit notification via the config-driven paid channels (SMS/WhatsApp),

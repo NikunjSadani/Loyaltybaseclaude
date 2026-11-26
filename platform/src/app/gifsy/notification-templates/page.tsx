@@ -41,7 +41,7 @@ interface EventContract {
   sms: string[];
   whatsapp: string[];
   /** Whether the free in-app / push channels fire for this event. Some events
-   *  (e.g. KYC_SUBMITTED, PAYOUT_CREDITED) suppress the free channels, so the
+   *  (e.g. KYC_SUBMITTED; PAYOUT_CREDITED writes them since 2026-11-26) suppress the free channels, so the
    *  "Always on" chip would be a lie for them. Undefined during rollout → treat
    *  as true so the chip degrades gracefully rather than blanking. */
   freeChannels?: boolean;
@@ -342,8 +342,8 @@ function EventRow({
 }) {
   const label = contract?.label ?? eventKey;
 
-  // The free in-app/push channels are on for most events, but some (KYC_SUBMITTED,
-  // PAYOUT_CREDITED) suppress them. Undefined (pre-rollout) → assume on so the row
+  // The free in-app/push channels are on for most events, but some (KYC_SUBMITTED)
+  // suppress them. Undefined (pre-rollout) → assume on so the row
   // never blanks; prefer the real per-event value once the backend supplies it.
   const freeChannels = contract?.freeChannels ?? true;
 

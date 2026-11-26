@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import { PayoutStatus, PaymentDetailsStatus, Prisma, RedemptionStatus } from '@prisma/client';
@@ -10,6 +11,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { fullRowsEcho, problemRowsEcho } from '../common/upload-echo';
 import { WalletService } from '../wallet/wallet.service';
 import { Msg91Service } from '../notifications/msg91.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { formatINR } from '../common/money';
 import { WHATSAPP_KYC } from '../notifications/whatsapp-kyc.config';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { buildXlsx } from '../common/xlsx';
@@ -91,6 +94,7 @@ export class PayoutsService {
     private readonly prisma: PrismaService,
     private readonly wallet: WalletService,
     private readonly msg91: Msg91Service,
+    @Optional() private readonly notifications?: NotificationsService,
   ) {}
 
   /** GET /v1/payouts/transactions — paginated, filterable payout transactions. */
@@ -802,6 +806,9 @@ export class PayoutsService {
       redemptionOrderId: string | null;
       utr: string;
     }> = [];
+    // Owner 2026-11-26 (every client): the payout-credited bell + push to the owner's login user — gathered for ALL
+    // tenants (the paid WhatsApp above stays Deoleo-gated and byte-identical).
+    const payoutBells: Array<{ partnerId: string; amountPaise: bigint; utr: string }> = [];
 
     // Bulk money mutation over uploaded rows — raise the interactive-tx timeout (default 5s) so the ATOMIC transaction survives a full-tenant batch; must stay all-or-nothing (do NOT chunk — would risk partial/double credit).
     // DETERMINISTIC LOCK ORDER: process rows sorted by txnId (plain code-unit compare, not
@@ -981,6 +988,7 @@ export class PayoutsService {
           // ids already on the txn — the partner/order rows are batch-read AFTER commit
           // so a gather read can never abort this atomic money mutation. Tenant-gated so
           // we only collect for configured tenants.
+          payoutBells.push({ partnerId: txn.partnerId, amountPaise: BigInt(txn.amountPaise ?? 0), utr: row.utr ?? '' });
           if (WHATSAPP_KYC[user.clientId]?.payoutCreditTemplate) {
             payoutWhatsapps.push({
               partnerId: txn.partnerId,
@@ -1098,6 +1106,33 @@ export class PayoutsService {
     //   {{1}} ownerName · {{2}} points · {{3}} UTR · {{4}} date of payment · {{5}} month
     // Note {{5}} for a redemption = the month of PAYMENT (monthYearIST(now)) — a redemption
     // is not tied to a credit month (product decision).
+    // Owner 2026-11-26: bell + push "payout credited" to the owner's login user (free channels) — every client. No login
+    // user → skipped (the paid WhatsApp, where configured, is unaffected). Never "₹0 credited". Fire-and-forget.
+    if (payoutBells.length > 0 && this.notifications) {
+      try {
+        const owners = await this.prisma.channelPartner.findMany({
+          where: { id: { in: [...new Set(payoutBells.map((b) => b.partnerId))] } },
+          select: { id: true, userId: true },
+        });
+        const userOf = new Map((owners ?? []).map((o) => [o.id, o.userId]));
+        const month = monthYearIST(now);
+        for (const b of payoutBells) {
+          const userId = userOf.get(b.partnerId);
+          if (!userId || b.amountPaise <= 0n) continue;
+          await this.notifications
+            .notifyUser({
+              userId,
+              subject: 'Payout credited',
+              body: `Your payout of ${formatINR(b.amountPaise)} for ${month} has been credited to your bank${b.utr ? ` (UTR ${b.utr})` : ''}.`,
+              url: '/partner/wallet',
+              event: 'PAYOUT_CREDITED',
+            })
+            .catch((e) => this.logger.warn(`[payout-notify] payout-credit bell/push failed (client ${user.clientId}): ${e}`));
+        }
+      } catch (e) {
+        this.logger.warn(`[payout-notify] payout-credit bell/push block failed (client ${user.clientId}): ${e}`);
+      }
+    }
     if (payoutWhatsapps.length > 0) {
       const template = WHATSAPP_KYC[user.clientId]?.payoutCreditTemplate;
       if (template) {

@@ -49,7 +49,8 @@ const EVENT_KEY_SET: ReadonlySet<string> = new Set(EVENT_KEYS);
  * PUSH). These are the events whose `notifyUserWithChannels` call passes `includeFreeChannels:false`
  * — historically paid-channel-only sends that never wrote a bell/push row:
  *   - KYC_SUBMITTED   (kyc.service.ts — submission only sent the owner WhatsApp)
- *   - PAYOUT_CREDITED (credits.service.ts — a payout only sent the owner WhatsApp)
+ * (PAYOUT_CREDITED used to be paid-only; since 2026-11-26 — owner, every client — it ALSO writes the owner's
+ *  bell + push, so it is no longer listed.)
  * Every OTHER event writes the free channels (POINTS_CREDITED is `includeFreeChannels:!!userId`,
  * i.e. TRUE in the normal case where the partner has a login user — treated as true here).
  * The GET /notification-templates contract exposes this as `freeChannels` per event so the FE can
@@ -57,7 +58,6 @@ const EVENT_KEY_SET: ReadonlySet<string> = new Set(EVENT_KEYS);
  */
 export const NO_FREE_CHANNEL_EVENTS: ReadonlySet<EventKey> = new Set<EventKey>([
   'KYC_SUBMITTED',
-  'PAYOUT_CREDITED',
 ]);
 
 /** True iff the event writes the free channels (IN_APP + PUSH). Derived from NO_FREE_CHANNEL_EVENTS. */

@@ -2435,6 +2435,30 @@ describe('CreditsService', () => {
       hook.mockRestore();
     });
 
+    it('owner 2026-11-26: "payout credited" ALSO writes the bell + push to the owner login user — every client (no paid config / no phone needed)', async () => {
+      mockPrisma.creditPayoutDownload.findFirst.mockResolvedValue({
+        id: 'd1', downloadCode, period: '2026-05', downloadedBy: 'g1',
+        entries: [{ id: 'e1', outletId: 'O1', status: 'PROCESSING', utr: null, amountPaise: BigInt(150000) }],
+      });
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([]);
+      mockTx.creditPayoutEntry.findMany.mockResolvedValue([
+        { id: 'e1', outletId: 'O1', status: 'PROCESSING', amountPaise: BigInt(150000), tdsDeductedPaise: 0n, tdsSection: null, period: '2026-05' },
+      ]);
+      // A Bajaj-like owner: login user, NO phone (so no paid channel at all).
+      mockPrisma.outlet.findMany.mockResolvedValue([
+        { outletCode: 'O1', name: 'A', partnerId: 'p1', partner: { ownerName: 'Ravi', phone: null, userId: 'u-owner' } },
+      ]);
+      await service.uploadUtr({ ...gifsy, clientId: 'bajaj' }, 'd1', buildUtrFile([[downloadCode, 'O1', 'UTR77700001', 'Success', '']]), true);
+      expect(mockNotifications.notifyUser).toHaveBeenCalledWith({
+        userId: 'u-owner',
+        subject: 'Payout credited',
+        body: 'Your payout of ₹1,500.00 for May 2026 has been credited to your bank (UTR UTR77700001).',
+        url: '/partner/wallet',
+        event: 'PAYOUT_CREDITED',
+      });
+      expect(mockNotifications.notifyUserWithChannels).not.toHaveBeenCalled(); // no phone → no paid channel
+    });
+
     it('sends the deoleo_payout_credit WhatsApp with the right ordered bodyValues (Flow A)', async () => {
       jest.useFakeTimers();
       jest.setSystemTime(new Date('2026-07-06T10:00:00.000Z'));

@@ -1724,6 +1724,29 @@ describe('PayoutsService', () => {
       }
     });
 
+    it('owner 2026-11-26: a PAID cash-out ALSO writes the bell + push to the owner login user — any client (no WhatsApp config needed), never ₹0', async () => {
+      const notifications = { notifyUser: jest.fn().mockResolvedValue(undefined) };
+      const svc = new PayoutsService(mockPrisma as never, mockWallet as never, mockMsg91 as never, notifications as never);
+      mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
+      mockPrisma.payoutTransaction.findMany
+        .mockResolvedValueOnce([
+          { id: 'txn1', status: 'INITIATED', providerRefId: null, payoutMode: 'UPI', partnerId: 'p1', redemptionOrderId: 'o1', amountPaise: 50000n },
+        ])
+        .mockResolvedValueOnce([]);
+      mockPrisma.channelPartner.findMany.mockResolvedValue([{ id: 'p1', userId: 'u-owner', ownerName: 'Ravi', phone: null }]);
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([]);
+      await svc.uploadPayoutUtr({ ...gifsy, clientId: 'bajaj' }, 'b1', buildUpload([{ txnId: 'txn1', utr: 'UTR55500001', status: 'PAID' }]), true);
+      expect(notifications.notifyUser).toHaveBeenCalledTimes(1);
+      expect(notifications.notifyUser.mock.calls[0][0]).toMatchObject({
+        userId: 'u-owner',
+        subject: 'Payout credited',
+        url: '/partner/wallet',
+        event: 'PAYOUT_CREDITED',
+        body: expect.stringMatching(/^Your payout of ₹500\.00 for .+ \d{4} has been credited to your bank \(UTR UTR55500001\)\.$/),
+      });
+      expect(mockMsg91.sendWhatsappTemplate).not.toHaveBeenCalled(); // no WhatsApp config for this client
+    });
+
     it('FIX D: a PAID txn with 0/absent redemption points sends NO WhatsApp (guards the "0 points" msg)', async () => {
       mockPrisma.payoutBatch.findFirst.mockResolvedValue({ id: 'b1', batchCode: 'PB-1' });
       mockPrisma.payoutTransaction.findMany

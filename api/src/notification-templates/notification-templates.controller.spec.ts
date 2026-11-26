@@ -39,9 +39,9 @@ describe('NotificationTemplatesController', () => {
   it('GET contracts carry freeChannels: false for paid-only events, true otherwise', async () => {
     svc.getConfig.mockResolvedValue({ masterSms: false, masterWhatsapp: false, events: {} } as never);
     const res = await controller.get(owner);
-    // KYC_SUBMITTED + PAYOUT_CREDITED pass includeFreeChannels:false → no IN_APP/PUSH.
+    // KYC_SUBMITTED passes includeFreeChannels:false → no IN_APP/PUSH. PAYOUT_CREDITED writes the bell + push since 2026-11-26.
     expect(res.contracts.KYC_SUBMITTED.freeChannels).toBe(false);
-    expect(res.contracts.PAYOUT_CREDITED.freeChannels).toBe(false);
+    expect(res.contracts.PAYOUT_CREDITED.freeChannels).toBe(true);
     // Every other event writes the free channels.
     expect(res.contracts.KYC_APPROVED.freeChannels).toBe(true);
     expect(res.contracts.POINTS_CREDITED.freeChannels).toBe(true);
