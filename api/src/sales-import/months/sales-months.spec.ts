@@ -687,16 +687,47 @@ describe('FOCUS-FROM-TARGETS: months list flag + focus acceptances', () => {
     await expect(s.unaccept(clientAdmin, OLD, 'FB1', 'ZZZ')).rejects.toBeInstanceOf(ConflictException);
   });
 
+  it('bulk accept (owner 2026-11-26): several names of ONE KPI in ONE transaction, one audit row each, idempotent', async () => {
+    const d = db([], { focusDefs: [FOCUS_DEF], targets: [{ month: PREV, targetValues: NAMES('CNO & adho500 & NEWBRAND') }] });
+    const s = new SalesMonthsService(d as never);
+    const out = await s.acceptMany(clientAdmin, PREV, { kpiCode: 'FB1', keys: [' adho 500 ', 'newbrand', 'ADHO500'] });
+    expect(out.acceptedCount).toBe(2);
+    expect(out.acceptances.map((a) => a.key)).toEqual(['ADHO500', 'NEWBRAND']);
+    expect(d.$transaction).toHaveBeenCalledTimes(1);
+    expect(d.log).toEqual([`lock:sales-month:t1:${PREV}`, 'acceptance.create', 'audit', 'acceptance.create', 'audit']);
+    expect(d.auditLog.create.mock.calls[0][0].data.metadata).toEqual(expect.objectContaining({ bulk: true, bulkSize: 2 }));
+    const again = await s.acceptMany(clientAdmin, PREV, { kpiCode: 'FB1', keys: ['ADHO500', 'CNO'] });
+    expect(again.acceptedCount).toBe(1); // only CNO is new
+    expect(d.salesFocusAcceptance.create).toHaveBeenCalledTimes(3);
+  });
+
+  it('bulk accept is ALL OR NOTHING: one key not in the month file refuses every key (nothing accepted, named)', async () => {
+    const d = db([], { focusDefs: [FOCUS_DEF], targets: [{ month: PREV, targetValues: NAMES('CNO & ADHO500') }] });
+    const s = new SalesMonthsService(d as never);
+    await expect(s.acceptMany(clientAdmin, PREV, { kpiCode: 'FB1', keys: ['CNO', 'ZZZ'] }))
+      .rejects.toThrow(/"ZZZ" is not a product name in the .* target file for Focus Brand 1\. Nothing was accepted/);
+    expect(d.salesFocusAcceptance.create).not.toHaveBeenCalled();
+    await expect(s.acceptMany(clientAdmin, PREV, { kpiCode: 'FB1', keys: [] })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(s.acceptMany(clientAdmin, PREV, { kpiCode: 'FB1', keys: ['CNO & ADHO500'] })).rejects.toThrow(/ONE focus product/);
+    await expect(s.acceptMany(clientAdmin, PREV, { kpiCode: 'TOTAL', keys: ['CNO'] })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(s.acceptMany(clientAdmin, PREV, { kpiCode: 'FB1', keys: Array.from({ length: 1001 }, (_, i) => `K${i}`) }))
+      .rejects.toThrow(/At most 1000/);
+    await expect(new SalesMonthsService(db([], { focusDefs: [FOCUS_DEF] }) as never).acceptMany(clientAdmin, OLD, { kpiCode: 'FB1', keys: ['X'] }))
+      .rejects.toBeInstanceOf(ConflictException);
+  });
+
   it('routes: POST / DELETE :month/focus-acceptances need targets:upload and pass the access gate first', async () => {
     const meta = (m: string) => Reflect.getMetadata(PERMISSION_KEY, (SalesMonthsController.prototype as unknown as Record<string, object>)[m]);
     expect(meta('acceptFocus')).toBe('targets:upload');
     expect(meta('unacceptFocus')).toBe('targets:upload');
+    expect(meta('acceptFocusBulk')).toBe('targets:upload');
     const tenant = { resolveClient: jest.fn(async () => ({ features: {} })) };
     const prisma = { client: { findUnique: jest.fn(async () => ({ status: 'ACTIVE', features: {} })) } };
     const never = new Proxy({}, { get: () => () => { throw new Error('service must not be reached'); } });
     const c = new SalesMonthsController(never as never, tenant as never, prisma as never, never as never, never as never, never as never);
     await expect(c.acceptFocus(clientAdmin, PREV, { kpiCode: 'FB1', key: 'X' })).rejects.toBeInstanceOf(ForbiddenException);
     await expect(c.unacceptFocus(clientAdmin, PREV, 'FB1', 'X')).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(c.acceptFocusBulk(clientAdmin, PREV, { kpiCode: 'FB1', keys: ['X'] })).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
 

@@ -6,6 +6,7 @@ import { lockSalesMonth } from '../../common/sales-kpi-ownership';
 import { currentMonthKey } from '../../targets/targets.helpers';
 import type {
   FocusAcceptanceList,
+  FocusAcceptanceBulkRequest,
   FocusAcceptanceRequest,
   SalesMonthRebuildProductListResult,
   SalesMonthReopenRequest,
@@ -30,6 +31,8 @@ import { focusKey, splitFocusName } from '../kpi/focus-products';
 
 /** Longest acceptance key accepted (a focus token key; real ones are a few characters). */
 export const FOCUS_ACCEPTANCE_MAX_KEY = 200;
+/** Max keys in one bulk "accept all as not sold yet". */
+export const FOCUS_ACCEPTANCE_BULK_MAX = 1000;
 
 /** Max months one list call returns. */
 export const MAX_MONTH_RANGE = 36;
@@ -348,6 +351,74 @@ export class SalesMonthsService {
       { timeout: 30_000, maxWait: 10_000 },
     );
     return this.listAcceptances(clientId, month);
+  }
+
+  /**
+   * POST admin/sales-months/:month/focus-acceptances/bulk — accept SEVERAL UNMATCHED names of ONE KPI as "not sold yet"
+   * in one go (the screen's "Accept all N", after the admin saw the list and ticked a confirm box). ALL OR NOTHING: every
+   * key is checked exactly like a single accept (one product, in this month's target file for the KPI) inside ONE
+   * transaction under the month lock; any bad key refuses the whole request, naming it. One audit row per new acceptance.
+   */
+  async acceptMany(
+    user: JwtPayload,
+    month: string,
+    body: FocusAcceptanceBulkRequest,
+  ): Promise<FocusAcceptanceList & { acceptedCount: number }> {
+    const rawKeys = body?.keys;
+    if (!Array.isArray(rawKeys) || rawKeys.length === 0) throw new BadRequestException('keys must be a non-empty list.');
+    if (rawKeys.length > FOCUS_ACCEPTANCE_BULK_MAX) {
+      throw new BadRequestException(`At most ${FOCUS_ACCEPTANCE_BULK_MAX} names can be accepted at once (${rawKeys.length} sent).`);
+    }
+    // Validate the KPI once, and every key with the single-accept rules (focusKey, one product, length).
+    const { kpiCode, namesKpi } = await this.acceptanceArgs(user.clientId, month, body?.kpiCode, rawKeys[0]);
+    const keys: string[] = [];
+    for (const raw of rawKeys) {
+      const { key } = await this.acceptanceArgs(user.clientId, month, kpiCode, raw, { requireDefinition: false });
+      if (!keys.includes(key)) keys.push(key);
+    }
+    const clientId = user.clientId;
+    let acceptedCount = 0;
+    await this.prisma.$transaction(
+      async (tx) => {
+        await this.lockOpenMonth(tx, clientId, month);
+        const rows = await tx.outletTarget.findMany({ where: { clientId, month }, select: { targetValues: true } });
+        const inFile = new Set<string>();
+        for (const r of rows) {
+          const name = targetRowOf(r.targetValues).names[namesKpi];
+          if (name) for (const t of splitFocusName(name)) inFile.add(focusKey(t));
+        }
+        const missing = keys.filter((k) => !inFile.has(k));
+        if (missing.length > 0) {
+          const label = ((await kpiLabelsOf(tx, clientId, [namesKpi])).get(namesKpi) ?? '').trim() || namesKpi;
+          throw new BadRequestException(
+            `${missing.map((k) => `"${k}"`).join(', ')} ${missing.length === 1 ? 'is not a product name' : 'are not product names'} ` +
+              `in the ${monthLabel(month)} target file for ${label}. Nothing was accepted — refresh the preview.`,
+          );
+        }
+        const existing = await tx.salesFocusAcceptance.findMany({
+          where: { clientId, month, kpiCode },
+          select: { key: true },
+        });
+        const have = new Set(existing.map((e) => e.key));
+        for (const key of keys) {
+          if (have.has(key)) continue;
+          const row = await tx.salesFocusAcceptance.create({ data: { clientId, month, kpiCode, key, acceptedById: user.sub } });
+          await tx.auditLog.create({
+            data: {
+              action: 'CREATE',
+              entityType: 'SALES_FOCUS_ACCEPTANCE',
+              entityId: row.id,
+              actorId: user.sub,
+              newValues: { month, kpiCode, key, acceptedAt: row.acceptedAt.toISOString() },
+              metadata: { clientId, month, kpiCode, key, action: 'accept-not-sold-yet', bulk: true, bulkSize: keys.length },
+            },
+          });
+          acceptedCount++;
+        }
+      },
+      { timeout: 60_000, maxWait: 10_000 },
+    );
+    return { ...(await this.listAcceptances(clientId, month)), acceptedCount };
   }
 
   /** DELETE admin/sales-months/:month/focus-acceptances?kpiCode=&key= — remove an acceptance (idempotent). Audited. */

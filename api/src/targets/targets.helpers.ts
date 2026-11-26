@@ -29,6 +29,7 @@
 import * as XLSX from 'xlsx';
 import { istMonthKey } from '../common/ist-date';
 import { problemRowsEcho } from '../common/upload-echo';
+import { isNumericFocusToken, splitFocusName } from '../sales-import/kpi/focus-products';
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -846,4 +847,46 @@ export function parseTargetUploadBuffer(
       ...(opts?.excludedKpis ? { excludedValues, excludedNames } : {}),
     },
   };
+}
+
+// ── Focus product names that are numbers (owner 2026-11-26) ──────────────────
+
+/** One focus-name part that is only a number: which outlet, month and column, and the value as written. */
+export interface NumericFocusName {
+  outletCode: string;
+  month: string;
+  /** The template column the name was typed in (e.g. "Focus Brand 1 Name"). */
+  column: string;
+  /** The number part, e.g. "1011.2697". */
+  value: string;
+  /** The whole name as written, e.g. "1011.2697 & ADHO500". */
+  name: string;
+}
+
+/**
+ * Every part of a FOCUS product name (KPI codes in `focusNameCodes` — the names Sales Import reads as products) that is
+ * only a number, split exactly the way Sales Import splits names. Sorted by month, outlet, column. Pure.
+ */
+export function findNumericFocusNames(
+  acceptedTargets: ParseResult['acceptedTargets'],
+  focusNameCodes: ReadonlySet<string>,
+  columnOf: (kpiCode: string) => string,
+): NumericFocusName[] {
+  const out: NumericFocusName[] = [];
+  if (focusNameCodes.size === 0) return out;
+  for (const [month, outlets] of Object.entries(acceptedTargets)) {
+    for (const [outletCode, map] of Object.entries(outlets)) {
+      const names = map[NAMES_KEY];
+      if (!names || typeof names !== 'object') continue;
+      for (const [code, raw] of Object.entries(names as Record<string, string>)) {
+        if (!focusNameCodes.has(code)) continue;
+        const name = String(raw ?? '');
+        for (const part of splitFocusName(name)) {
+          if (isNumericFocusToken(part)) out.push({ outletCode, month, column: columnOf(code), value: part, name });
+        }
+      }
+    }
+  }
+  const c = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return out.sort((a, b) => c(a.month, b.month) || c(a.outletCode, b.outletCode) || c(a.column, b.column) || c(a.value, b.value));
 }

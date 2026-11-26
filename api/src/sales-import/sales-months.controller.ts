@@ -9,6 +9,7 @@ import { SalesApplyService } from './apply/sales-apply.service';
 import { assertSalesImportAccess } from './sales-import-access';
 import type {
   FocusAcceptanceList,
+  FocusAcceptanceBulkRequest,
   FocusAcceptanceRequest,
   SalesMonthRebuildProductListResult,
   SalesMonthRecalcPreview,
@@ -37,6 +38,8 @@ import { SalesImportRunnerService } from './ingest/sales-import-runner.service';
  *                                                        rebuilds the stored product list only — no figures change; §10c)
  *   POST   admin/sales-months/:month/focus-acceptances   targets:upload → FocusAcceptanceList (FOCUS-FROM-TARGETS: accept an
  *                                                        UNMATCHED focus token as "not sold yet"; month OPEN; month lock)
+ *   POST   admin/sales-months/:month/focus-acceptances/bulk  targets:upload → FocusAcceptanceList + acceptedCount
+ *                                                        (several names of ONE KPI, all or nothing)
  *   DELETE admin/sales-months/:month/focus-acceptances?kpiCode=&key=   targets:upload → FocusAcceptanceList (undo)
  * OWNER: Lane K.
  */
@@ -104,6 +107,18 @@ export class SalesMonthsController {
   ): Promise<FocusAcceptanceList> {
     await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
     return this.months.accept(user, month, body);
+  }
+
+  @Post(':month/focus-acceptances/bulk')
+  @HttpCode(200)
+  @RequirePermission('targets:upload')
+  async acceptFocusBulk(
+    @CurrentUser() user: JwtPayload,
+    @Param('month') month: string,
+    @Body() body: FocusAcceptanceBulkRequest,
+  ): Promise<FocusAcceptanceList & { acceptedCount: number }> {
+    await assertSalesImportAccess(user, { tenant: this.tenant, prisma: this.prisma }, { write: true });
+    return this.months.acceptMany(user, month, body);
   }
 
   @Delete(':month/focus-acceptances')

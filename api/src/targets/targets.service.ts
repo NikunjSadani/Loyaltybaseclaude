@@ -58,6 +58,8 @@ import {
   KpiDefLike,
   NAMES_KEY,
   TemplateFormatError,
+  findNumericFocusNames,
+  type NumericFocusName,
 } from './targets.helpers';
 
 /**
@@ -70,6 +72,7 @@ export function uploadParseError(e: unknown): BadRequestException {
 }
 import { SQL_NOW_UTC } from '../sales-import/sql-time';
 import { targetUploadFocusCheck } from '../sales-import/kpi/focus-upload-check';
+import { focusNamesKpiOf } from '../sales-import/kpi/focus-products';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import {
   AppliesTo,
@@ -886,6 +889,53 @@ export class TargetsService {
       'Check the targets with Download Final Targets or in Upload history. To upload this file again, pick it again for a new preview.';
   }
 
+  /** Max numeric focus names written out in the refusal message (the full list is in `details.items`). */
+  static readonly NUMERIC_FOCUS_MESSAGE_LIMIT = 10;
+
+  /**
+   * Refuses the file (400, nothing saved) when any FOCUS product name part — the per-outlet names of a KPI whose Sales
+   * Import products come from the target file (own names, or names another KPI borrows) — is only a number. The message
+   * names the columns and the first few outlets; `details.items` carries EVERY one (the screen offers it as a download).
+   * A tenant with no such Sales Import KPI (Deoleo) reads nothing extra unless the file has names, and is never refused.
+   */
+  private async refuseNumericFocusNames(
+    clientId: string,
+    acceptedTargets: ReturnType<typeof parseTargetUploadBuffer>['acceptedTargets'],
+    kpiRows: ReadonlyArray<{ code: string; label: string; nameOverrideLabel: string | null }>,
+  ): Promise<void> {
+    const anyNames = Object.values(acceptedTargets).some((outlets) =>
+      Object.values(outlets).some((m) => m[NAMES_KEY] && Object.keys(m[NAMES_KEY] as object).length > 0));
+    if (!anyNames) return;
+    const defs = await this.prisma.salesKpiDefinition.findMany({
+      where: { clientId, enabled: true, productSource: 'TARGET_NAMES' },
+      select: { kpiCode: true, productSource: true, focusNamesFromKpi: true, enabled: true },
+    });
+    const codes = new Set(
+      (defs ?? [])
+        .filter((d) => d.enabled !== false && d.productSource === 'TARGET_NAMES')
+        .map((d) => focusNamesKpiOf({ kpiCode: d.kpiCode, focusNamesFromKpi: d.focusNamesFromKpi ?? undefined })),
+    );
+    const kpiOf = new Map(kpiRows.map((k) => [k.code, k]));
+    const columnOf = (code: string) => {
+      const k = kpiOf.get(code);
+      return k?.nameOverrideLabel?.trim() || `${k?.label ?? code} Name`;
+    };
+    const found: NumericFocusName[] = findNumericFocusNames(acceptedTargets, codes, columnOf);
+    if (found.length === 0) return;
+    const columns = [...new Set(found.map((f) => f.column))];
+    const lim = TargetsService.NUMERIC_FOCUS_MESSAGE_LIMIT;
+    const shown = found.slice(0, lim).map((f) => `${f.outletCode} (${f.month}) "${f.column}": "${f.value}" in "${f.name}"`);
+    const more = found.length > lim ? `; and ${(found.length - lim).toLocaleString('en-IN')} more` : '';
+    throw new BadRequestException({
+      message:
+        `Focus brand names must be product names, not numbers — check ${columns.length === 1 ? 'column' : 'columns'} ` +
+        `${columns.map((c) => `"${c}"`).join(', ')}. ${found.length.toLocaleString('en-IN')} ` +
+        `${found.length === 1 ? 'name has' : 'names have'} a number where a product should be: ${shown.join('; ')}${more}. ` +
+        'Fix the target file and upload it again. Nothing was saved.',
+      details: { code: 'NUMERIC_FOCUS_NAMES', total: found.length, columns, items: found },
+    });
+  }
+
   /**
    * The shared parse + validate step of a target upload (preview AND apply). Reads only; writes nothing.
    */
@@ -989,6 +1039,10 @@ export class TargetsService {
           'Clear those columns or download the current template, then upload again. Nothing was saved.',
       );
     }
+
+    // NO SILENT FAILURE (owner 2026-11-26): a focus product name with a NUMBER in it ("1011.2697 & ADHO500" — a ₹ figure
+    // typed into the name) can never match a product; Sales Import would list it as "not found" on every outlet.
+    await this.refuseNumericFocusNames(user.clientId, parseResult.acceptedTargets, kpiRows);
 
     // ── Determine months present in the upload ────────────────────────────────
     const monthsInUpload = new Set<string>();

@@ -793,6 +793,11 @@ export interface FocusAcceptanceRequest {
   kpiCode: string;
   key: string;
 }
+/** POST admin/sales-months/:month/focus-acceptances/bulk: several keys of ONE KPI, all or nothing. */
+export interface FocusAcceptanceBulkRequest {
+  kpiCode: string;
+  keys: string[];
+}
 /** DELETE admin/sales-months/:month/focus-acceptances?kpiCode=&key= removes it. Both return the month's acceptances. */
 export interface FocusAcceptanceList {
   month: string;

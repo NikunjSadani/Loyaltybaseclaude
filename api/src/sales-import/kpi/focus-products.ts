@@ -46,6 +46,18 @@ export function splitFocusName(raw: string): string[] {
   return out;
 }
 
+/**
+ * A focus name PART (after splitFocusName) that is only a number — e.g. the "1011.2697" of "1011.2697 & ADHO500", a ₹
+ * figure typed into the name column. It can never be a product name: the target upload refuses it, and the Sales
+ * Import screen flags it instead of offering "accept — not sold yet". An optional leading ₹ is still a number.
+ */
+export const NUMERIC_FOCUS_TOKEN = /^\s*₹?\s*[\d.,]+\s*$/;
+
+export function isNumericFocusToken(token: unknown): boolean {
+  const t = String(token ?? '');
+  return /\d/.test(t) && NUMERIC_FOCUS_TOKEN.test(t);
+}
+
 /** A name's identity regardless of spelling / order: its tokens' keys sorted and joined with '&' ('' = no tokens). */
 export function focusNameKey(raw: string): string {
   return splitFocusName(raw)

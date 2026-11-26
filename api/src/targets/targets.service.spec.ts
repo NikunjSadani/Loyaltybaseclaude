@@ -1403,6 +1403,83 @@ describe('TargetsService', () => {
         });
       });
 
+      describe('NUMERIC FOCUS NAMES (owner 2026-11-26: "1011.2697 & ADHO500" — a ₹ figure typed into the name)', () => {
+        const focusKpi = { ...kpiRow2, hasNameOverride: true, nameOverrideLabel: 'Focus Pack - 1 Name' };
+        const withNames = (rows: (string | number | null)[][]) => {
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+            ['', '', '', WRITABLE_MONTH.label, '', ''],
+            ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'Focus Pack - 1 Name'],
+            ...rows,
+          ]), 'Targets');
+          return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+        };
+        const focusDef = { kpiCode: 'FOCUS_PACK_1', productSource: 'TARGET_NAMES', focusNamesFromKpi: null, enabled: true };
+        beforeEach(() => mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, focusKpi]));
+        afterEach(() => mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([]));
+
+        it('a number part of a FOCUS name refuses the file: outlet + column + value, full list in details; preview AND confirm', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([focusDef]);
+          const b = withNames([
+            ['O001', 'Outlet One', 'RETAIL', 10, 5, '1011.2697 & ADHO500'],
+            ['O002', 'Outlet Two', 'HORECA', 1, 2, 'CNO & ADHO500'],
+          ]);
+          const err = await service.previewTargetUpload(admin, xfile(b)).catch((e: unknown) => e);
+          expect(err).toBeInstanceOf(BadRequestException);
+          expect((err as Error).message).toMatch(
+            /^Focus brand names must be product names, not numbers — check column "Focus Pack - 1 Name"\. 1 name has a number .*O001 \(\d{4}-\d{2}\) "Focus Pack - 1 Name": "1011\.2697" in "1011\.2697 & ADHO500".*Nothing was saved\.$/,
+          );
+          const body = (err as BadRequestException).getResponse() as { details: { code: string; total: number; items: unknown[] } };
+          expect(body.details).toEqual({
+            code: 'NUMERIC_FOCUS_NAMES', total: 1, columns: ['Focus Pack - 1 Name'],
+            items: [{ outletCode: 'O001', month: WRITABLE_MONTH.ym, column: 'Focus Pack - 1 Name', value: '1011.2697', name: '1011.2697 & ADHO500' }],
+          });
+          // Confirm re-checks: previewed while no KPI read these names, the KPI was switched to "from the target file"
+          // before Confirm → the confirm is refused the same way, nothing saved.
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([]);
+          const p = await service.previewTargetUpload(admin, xfile(b));
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([focusDef]);
+          await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }))
+            .rejects.toThrow(/not numbers/);
+          expect(writtenTargets()).toHaveLength(0);
+        });
+
+        it('a long list: the message shows the first 10 + "and N more"; details carries every one', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([focusDef]);
+          const rows = Array.from({ length: 25 }, (_, i) => [`O${String(i).padStart(3, '0')}`, 'X', 'RETAIL', 1, 1, `${100 + i}.5 & ADHO500`]);
+          mockPrisma.outlet.findMany.mockResolvedValueOnce(rows.map((r) => ({ outletCode: r[0], name: 'X', outletType: { code: 'RETAIL' } })));
+          const err = (await service.previewTargetUpload(admin, xfile(withNames(rows))).catch((e: unknown) => e)) as BadRequestException;
+          expect(err.message).toMatch(/25 names have a number.*; and 15 more\. Fix the target file/);
+          expect((err.getResponse() as { details: { items: unknown[]; total: number } }).details.items).toHaveLength(25);
+        });
+
+        it('the name a BORROWING KPI reads (focusNamesFromKpi) is checked too', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([
+            { kpiCode: 'FB1 CASES', productSource: 'TARGET_NAMES', focusNamesFromKpi: 'FOCUS_PACK_1', enabled: true },
+          ]);
+          await expect(service.previewTargetUpload(admin, xfile(withNames([['O001', 'Outlet One', 'RETAIL', 10, 5, '1,011 & ADHO500']])))).rejects.toThrow(/"1"|"011"/);
+        });
+
+        it('no FOCUS KPI reads the column (Deoleo display names) → a numeric name is accepted, unchanged behaviour', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([]);
+          const p = await service.previewTargetUpload(admin, xfile(withNames([['O001', 'Outlet One', 'RETAIL', 10, 5, '2026']])));
+          expect(p.willSaveCount).toBe(1);
+        });
+
+        it('a product name with digits in it ("ADHO500") is fine', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([focusDef]);
+          const p = await service.previewTargetUpload(admin, xfile(withNames([['O001', 'Outlet One', 'RETAIL', 10, 5, 'ADHO500 & CNO 1L']])));
+          expect(p.willSaveCount).toBe(1);
+        });
+
+        it('a file with no names at all reads no Sales Import definitions', async () => {
+          await service.previewTargetUpload(admin, xfile(withNames([['O001', 'Outlet One', 'RETAIL', 10, 5, null]])));
+          expect(mockPrisma.salesKpiDefinition.findMany).not.toHaveBeenCalledWith(
+            expect.objectContaining({ select: expect.objectContaining({ focusNamesFromKpi: true }) }),
+          );
+        });
+      });
+
       describe('parse errors (#1: specific, actionable message passes through)', () => {
         it('a non-template sheet (no "Outlet ID") → that exact reason, not "corrupted"', async () => {
           const wb = XLSX.utils.book_new();
