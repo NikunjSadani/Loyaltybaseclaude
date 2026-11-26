@@ -977,3 +977,24 @@ describe('Daily Ops Digest — client fund line (fund reconciliation)', () => {
     expect(buildDailyOpsDigest(input([quietTenant('deoleo', 'Deoleo')])).html).not.toContain('committed, not yet paid');
   });
 });
+
+// OWNER RULE (2026-11-26): an e-mailed digest can be forwarded to a client, so what Msg91Service.sendEmail
+// actually sends (subject + HTML through neutralFulfillerText / neutralFulfillerHtml) never names the fulfiller.
+describe('digest as e-mailed — no fulfiller name', () => {
+  it('a busy digest (vouchers + dispersal alerts) sends no "hubble" anywhere, text or attributes', () => {
+    const { neutralFulfillerHtml, neutralFulfillerText } = jest.requireActual('../../common/fulfiller-name');
+    const d = buildDailyOpsDigest(
+      input([busyTenant()], {
+        voucherDispersal: ok({
+          bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 3, messageFailedOpen: 4,
+          unrecognisedStatus: 1, lateCompleted: 2, earlierOrderAlerts: 2, earlierOrderAlertsResolved: 1,
+        }),
+      }),
+    );
+    expect(d.html).toMatch(/hubble/i); // the builder itself is unchanged (Gifsy-only preview may say Hubble)
+    expect(neutralFulfillerText(d.subject)).not.toMatch(/hubble/i);
+    const sent = neutralFulfillerHtml(d.html);
+    expect(sent).not.toMatch(/hubble/i);
+    expect(sent).toContain('Vouchers (Via API)');
+  });
+});

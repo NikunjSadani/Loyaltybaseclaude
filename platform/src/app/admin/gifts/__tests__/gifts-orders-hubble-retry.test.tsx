@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 /**
  * GIFHR — "Retry with Hubble" visibility matrix (owner 2026-11-24: any open order handed to Hubble,
- * not only flagged ones) + the muted "Waiting for Hubble since … · last checked …" line.
+ * not only flagged ones) + the muted "Waiting via API since … · last checked …" line.
  */
 
 import React from 'react';
@@ -68,7 +68,7 @@ describe('GIFHR — Retry with Hubble visibility', () => {
     expect(retryIn('MANUAL')).not.toBeInTheDocument();
     expect(retryIn('DONE-1')).not.toBeInTheDocument();
     // The stale flag reads in plain words and keeps "Fulfil manually".
-    expect(within(row('STALE')).getByText(/Still processing at Hubble/)).toBeInTheDocument();
+    expect(within(row('STALE')).getByText(/Still processing via API/)).toBeInTheDocument();
     expect(within(row('STALE')).getByRole('button', { name: /fulfil manually/i })).toBeInTheDocument();
     // OWNER 2026-11-24: no "Advance" on a Hubble order without a code (backend refuses it too);
     // a non-Hubble order keeps it.
@@ -80,13 +80,13 @@ describe('GIFHR — Retry with Hubble visibility', () => {
     expect(await screen.findByText(/Fulfil this Hubble order manually/)).toBeInTheDocument();
   });
 
-  it('audit J: HUBBLE_NOT_ELIGIBLE_NOW reads "Hubble can’t be checked — fulfil manually" (no refund promise)', async () => {
+  it('audit J: HUBBLE_NOT_ELIGIBLE_NOW reads "API can’t be checked — fulfil manually" (no refund promise)', async () => {
     ORDERS.push({ ...base, id: 'n', orderNumber: 'NOTELIG', status: 'CONFIRMED', voucherProvider: null,
       hubbleHanded: true, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_ELIGIBLE_NOW' } as never);
     try {
       installFetch();
       await open();
-      expect(within(row('NOTELIG')).getByText(/Hubble can’t be checked — fulfil manually$/)).toBeInTheDocument();
+      expect(within(row('NOTELIG')).getByText(/API can’t be checked — fulfil manually$/)).toBeInTheDocument();
     } finally {
       ORDERS.pop();
     }
@@ -105,11 +105,11 @@ describe('GIFHR — Retry with Hubble visibility', () => {
     }
   });
 
-  it('the unflagged waiting order shows "Waiting for Hubble since <IST> · last checked <relative>"', async () => {
+  it('the unflagged waiting order shows "Waiting via API since <IST> · last checked <relative>"', async () => {
     installFetch();
     await open();
     const line = within(row('WAITING')).getByTestId('hubble-waiting');
-    expect(line.textContent).toMatch(/^Waiting for Hubble since 24 Nov 2026, 10:45 am · last checked 4 min ago$/i);
+    expect(line.textContent).toMatch(/^Waiting via API since 24 Nov 2026, 10:45 am · last checked 4 min ago$/i);
     expect(within(row('STALE')).queryByTestId('hubble-waiting')).not.toBeInTheDocument();
   });
 
@@ -124,7 +124,7 @@ describe('GIFHR — Retry with Hubble visibility', () => {
     expect(retryIn('STALE')).not.toBeInTheDocument();
     if (role === 'GIFSY_STAFF') {
       // Audit I: an operator who can't act sees WHY instead of a bare dash.
-      expect(within(row('WAITING')).getByTestId('hubble-held-note')).toHaveTextContent('With Hubble — a Gifsy admin can retry or fulfil');
+      expect(within(row('WAITING')).getByTestId('hubble-held-note')).toHaveTextContent('With the API — a Gifsy admin can retry or fulfil');
       expect(within(row('MANUAL')).queryByTestId('hubble-held-note')).not.toBeInTheDocument();
     }
   });

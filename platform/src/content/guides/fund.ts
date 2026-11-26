@@ -22,7 +22,7 @@ Each client **prepays** an advance. Spend comes off it:
 
 | Spend | Charged to the advance |
 |---|---|
-| Vouchers (Hubble or manual) | Face value **less** the discount set for that **voucher item** |
+| Vouchers (via API or manual) | Face value **less** the discount set for that **voucher item** |
 | Cash redemptions (UPI / bank) | Face value **plus** the agency fee |
 | Target / credit payouts | Gross award **plus** the agency fee |
 | Visibility payouts | Gross award **plus** the agency fee |
@@ -99,7 +99,7 @@ Small orange chips are **flags**. Under the filters, "What the flags mean" expla
 |---|---|---|
 | No item discount | No discount is set for this voucher item — charged at face value | Set the item's discount in the console (back-date it if it should apply to past vouchers) |
 | No agency fee | No agency fee is set — no fee was charged on this payout | Set the agency fee in the console |
-| Awaiting voucher provider | The voucher provider's (Hubble's) outcome is not known yet — counted as committed | Reconcile the Hubble order |
+| Awaiting voucher provider | The voucher provider's (via API) outcome is not known yet — counted as committed | Gifsy reconciles the order with the API provider |
 | Failed: re-bank | Failed at the bank and not reversed — still committed | Re-bank it or reverse it |
 | Face recomputed | The order's value was worked out again from the copy saved when it was ordered (a refund had cleared the stored value) | Nothing — for information |
 | Face unknown | No face value could be found (₹0 charged) | Check the source record |

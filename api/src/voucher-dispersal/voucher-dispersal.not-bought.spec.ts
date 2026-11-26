@@ -73,7 +73,7 @@ describe('owner decision (corrected): Hubble documents only SUCCESS / PROCESSING
     const XLSX = await import('xlsx');
     const wb = XLSX.read((await t.svc.report(ADMIN, id)).buffer);
     const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[wb.SheetNames[0]]);
-    expect(json.find((r) => r.Phone === '9876543211')).toMatchObject({ 'Voucher status': 'BUY_FAILED', 'Failure reason': 'Marked as not bought by Admin One: Hubble support: ticket 7' });
+    expect(json.find((r) => r.Phone === '9876543211')).toMatchObject({ 'Voucher status': 'BUY_FAILED', 'Failure reason': 'Marked as not bought by Admin One: API support: ticket 7' }); // owner rule 2026-11-26: a download never names the fulfiller
   });
 });
 

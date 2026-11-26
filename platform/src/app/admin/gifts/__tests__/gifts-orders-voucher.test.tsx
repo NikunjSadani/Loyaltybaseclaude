@@ -290,7 +290,7 @@ describe('GIFVC — voucher handling', () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null,
       voucherProvider: 'Hubble', hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE' }]);
     const row = await openRow('RDM-1');
-    expect(await within(row).findByTestId('hubble-needs-reconcile')).toHaveTextContent('Needs reconcile · Hubble state unknown');
+    expect(await within(row).findByTestId('hubble-needs-reconcile')).toHaveTextContent('Needs reconcile · API state unknown');
     // No refund targets AND (owner 2026-11-24) no forward move without a code → no Advance; exits are Retry / Fulfil manually.
     expect(within(row).queryByRole('button', { name: /advance/i })).toBeNull();
     expect(within(row).getByRole('button', { name: 'Retry with Hubble' })).toBeInTheDocument();
@@ -301,7 +301,7 @@ describe('GIFVC — voucher handling', () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null,
       voucherProvider: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_NOT_CONFIGURED' }]);
     const row = await openRow('RDM-1');
-    expect(await within(row).findByTestId('hubble-needs-reconcile')).toHaveTextContent('Hubble not configured');
+    expect(await within(row).findByTestId('hubble-needs-reconcile')).toHaveTextContent('API issuance not configured');
     await userEvent.click(await within(row).findByRole('button', { name: /advance/i }));
     expect(optionValues(advanceSelect())).toEqual(['PROCESSING', 'CANCELLED', 'RETURNED']);
   });
@@ -360,7 +360,7 @@ describe('GIFVC — voucher handling', () => {
           : undefined),
       );
       const row = await openRow('RDM-1');
-      expect(within(row).getByTestId('hubble-needs-reconcile')).toHaveTextContent(/check the order in Hubble’s portal/);
+      expect(within(row).getByTestId('hubble-needs-reconcile')).toHaveTextContent(/check the order in the API provider’s portal/);
       expect(within(row).queryByRole('button', { name: /retry with hubble/i })).toBeNull();
       expect(within(row).queryByRole('button', { name: /fulfil manually/i })).toBeNull();
       await userEvent.click(within(row).getByRole('button', { name: /acknowledge — resolved/i }));
@@ -422,12 +422,12 @@ describe('GIFVC — voucher handling', () => {
         : undefined),
     );
     const row = await openRow('RDM-1');
-    expect(await within(row).findByTestId('hubble-latest-reason')).toHaveTextContent('Newer: Hubble succeeded without a code');
+    expect(await within(row).findByTestId('hubble-latest-reason')).toHaveTextContent('Newer: Issued via API without a code');
     await userEvent.click(await within(row).findByRole('button', { name: /acknowledge — resolved/i }));
     await userEvent.type(await screen.findByLabelText('Note *'), 'one voucher used');
     await userEvent.click(await screen.findByRole('button', { name: /^acknowledge — resolved$/i }));
     const updated = (await screen.findByText('RDM-1')).closest('tr') as HTMLElement;
-    await waitFor(() => expect(within(updated).getByTestId('hubble-needs-reconcile')).toHaveTextContent(/Hubble succeeded without a code/));
+    await waitFor(() => expect(within(updated).getByTestId('hubble-needs-reconcile')).toHaveTextContent(/Issued via API without a code/));
     expect(within(updated).queryByTestId('hubble-latest-reason')).toBeNull();
   });
 
@@ -441,7 +441,7 @@ describe('GIFVC — voucher handling', () => {
   it('GIFVC11g: the row shows WHY Hubble\'s "no order" was not trusted', async () => {
     installFetch([{ ...base, id: 'o1', orderNumber: 'RDM-1', status: 'CONFIRMED', voucherCode: null, hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE', hubbleNoOrderUnverifiedWhy: 'no delivered Hubble order on this Hubble account to verify against' }]);
     const row = await openRow('RDM-1');
-    expect(await within(row).findByTestId('hubble-no-order-unverified')).toHaveTextContent(/not trusted: no delivered Hubble order on this Hubble account/);
+    expect(await within(row).findByTestId('hubble-no-order-unverified')).toHaveTextContent(/not trusted: no delivered API order on this API account/);
     expect(await within(row).findByRole('button', { name: /retry with hubble/i })).toBeInTheDocument();
   });
 

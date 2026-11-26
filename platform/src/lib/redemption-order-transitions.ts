@@ -47,6 +47,44 @@ export const HUBBLE_NEVER_PLACED_REASONS: ReadonlySet<string> = new Set([
   'HUBBLE_INVALID_AMOUNT',
 ]);
 
+/**
+ * Is this the API fulfiller's provider stamp? The server stores 'Hubble'; a non-Gifsy viewer receives it as
+ * "Via API" (owner rule 2026-11-26 — the client never sees the name), so both spellings count.
+ */
+export function isApiFulfillerProvider(provider: string | null | undefined): boolean {
+  const p = (provider ?? '').trim().toLowerCase();
+  return p === 'hubble' || p === 'via api';
+}
+
+/**
+ * A non-Gifsy viewer's order arrives with the fulfiller's name neutralised in KEYS and codes too
+ * (apiNeedsReconcile / API_INDETERMINATE). Map those back onto the console's field names so one rendering
+ * path serves both audiences. A Gifsy operator's order (hubble* keys) passes through unchanged.
+ */
+export function withConsoleFulfillerFields<T extends object>(order: T): T {
+  const o = order as Record<string, unknown>;
+  const pairs: Array<[string, string]> = [
+    ['apiNeedsReconcile', 'hubbleNeedsReconcile'],
+    ['apiReconcileReason', 'hubbleReconcileReason'],
+    ['apiLatestReason', 'hubbleLatestReason'],
+    ['apiNoOrderUnverifiedWhy', 'hubbleNoOrderUnverifiedWhy'],
+    ['apiHanded', 'hubbleHanded'],
+    ['apiWaitingSince', 'hubbleWaitingSince'],
+    ['apiLastCheckedAt', 'hubbleLastCheckedAt'],
+  ];
+  if (!pairs.some(([from]) => from in o)) return order;
+  const out: Record<string, unknown> = { ...o };
+  for (const [from, to] of pairs) {
+    if (from in out) {
+      const v = out[from];
+      delete out[from];
+      // Reason CODES come back as API_X — the console's label map is keyed HUBBLE_X.
+      out[to] = typeof v === 'string' && /^API_/.test(v) && /Reason$/.test(to) ? `HUBBLE_${v.slice(4)}` : v;
+    }
+  }
+  return out as T;
+}
+
 /** Mirrors the backend `hasIssuedVoucher` (null / '' / whitespace-only = none). */
 export function hasIssuedVoucher(code: string | null | undefined): boolean {
   return typeof code === 'string' && code.trim() !== '';
@@ -65,7 +103,7 @@ export function hasIssuedVoucher(code: string | null | undefined): boolean {
 export function nextStatusOptions(order: TransitionableOrder): string[] {
   const edges = NEXT_STATUS[order.status] ?? [];
   const isCash = CASH_REDEMPTION_MODES.has(order.redemptionMode ?? '');
-  const isHubble = (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble';
+  const isHubble = isApiFulfillerProvider(order.voucherProvider);
   const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
   const hubbleWithoutCode = (order.hubbleHanded === true || isHubble) && !voucherIssued;
   return edges.filter((to) => {

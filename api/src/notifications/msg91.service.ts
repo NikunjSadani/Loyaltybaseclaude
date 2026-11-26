@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 import { isFixedOtpAllowed } from '../common/fixed-otp';
 import { scrubSecrets } from './scrub-secrets';
+import { neutralFulfillerHtml, neutralFulfillerText } from '../common/fulfiller-name';
 
 /** Reason used when MSG91 answers with a body that isn't JSON (an HTML error page, a proxy page…). */
 /** sendEmail outcome — see sendEmail's doc. Addresses lowercased. */
@@ -563,7 +564,11 @@ export class Msg91Service {
    *          Acceptance by the relay is not inbox delivery — a later bounce is not visible here.
    */
   async sendEmail(params: { to: string[]; cc?: string[]; subject: string; html: string }): Promise<SendEmailResult> {
-    const { to, subject, html } = params;
+    // OWNER RULE (2026-11-26): an e-mail can be forwarded to a client, so it never names the voucher
+    // fulfiller ("Hubble" → "Via API") — whatever report / digest / statement built it.
+    const { to } = params;
+    const subject = neutralFulfillerText(params.subject);
+    const html = neutralFulfillerHtml(params.html);
     const cc = params.cc ?? [];
 
     // Nothing to send — no-op (never errors on an empty recipient list).

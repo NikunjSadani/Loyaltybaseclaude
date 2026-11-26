@@ -293,6 +293,11 @@ export function planVoucherWrite(
   let provider = input.voucherProvider === undefined ? undefined : norm(input.voucherProvider)!;
 
   if (isHubbleProvider(provider) && provider !== storedProvider) throw new BadRequestException(HUBBLE_HAND_SET_MESSAGE);
+  // "Via API" is how clients see the integration's stamp (owner rule 2026-11-26) — a hand-typed "Via API"
+  // would pass a manual voucher off as an API one in every client report, so it is refused the same way.
+  if ((provider ?? '').toLowerCase() === 'via api' && provider !== storedProvider) {
+    throw new BadRequestException(HUBBLE_HAND_SET_MESSAGE);
+  }
 
   const codeChanges = code !== undefined && code !== storedCode;
   if (override) {

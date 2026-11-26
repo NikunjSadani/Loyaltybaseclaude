@@ -12,6 +12,7 @@
 import { formatISTDate, formatISTDateTime } from '@/lib/ist-date';
 import { EMPTY_STATEMENT_TEXT } from './statement-xlsx';
 import type { StatementDoc } from './statement-model';
+import { neutralFulfillerText } from '@/lib/fulfiller-name';
 
 // cp1252 (WinAnsi) characters outside Latin-1 that Helvetica CAN draw.
 const WINANSI_EXTRAS = new Set('€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ');
@@ -19,7 +20,8 @@ const WINANSI_EXTRAS = new Set('€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”�
 /** Make a string drawable by Helvetica: ₹ → "Rs.", anything outside WinAnsi → "?". */
 export function pdfSafe(s: string): string {
   let out = '';
-  for (const ch of s.replace(/₹\s?/g, 'Rs.')) {
+  // OWNER RULE (2026-11-26): a downloaded statement never names the voucher fulfiller ("Hubble" → "Via API").
+  for (const ch of neutralFulfillerText(s).replace(/₹\s?/g, 'Rs.')) {
     const c = ch.codePointAt(0) ?? 0;
     const ok = (c >= 0x20 && c <= 0x7e) || (c >= 0xa0 && c <= 0xff) || WINANSI_EXTRAS.has(ch);
     out += ok ? ch : '?';

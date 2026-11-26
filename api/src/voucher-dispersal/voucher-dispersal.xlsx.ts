@@ -106,7 +106,7 @@ export function phoneCell(v: string): string {
 }
 
 const REPORT_HEADERS = [
-  'Batch', 'Source file', 'Row', 'Phone', 'Name', 'Amount', 'Brand', 'Voucher status', 'Hubble order ref', 'Bought at (IST)', 'Failure reason',
+  'Batch', 'Source file', 'Row', 'Phone', 'Name', 'Amount', 'Brand', 'Voucher status', 'API order ref', 'Bought at (IST)', 'Failure reason',
   'WhatsApp status', 'Sent at (IST)', 'Delivered at (IST)', 'Read at (IST)', 'Message failure reason',
 ];
 
@@ -122,11 +122,11 @@ export function buildDispersalReport(rows: DispersalReportRow[]): Buffer {
       safe(r.name),
       r.amountRupees ?? '',
       safe(r.brand),
-      r.voucherStatus,
+      safe(r.voucherStatus),
       safe(r.hubbleReference),
       ist(r.boughtAt),
       safe(r.failureReason),
-      r.whatsappStatus,
+      safe(r.whatsappStatus),
       ist(r.sentAt),
       ist(r.deliveredAt),
       ist(r.readAt),
