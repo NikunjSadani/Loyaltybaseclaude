@@ -60,6 +60,9 @@ export const ROUTE_PERMISSIONS: Record<string, string> = {
   '/admin/payouts':                  'payouts:read',
   // Fund reconciliation (the client advance) — the same read permission as the backend (@RequirePermission).
   '/admin/fund':                     'payouts:read',
+  // Off-portal payments register — same read permission as the backend (@RequirePermission('payouts:read')). The route
+  // guard already refuses GIFSY_STAFF (the API reads are GIFSY_ADMIN / CLIENT_ADMIN only); listed for completeness.
+  '/admin/off-portal-payments':      'payouts:read',
 
   // Gift catalogue
   '/admin/gifts':                    'rewards:read',

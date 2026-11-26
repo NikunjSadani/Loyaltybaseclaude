@@ -7,7 +7,7 @@
  * Never multiply by 100 here (the retired Fund Management page stored receipts ×100).
  */
 
-export type FundSpendType = 'VOUCHER' | 'CASH_REDEMPTION' | 'CREDIT_PAYOUT' | 'VISIBILITY_PAYOUT' | 'TDS_194C';
+export type FundSpendType = 'VOUCHER' | 'CASH_REDEMPTION' | 'CREDIT_PAYOUT' | 'VISIBILITY_PAYOUT' | 'TDS_194C' | 'OFF_PORTAL_PAYMENT';
 export type FundEvent = 'OPENING' | 'RECEIPT' | 'ADJUSTMENT' | 'CHARGE' | 'RETURN' | 'RATE_CHANGE';
 export type FundStatus = 'COMMITTED' | 'PAID' | 'RETURNED';
 export type FundFlag =
@@ -49,6 +49,7 @@ export const SPEND_TYPE_LABELS: Record<FundSpendType, string> = {
   CREDIT_PAYOUT: 'Target / credit payouts',
   VISIBILITY_PAYOUT: 'Visibility payouts',
   TDS_194C: 'TDS 194C (gross-up)',
+  OFF_PORTAL_PAYMENT: 'Off-portal payments',
 };
 
 export const EVENT_LABELS: Record<FundEvent, string> = {
@@ -336,7 +337,8 @@ function errorText(body: unknown, status: number): string {
   return `Something went wrong (error ${status}). Please try again.`;
 }
 
-async function call<T>(url: string, init?: RequestInit): Promise<FundResult<T>> {
+/** Fetch a `{ success, data }` envelope (also used by lib/off-portal-payments.ts). Never throws. */
+export async function call<T>(url: string, init?: RequestInit): Promise<FundResult<T>> {
   let res: Response;
   try {
     res = await (init ? fetch(url, init) : fetch(url));

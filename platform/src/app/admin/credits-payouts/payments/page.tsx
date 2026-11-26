@@ -285,6 +285,22 @@ export default function AdminPaymentsReportPage() {
           <SummaryCard label="Total Amount" value={totalAmount ? formatInr(totalAmount) : '₹0.00'} sub="all matching payments" />
           <SummaryCard label="TDS Deducted" value={totalTds ? formatInr(totalTds) : '₹0.00'} sub="all matching payments" />
         </div>
+        {/* Off-portal payments register — paid OUTSIDE the portal in the same range; NOT in the totals / table. */}
+        {report?.offPortal && report.offPortal.count > 0 && (
+          <div
+            role="note"
+            data-testid="payments-offportal-card"
+            className="mt-3 max-w-xl bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs text-slate-700"
+          >
+            <p className="font-semibold text-slate-900">
+              Off-portal payments in this range: {formatCount(report.offPortal.count)}, {formatInr(report.offPortal.amount)}
+            </p>
+            <p className="mt-0.5">
+              Paid outside the portal and recorded by Gifsy. They are not in the totals or the table below — see the
+              Off-portal payments register, or the &quot;Off-portal payments&quot; sheet of the Excel export.
+            </p>
+          </div>
+        )}
       </section>
 
       {/* Filters */}

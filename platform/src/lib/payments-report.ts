@@ -85,6 +85,11 @@ export interface PaymentsReport {
   count: number;
   /** Whole-range totals over ALL matching payments (every page) — not a sum of `rows`. */
   totals: { count: number; amount: Money; tdsDeducted: Money };
+  /**
+   * Off-portal payments register — payments made OUTSIDE the portal in the same range. NOT in `rows` / `totals`
+   * (the export lists them on their own sheet). null for a non-PAID status filter; absent on an older API.
+   */
+  offPortal?: { count: number; amount: Money } | null;
   /** This page's rows only. */
   rows: PaymentRow[];
 }
