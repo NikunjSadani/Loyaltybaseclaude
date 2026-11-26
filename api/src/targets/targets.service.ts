@@ -58,6 +58,10 @@ import {
   KpiDefLike,
   NAMES_KEY,
   TemplateFormatError,
+  findNumericFocusNames,
+  labelKey,
+  nameColumnHeader,
+  type NumericFocusName,
 } from './targets.helpers';
 
 /**
@@ -70,6 +74,7 @@ export function uploadParseError(e: unknown): BadRequestException {
 }
 import { SQL_NOW_UTC } from '../sales-import/sql-time';
 import { targetUploadFocusCheck } from '../sales-import/kpi/focus-upload-check';
+import { focusNamesKpiOf } from '../sales-import/kpi/focus-products';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
 import {
   AppliesTo,
@@ -396,6 +401,7 @@ export class TargetsService {
     // resulting scope equals the STORED scope is a no-op and is NOT re-validated (so relabelling never
     // fails because an outlet type was disabled / a program renamed after the KPI was scoped); on a
     // change only the CHANGED facets are validated. The legacy column is dual-written.
+    await this.assertNoLabelCollision(user.clientId, dto);
     const scope = await this.resolveKpiScopeWrite(user.clientId, code, dto);
     const scopeData = scope?.write;
 
@@ -475,6 +481,43 @@ export class TargetsService {
         );
       }
       throw error;
+    }
+  }
+
+  /**
+   * Owner 2026-11-26: a KPI's per-outlet NAME column header (nameOverrideLabel) must not equal ANY KPI label of the
+   * tenant (case / space insensitive) — otherwise the template shows the same header twice and only column ORDER says
+   * which is the target (Bajaj prod: "Focus Brand 1" twice). Checked when this save leaves the KPI with a name column;
+   * the reverse (a label equal to another KPI's name header) is refused too. Nothing is saved on a refusal.
+   */
+  private async assertNoLabelCollision(clientId: string, dto: UpsertKpiDefDto): Promise<void> {
+    const all = ((await this.prisma.kpiDef.findMany({
+      where: { clientId },
+      select: { code: true, label: true, hasNameOverride: true, nameOverrideLabel: true },
+    })) ?? []) as Array<{ code: string; label: string; hasNameOverride: boolean; nameOverrideLabel: string | null }>;
+    const stored = all.find((k) => k.code === dto.code);
+    const others = all.filter((k) => k.code !== dto.code);
+    const label = dto.label ?? stored?.label ?? '';
+    const hasName = dto.hasNameOverride ?? stored?.hasNameOverride ?? false;
+    const nameLabel = dto.nameOverrideLabel !== undefined ? dto.nameOverrideLabel : (stored?.nameOverrideLabel ?? null);
+    if (hasName && nameLabel && nameLabel.trim() !== '') {
+      const clash = labelKey(nameLabel) === labelKey(label)
+        ? { label, code: dto.code }
+        : others.find((k) => labelKey(k.label) === labelKey(nameLabel));
+      if (clash) {
+        throw new BadRequestException(
+          `The name column label "${nameLabel.trim()}" is the same as the label of KPI ${clash.code === dto.code ? 'itself' : `"${clash.code}"`} ` +
+            `("${clash.label.trim()}"), so the target template would show that header twice. Use a different name column ` +
+            `label, e.g. "${label.trim()} Name". Nothing was saved.`,
+        );
+      }
+    }
+    const nameOf = others.find((k) => k.hasNameOverride && k.nameOverrideLabel && labelKey(k.nameOverrideLabel) === labelKey(label));
+    if (nameOf) {
+      throw new BadRequestException(
+        `The label "${label.trim()}" is already the name column label of KPI "${nameOf.code}", so the target template ` +
+          'would show that header twice. Use a different label, or change that KPI\'s name column label first. Nothing was saved.',
+      );
     }
   }
 
@@ -886,6 +929,54 @@ export class TargetsService {
       'Check the targets with Download Final Targets or in Upload history. To upload this file again, pick it again for a new preview.';
   }
 
+  /** Max numeric focus names written out in the refusal message (the full list is in `details.items`). */
+  static readonly NUMERIC_FOCUS_MESSAGE_LIMIT = 10;
+
+  /**
+   * Refuses the file (400, nothing saved) when any FOCUS product name part — the per-outlet names of a KPI whose Sales
+   * Import products come from the target file (own names, or names another KPI borrows) — is only a number. The message
+   * names the columns and the first few outlets; `details.items` carries EVERY one (the screen offers it as a download).
+   * A tenant with no such Sales Import KPI (Deoleo) reads nothing extra unless the file has names, and is never refused.
+   */
+  private async refuseNumericFocusNames(
+    clientId: string,
+    acceptedTargets: ReturnType<typeof parseTargetUploadBuffer>['acceptedTargets'],
+    kpiRows: ReadonlyArray<{ code: string; label: string; hasNameOverride: boolean; nameOverrideLabel: string | null }>,
+  ): Promise<void> {
+    const anyNames = Object.values(acceptedTargets).some((outlets) =>
+      Object.values(outlets).some((m) => m[NAMES_KEY] && Object.keys(m[NAMES_KEY] as object).length > 0));
+    if (!anyNames) return;
+    const defs = await this.prisma.salesKpiDefinition.findMany({
+      where: { clientId, enabled: true, productSource: 'TARGET_NAMES' },
+      select: { kpiCode: true, productSource: true, focusNamesFromKpi: true, enabled: true },
+    });
+    const codes = new Set(
+      (defs ?? [])
+        .filter((d) => d.enabled !== false && d.productSource === 'TARGET_NAMES')
+        .map((d) => focusNamesKpiOf({ kpiCode: d.kpiCode, focusNamesFromKpi: d.focusNamesFromKpi ?? undefined })),
+    );
+    const kpiOf = new Map(kpiRows.map((k) => [k.code, k]));
+    const columnOf = (code: string) => {
+      const k = kpiOf.get(code);
+      // The header the file shows for the names (the template's nameColumnHeader; "<label> Name" when they collide).
+      return (k && nameColumnHeader(k)) || `${k?.label ?? code} Name`;
+    };
+    const found: NumericFocusName[] = findNumericFocusNames(acceptedTargets, codes, columnOf);
+    if (found.length === 0) return;
+    const columns = [...new Set(found.map((f) => f.column))];
+    const lim = TargetsService.NUMERIC_FOCUS_MESSAGE_LIMIT;
+    const shown = found.slice(0, lim).map((f) => `${f.outletCode} (${f.month}) "${f.column}": "${f.value}" in "${f.name}"`);
+    const more = found.length > lim ? `; and ${(found.length - lim).toLocaleString('en-IN')} more` : '';
+    throw new BadRequestException({
+      message:
+        `Focus brand names must be product names, not numbers — check ${columns.length === 1 ? 'column' : 'columns'} ` +
+        `${columns.map((c) => `"${c}"`).join(', ')}. ${found.length.toLocaleString('en-IN')} ` +
+        `${found.length === 1 ? 'name has' : 'names have'} a number where a product should be: ${shown.join('; ')}${more}. ` +
+        'Fix the target file and upload it again. Nothing was saved.',
+      details: { code: 'NUMERIC_FOCUS_NAMES', total: found.length, columns, items: found },
+    });
+  }
+
   /**
    * The shared parse + validate step of a target upload (preview AND apply). Reads only; writes nothing.
    */
@@ -989,6 +1080,10 @@ export class TargetsService {
           'Clear those columns or download the current template, then upload again. Nothing was saved.',
       );
     }
+
+    // NO SILENT FAILURE (owner 2026-11-26): a focus product name with a NUMBER in it ("1011.2697 & ADHO500" — a ₹ figure
+    // typed into the name) can never match a product; Sales Import would list it as "not found" on every outlet.
+    await this.refuseNumericFocusNames(user.clientId, parseResult.acceptedTargets, kpiRows);
 
     // ── Determine months present in the upload ────────────────────────────────
     const monthsInUpload = new Set<string>();
@@ -1154,7 +1249,21 @@ export class TargetsService {
       // APPLIES-TO D1: numeric values dropped as out of the KPI's scope — present ONLY for a tenant
       // with a scoped KPI (an all-unscoped tenant's response stays byte-identical).
       ...(p.scopeEnforced ? { ignoredOutOfScope: p.parseResult.summary.ignoredOutOfScope } : {}),
+      // Owner 2026-11-26: name columns read from the OLD duplicate-header layout — said in words (absent otherwise).
+      ...(TargetsService.legacyLayoutNotes(p).length > 0 ? { layoutNotes: TargetsService.legacyLayoutNotes(p) } : {}),
     };
+  }
+
+  /** "Read column F as Focus Brand 1 names (old template layout)." — one line per KPI, every month block's column. */
+  static legacyLayoutNotes(p: { parseResult: { summary: { legacyNameColumns?: Array<{ kpiCode: string; label: string; column: string }> } } }): string[] {
+    const byKpi = new Map<string, { label: string; columns: string[] }>();
+    for (const c of p.parseResult.summary.legacyNameColumns ?? []) {
+      const e = byKpi.get(c.kpiCode) ?? { label: c.label, columns: [] };
+      if (!e.columns.includes(c.column)) e.columns.push(c.column);
+      byKpi.set(c.kpiCode, e);
+    }
+    return [...byKpi.values()].map((e) =>
+      `Read column${e.columns.length === 1 ? '' : 's'} ${e.columns.join(', ')} as ${e.label} names (old template layout).`);
   }
 
   /**

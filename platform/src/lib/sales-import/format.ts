@@ -78,6 +78,15 @@ export function sentence(s: string | null | undefined): string {
   return String(s ?? '').trim().replace(/\.+$/, '');
 }
 
+/**
+ * A focus product name part that is only a number ("1011.2697" from "1011.2697 & ADHO500" — a ₹ figure typed into the
+ * name). Same rule as the API's isNumericFocusToken (api/src/sales-import/kpi/focus-products.ts).
+ */
+export function looksLikeNumber(token: string | null | undefined): boolean {
+  const t = String(token ?? '');
+  return /\d/.test(t) && /^\s*₹?\s*[\d.,]+\s*$/.test(t);
+}
+
 /** Cases with up to SALES_KPI_QUANTITY_DECIMALS (3) decimals — the precision the backend stores and sends. */
 export function formatCases(v: number): string {
   const text = Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: SALES_KPI_QUANTITY_DECIMALS });

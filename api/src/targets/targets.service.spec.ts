@@ -372,6 +372,39 @@ describe('TargetsService', () => {
       expect(arg.create.code).toBe('MONTH_TGT');
     });
 
+    describe('owner 2026-11-26: a name column label equal to ANY KPI label is refused (template would show it twice)', () => {
+      const bajaj = [
+        { code: 'FOCUS BRAND', label: 'Focus Brand 1', hasNameOverride: true, nameOverrideLabel: 'Focus Brand 1' },
+        { code: 'FOCUS BRAND 2', label: 'Focus Brand 2', hasNameOverride: true, nameOverrideLabel: 'Focus Brand 2 Name' },
+        { code: 'MONTH_TGT', label: 'Month Target', hasNameOverride: false, nameOverrideLabel: null },
+      ];
+      beforeEach(() => mockPrisma.kpiDef.findMany.mockResolvedValue(bajaj));
+      afterEach(() => mockPrisma.kpiDef.findMany.mockReset());
+
+      it('its OWN label (case / space insensitive) → 400, nothing saved, suggests "<label> Name"', async () => {
+        await expect(service.upsertKpi(admin, { code: 'FOCUS BRAND', label: 'Focus Brand 1', hasNameOverride: true, nameOverrideLabel: ' focus BRAND 1 ' }))
+          .rejects.toThrow(/name column label "focus BRAND 1" is the same as the label of KPI itself \("Focus Brand 1"\).*e\.g\. "Focus Brand 1 Name"\. Nothing was saved\./);
+        expect(mockTx.kpiDef.upsert).not.toHaveBeenCalled();
+      });
+
+      it('ANOTHER KPI\'s label → 400 naming it', async () => {
+        await expect(service.upsertKpi(admin, { code: 'FOCUS BRAND 2', label: 'Focus Brand 2', hasNameOverride: true, nameOverrideLabel: 'Month Target' }))
+          .rejects.toThrow(/same as the label of KPI "MONTH_TGT" \("Month Target"\)/);
+      });
+
+      it('a label equal to another KPI\'s name column label → 400', async () => {
+        await expect(service.upsertKpi(admin, { code: 'NEW', label: 'focus brand 2 name' }))
+          .rejects.toThrow(/already the name column label of KPI "FOCUS BRAND 2"/);
+      });
+
+      it('a distinct name label saves; a KPI without a name column is never checked against its name label', async () => {
+        mockTx.kpiDef.upsert.mockResolvedValue(kpiRow);
+        await service.upsertKpi(admin, { code: 'FOCUS BRAND', label: 'Focus Brand 1', hasNameOverride: true, nameOverrideLabel: 'Focus Brand 1 Name' });
+        await service.upsertKpi(admin, { code: 'X', label: 'X', hasNameOverride: false, nameOverrideLabel: 'X' });
+        expect(mockTx.kpiDef.upsert).toHaveBeenCalledTimes(2);
+      });
+    });
+
     it('sets enabled=true by default when not supplied', async () => {
       mockTx.kpiDef.upsert.mockResolvedValue(kpiRow);
       const dto: UpsertKpiDefDto = { code: 'NEW_KPI', label: 'New KPI' };
@@ -1400,6 +1433,116 @@ describe('TargetsService', () => {
           mockPrisma.kpiDef.findMany.mockResolvedValue([{ ...bscCases, achievementOnly: true }]);
           await expect(service.previewTargetUpload(admin, xfile(oldFormat())))
             .rejects.toThrow(/Every enabled KPI is marked "achievement only"/);
+        });
+      });
+
+      describe('NUMERIC FOCUS NAMES (owner 2026-11-26: "1011.2697 & ADHO500" — a ₹ figure typed into the name)', () => {
+        const focusKpi = { ...kpiRow2, hasNameOverride: true, nameOverrideLabel: 'Focus Pack - 1 Name' };
+        const withNames = (rows: (string | number | null)[][]) => {
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+            ['', '', '', WRITABLE_MONTH.label, '', ''],
+            ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'Focus Pack - 1 Name'],
+            ...rows,
+          ]), 'Targets');
+          return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+        };
+        const focusDef = { kpiCode: 'FOCUS_PACK_1', productSource: 'TARGET_NAMES', focusNamesFromKpi: null, enabled: true };
+        beforeEach(() => mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, focusKpi]));
+        afterEach(() => mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([]));
+
+        it('a number part of a FOCUS name refuses the file: outlet + column + value, full list in details; preview AND confirm', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([focusDef]);
+          const b = withNames([
+            ['O001', 'Outlet One', 'RETAIL', 10, 5, '1011.2697 & ADHO500'],
+            ['O002', 'Outlet Two', 'HORECA', 1, 2, 'CNO & ADHO500'],
+          ]);
+          const err = await service.previewTargetUpload(admin, xfile(b)).catch((e: unknown) => e);
+          expect(err).toBeInstanceOf(BadRequestException);
+          expect((err as Error).message).toMatch(
+            /^Focus brand names must be product names, not numbers — check column "Focus Pack - 1 Name"\. 1 name has a number .*O001 \(\d{4}-\d{2}\) "Focus Pack - 1 Name": "1011\.2697" in "1011\.2697 & ADHO500".*Nothing was saved\.$/,
+          );
+          const body = (err as BadRequestException).getResponse() as { details: { code: string; total: number; items: unknown[] } };
+          expect(body.details).toEqual({
+            code: 'NUMERIC_FOCUS_NAMES', total: 1, columns: ['Focus Pack - 1 Name'],
+            items: [{ outletCode: 'O001', month: WRITABLE_MONTH.ym, column: 'Focus Pack - 1 Name', value: '1011.2697', name: '1011.2697 & ADHO500' }],
+          });
+          // Confirm re-checks: previewed while no KPI read these names, the KPI was switched to "from the target file"
+          // before Confirm → the confirm is refused the same way, nothing saved.
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([]);
+          const p = await service.previewTargetUpload(admin, xfile(b));
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([focusDef]);
+          await expect(service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) }))
+            .rejects.toThrow(/not numbers/);
+          expect(writtenTargets()).toHaveLength(0);
+        });
+
+        it('a long list: the message shows the first 10 + "and N more"; details carries every one', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([focusDef]);
+          const rows = Array.from({ length: 25 }, (_, i) => [`O${String(i).padStart(3, '0')}`, 'X', 'RETAIL', 1, 1, `${100 + i}.5 & ADHO500`]);
+          mockPrisma.outlet.findMany.mockResolvedValueOnce(rows.map((r) => ({ outletCode: r[0], name: 'X', outletType: { code: 'RETAIL' } })));
+          const err = (await service.previewTargetUpload(admin, xfile(withNames(rows))).catch((e: unknown) => e)) as BadRequestException;
+          expect(err.message).toMatch(/25 names have a number.*; and 15 more\. Fix the target file/);
+          expect((err.getResponse() as { details: { items: unknown[]; total: number } }).details.items).toHaveLength(25);
+        });
+
+        it('the name a BORROWING KPI reads (focusNamesFromKpi) is checked too', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([
+            { kpiCode: 'FB1 CASES', productSource: 'TARGET_NAMES', focusNamesFromKpi: 'FOCUS_PACK_1', enabled: true },
+          ]);
+          await expect(service.previewTargetUpload(admin, xfile(withNames([['O001', 'Outlet One', 'RETAIL', 10, 5, '1,011 & ADHO500']])))).rejects.toThrow(/"1"|"011"/);
+        });
+
+        it('no FOCUS KPI reads the column (Deoleo display names) → a numeric name is accepted, unchanged behaviour', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([]);
+          const p = await service.previewTargetUpload(admin, xfile(withNames([['O001', 'Outlet One', 'RETAIL', 10, 5, '2026']])));
+          expect(p.willSaveCount).toBe(1);
+        });
+
+        it('a product name with digits in it ("ADHO500") is fine', async () => {
+          mockPrisma.salesKpiDefinition.findMany.mockResolvedValue([focusDef]);
+          const p = await service.previewTargetUpload(admin, xfile(withNames([['O001', 'Outlet One', 'RETAIL', 10, 5, 'ADHO500 & CNO 1L']])));
+          expect(p.willSaveCount).toBe(1);
+        });
+
+        it('a file with no names at all reads no Sales Import definitions', async () => {
+          await service.previewTargetUpload(admin, xfile(withNames([['O001', 'Outlet One', 'RETAIL', 10, 5, null]])));
+          expect(mockPrisma.salesKpiDefinition.findMany).not.toHaveBeenCalledWith(
+            expect.objectContaining({ select: expect.objectContaining({ focusNamesFromKpi: true }) }),
+          );
+        });
+      });
+
+      describe('OLD duplicate-header layout (owner 2026-11-26: "Focus Brand 1" written twice)', () => {
+        const dupKpi = { ...kpiRow2, label: 'Focus Pack - 1', hasNameOverride: true, nameOverrideLabel: 'Focus Pack - 1' };
+        const file = (rows: (string | number | null)[][], second = 'Focus Pack - 1') => {
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+            ['', '', '', WRITABLE_MONTH.label, '', ''],
+            ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', second],
+            ...rows,
+          ]), 'Targets');
+          return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+        };
+        beforeEach(() => mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, dupKpi]));
+
+        it('preview AND result say "Read column F as Focus Pack - 1 names (old template layout)."; the names are saved', async () => {
+          const b = file([['O001', 'Outlet One', 'RETAIL', 10, 5, 'Diwali Combo']]);
+          const p = await service.previewTargetUpload(admin, xfile(b));
+          expect(p.layoutNotes).toEqual(['Read column F as Focus Pack - 1 names (old template layout).']);
+          const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
+          expect(r.layoutNotes).toEqual(['Read column F as Focus Pack - 1 names (old template layout).']);
+          expect(writtenTargets()[0].targetValues).toEqual({ MONTH_TGT: 10, FOCUS_PACK_1: 5, __names: { FOCUS_PACK_1: 'Diwali Combo' } });
+        });
+
+        it('the current template ("Focus Pack - 1 Name") → no note', async () => {
+          const p = await service.previewTargetUpload(admin, xfile(file([['O001', 'Outlet One', 'RETAIL', 10, 5, 'Diwali']], 'Focus Pack - 1 Name')));
+          expect(p).not.toHaveProperty('layoutNotes');
+        });
+
+        it('swapped columns → 400 naming the columns, nothing saved', async () => {
+          await expect(service.previewTargetUpload(admin, xfile(file([['O001', 'Outlet One', 'RETAIL', 10, 'Diwali Combo', 5]]))))
+            .rejects.toThrow(/columns look swapped: column E .* column F .*Nothing was saved\./);
         });
       });
 

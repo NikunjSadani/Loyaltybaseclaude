@@ -407,6 +407,9 @@ const KPIS: Row[] = [
   { clientId: 'other', code: 'X', label: 'Other tenant', order: 1 },
 ];
 
+/** The same KPIs WITHOUT any per-outlet name column (Final Targets must then be byte-identical to the old builder). */
+const KPIS_NO_NAMES: Row[] = KPIS.map((k) => ({ ...k, hasNameOverride: false, nameOverrideLabel: null }));
+
 function roster(): Row[] {
   return [
     { outletCode: 'A1', name: 'Alpha', outletType: { code: 'RETAIL' }, programName: 'Gold', programCategory: 'Tier A' },
@@ -533,7 +536,7 @@ describe('targets-export / achievements-export export kinds', () => {
   });
 
   it('parity: final targets (verbatim values, current outlet type, program name, blank for absent/non-numeric)', async () => {
-    const prisma = db({ kpis: KPIS, outlets: roster(), ...stored() });
+    const prisma = db({ kpis: KPIS_NO_NAMES, outlets: roster(), ...stored() });
     const { buffer, rowCount } = await render(TARGETS_EXPORT_KIND, prisma, { month: '2026-07' });
     expectSameWorkbook(buffer, await oldExport(prisma, ADMIN, '2026-07', false));
     expect(rowCount).toBe(3);
@@ -548,7 +551,7 @@ describe('targets-export / achievements-export export kinds', () => {
   }, XLSX_TIMEOUT);
 
   it('parity: empty month → the two header rows only', async () => {
-    const prisma = db({ kpis: KPIS, outlets: roster() });
+    const prisma = db({ kpis: KPIS_NO_NAMES, outlets: roster() });
     expectSameWorkbook((await render(TARGETS_EXPORT_KIND, prisma, { month: '2026-01' })).buffer, await oldExport(prisma, ADMIN, '2026-01', false));
     expectSameWorkbook((await render(ACHIEVEMENTS_EXPORT_KIND, prisma, { month: '2026-01' })).buffer, await oldExport(prisma, ADMIN, '2026-01', true));
   }, XLSX_TIMEOUT);
@@ -561,7 +564,7 @@ describe('targets-export / achievements-export export kinds', () => {
       outlets.push({ outletCode: code, name: `S${i}`, outletType: { code: 'RETAIL' }, programName: `P${i % 7}` });
       targets.push({ outletCode: code, month: '2026-07', outletName: `S${i}`, targetValues: { VOL: i } });
     }
-    const prisma = db({ kpis: KPIS, outlets, targets });
+    const prisma = db({ kpis: KPIS_NO_NAMES, outlets, targets });
     const expected = await oldExport(prisma, ADMIN, '2026-07', false);
     prisma.outletTarget.findMany.mockClear();
     prisma.outlet.findMany.mockClear();
@@ -573,6 +576,29 @@ describe('targets-export / achievements-export export kinds', () => {
     expect(await maxPage(prisma.outletTarget)).toBeLessThanOrEqual(2000);
     expect(await maxPage(prisma.outlet)).toBeLessThanOrEqual(2000);
   }, PAGING_TIMEOUT);
+
+  it('owner 2026-11-26: a KPI with a name column gets it right after its value column (header, widths, merge, stored names, cellSafe), and the export re-uploads with the names', async () => {
+    const t = stored();
+    t.targets[0].targetValues = { VOL: 100, FP1: 20, CON: 'x', __names: { FP1: '=Combo & ADHO500' } };
+    const prisma = db({ kpis: KPIS, outlets: roster(), ...t });
+    const { buffer } = await render(TARGETS_EXPORT_KIND, prisma, { month: '2026-07' });
+    const s = readBook(buffer).sheets['Final Targets 2026-07'];
+    expect(s.aoa[1]).toEqual(['Outlet ID', 'Outlet Name', 'Outlet Type', 'Program Name', 'Volume', 'Focus Pack 1', 'Focus Pack 1 Name', "'=Consistency"]);
+    expect(s.merges).toEqual([{ s: { r: 0, c: 4 }, e: { r: 0, c: 7 } }]);
+    const b2 = s.aoa.find((r: unknown[]) => r[0] === 'B2')!;
+    expect(b2.slice(4, 7)).toEqual([100, 20, "'=Combo & ADHO500"]); // formula-guarded
+    const a1 = s.aoa.find((r: unknown[]) => r[0] === 'A1')!;
+    expect(a1[6] ?? '').toBe(''); // no stored name → blank
+    // A name label equal to its KPI label (Bajaj prod) → "<label> Name", never the same header twice.
+    const dup = db({ kpis: [KPIS[0], { ...KPIS[1], nameOverrideLabel: 'focus pack 1 ' }], outlets: roster(), ...stored() });
+    const d = readBook((await render(TARGETS_EXPORT_KIND, dup, { month: '2026-07' })).buffer).sheets['Final Targets 2026-07'];
+    expect(d.aoa[1].slice(4)).toEqual(['Volume', 'Focus Pack 1', 'Focus Pack 1 Name']);
+    // Re-upload: the names come back.
+    const kpiLike = [KPIS[0], KPIS[1]].map((k) => ({ enabled: true, isPrimary: false, hasNameOverride: false, nameOverrideLabel: null, ...k }) as any);
+    // (the "=Consistency" header is written formula-guarded, so only VOL + FP1 are re-read here)
+    const parsed = parseTargetUploadBuffer(buffer, kpiLike, new Set(['A1', 'B2', 'C3']));
+    expect(parsed.acceptedTargets['2026-07'].B2).toEqual({ VOL: 100, FP1: 20, __names: { FP1: "'=Combo & ADHO500" } });
+  }, XLSX_TIMEOUT);
 
   it('params: loose month for targets (as before), strict for sales; other query params ignored', () => {
     expect(() => TARGETS_EXPORT_KIND.parseParams({ month: 'July' }, ADMIN)).toThrow('A valid YYYY-MM "month" query param is required');

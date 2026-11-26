@@ -8,12 +8,17 @@
  * "Accept — not sold yet" / "Undo" call POST / DELETE admin/sales-months/:month/focus-acceptances and then ask the
  * parent to refresh its preview (the reconciliation, canApply and the focus fingerprint all change). Nothing is shown
  * as done until the server said so and the refreshed preview landed.
+ *
+ * Owner 2026-11-26: not-found names are grouped per KPI (collapsed when large, count in the header) with a confirmed
+ * "Accept all N" (POST …/focus-acceptances/bulk, all or nothing); a name that looks like a number gets a red hint and no
+ * Accept unless an explicit override is ticked; each focus KPI section is collapsible too. The import page puts the
+ * summary (reconciliationProblems) and Apply in a sticky bar at the top.
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Info, Undo2, XCircle } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronRight, Info, Undo2, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { salesImportApi } from '@/lib/sales-import/api';
-import { dateTimeLabel, formatCount, formatKpiValue, monthLabel, sentence } from '@/lib/sales-import/format';
+import { dateTimeLabel, formatCount, formatKpiValue, looksLikeNumber, monthLabel, sentence } from '@/lib/sales-import/format';
 import { noAnswerReason, outcomeUnknown, reasonOr } from '@/lib/request-outcome';
 import type {
   DimMatch, FocusBlocker, FocusNameSummary, FocusTokenResolution, MonthFocusKpi, MonthReconciliation,
@@ -130,7 +135,8 @@ function Notice({ tone, children, testId }: { tone: 'amber' | 'red' | 'gray'; ch
   );
 }
 
-type AcceptAction = { kind: 'accept' | 'undo'; kpiCode: string; key: string };
+/** `acceptMany`: the confirmed "Accept all" of one KPI (`keys`; `key` is ''). */
+type AcceptAction = { kind: 'accept' | 'undo' | 'acceptMany'; kpiCode: string; key: string; keys?: string[] };
 
 /** "XYZ (Focus Brand 2)" — the token with its KPI, so a screen reader can tell same-named buttons apart. */
 function tokenWithKpi(token: string, kpiLabel: string): string {
@@ -196,12 +202,52 @@ function TokenChip({
       className={`inline-flex flex-wrap items-center gap-1 text-[11px] rounded border px-1.5 py-0.5 bg-red-50 text-red-800 border-red-200 ${CHIP_TEXT}`}>
       <span><XCircle className="inline w-3 h-3 mr-0.5 -mt-0.5" /><strong className="font-semibold">{t.token}</strong> — not found in sales data</span>
       {canChange && (
-        <Button size="sm" variant="outline" className="!px-1.5 !py-0 text-[11px] bg-white" disabled={busy} loading={mine}
-          onClick={() => onAction({ kind: 'accept', kpiCode, key: t.key })}
-          aria-label={`Accept ${tokenWithKpi(t.token, kpiLabel)} as not sold yet`}>
-          Accept — not sold yet
-        </Button>
+        <AcceptOne token={t.token} tokenKey={t.key} kpiCode={kpiCode} kpiLabel={kpiLabel} busy={busy} mine={mine}
+          onAction={onAction} testId={`focus-token-accept-${kpiCode}-${t.key}`} />
       )}
+      {!canChange && looksLikeNumber(t.token) && <NumberHint />}
+    </span>
+  );
+}
+
+/** Red hint for a name part that is only a number (owner 2026-11-26). */
+function NumberHint() {
+  return (
+    <span className="block w-full font-semibold text-red-700" data-testid="focus-number-hint">
+      This looks like a number, not a product — fix the target file.
+    </span>
+  );
+}
+
+/**
+ * The "Accept — not sold yet" control for ONE unmatched name. A name that looks like a number gets the red hint and NO
+ * accept button until the admin ticks an explicit override (owner 2026-11-26: never offered by default).
+ */
+function AcceptOne({
+  token, tokenKey, kpiCode, kpiLabel, busy, mine, onAction, testId, variant = 'outline',
+}: {
+  token: string; tokenKey: string; kpiCode: string; kpiLabel: string; busy: boolean; mine: boolean;
+  onAction(a: AcceptAction): void; testId?: string; variant?: 'outline';
+}) {
+  const numeric = looksLikeNumber(token);
+  const [override, setOverride] = useState(false);
+  const button = (
+    <Button size="sm" variant={variant} className="!px-1.5 !py-0 text-[11px] bg-white" disabled={busy} loading={mine}
+      onClick={() => onAction({ kind: 'accept', kpiCode, key: tokenKey })} data-testid={testId}
+      aria-label={`Accept ${tokenWithKpi(token, kpiLabel)} as not sold yet`}>
+      Accept — not sold yet
+    </Button>
+  );
+  if (!numeric) return button;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <NumberHint />
+      <label className="inline-flex items-center gap-1 text-[11px] text-gray-700">
+        <input type="checkbox" checked={override} onChange={(e) => setOverride(e.target.checked)}
+          aria-label={`Override: ${tokenWithKpi(token, kpiLabel)} really is a product that has not sold yet`} />
+        It really is a product (override)
+      </label>
+      {override && button}
     </span>
   );
 }
@@ -225,9 +271,24 @@ function FocusKpiSection({
 }) {
   const measure = k.measure ?? fallbackMeasure;
   const kpiLabel = k.label || k.kpiCode;
+  const counts = focusKpiCounts(k);
+  // Large sections start collapsed (owner 2026-11-26: hundreds of rows pushed Apply far down); the header says why.
+  const [open, setOpen] = useState(k.names.length <= SECTION_OPEN_MAX);
+  const bodyId = `focus-kpi-body-${k.kpiCode}`;
   return (
     <div className="space-y-1.5 min-w-0" data-testid={`focus-kpi-${k.kpiCode}`}>
-      <p className="text-xs font-semibold text-gray-800" data-testid={`focus-kpi-title-${k.kpiCode}`}>{kpiLabel}</p>
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-controls={bodyId}
+        data-testid={`focus-kpi-toggle-${k.kpiCode}`}
+        className="flex items-center gap-1 text-left text-xs font-semibold text-gray-800">
+        {open ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
+        <span data-testid={`focus-kpi-title-${k.kpiCode}`}>{kpiLabel}</span>
+        <span data-testid={`focus-kpi-status-${k.kpiCode}`}
+          className={counts.unresolved > 0 || k.missingName.outlets > 0 ? 'font-normal text-red-700' : 'font-normal text-gray-500'}>
+          — {focusKpiStatusText(k, counts)}
+        </span>
+      </button>
+      {open && (
+      <div id={bodyId} className="space-y-1.5 min-w-0">
       {k.names.length === 0 ? (
         <p className="text-xs text-gray-500">No outlet has a product name for this KPI in the target file this month.</p>
       ) : (
@@ -278,8 +339,41 @@ function FocusKpiSection({
           <SampleCodes codes={k.missingName.sampleOutletCodes} total={k.missingName.outlets} label="Show outlet codes" />
         </div>
       )}
+      </div>
+      )}
     </div>
   );
+}
+
+/** A section with more rows than this starts collapsed. */
+export const SECTION_OPEN_MAX = 10;
+
+/** Per KPI: distinct names not found (not yet accepted), of which look like numbers, could-mean-several, accepted. */
+export function focusKpiCounts(k: MonthFocusKpi): { unmatched: number; numeric: number; ambiguous: number; accepted: number; unresolved: number } {
+  const seen = new Map<string, FocusTokenResolution>();
+  for (const n of k.names) for (const t of n.tokens) if (!seen.has(t.key)) seen.set(t.key, t);
+  let unmatched = 0; let numeric = 0; let ambiguous = 0; let accepted = 0;
+  for (const t of seen.values()) {
+    if (t.status === 'AMBIGUOUS') ambiguous++;
+    else if (t.status === 'UNMATCHED' && t.accepted) accepted++;
+    else if (t.status === 'UNMATCHED') { unmatched++; if (looksLikeNumber(t.token)) numeric++; }
+  }
+  return { unmatched, numeric, ambiguous, accepted, unresolved: unmatched + ambiguous };
+}
+
+/** "38 names not found (3 look like numbers) · 1 could mean more than one product" / "all names found". */
+export function focusKpiStatusText(k: MonthFocusKpi, c = focusKpiCounts(k)): string {
+  const parts: string[] = [];
+  if (c.unmatched > 0) {
+    parts.push(`${plural(c.unmatched, 'name')} not found${c.numeric > 0 ? ` (${formatCount(c.numeric)} ${c.numeric === 1 ? 'looks' : 'look'} like ${c.numeric === 1 ? 'a number' : 'numbers'})` : ''}`);
+  }
+  if (c.ambiguous > 0) parts.push(`${plural(c.ambiguous, 'name')} could mean more than one product`);
+  if (k.missingName.outlets > 0) parts.push(`${plural(k.missingName.outlets, 'outlet')} without a name`);
+  if (parts.length === 0) {
+    if (k.names.length === 0) return 'no names this month';
+    return c.accepted > 0 ? `all names found or accepted (${formatCount(c.accepted)} accepted as not sold yet)` : 'all names found';
+  }
+  return parts.join(' · ');
 }
 
 function BlockerList({
@@ -289,6 +383,15 @@ function BlockerList({
   pending: AcceptAction | null; onAction(a: AcceptAction): void;
 }) {
   const busy = pending !== null;
+  // Not-found names are grouped per KPI (collapsible, with "Accept all"); every other blocker is listed as before.
+  const others = blockers.filter((b) => !(b.code === 'FOCUS_UNMATCHED' && b.key));
+  const unmatchedByKpi = new Map<string, FocusBlocker[]>();
+  for (const b of blockers) {
+    if (b.code !== 'FOCUS_UNMATCHED' || !b.key) continue;
+    const list = unmatchedByKpi.get(b.kpiCode) ?? [];
+    list.push(b);
+    unmatchedByKpi.set(b.kpiCode, list);
+  }
   // role="status" (polite), not "alert": a preview with N blocked months must not fire N assertive announcements.
   return (
     <div role="status" data-testid={`recon-blockers-${month}`}
@@ -297,27 +400,145 @@ function BlockerList({
         <XCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
         {monthLabel(month)} can&apos;t be applied until {blockers.length === 1 ? 'this is' : 'these are'} fixed:
       </p>
-      <ul className="space-y-1 pl-5 list-disc">
-        {blockers.map((b, i) => (
-          <li key={`${b.code}-${b.kpiCode}-${b.key ?? i}`} data-testid="recon-blocker" className="[overflow-wrap:anywhere]">
-            {/* The server's message already says how many outlets: nothing is appended here. */}
-            {sentence(b.message)}.
-            {canChange && b.code === 'FOCUS_UNMATCHED' && b.key && (
-              <Button size="sm" variant="outline" className="ml-1.5 !px-1.5 !py-0 text-[11px] bg-white" disabled={busy}
-                loading={pending?.kpiCode === b.kpiCode && pending.key === b.key}
-                onClick={() => onAction({ kind: 'accept', kpiCode: b.kpiCode, key: b.key! })}
-                data-testid={`recon-blocker-accept-${b.kpiCode}-${b.key}`}
-                aria-label={`Accept ${tokenWithKpi(b.token ?? b.key, kpiLabels[b.kpiCode] || b.kpiCode)} as not sold yet`}>
-                Accept — not sold yet
-              </Button>
-            )}
-            <SampleCodes codes={b.sampleOutletCodes} total={b.outlets} label="Show outlet codes" />
-          </li>
-        ))}
-      </ul>
+      {others.length > 0 && (
+        <ul className="space-y-1 pl-5 list-disc">
+          {others.map((b, i) => (
+            <li key={`${b.code}-${b.kpiCode}-${b.key ?? i}`} data-testid="recon-blocker" className="[overflow-wrap:anywhere]">
+              {/* The server's message already says how many outlets: nothing is appended here. */}
+              {sentence(b.message)}.
+              <SampleCodes codes={b.sampleOutletCodes} total={b.outlets} label="Show outlet codes" />
+            </li>
+          ))}
+        </ul>
+      )}
+      {[...unmatchedByKpi.entries()].map(([kpiCode, list]) => (
+        <UnmatchedGroup key={kpiCode} month={month} kpiCode={kpiCode} kpiLabel={kpiLabels[kpiCode] || kpiCode} list={list}
+          canChange={canChange} busy={busy} pending={pending} onAction={onAction} />
+      ))}
     </div>
   );
 }
+
+/**
+ * One KPI's "not found in sales data" names (owner 2026-11-26): a collapsible group (collapsed when large) whose header
+ * says the count, each name with its own Accept (numbers need an override), and "Accept all N as not sold yet" — which
+ * first SHOWS the exact list and needs a confirm tick (never a silent bulk). Names that look like numbers are left out
+ * of "Accept all" unless the admin ticks a separate override.
+ */
+function UnmatchedGroup({
+  month, kpiCode, kpiLabel, list, canChange, busy, pending, onAction,
+}: {
+  month: string; kpiCode: string; kpiLabel: string; list: FocusBlocker[]; canChange: boolean; busy: boolean;
+  pending: AcceptAction | null; onAction(a: AcceptAction): void;
+}) {
+  const [open, setOpen] = useState(list.length <= GROUP_OPEN_MAX);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [confirmTick, setConfirmTick] = useState(false);
+  const [includeNumbers, setIncludeNumbers] = useState(false);
+  const numeric = list.filter((b) => looksLikeNumber(b.token ?? b.key));
+  const products = list.filter((b) => !looksLikeNumber(b.token ?? b.key));
+  const bulkList = includeNumbers ? list : products;
+  const bodyId = `recon-unmatched-body-${month}-${kpiCode}`;
+  const bulkPending = pending?.kind === 'acceptMany' && pending.kpiCode === kpiCode;
+  const closeBulk = () => { setBulkOpen(false); setConfirmTick(false); setIncludeNumbers(false); };
+  return (
+    <div className="rounded border border-red-200 bg-white/60 px-2 py-1.5 space-y-1.5" data-testid={`recon-unmatched-${month}-${kpiCode}`}>
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} aria-controls={bodyId}
+        data-testid={`recon-unmatched-toggle-${month}-${kpiCode}`} className="flex items-center gap-1 text-left font-semibold">
+        {open ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
+        <span>
+          {kpiLabel} — {plural(list.length, 'name')} not found in sales data
+          {numeric.length > 0 && ` (${formatCount(numeric.length)} ${numeric.length === 1 ? 'looks' : 'look'} like ${numeric.length === 1 ? 'a number' : 'numbers'})`}
+        </span>
+      </button>
+      {open && (
+        <div id={bodyId} className="space-y-1.5">
+          {/* One name has its own Accept; "Accept all" is for two or more. */}
+          {canChange && !bulkOpen && list.length > 1 && (
+            <Button size="sm" variant="outline" className="!px-1.5 !py-0 text-[11px] bg-white" disabled={busy}
+              onClick={() => setBulkOpen(true)} data-testid={`recon-accept-all-${month}-${kpiCode}`}>
+              {products.length > 0
+                ? `Accept all ${formatCount(products.length)} as not sold yet…`
+                : 'Accept all… (every name here looks like a number)'}
+            </Button>
+          )}
+          {canChange && bulkOpen && (
+            <div className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-amber-900 space-y-1.5"
+              data-testid={`recon-accept-all-confirm-${month}-${kpiCode}`}>
+              <p className="font-semibold">
+                Accept {plural(bulkList.length, 'name')} for {kpiLabel} as not sold yet? Each then counts as 0 for {monthLabel(month)}.
+              </p>
+              {bulkList.length > 0 ? (
+                <ul className="max-h-48 overflow-y-auto font-mono text-[11px] bg-white border border-amber-200 rounded px-2 py-1 list-disc pl-5"
+                  data-testid={`recon-accept-all-list-${month}-${kpiCode}`}>
+                  {bulkList.map((b) => (
+                    <li key={b.key} className={looksLikeNumber(b.token ?? b.key) ? 'text-red-700' : undefined}>
+                      {b.token ?? b.key} ({plural(b.outlets, 'outlet')})
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p data-testid={`recon-accept-all-empty-${month}-${kpiCode}`}>
+                  Every name here looks like a number. Fix the target file — or tick the override below.
+                </p>
+              )}
+              {numeric.length > 0 && (
+                <div className="space-y-0.5">
+                  <p className="text-red-700 font-semibold">
+                    {plural(numeric.length, 'name')} {numeric.length === 1 ? 'looks' : 'look'} like {numeric.length === 1 ? 'a number' : 'numbers'}, not
+                    {numeric.length === 1 ? ' a product' : ' products'} — {numeric.length === 1 ? 'it is' : 'they are'} left out. Fix the target file.
+                  </p>
+                  <label className="flex items-start gap-1.5">
+                    <input type="checkbox" className="mt-0.5" checked={includeNumbers}
+                      onChange={(e) => { setIncludeNumbers(e.target.checked); setConfirmTick(false); }}
+                      aria-label={`Override: also accept the ${numeric.length} names that look like numbers`} />
+                    <span>Override: also accept the {plural(numeric.length, 'name')} that {numeric.length === 1 ? 'looks' : 'look'} like {numeric.length === 1 ? 'a number' : 'numbers'}.</span>
+                  </label>
+                </div>
+              )}
+              {bulkList.length > 0 && (
+                <label className="flex items-start gap-1.5">
+                  <input type="checkbox" className="mt-0.5" checked={confirmTick} onChange={(e) => setConfirmTick(e.target.checked)}
+                    aria-label={`I checked these ${bulkList.length} names: they are products that have not sold yet`} />
+                  <span>I checked {bulkList.length === 1 ? 'this name' : `these ${formatCount(bulkList.length)} names`}: {bulkList.length === 1 ? 'it is a product' : 'they are products'} that {bulkList.length === 1 ? 'has' : 'have'} not sold yet.</span>
+                </label>
+              )}
+              <div className="flex gap-1.5">
+                <Button size="sm" variant="primary" className="!px-2 !py-0.5 text-[11px]" disabled={busy || !confirmTick || bulkList.length === 0}
+                  loading={bulkPending} data-testid={`recon-accept-all-go-${month}-${kpiCode}`}
+                  onClick={() => { onAction({ kind: 'acceptMany', kpiCode, key: '', keys: bulkList.map((b) => b.key!) }); closeBulk(); }}>
+                  Accept {plural(bulkList.length, 'name')}
+                </Button>
+                <Button size="sm" variant="ghost" className="!px-2 !py-0.5 text-[11px]" disabled={bulkPending} onClick={closeBulk}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+          <ul className="space-y-1 pl-5 list-disc">
+            {list.map((b) => (
+              <li key={b.key} data-testid="recon-blocker" className="[overflow-wrap:anywhere]">
+                {sentence(b.message)}.
+                {canChange && (
+                  <span className="ml-1.5 inline-flex">
+                    <AcceptOne token={b.token ?? b.key!} tokenKey={b.key!} kpiCode={kpiCode} kpiLabel={kpiLabel} busy={busy}
+                      mine={pending?.kind === 'accept' && pending.kpiCode === kpiCode && pending.key === b.key}
+                      onAction={onAction} testId={`recon-blocker-accept-${kpiCode}-${b.key}`} />
+                  </span>
+                )}
+                {!canChange && looksLikeNumber(b.token ?? b.key) && <NumberHint />}
+                <SampleCodes codes={b.sampleOutletCodes} total={b.outlets} label="Show outlet codes" />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A not-found group with more names than this starts collapsed. */
+export const GROUP_OPEN_MAX = 5;
 
 export function MonthReconciliationPanel({
   month, reconciliation: r, measures = {}, dims = [], typeNames = {}, canAct, monthOpen, expanded = true, onRefresh,
@@ -379,7 +600,11 @@ export function MonthReconciliationPanel({
     setError(null);
     const res = a.kind === 'accept'
       ? await salesImportApi.acceptFocusToken(month, { kpiCode: a.kpiCode, key: a.key })
-      : await salesImportApi.undoFocusAcceptance(month, a.kpiCode, a.key);
+      : a.kind === 'acceptMany'
+        ? await salesImportApi.acceptFocusTokens(month, { kpiCode: a.kpiCode, keys: a.keys ?? [] })
+        : await salesImportApi.undoFocusAcceptance(month, a.kpiCode, a.key);
+    const n = a.keys?.length ?? 0;
+    const what = a.kind === 'acceptMany' ? `${n} ${n === 1 ? 'name' : 'names'}` : '';
     // Refresh either way: after a refusal (month closed, token now matched, …) the screen is usually out of date.
     // Only say it was reloaded when the reload actually landed.
     const refreshed = await onRefresh();
@@ -388,15 +613,15 @@ export function MonthReconciliationPanel({
     if (!res.success) {
       // No definite answer (timeout / 5xx / network): it may have been saved — the reloaded preview shows the truth.
       setError(outcomeUnknown(res)
-        ? `We couldn’t confirm whether this was ${a.kind === 'accept' ? 'accepted' : 'undone'}: ${noAnswerReason(res)}. ` +
+        ? `We couldn’t confirm whether ${a.kind === 'acceptMany' ? `the ${what} were accepted` : `this was ${a.kind === 'accept' ? 'accepted' : 'undone'}`}: ${noAnswerReason(res)}. ` +
           (refreshed ? 'The preview has been reloaded and shows what is saved now — check it before trying again.'
             : `The preview could not be refreshed — ${refreshHint}.`)
-        : `${a.kind === 'accept' ? 'Not accepted' : 'Not undone'}: ${reasonOr(res.error, 'the request failed')}. ` +
+        : `${a.kind === 'acceptMany' ? `None of the ${what} were accepted` : a.kind === 'accept' ? 'Not accepted' : 'Not undone'}: ${reasonOr(res.error, 'the request failed')}. ` +
           (refreshed ? 'The preview has been reloaded.' : `The preview could not be refreshed — ${refreshHint}.`));
       return;
     }
     if (!refreshed) {
-      setError(`${a.kind === 'accept' ? 'Accepted' : 'Undone'}, but the preview could not be refreshed — ${refreshHint}.`);
+      setError(`${a.kind === 'acceptMany' ? `Accepted ${what}` : a.kind === 'accept' ? 'Accepted' : 'Undone'}, but the preview could not be refreshed — ${refreshHint}.`);
     }
   }
   const onAction = (a: AcceptAction) => { void act(a); };
@@ -494,4 +719,43 @@ export function reconciliationNeedsAttention(r: MonthReconciliation | null | und
   if (!r) return false;
   return r.blockers.length > 0 || r.targets.newerThanLastApply || (r.focus.length > 0 && r.targets.targetUploadedAt === null)
     || (r.notCalculated?.length ?? 0) > 0;
+}
+
+/** One line of the screen-top summary: what still needs doing for one KPI of one month. */
+export interface ReconciliationProblem {
+  kpiCode: string;
+  label: string;
+  /** "38 names not found (3 look like numbers)" … */
+  text: string;
+}
+
+/**
+ * Owner 2026-11-26: the TOP summary of a month's open problems, per KPI, from the blockers (exactly what blocks Apply):
+ * names not found (with how many look like numbers), names that could mean several products, outlets without a name,
+ * and any other blocker by its message. Empty = nothing blocks the month.
+ */
+export function reconciliationProblems(r: MonthReconciliation | null | undefined): ReconciliationProblem[] {
+  if (!r || r.blockers.length === 0) return [];
+  const labelOf: Record<string, string> = {};
+  for (const k of [...r.targets.kpis, ...r.focus]) if (k.label) labelOf[k.kpiCode] = k.label;
+  const byKpi = new Map<string, { unmatched: number; numeric: number; ambiguous: number; missing: number; other: string[] }>();
+  for (const b of r.blockers) {
+    const e = byKpi.get(b.kpiCode) ?? { unmatched: 0, numeric: 0, ambiguous: 0, missing: 0, other: [] };
+    if (b.code === 'FOCUS_UNMATCHED') { e.unmatched++; if (looksLikeNumber(b.token ?? b.key)) e.numeric++; }
+    else if (b.code === 'FOCUS_AMBIGUOUS') e.ambiguous++;
+    else if (b.code === 'FOCUS_MISSING_NAME') e.missing += b.outlets;
+    else e.other.push(sentence(b.message));
+    byKpi.set(b.kpiCode, e);
+  }
+  return [...byKpi.entries()].map(([kpiCode, e]) => {
+    const parts: string[] = [];
+    if (e.unmatched > 0) {
+      parts.push(`${plural(e.unmatched, 'name')} not found — accept as not sold yet or fix the target file` +
+        (e.numeric > 0 ? ` (${formatCount(e.numeric)} ${e.numeric === 1 ? 'looks' : 'look'} like ${e.numeric === 1 ? 'a number' : 'numbers'} — fix the target file)` : ''));
+    }
+    if (e.ambiguous > 0) parts.push(`${plural(e.ambiguous, 'name')} could mean more than one product — fix the target file`);
+    if (e.missing > 0) parts.push(`${plural(e.missing, 'outlet')} without a product name — fix the target file`);
+    parts.push(...e.other);
+    return { kpiCode, label: labelOf[kpiCode] || kpiCode, text: parts.join(' · ') };
+  });
 }

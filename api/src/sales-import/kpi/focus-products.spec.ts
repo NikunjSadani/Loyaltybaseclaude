@@ -5,6 +5,7 @@ import {
   buildMonthReconciliation,
   focusKey,
   focusNameKey,
+  isNumericFocusToken,
   resolveFocusToken,
   resolveMonthFocus,
   splitFocusName,
@@ -90,6 +91,18 @@ describe('focusKey / splitFocusName', () => {
   it('focusNameKey is order / spelling independent', () => {
     expect(focusNameKey('CNO & ADHO500')).toBe('ADHO500&CNO');
     expect(focusNameKey('adho 500, cno')).toBe('ADHO500&CNO');
+  });
+});
+
+describe('isNumericFocusToken (owner 2026-11-26)', () => {
+  it('a part that is only a number (₹ figure) is numeric', () => {
+    for (const t of ['1011.2697', ' 1011 ', '1.011', '₹ 1011.50', '42']) expect(isNumericFocusToken(t)).toBe(true);
+  });
+  it('a product name with digits, or separators only, is not', () => {
+    for (const t of ['ADHO500', 'CNO 1L', '500ML', '.', ',', '', null]) expect(isNumericFocusToken(t)).toBe(false);
+  });
+  it('"1011.2697 & ADHO500" splits into a numeric part and a product', () => {
+    expect(splitFocusName('1011.2697 & ADHO500').map(isNumericFocusToken)).toEqual([true, false]);
   });
 });
 
