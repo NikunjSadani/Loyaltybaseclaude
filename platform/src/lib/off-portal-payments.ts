@@ -148,6 +148,7 @@ export const CATEGORY_SHORT: Record<string, string> = {
   DUPLICATE: 'Repeat',
   POSSIBLE_DUPLICATE: 'Possible repeat',
   PAID_ON_PORTAL: 'Paid on portal',
+  PORTAL_UNPAID: 'Portal payout still unpaid',
   REPLACES_TDS_ENTRY: 'Replaces TDS entry',
   TDS_ENTRY_OTHER_PAYEE: 'TDS entry, other payee',
   NO_FUND_OPENING: 'No fund opening',

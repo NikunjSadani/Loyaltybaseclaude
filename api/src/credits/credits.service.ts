@@ -1368,6 +1368,49 @@ export class CreditsService {
   }
 
   /**
+   * Double-payment guard (owner 2026-11-26): the payout entries a bank file would pay that match a LIVE (not voided)
+   * off-portal payment recorded for the same outlet + amount — same payout month, or paid within ±3 days of now.
+   * Read-only; one query per 1,000 outlets.
+   */
+  private async offPortalMatchesForDownload(
+    clientId: string,
+    entries: Array<{ id: string; outletId: string; outletName: string; amountPaise: bigint; period: string; fieldName?: string }>,
+  ): Promise<Array<{ entryId: string; outletId: string; outletName: string; amountPaise: string; period: string; offPortal: Array<{ id: string; paymentDate: string; utr: string | null; period: string }> }>> {
+    const db = (this.prisma as unknown as Partial<Prisma.TransactionClient>).offPortalPayment;
+    if (!db || entries.length === 0) return [];
+    const keys = [...new Set(entries.map((e) => e.outletId.trim().toUpperCase()))];
+    const now = Date.now();
+    const rows: Array<{ id: string; outletCodeKey: string; amountPaise: bigint; paymentDate: Date; utr: string | null; period: string }> = [];
+    for (let i = 0; i < keys.length; i += 1000) {
+      const part = keys.slice(i, i + 1000);
+      rows.push(
+        ...((await db.findMany({
+          where: { clientId, voidedAt: null, outletCodeKey: { in: part } },
+          select: { id: true, outletCodeKey: true, amountPaise: true, paymentDate: true, utr: true, period: true },
+        })) ?? []),
+      );
+    }
+    if (rows.length === 0) return [];
+    const out: Awaited<ReturnType<CreditsService['offPortalMatchesForDownload']>> = [];
+    for (const e of entries) {
+      const k = e.outletId.trim().toUpperCase();
+      const hits = rows.filter(
+        (r) => r.outletCodeKey === k && r.amountPaise === e.amountPaise && (r.period === e.period || Math.abs(r.paymentDate.getTime() - now) <= 3 * 86_400_000),
+      );
+      if (hits.length === 0) continue;
+      out.push({
+        entryId: e.id,
+        outletId: e.outletId,
+        outletName: e.outletName,
+        amountPaise: e.amountPaise.toString(),
+        period: e.period,
+        offPortal: hits.map((h) => ({ id: h.id, paymentDate: h.paymentDate.toISOString(), utr: h.utr, period: h.period })),
+      });
+    }
+    return out;
+  }
+
+  /**
    * Write a plan's 194C gross-up TDS invoices (+ their pro-rata recovery rows) and its 194C no-PAN recovery rows,
    * inside the caller's transaction. `downloadId` = the bank run the paid payouts came from (Fund Reconciliation's TDS
    * line). Every row written here is marked `raisedOn = 'PAID'` (owner 2026-11-25: raised when the payout is paid) —
@@ -3853,6 +3896,26 @@ export class CreditsService {
     // marked PROCESSING — they stay PENDING and re-enter the next download.
     const payableEntryIds = payableCodes.flatMap((code) => outletMap.get(code)!.entryIds);
 
+    // Owner 2026-11-26 (double-payment guard, integration audit): an entry this file would pay that matches a LIVE
+    // off-portal payment already recorded for the outlet (same amount; same month, or paid within ±3 days of this run)
+    // may already have been paid by hand → the download needs an explicit acknowledgement naming EVERY such entry
+    // (server-enforced; refused with the list otherwise; acknowledged matches are audited with the download).
+    const payableIdSet = new Set(payableEntryIds);
+    const offPortalMatches = await this.offPortalMatchesForDownload(user.clientId, entries.filter((e) => payableIdSet.has(e.id)));
+    if (offPortalMatches.length > 0) {
+      const acked = new Set(dto.acknowledgedOffPortalMatches ?? []);
+      const missing = offPortalMatches.filter((m) => !acked.has(m.entryId));
+      if (missing.length > 0) {
+        throw new ConflictException({
+          message:
+            `Nothing was downloaded — ${missing.length} payout${missing.length === 1 ? '' : 's'} in this file match an off-portal payment already recorded ` +
+            `for the same outlet and amount (it may already have been paid by hand). Check them, cancel any that were paid ` +
+            `(Gifsy: Cancel unpaid/failed), or acknowledge them to download anyway.`,
+          details: { offPortalMatches: missing },
+        });
+      }
+    }
+
     // FIX-8: per-PAN (and per no-PAN outlet) advisory-lock keys for the visibility engine, in a
     // deterministic sorted order (deadlock-safe). Empty for STANDARD / non-visibility downloads
     // → the engine + locks are a no-op there.
@@ -4115,6 +4178,19 @@ export class CreditsService {
           if (fullyWithheldCodes.length === payableCodes.length) {
             await tx.creditPayoutDownload.update({ where: { id: rec.id }, data: { status: 'PAID' } });
           }
+        }
+
+        // Double-payment guard: the off-portal matches the admin acknowledged travel with the download's audit trail.
+        if (offPortalMatches.length > 0) {
+          await tx.auditLog.create({
+            data: {
+              action: 'EXPORT',
+              entityType: 'PAYOUT_DOWNLOAD_OFF_PORTAL_ACK',
+              entityId: rec.id,
+              actorId: user.sub,
+              metadata: JSON.parse(JSON.stringify({ clientId: user.clientId, downloadCode, period, matches: offPortalMatches }, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))) as Prisma.InputJsonValue,
+            },
+          });
         }
 
         // WP5: the reversal hold is part of the download record's audit trail (who, which file, which entries).

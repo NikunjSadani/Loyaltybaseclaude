@@ -3576,6 +3576,38 @@ describe('CreditsService', () => {
       expect(mockInvoicesService.createTdsInvoice).not.toHaveBeenCalled();
     });
 
+    it('owner 2026-11-26 double-payment guard: a payout matching a recorded off-portal payment needs an explicit acknowledgement (refused with the list; acknowledged → downloaded + audited)', async () => {
+      mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
+      mockPrisma.creditPayoutEntry.findMany.mockResolvedValue([{ ...visEntry(250_000n, 'GROSS_UP'), period: '2026-05' }]);
+      mockPrisma.outlet.findMany.mockResolvedValue([bankOutlet('INDIVIDUAL')]);
+      mockPrisma.creditPayoutDownload.count.mockResolvedValue(0);
+      mockTx.creditPayoutDownload.create.mockResolvedValue({ id: 'd1', downloadCode: 'PD-2026-05-009' });
+      const offPortal = {
+        findMany: jest.fn(async (_a?: unknown) => [
+          { id: 'op1', outletCodeKey: 'O1', amountPaise: 250_000n, paymentDate: new Date('2026-05-20T00:00:00Z'), utr: 'CASH1', period: '2026-05' },
+          { id: 'op2', outletCodeKey: 'O1', amountPaise: 99_900n, paymentDate: new Date('2026-05-20T00:00:00Z'), utr: null, period: '2026-05' }, // other amount
+        ]),
+      };
+      (mockPrisma as any).offPortalPayment = offPortal;
+      try {
+        const dto = { period: '2026-05', groupType: PayoutGroupType.SEPARATE, fieldId: 'f-vis', fieldName: 'Visibility' };
+        let err: any;
+        try { await service.createPayoutDownload(gifsy, dto); } catch (e) { err = e; }
+        expect(err).toBeInstanceOf(ConflictException);
+        expect(err.getResponse().details.offPortalMatches).toEqual([
+          expect.objectContaining({ entryId: 'e1', outletId: 'O1', amountPaise: '250000', offPortal: [expect.objectContaining({ id: 'op1', utr: 'CASH1' })] }),
+        ]);
+        expect(offPortal.findMany.mock.calls[0][0]).toMatchObject({ where: { clientId: 'deoleo', voidedAt: null, outletCodeKey: { in: ['O1'] } } });
+        expect(mockTx.creditPayoutDownload.create).not.toHaveBeenCalled(); // nothing claimed, no file
+
+        await service.createPayoutDownload(gifsy, { ...dto, acknowledgedOffPortalMatches: ['e1'] });
+        expect(mockTx.creditPayoutDownload.create).toHaveBeenCalledTimes(1);
+        expect(mockTx.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ entityType: 'PAYOUT_DOWNLOAD_OFF_PORTAL_ACK', entityId: 'd1' }) }));
+      } finally {
+        delete (mockPrisma as any).offPortalPayment;
+      }
+    });
+
     it('DEDUCT: carries the un-withheld remainder forward when the catch-up exceeds the payout', async () => {
       mockPrisma.creditField.findMany.mockResolvedValue([{ id: 'f-vis' }]);
       // OTHERS → 2%. Prior FY base ₹99,000 (below ₹1L, no single > ₹30k), this payout ₹2,000

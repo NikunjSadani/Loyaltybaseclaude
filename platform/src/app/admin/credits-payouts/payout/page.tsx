@@ -145,6 +145,16 @@ const STATUS_COLOR: Record<string, string> = {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+/** A payout of the file that matches a recorded off-portal payment (double-payment guard, owner 2026-11-26). */
+interface OffPortalMatch {
+  entryId: string;
+  outletId: string;
+  outletName: string;
+  amountPaise: string;
+  period: string;
+  offPortal: Array<{ id: string; paymentDate: string; utr: string | null; period: string }>;
+}
+
 interface CreditField {
   id:              string;
   name:            string;
@@ -474,6 +484,9 @@ function PayoutPageInner() {
   const [reversals, setReversals] = useState<Reversal[]>([]);
   const [generating, setGenerating] = useState(false);
   const [genError,   setGenError]   = useState('');
+  // Double-payment guard (owner 2026-11-26): entries of this file that match a recorded off-portal payment.
+  const [offPortalMatches, setOffPortalMatches] = useState<OffPortalMatch[] | null>(null);
+  const [offPortalAck, setOffPortalAck] = useState(false);
   // A-H2: payouts fully withheld as TDS are NOT in the bank file — the API names them in headers.
   const [fullyWithheldNote, setFullyWithheldNote] = useState('');
   // Owner rule "no silent pass-through": KYC-held payouts left out of the file.
@@ -604,9 +617,10 @@ function PayoutPageInner() {
     return read(`/api/admin/credits/payout-downloads/latest-summary?${q.toString()}`);
   }
 
-  async function handleGeneratePayoutFile() {
+  async function handleGeneratePayoutFile(acknowledgedOffPortalMatches?: string[]) {
     setGenerating(true);
     setGenError('');
+    if (!acknowledgedOffPortalMatches) { setOffPortalMatches(null); setOffPortalAck(false); }
     setFullyWithheldNote('');
     setHeldNote('');
     setNoBankFileMsg('');
@@ -619,6 +633,7 @@ function PayoutPageInner() {
         body.fieldId   = fieldId;
         body.fieldName = field?.name;
       }
+      if (acknowledgedOffPortalMatches) body.acknowledgedOffPortalMatches = acknowledgedOffPortalMatches;
 
       const res = await fetch('/api/admin/credits/payout-downloads', {
         method:  'POST',
@@ -629,6 +644,8 @@ function PayoutPageInner() {
       if (!res.ok) {
         const json = await res.json().catch(() => ({ error: 'Request failed' }));
         setGenError(json.error ?? `HTTP ${res.status}`);
+        const m = json?.details?.offPortalMatches;
+        if (Array.isArray(m) && m.length > 0) { setOffPortalMatches(m as OffPortalMatch[]); setOffPortalAck(false); }
         return;
       }
 
@@ -928,7 +945,7 @@ function PayoutPageInner() {
           )}
 
           <button
-            onClick={handleGeneratePayoutFile}
+            onClick={() => void handleGeneratePayoutFile()}
             disabled={generating || (groupType === 'SEPARATE' && !fieldId)}
             className="flex items-center gap-2 px-4 py-2 bg-[var(--brand-primary)] text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -1038,6 +1055,34 @@ function PayoutPageInner() {
           <div className="flex items-center gap-2 text-xs text-red-700 bg-red-50 rounded-xl px-4 py-3">
             <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
             {genError}
+          </div>
+        )}
+        {offPortalMatches && offPortalMatches.length > 0 && (
+          <div data-testid="off-portal-matches" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 space-y-2">
+            <p className="font-semibold">
+              {offPortalMatches.length} payout{offPortalMatches.length === 1 ? '' : 's'} in this file match an off-portal payment already recorded — they may already have been paid by hand
+            </p>
+            <ul className="space-y-0.5 max-h-48 overflow-y-auto">
+              {offPortalMatches.map((m) => (
+                <li key={m.entryId}>
+                  {m.outletName} ({m.outletId}) · {m.period} · ₹{(Number(m.amountPaise) / 100).toLocaleString('en-IN', { minimumFractionDigits: 2 })} — off-portal{' '}
+                  {m.offPortal.map((o) => `${new Date(o.paymentDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}${o.utr ? ` (UTR ${o.utr})` : ''}`).join(', ')}
+                </li>
+              ))}
+            </ul>
+            <p>Cancel any that were already paid (Gifsy: Payout Status → Cancel unpaid / failed), or acknowledge them to download anyway.</p>
+            <label className="flex items-start gap-2">
+              <input type="checkbox" checked={offPortalAck} onChange={(e) => setOffPortalAck(e.target.checked)} />
+              I checked these {offPortalMatches.length} payout{offPortalMatches.length === 1 ? '' : 's'} — they were NOT paid off-portal; download anyway
+            </label>
+            <button
+              type="button"
+              disabled={!offPortalAck || generating}
+              onClick={() => void handleGeneratePayoutFile(offPortalMatches.map((m) => m.entryId))}
+              className="px-3 py-1.5 rounded-lg bg-amber-600 text-white disabled:opacity-50"
+            >
+              Download with these acknowledged
+            </button>
           </div>
         )}
 

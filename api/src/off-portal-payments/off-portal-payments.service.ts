@@ -57,6 +57,7 @@ export const OFF_PORTAL_CATEGORIES = [
   'DUPLICATE',
   'POSSIBLE_DUPLICATE',
   'PAID_ON_PORTAL',
+  'PORTAL_UNPAID',
   'REPLACES_TDS_ENTRY',
   'TDS_ENTRY_OTHER_PAYEE',
   'NO_FUND_OPENING',
@@ -88,6 +89,8 @@ export const OFF_PORTAL_CATEGORY_LABEL: Record<OffPortalCategory, string> = {
     'Matches an earlier TDS off-platform entry (same outlet / PAN, amount and date) — the payment REPLACES that entry in the 194R base (never counted twice)',
   PAID_ON_PORTAL:
     'Matches a payout already PAID through the portal to this outlet (same UTR, or same amount on the same day) — recording it would count it twice',
+  PORTAL_UNPAID:
+    'Portal payout still unpaid — cancel it (Gifsy: Cancel unpaid/failed) or it will be paid again (a portal payout to this outlet for the same amount is still PENDING or FAILED-awaiting-re-bank, same month or within 3 days)',
   TDS_ENTRY_OTHER_PAYEE:
     'Matches an earlier TDS off-platform entry (same date and amount) recorded under a DIFFERENT payee — BOTH will count in 194R; correct one of them',
   BEFORE_FUND_OPENING:
@@ -304,6 +307,26 @@ export class OffPortalPaymentsService {
       }
     }
 
+    // Portal payouts NOT yet paid to these outlets (PENDING — the next bank file pays them — or FAILED, awaiting re-bank):
+    // a row matching one (same amount, same month or within ±3 days) means the outlet would be paid TWICE unless the
+    // portal payout is cancelled (owner 2026-11-26 integration audit) → flagged PORTAL_UNPAID (ticked + listed).
+    const portalUnpaid = new Map<string, Array<{ amountPaise: bigint; period: string; day: string; status: string; batchCode: string }>>();
+    if (parsed.rows.length) {
+      for (const part of chunks(keys)) {
+        const open = await db.creditPayoutEntry.findMany({
+          where: { clientId, outletId: { in: part, mode: 'insensitive' }, status: { in: ['PENDING', 'FAILED'] } },
+          select: { outletId: true, amountPaise: true, period: true, status: true, createdAt: true, attemptedAt: true, batch: { select: { batchCode: true } } },
+        });
+        for (const e of open ?? []) {
+          const k = outletKeyOf(e.outletId);
+          portalUnpaid.set(k, [
+            ...(portalUnpaid.get(k) ?? []),
+            { amountPaise: e.amountPaise, period: e.period, day: istDateKey(e.attemptedAt ?? e.createdAt), status: String(e.status), batchCode: e.batch?.batchCode ?? '' },
+          ]);
+        }
+      }
+    }
+
     const opening = await db.fundReceipt.findFirst({ where: { clientId, entryType: 'OPENING_BALANCE' }, select: { receivedAt: true } });
 
     const seenInFile = new Map<string, number>();
@@ -411,6 +434,15 @@ export class OffPortalPaymentsService {
       if (portalHit) {
         flags.push('PAID_ON_PORTAL');
         notes.push(`A portal payout of ${formatINR(portalHit.amountPaise)} on ${portalHit.day}${portalHit.utr ? ` (UTR ${portalHit.utr})` : ''} matches`);
+      }
+      const unpaidHit = (portalUnpaid.get(r.outletKey) ?? []).find(
+        (p) => p.amountPaise === r.amountPaise && (p.period === r.period || dayGap(p.day, r.paymentDay) <= 3),
+      );
+      if (unpaidHit) {
+        flags.push('PORTAL_UNPAID');
+        notes.push(
+          `A portal payout of ${formatINR(unpaidHit.amountPaise)} for ${unpaidHit.period} (upload ${unpaidHit.batchCode}) is still ${unpaidHit.status === 'FAILED' ? 'FAILED — it will be re-banked' : 'PENDING — the next bank file pays it'}: cancel it or it will be paid again`,
+        );
       }
       if (!opening) flags.push('NO_FUND_OPENING');
       else if (r.paymentDate < opening.receivedAt) flags.push('BEFORE_FUND_OPENING');

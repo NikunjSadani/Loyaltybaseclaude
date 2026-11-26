@@ -289,6 +289,17 @@ export class CreatePayoutDownloadDto {
   @IsOptional()
   @IsString()
   fieldName?: string;
+
+  /**
+   * Owner 2026-11-26 (double-payment guard): the payout entry ids the admin acknowledged as matching a recorded
+   * off-portal payment (same outlet + amount, same month or within 3 days). Every match must be listed, else the
+   * download is refused with the list.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20000)
+  @IsString({ each: true })
+  acknowledgedOffPortalMatches?: string[];
 }
 
 /** GET /admin/credits/reversals — optional ?status / ?period filters + pagination. */

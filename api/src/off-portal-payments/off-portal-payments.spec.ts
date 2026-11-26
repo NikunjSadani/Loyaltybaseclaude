@@ -405,7 +405,7 @@ describe('preview → confirm', () => {
         portal
           .filter((e) =>
             matches({ clientId: e.clientId, outletId: e.outletId }, { clientId: where.clientId, outletId: where.outletId }) &&
-            where.OR.some((c: any) => c.status === e.status && (c.paidAt ? fieldOk(e.paidAt, c.paidAt) : !!e.download && fieldOk(e.download.downloadedAt, c.download.downloadedAt))),
+            (where.OR ?? []).some((c: any) => c.status === e.status && (c.paidAt ? fieldOk(e.paidAt, c.paidAt) : !!e.download && fieldOk(e.download.downloadedAt, c.download.downloadedAt))),
           )
           .map((e) => ({ outletId: e.outletId, amountPaise: e.amountPaise, paidAt: e.paidAt, utr: e.utr, status: e.status, download: e.download })),
     };
@@ -417,6 +417,33 @@ describe('preview → confirm', () => {
     ]));
     expect(p.rows.map((r) => r.flags.includes('PAID_ON_PORTAL'))).toEqual([true, true, true, false]);
     expect(p.requiredAcknowledgements).toContain('PAID_ON_PORTAL');
+  });
+
+  it('owner 2026-11-26: a portal payout still PENDING / FAILED for the same outlet + amount (same month or ±3 days) → PORTAL_UNPAID, ticked + listed', async () => {
+    const { svc, s } = setup();
+    const row0 = parseOffPortalFile(fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 1, date: fyDay(5), utr: 'X' }]).buffer).rows[0];
+    s.portalEntries.push(
+      // PENDING for the same month (the next bank file would pay it).
+      { clientId: CLIENT, status: 'PENDING', outletId: 'out1', amountPaise: 250_000n, period: row0.period, createdAt: new Date(row0.paymentDate.getTime() - 40 * 86_400_000), attemptedAt: null },
+      // FAILED, awaiting re-bank, attempted 2 days after the payment date (another month).
+      { clientId: CLIENT, status: 'FAILED', outletId: 'OUT1', amountPaise: 41_100n, period: '2000-01', createdAt: new Date(0), attemptedAt: new Date(row0.paymentDate.getTime() + 2 * 86_400_000) },
+      // Already PAID — not "unpaid".
+      { clientId: CLIENT, status: 'PAID', outletId: 'OUT1', amountPaise: 1_200n, period: row0.period, createdAt: new Date(), attemptedAt: null, paidAt: new Date(0), utr: 'U' },
+    );
+    const p = await svc.preview(gifsy(), fileOf([
+      { id: 'OUT1', name: 'Sharma Stores', amount: 2500, date: fyDay(5), utr: 'A1' },
+      { id: 'OUT1', name: 'Sharma Stores', amount: 411, date: fyDay(5), utr: 'A2' },
+      { id: 'OUT1', name: 'Sharma Stores', amount: 12, date: fyDay(5), utr: 'A3' },
+    ]));
+    expect(p.rows.map((r) => r.flags.includes('PORTAL_UNPAID'))).toEqual([true, true, false]);
+    expect(p.rows[0].notes.join(' ')).toMatch(/still PENDING — the next bank file pays it: cancel it or it will be paid again/);
+    expect(p.rows[1].notes.join(' ')).toMatch(/still FAILED — it will be re-banked/);
+    expect(p.requiredAcknowledgements).toContain('PORTAL_UNPAID');
+    // Server-enforced: confirming without ticking it records nothing.
+    const f = fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 2500, date: fyDay(5), utr: 'A1' }]);
+    const p1 = await svc.preview(gifsy(), f);
+    await expect(svc.confirm(gifsy(), f, { fileSha256: p1.fileSha256, acknowledged: p1.requiredAcknowledgements.filter((c: string) => c !== 'PORTAL_UNPAID') })).rejects.toThrow(/Portal payout still unpaid/);
+    expect(s.payments).toHaveLength(0);
   });
 
   it('a legacy TDS entry under a DIFFERENT payee is never silently replaced (flagged, both count)', async () => {
