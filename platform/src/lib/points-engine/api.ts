@@ -12,6 +12,7 @@ import { downloadOrQueue, type DownloadOutcome } from '../exports/download';
 import type {
   ComputeCommitResult,
   ComputePreview,
+  EvaluationBasis,
   PointsEngineSettings,
   PointsRuleRow,
   RuleConfigDraft,
@@ -52,11 +53,15 @@ export function simulate(body: {
   pipeline: RuleConfigDraft['pipeline'];
   effectiveFrom?: string;
   effectiveTo?: string | null;
+  /** 'QUARTER' simulates a quarterly rule on `context.months` (3 months of values). Omitted = monthly (unchanged). */
+  evaluationBasis?: EvaluationBasis;
   context: {
     achievements?: Record<string, number | null>;
     targets?: Record<string, number | null>;
     segment?: { program?: string | null; programCategory?: string | null; outletType?: string | null; metro?: string | null };
     visibility?: { approvedWindows?: number | null; approved?: number | null; windows?: number | null };
+    quarterLabel?: string;
+    months?: Array<{ label?: string; achievements?: Record<string, number | null>; targets?: Record<string, number | null> }>;
   };
 }): Promise<ApiResponse<SimulateResult>> {
   return api.post<SimulateResult>(`${COMPUTE}/simulate`, body);

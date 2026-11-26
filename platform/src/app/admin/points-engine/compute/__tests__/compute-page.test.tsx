@@ -577,3 +577,27 @@ describe('Points Engine compute page', () => {
     expect(screen.queryByTestId('skip-kpi-scope-count')).not.toBeInTheDocument();
   });
 });
+
+describe('PE-Q: quarter run (owner-approved 2026-11-25)', () => {
+  it('PE-Q1: picking a quarter runs the preview with period YYYY-Qn and shows the quarter banner + credit month', async () => {
+    previewMock.mockResolvedValue({
+      success: true,
+      data: makePreview({
+        period: '2026-Q3',
+        quarter: { key: '2026-Q3', label: 'Oct–Dec 2026', fyLabel: 'Q3 FY2026-27', months: ['2026-10', '2026-11', '2026-12'], monthLabels: ['Oct 2026', 'Nov 2026', 'Dec 2026'], creditPeriod: '2026-12' },
+      }),
+    });
+    render(<ComputePage />);
+    fireEvent.click(screen.getByLabelText('Quarter run (quarterly rules only)'));
+    const pick = screen.getByLabelText('Quarter *') as HTMLSelectElement;
+    expect(pick.options[0].value).toMatch(/^\d{4}-Q[1-4]$/);
+    expect(pick.options[0].textContent).toMatch(/^[A-Z][a-z]{2}–[A-Z][a-z]{2} \d{4} \(Q[1-4] FY\d{4}-\d{2}\)$/);
+    fireEvent.change(pick, { target: { value: pick.options[0].value } });
+    fireEvent.click(screen.getByRole('button', { name: /Run preview/ }));
+    await waitFor(() => expect(previewMock).toHaveBeenCalledWith(expect.objectContaining({ period: pick.options[0].value })));
+    const banner = await screen.findByTestId('quarter-run');
+    expect(within(banner).getByText(/Quarter run — Oct–Dec 2026 \(Q3 FY2026-27\)/)).toBeTruthy();
+    expect(banner.textContent).toMatch(/Oct 2026, Nov 2026, Dec 2026/);
+    expect(banner.textContent).toMatch(/December 2026/);
+  });
+});

@@ -16,6 +16,39 @@ export interface RuleInput {
   type: 'number' | 'enum';
   nullAs: NullPolicy;
   values?: string[];
+  /** QUARTERLY rules only: read month 1 / 2 / 3 of the quarter; omitted = the quarter total (sum of the 3 months). */
+  month?: 1 | 2 | 3;
+}
+
+/** PERIOD_AGGREGATE = monthly rule (YYYY-MM runs); QUARTER = quarterly rule (YYYY-Qn FY-quarter runs only). */
+export type EvaluationBasis = 'PERIOD_AGGREGATE' | 'QUARTER';
+
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * FY quarter key `YYYY-Qn` (YYYY = FY start year) → its months + labels. Mirrors api/src/points-engine/points-engine.quarter.ts:
+ * Q1 Apr–Jun · Q2 Jul–Sep · Q3 Oct–Dec (same year) · Q4 Jan–Mar of the NEXT calendar year. Null when not a quarter key.
+ */
+export function parseQuarterKey(key: string): { months: string[]; monthLabels: string[]; label: string; fyLabel: string } | null {
+  const m = /^(\d{4})-Q([1-4])$/.exec(key);
+  if (!m) return null;
+  const fy = Number(m[1]);
+  const q = Number(m[2]);
+  const first = q === 4 ? 1 : 1 + q * 3;
+  const year = q === 4 ? fy + 1 : fy;
+  const months = [0, 1, 2].map((i) => `${year}-${String(first + i).padStart(2, '0')}`);
+  return {
+    months,
+    monthLabels: months.map((_, i) => `${MONTH_SHORT[first - 1 + i]} ${year}`),
+    label: `${MONTH_SHORT[first - 1]}–${MONTH_SHORT[first + 1]} ${year}`,
+    fyLabel: `Q${q} FY${fy}-${String((fy + 1) % 100).padStart(2, '0')}`,
+  };
+}
+
+/** The FY quarter key a YYYY-MM month falls in ("2026-11" → "2026-Q3"; "2027-02" → "2026-Q4"). */
+export function quarterKeyForMonth(ym: string): string {
+  const [y, mo] = ym.split('-').map(Number);
+  return mo >= 4 ? `${y}-Q${Math.floor((mo - 4) / 3) + 1}` : `${y - 1}-Q4`;
 }
 
 // ── Operands & predicates ───────────────────────────────────────────────────────
@@ -75,14 +108,15 @@ export interface RuleAttachment {
   programCategory?: string | null;
   kpiCode: string;
 }
-export interface RuleOutput { awardType: AwardType; fieldId: string }
+/** `narration` (quarterly rules only): credit narration prefix — the quarter is appended ("Consistency bonus Oct–Dec 2026"). */
+export interface RuleOutput { awardType: AwardType; fieldId: string; narration?: string }
 
 /** The authoring fields a draft create/update sends (server owns identity/version/status). */
 export interface RuleConfigDraft {
   ruleId?: string;
   effectiveFrom: string; // YYYY-MM-DD
   effectiveTo?: string | null;
-  evaluationBasis?: 'PERIOD_AGGREGATE';
+  evaluationBasis?: EvaluationBasis;
   attachsTo: RuleAttachment;
   output: RuleOutput;
   rounding: RoundingSpec;
@@ -99,7 +133,7 @@ export interface PointsRuleRow {
   status: RuleStatus;
   effectiveFrom: string;
   effectiveTo: string | null;
-  evaluationBasis: 'PERIOD_AGGREGATE';
+  evaluationBasis: EvaluationBasis;
   attachsTo: RuleAttachment;
   output: RuleOutput;
   rounding: RoundingSpec;
@@ -174,6 +208,8 @@ export interface ComputePreviewRow {
   /** Structured skip category — 'KPI_SCOPE' = outside the KPI's scope (never match the reason text). */
   skipKind?: 'KPI_SCOPE';
   explanation?: string;
+  /** Quarter runs only: the credit narration naming the quarter ("Consistency bonus Oct–Dec 2026"). */
+  narration?: string;
   /** The outlet's visibility values the rule read (only when the rule has a visibility input). */
   visibility?: {
     approvedWindows: number;
@@ -189,7 +225,10 @@ export interface ComputePreviewRow {
 }
 export interface ComputePreview {
   clientId: string;
+  /** YYYY-MM, or YYYY-Qn for a quarter run (see `quarter`). */
   period: string;
+  /** Quarter runs only. `creditPeriod` = the last month — the month a direct-credit batch is filed under. */
+  quarter?: { key: string; label: string; fyLabel: string; months: string[]; monthLabels: string[]; creditPeriod: string };
   filter?: { program?: string | null; kpiCode?: string | null };
   counts: { total: number; ok: number; skip: number; error: number; noRule: number };
   totalPoints: number;

@@ -45,6 +45,7 @@ import type {
   ComputePreviewRow,
   PreviewRowStatus,
 } from '@/lib/points-engine/types';
+import { parseQuarterKey, quarterKeyForMonth } from '@/lib/points-engine/types';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { useGifsySettings } from '@/lib/gifsy-settings';
 import type { DownloadOutcome } from '@/lib/exports/download';
@@ -62,7 +63,22 @@ function getPreviousMonth(): string {
   return `${y}-${String(m).padStart(2, '0')}`;
 }
 
+/** The last `n` FY quarters ending with the one the previous month falls in (newest first) — date-relative. */
+function recentQuarters(n = 8): string[] {
+  const out: string[] = [];
+  let key = quarterKeyForMonth(getPreviousMonth());
+  for (let i = 0; i < n; i++) {
+    out.push(key);
+    const [y, q] = [Number(key.slice(0, 4)), Number(key.slice(6))];
+    key = q === 1 ? `${y - 1}-Q4` : `${y}-Q${q - 1}`;
+  }
+  return out;
+}
+
 function monthLabel(yyyyMm: string): string {
+  // A quarter run (YYYY-Qn) names its months: "Oct–Dec 2026 (Q3 FY2026-27)".
+  const q = parseQuarterKey(yyyyMm);
+  if (q) return `${q.label} (${q.fyLabel})`;
   const [y, m] = yyyyMm.split('-').map(Number);
   if (!y || !m) return yyyyMm;
   return new Date(y, m - 1, 1).toLocaleDateString('en-IN', {
@@ -280,7 +296,12 @@ export default function PointsComputePage() {
   const [step, setStep] = useState<Step>('select');
 
   // SELECT inputs
-  const [period, setPeriod] = useState<string>(getPreviousMonth());
+  // Monthly run (YYYY-MM → monthly rules) or quarter run (YYYY-Qn → quarterly rules only).
+  const [runKind, setRunKind] = useState<'MONTH' | 'QUARTER'>('MONTH');
+  const [month, setPeriod] = useState<string>(getPreviousMonth());
+  const quarterOptions = recentQuarters();
+  const [quarterKey, setQuarterKey] = useState<string>(quarterOptions[0]);
+  const period = runKind === 'QUARTER' ? quarterKey : month;
   const [program, setProgram] = useState('');
   const [kpiCode, setKpiCode] = useState('');
 
@@ -511,18 +532,48 @@ export default function PointsComputePage() {
       {/* ─── SELECT ─────────────────────────────────────────────────────────── */}
       <div className="space-y-4 rounded-2xl border border-gray-200 bg-white p-5">
         <h2 className="text-sm font-semibold text-gray-900">Step 1 — Choose what to compute</h2>
+        <div className="flex flex-wrap items-center gap-4 text-sm" role="radiogroup" aria-label="Run type">
+          {([
+            ['MONTH', 'Monthly run (monthly rules)'],
+            ['QUARTER', 'Quarter run (quarterly rules only)'],
+          ] as const).map(([v, l]) => (
+            <label key={v} className="flex items-center gap-1.5 text-gray-700">
+              <input
+                type="radio"
+                name="pe-run-kind"
+                checked={runKind === v}
+                onChange={() => setRunKind(v)}
+                className="accent-[var(--brand-primary)]"
+              />
+              {l}
+            </label>
+          ))}
+        </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <div>
             <label htmlFor="pe-period" className="mb-1 block text-xs font-semibold text-gray-500">
-              Period *
+              {runKind === 'QUARTER' ? 'Quarter *' : 'Period *'}
             </label>
-            <input
-              id="pe-period"
-              type="month"
-              value={period}
-              onChange={(e) => setPeriod(e.target.value)}
-              className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
-            />
+            {runKind === 'QUARTER' ? (
+              <select
+                id="pe-period"
+                value={quarterKey}
+                onChange={(e) => setQuarterKey(e.target.value)}
+                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
+              >
+                {quarterOptions.map((k) => (
+                  <option key={k} value={k}>{monthLabel(k)}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                id="pe-period"
+                type="month"
+                value={month}
+                onChange={(e) => setPeriod(e.target.value)}
+                className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20"
+              />
+            )}
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-500">
@@ -588,6 +639,23 @@ export default function PointsComputePage() {
           <h2 className="text-sm font-semibold text-gray-900">
             Step 2 — Preview for {monthLabel(applied.period)}
           </h2>
+
+          {preview.quarter && (
+            <div className="flex items-start gap-3 rounded-xl border border-violet-200 bg-violet-50 p-4" data-testid="quarter-run">
+              <Info className="mt-0.5 h-5 w-5 shrink-0 text-violet-600" />
+              <div className="text-xs text-violet-800">
+                <p className="text-sm font-semibold">
+                  Quarter run — {preview.quarter.label} ({preview.quarter.fyLabel})
+                </p>
+                <p className="mt-0.5">
+                  Only QUARTERLY rules are computed, over {preview.quarter.monthLabels.join(', ')} (all three months must be
+                  closed in Sales Import). Each credit&apos;s narration names the quarter. Credits are filed under{' '}
+                  <strong>{monthLabel(preview.quarter.creditPeriod)}</strong> (the quarter&apos;s last month) — upload the
+                  credit file under that month; it never merges with that month&apos;s monthly run.
+                </p>
+              </div>
+            </div>
+          )}
 
           {preview.engineDisabled && (
             <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4" data-testid="engine-disabled">

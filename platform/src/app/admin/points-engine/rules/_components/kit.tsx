@@ -421,7 +421,11 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
       const key = inp.source!.slice('visibility:'.length);
       if (!VISIBILITY_SOURCES.some((v) => v.key === key)) blocking.push(`${w}: pick which visibility value to read.`);
       if (inp.type !== 'number') blocking.push(`${w}: a visibility input must be a Number.`);
+      if (draft.evaluationBasis === 'QUARTER') blocking.push(`${w}: visibility is monthly — a quarterly rule cannot read it yet.`);
     }
+    // Quarterly binding — mirror validateRule: a month only on a quarterly rule.
+    if (inp.month !== undefined && draft.evaluationBasis !== 'QUARTER')
+      blocking.push(`${w}: “month of the quarter” is only for quarterly rules.`);
   });
 
   // §3a: "every window approved" without inScope — mirrors the backend ruleWarnings (non-blocking).

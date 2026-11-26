@@ -18,11 +18,11 @@ import {
   getRule, createRule, updateRule, publishRule, archiveRule,
 } from '@/lib/points-engine/api';
 import type {
-  RuleConfigDraft, PipelineNode, NodeType, RuleStatus, RuleInput, AwardType, RoundingSpec,
+  RuleConfigDraft, PipelineNode, NodeType, RuleStatus, RuleInput, AwardType, RoundingSpec, EvaluationBasis,
 } from '@/lib/points-engine/types';
 import { NODE_META } from '@/lib/points-engine/types';
 import {
-  Field, NumberField, SelectField, StatusBadge, cardCls,
+  Field, NumberField, SelectField, TextField, StatusBadge, cardCls,
   blankDraft, rowToDraft, defaultNode, firstNumericVar, draftIssues, inputCls,
 } from './kit';
 import { InputsCard } from './InputsCard';
@@ -291,6 +291,26 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
   };
 
   const setInputs = (inputs: RuleInput[]) => patch({ inputs });
+
+  // Monthly ↔ quarterly. Going back to monthly drops the quarter-only settings (per-input month, narration) so the
+  // draft stays valid; the quarter placeholders in a gate reason are left for the author to edit (the validator says so).
+  const quarterly = draft.evaluationBasis === 'QUARTER';
+  const setBasis = (evaluationBasis: EvaluationBasis) => {
+    setDraft((d) => {
+      if (evaluationBasis === 'QUARTER') return { ...d, evaluationBasis };
+      const inputs = d.inputs.map((inp) => {
+        if (inp.month === undefined) return inp;
+        const next = { ...inp };
+        delete next.month;
+        return next;
+      });
+      const output = { ...d.output };
+      delete output.narration;
+      return { ...d, evaluationBasis, inputs, output };
+    });
+    setSaved(false);
+    setDirty(true);
+  };
 
   const setNode = (i: number, node: PipelineNode) =>
     patch({ pipeline: draft.pipeline.map((n, idx) => (idx === i ? node : n)) });
@@ -623,6 +643,24 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                   onChange={(v) => setAttach({ kpiCode: v })}
                 />
               </Field>
+              <Field
+                label="Rule period"
+                hint={
+                  quarterly
+                    ? 'Computed only in a quarter run (FY quarters Apr–Jun, Jul–Sep, Oct–Dec, Jan–Mar). Inputs read month 1 / 2 / 3 of the quarter or the quarter total.'
+                    : 'Computed in each monthly run.'
+                }
+              >
+                <SelectField<EvaluationBasis>
+                  value={draft.evaluationBasis ?? 'PERIOD_AGGREGATE'}
+                  disabled={readOnly}
+                  onChange={setBasis}
+                  options={[
+                    { value: 'PERIOD_AGGREGATE', label: 'Monthly' },
+                    { value: 'QUARTER', label: 'Quarterly (financial-year quarter)' },
+                  ]}
+                />
+              </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Effective from" required>
                   <input
@@ -655,7 +693,7 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
 
           {/* Inputs */}
           <SectionCard title="Inputs" subtitle="The variables the pipeline can read. The null policy decides what happens when a value is missing.">
-            <InputsCard inputs={draft.inputs} disabled={readOnly} onChange={setInputs} />
+            <InputsCard inputs={draft.inputs} disabled={readOnly} onChange={setInputs} quarterly={quarterly} />
           </SectionCard>
 
           {/* Pipeline */}
@@ -742,6 +780,20 @@ export function RuleBuilder({ ruleId }: { ruleId: string }) {
                 })()}
               </Field>
 
+              {quarterly && (
+                <Field
+                  label="Credit narration"
+                  className="sm:col-span-2"
+                  hint="Shown on each credit; the quarter is added automatically, e.g. “Consistency bonus” → “Consistency bonus Oct–Dec 2026”. Blank = “Quarterly points Oct–Dec 2026”."
+                >
+                  <TextField
+                    value={draft.output.narration ?? ''}
+                    disabled={readOnly}
+                    placeholder="Consistency bonus"
+                    onChange={(v) => setOutput({ narration: v === '' ? undefined : v.slice(0, 100) })}
+                  />
+                </Field>
+              )}
               {draft.output.awardType === 'PAYOUT' && (
                 <div className="sm:col-span-2 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
                   <AlertCircle className="h-4 w-4 shrink-0" />
