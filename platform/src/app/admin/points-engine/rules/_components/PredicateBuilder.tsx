@@ -11,7 +11,7 @@
 import React from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import type { Condition, CompareOp, Operand, Predicate } from '@/lib/points-engine/types';
-import { OperandPicker, SelectField, type VarOption } from './kit';
+import { OperandPicker, SelectField, TEXT_OPS, enumVarOf, isVarOperand, literalKindFor, type VarOption } from './kit';
 
 const OP_OPTIONS: ReadonlyArray<{ value: CompareOp; label: string }> = [
   { value: 'gte', label: '≥ (at least)' },
@@ -91,8 +91,23 @@ export function PredicateBuilder({
     emit({ ...model, combinator: c, conditions });
   };
 
+  /**
+   * Keep a condition well-typed when either side changes: comparing an ENUM (text) input → only = / ≠, and a Value
+   * on the other side becomes one of the input's allowed values (a number there could never match).
+   */
+  const fixTypes = (cond: Condition): Condition => {
+    const ev = enumVarOf(cond.left, vars) ?? enumVarOf(cond.right, vars);
+    if (!ev) return cond;
+    const next = { ...cond };
+    if (!TEXT_OPS.has(next.op)) next.op = 'eq';
+    const otherKey = enumVarOf(cond.left, vars) ? 'right' : 'left';
+    const other = next[otherKey];
+    if (!isVarOperand(other) && typeof other.lit === 'number') next[otherKey] = { lit: ev.values?.[0] ?? '' };
+    return next;
+  };
+
   const setCondition = (i: number, cond: Condition) => {
-    const conditions = model.conditions.map((c, idx) => (idx === i ? cond : c));
+    const conditions = model.conditions.map((c, idx) => (idx === i ? fixTypes(cond) : c));
     emit({ ...model, conditions });
   };
 
@@ -130,7 +145,10 @@ export function PredicateBuilder({
       </div>
 
       <div className="space-y-2">
-        {model.conditions.map((cond, i) => (
+        {model.conditions.map((cond, i) => {
+          const isText = !!(enumVarOf(cond.left, vars) ?? enumVarOf(cond.right, vars));
+          const ops = isText ? OP_OPTIONS.filter((o) => TEXT_OPS.has(o.value)) : OP_OPTIONS;
+          return (
           <div key={i} className="flex flex-wrap items-center gap-1.5 rounded-lg border border-gray-200 bg-white p-2">
             {model.combinator !== 'single' && (
               <span className="shrink-0 text-[10px] font-bold uppercase text-gray-400">
@@ -138,18 +156,30 @@ export function PredicateBuilder({
               </span>
             )}
             <div className="min-w-[150px] flex-1">
-              <OperandPicker value={cond.left} vars={vars} disabled={disabled} onChange={(left) => setCondition(i, { ...cond, left })} />
+              <OperandPicker
+                value={cond.left}
+                vars={vars}
+                disabled={disabled}
+                literal={literalKindFor(cond.right, vars)}
+                onChange={(left) => setCondition(i, { ...cond, left })}
+              />
             </div>
             <div className="w-36 shrink-0">
               <SelectField<CompareOp>
                 value={cond.op}
                 disabled={disabled}
                 onChange={(op) => setCondition(i, { ...cond, op })}
-                options={OP_OPTIONS}
+                options={ops.some((o) => o.value === cond.op) ? ops : [...ops, OP_OPTIONS.find((o) => o.value === cond.op)!]}
               />
             </div>
             <div className="min-w-[150px] flex-1">
-              <OperandPicker value={cond.right} vars={vars} disabled={disabled} onChange={(right) => setCondition(i, { ...cond, right })} />
+              <OperandPicker
+                value={cond.right}
+                vars={vars}
+                disabled={disabled}
+                literal={literalKindFor(cond.left, vars)}
+                onChange={(right) => setCondition(i, { ...cond, right })}
+              />
             </div>
             {model.combinator !== 'single' && (
               <button
@@ -163,7 +193,8 @@ export function PredicateBuilder({
               </button>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {model.combinator !== 'single' && !disabled && (

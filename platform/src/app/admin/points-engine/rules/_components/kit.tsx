@@ -189,6 +189,30 @@ export function operandToText(op: Operand): string {
 export interface VarOption {
   ref: string;
   type: 'number' | 'enum';
+  /** Enum inputs: the allowed values (what a Value compared with this input must be one of). */
+  values?: string[];
+}
+
+/** What a literal ("Value") operand should look like given the OTHER side of a comparison. */
+export type LiteralKind = { kind: 'enum'; ref: string; values: string[] } | { kind: 'number' } | { kind: 'any' };
+
+/** Comparison ops allowed for text (enum) comparisons — ordering (≥ ≤ > <) on text is always false. */
+export const TEXT_OPS: ReadonlySet<string> = new Set(['eq', 'neq']);
+
+/** The enum input an operand refers to, if it is a var bound to an enum-typed input. */
+export function enumVarOf(op: Operand | undefined, vars: VarOption[]): VarOption | null {
+  if (!op || !isVarOperand(op)) return null;
+  const v = vars.find((x) => x.ref === op.var);
+  return v && v.type === 'enum' ? v : null;
+}
+
+/** The literal kind for one side of a condition, from the other side (enum input → its values; number input → number). */
+export function literalKindFor(other: Operand | undefined, vars: VarOption[]): LiteralKind {
+  if (!other || !isVarOperand(other)) return { kind: 'any' };
+  const v = vars.find((x) => x.ref === other.var);
+  if (!v) return { kind: 'any' };
+  if (v.type === 'enum') return { kind: 'enum', ref: v.ref, values: v.values ?? [] };
+  return { kind: 'number' };
 }
 
 /**
@@ -202,17 +226,28 @@ export function OperandPicker({
   vars,
   numericOnly,
   disabled,
+  literal,
+  'aria-label': ariaLabel,
 }: {
   value: Operand;
   onChange: (op: Operand) => void;
   vars: VarOption[];
   numericOnly?: boolean;
   disabled?: boolean;
+  /**
+   * Shape of the Value box, from the other side of a comparison: `enum` → a dropdown of that input's allowed values
+   * (a text comparison); `number` → a number box; `any`/omitted → number box for a number literal, free text otherwise.
+   */
+  literal?: LiteralKind;
+  'aria-label'?: string;
 }) {
   const kind: 'var' | 'lit' = isVarOperand(value) ? 'var' : 'lit';
   const selectable = numericOnly ? vars.filter((v) => v.type === 'number') : vars;
   const litIsNumber = !isVarOperand(value) && typeof value.lit === 'number';
   const selCls = `${inputCls} disabled:bg-gray-100 disabled:text-gray-400`;
+  const enumLit = !numericOnly && literal?.kind === 'enum' ? literal : null;
+  // A fresh Value defaults to the right TYPE: the first allowed value for an enum comparison, else 0.
+  const freshLit = (): Operand => (enumLit ? { lit: enumLit.values[0] ?? '' } : { lit: 0 });
 
   return (
     <div className="flex gap-1.5">
@@ -221,7 +256,7 @@ export function OperandPicker({
         disabled={disabled}
         onChange={(e) => {
           if (e.target.value === 'var') onChange({ var: selectable[0]?.ref ?? '' });
-          else onChange({ lit: 0 });
+          else onChange(freshLit());
         }}
         className="w-24 shrink-0 rounded-xl border border-gray-200 px-2 py-2 text-sm focus:border-[var(--brand-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 disabled:bg-gray-100 disabled:text-gray-400"
       >
@@ -243,6 +278,29 @@ export function OperandPicker({
             </option>
           ))}
         </select>
+      ) : enumLit ? (
+        (() => {
+          const cur = !isVarOperand(value) ? String(value.lit) : '';
+          const known = enumLit.values.includes(cur);
+          return (
+            <select
+              value={cur}
+              disabled={disabled}
+              aria-label={ariaLabel ?? `Value for ${enumLit.ref}`}
+              onChange={(e) => onChange({ lit: e.target.value })}
+              className={`${selCls} ${known ? '' : 'border-red-300 text-red-700'}`}
+            >
+              {!known && (
+                <option value={cur}>{cur === '' ? '— pick a value —' : `${cur} (not an allowed value of ${enumLit.ref})`}</option>
+              )}
+              {enumLit.values.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          );
+        })()
       ) : numericOnly || litIsNumber ? (
         <input
           type="number"
@@ -431,7 +489,7 @@ export function duplicateDraft(row: PointsRuleRow): RuleConfigDraft {
 export function varOptions(inputs: RuleInput[]): VarOption[] {
   return inputs
     .filter((i) => i.ref.trim() !== '')
-    .map((i) => ({ ref: i.ref, type: i.type }));
+    .map((i) => (i.type === 'enum' ? { ref: i.ref, type: i.type, values: (i.values ?? []).filter((v) => v !== '') } : { ref: i.ref, type: i.type }));
 }
 
 /** The first NUMBER-typed input ref (for seeding a new node's measure — never an enum, which the
@@ -444,6 +502,35 @@ export function firstNumericVar(inputs: RuleInput[]): string {
 export const GATE_FAIL_REASON_MAX = 200;
 
 /** Flatten a predicate to its leaf operands (for validation). */
+/** Every leaf condition of a predicate. */
+export function predicateConditions(p: Predicate): Array<{ op: string; left: Operand; right: Operand }> {
+  if ('op' in p) return [p];
+  if ('all' in p) return p.all.flatMap(predicateConditions);
+  if ('any' in p) return p.any.flatMap(predicateConditions);
+  if ('not' in p) return predicateConditions(p.not);
+  return [];
+}
+
+/**
+ * Text (enum) comparisons that can never be true in the engine — an ordering op (≥ ≤ > <) on text, a NUMBER
+ * compared with text, or a value outside the input's allowed values. Warnings, not blocking (the backend accepts
+ * them; they just always evaluate false / never match).
+ */
+export function enumConditionWarnings(p: Predicate, vars: VarOption[], where: string): string[] {
+  const out: string[] = [];
+  for (const c of predicateConditions(p)) {
+    const ev = enumVarOf(c.left, vars) ?? enumVarOf(c.right, vars);
+    if (!ev) continue;
+    const other = enumVarOf(c.left, vars) ? c.right : c.left;
+    if (!TEXT_OPS.has(c.op)) out.push(`${where}: "${ev.ref}" is text — use = or ≠ (≥ ≤ > < never match text).`);
+    if (!isVarOperand(other)) {
+      if (typeof other.lit === 'number') out.push(`${where}: "${ev.ref}" is text but is compared with the number ${other.lit} — pick one of its values.`);
+      else if (!(ev.values ?? []).includes(other.lit)) out.push(`${where}: "${other.lit}" is not an allowed value of "${ev.ref}" (${(ev.values ?? []).join(', ')}), so it never matches.`);
+    }
+  }
+  return out;
+}
+
 export function predicateOperands(p: Predicate): Operand[] {
   if ('op' in p) return [p.left, p.right];
   if ('all' in p) return p.all.flatMap(predicateOperands);
@@ -567,6 +654,7 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
       }
       case 'gate': {
         predicateOperands(n.when).forEach((op) => checkOperand(op, where, false));
+        warnings.push(...enumConditionWarnings(n.when, opts, where));
         // failAs (opt-in) decides the failure when set: 'zero' and 'skip' both withhold.
         const hard = n.failAs === 'zero' || n.failAs === 'skip' || n.onFail === 'zero';
         if (!hard) warnings.push(`${where}: this gate won't withhold points on failure — only "Pay 0" withholds.`);
@@ -584,6 +672,7 @@ export function draftIssues(draft: RuleConfigDraft): { blocking: string[]; warni
       }
       case 'milestone':
         predicateOperands(n.when).forEach((op) => checkOperand(op, where, false));
+        warnings.push(...enumConditionWarnings(n.when, opts, where));
         break;
       case 'segmentFilter':
         if (n.allow.length === 0)
