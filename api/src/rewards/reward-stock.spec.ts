@@ -134,7 +134,14 @@ function makeDb() {
       create: async ({ data }: Row) => { const row = { ...data, createdAt: now() }; history.push(row); return row; },
       findFirst: async ({ where, orderBy }: Row) => sortBy(history.filter((h) => matches(h, where)), orderBy)[0] ?? null,
     },
-    user: { findMany: async () => [{ id: 'admin1', name: 'Asha Admin' }] },
+    user: {
+      findMany: async ({ where }: Row) =>
+        [
+          { id: 'admin1', name: 'Asha Admin', role: 'CLIENT_ADMIN' },
+          { id: 'gifsy1', name: 'Gita Gifsy', role: 'GIFSY_STAFF' },
+          { id: 'vend1', name: 'Vikram Vendor', role: 'VENDOR' },
+        ].filter((u) => matches(u, where)),
+    },
     $executeRaw: async () => 1,
     $queryRaw: async (_s: unknown, id: string) => {
       const r = rewards.find((x) => x.id === id);
@@ -522,6 +529,26 @@ describe('RewardStockService — history read, review decisions, tenant scoping'
     const out = await Promise.allSettled([svc.resolveReview(bajajAdmin, id, 'RETURN'), svc.resolveReview(bajajAdmin, id, 'RETURN')]);
     expect(out.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
     expect(db.rewards[0].stockQuantity).toBe(6);
+  });
+
+  it('NAMES (owner 2026-11-26): a client admin sees "Gifsy team" / "Vendor"; a Gifsy admin sees names (screen + download)', async () => {
+    const { db, svc } = seeded();
+    await recordStockEdit(db.tx as never, { rewardId: 'r1', clientId: 'bajaj', oldQty: 5, newQty: 6, actorId: 'gifsy1', source: 'catalogue edit' });
+    await recordStockEdit(db.tx as never, { rewardId: 'r1', clientId: 'bajaj', oldQty: 6, newQty: 7, actorId: 'vend1', source: 'vendor portal edit' });
+    await recordStockEdit(db.tx as never, { rewardId: 'r1', clientId: 'bajaj', oldQty: 7, newQty: 8, actorId: 'admin1', source: 'catalogue edit' });
+    const who = async (viewer: unknown) =>
+      Object.fromEntries((await svc.getHistory(viewer as never, 'r1')).movements.filter((m) => m.actorId).map((m) => [m.actorId, m.actorName]));
+    expect(await who(bajajAdmin)).toEqual({ gifsy1: 'Gifsy team', vend1: 'Vendor', admin1: 'Asha Admin' });
+    const gifsyAdmin = { sub: 'g0', role: 'GIFSY_ADMIN', clientId: 'bajaj' };
+    expect(await who(gifsyAdmin)).toEqual({ gifsy1: 'Gita Gifsy', vend1: 'Vikram Vendor', admin1: 'Asha Admin' });
+    // the client download carries the same masked labels, never the names
+    const XLSX = await import('xlsx');
+    const { buffer } = await svc.exportHistory(bajajAdmin, 'r1');
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(XLSX.read(buffer).Sheets['Stock history']);
+    const by = rows.map((r) => r.By);
+    expect(by).toEqual(expect.arrayContaining(['Gifsy team', 'Vendor', 'Asha Admin']));
+    expect(by).not.toContain('Gita Gifsy');
+    expect(by).not.toContain('Vikram Vendor');
   });
 
   it('download: an .xlsx with the movements + a summary sheet', async () => {

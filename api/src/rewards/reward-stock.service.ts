@@ -28,6 +28,16 @@ export interface StockMovementView {
   createdAt: Date;
 }
 
+const GIFSY_ROLES = new Set(['GIFSY_ADMIN', 'GIFSY_STAFF']);
+
+/** Who-column label: Gifsy viewers see names; a client viewer sees "Gifsy team" / "Vendor" for those actors. */
+export function displayActor(viewer: Pick<JwtPayload, 'role'>, actor: { name: string; role: string }): string {
+  if (GIFSY_ROLES.has(viewer.role)) return actor.name;
+  if (GIFSY_ROLES.has(actor.role)) return 'Gifsy team';
+  if (actor.role === 'VENDOR') return 'Vendor';
+  return actor.name;
+}
+
 /**
  * Stock history reads + the pre-release review decisions (admin catalogue). Tenant-scoped exactly like the admin
  * catalogue CRUD: `clientId = user.clientId` (an assumed Gifsy operator acts inside that tenant).
@@ -74,7 +84,7 @@ export class RewardStockService {
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     });
 
-    const movements = await this.decorate(rows);
+    const movements = await this.decorate(user, rows);
     return {
       reward: {
         id: reward.id,
@@ -112,6 +122,7 @@ export class RewardStockService {
 
   /** Resolve actor names + order numbers for display (batched, never one query per row). */
   private async decorate(
+    viewer: JwtPayload,
     rows: Array<{
       id: string; type: string; quantity: number; balanceAfter: number | null; orderId: string | null;
       reason: string | null; actorId: string | null; createdAt: Date;
@@ -121,13 +132,15 @@ export class RewardStockService {
     const orderIds = [...new Set(rows.map((r) => r.orderId).filter((v): v is string => !!v))];
     const [actors, orders] = await Promise.all([
       actorIds.length
-        ? this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, name: true } })
-        : Promise.resolve([] as { id: string; name: string }[]),
+        ? this.prisma.user.findMany({ where: { id: { in: actorIds } }, select: { id: true, name: true, role: true } })
+        : Promise.resolve([] as { id: string; name: string; role: string }[]),
       orderIds.length
         ? this.prisma.redemptionOrder.findMany({ where: { id: { in: orderIds } }, select: { id: true, orderNumber: true } })
         : Promise.resolve([] as { id: string; orderNumber: string }[]),
     ]);
-    const actorName = new Map(actors.map((a) => [a.id, a.name]));
+    // Owner 2026-11-26: a CLIENT viewer never sees personal names of Gifsy or vendor staff — "Gifsy team" /
+    // "Vendor" instead (screen + download). Gifsy viewers see names. The tenant's own users show by name.
+    const actorName = new Map(actors.map((a) => [a.id, displayActor(viewer, a)]));
     const orderNo = new Map(orders.map((o) => [o.id, o.orderNumber]));
     return rows.map((r) => ({
       id: r.id,
@@ -155,7 +168,7 @@ export class RewardStockService {
       Quantity: m.quantity,
       'Stock after': m.balanceAfter ?? 'Unlimited (not tracked)',
       Order: m.orderNumber ?? '',
-      By: m.actorName ?? (m.actorId ? m.actorId : m.isBaseline ? 'System (go-live baseline)' : 'System'),
+      By: m.actorName ?? (m.actorId ? 'Unknown user' : m.isBaseline ? 'System (go-live baseline)' : 'System'),
       Details: m.reason ?? '',
     }));
     if (rows.length === 0) {
