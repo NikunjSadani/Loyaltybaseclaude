@@ -34,7 +34,4 @@ describe('off-portal payments — migration-only constraints stay in place', () 
     expect(schema).toContain('off_portal_payments_one_live_supersede');
     expect(schema).toContain('off_portal_payments_amount_positive');
   });
-  it('the recovery-row link column is migrated', () => {
-    expect(sql).toContain('ALTER TABLE "tds_recovery_entries" ADD COLUMN IF NOT EXISTS "offPortalUploadId" TEXT');
-  });
 });

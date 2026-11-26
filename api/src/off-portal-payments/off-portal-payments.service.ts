@@ -31,8 +31,7 @@ import { REPORTS_CLIENT_ID } from '../common/report-recipients';
 import { istDateKey, istDayRangeFilter } from '../common/ist-date';
 import { buildXlsx } from '../common/xlsx';
 import { formatINR } from '../common/money';
-import { financialYear } from '../tds/tds.helpers';
-import { CreditsService } from '../credits/credits.service';
+import { financialYear, fyLabelForPeriod } from '../tds/tds.helpers';
 import { clientHasOffPortalPayments, invalidateOffPortalPresence } from './off-portal-presence';
 import { isNoPanCell, isNoPanKey, normalisePan, offPortalNoPanKey, retailerKeyOfLedgerPan } from '../tds/tds-194r.shared';
 import {
@@ -64,7 +63,6 @@ export const OFF_PORTAL_CATEGORIES = [
   'BEFORE_FUND_OPENING',
   'GIFT_NO_AGENCY_FEE',
   'TDS_NOT_WITHHELD',
-  'GROSS_UP_TDS_NOT_INVOICED',
 ] as const;
 export type OffPortalCategory = (typeof OFF_PORTAL_CATEGORIES)[number];
 
@@ -85,9 +83,7 @@ export const OFF_PORTAL_CATEGORY_LABEL: Record<OffPortalCategory, string> = {
   NO_FUND_OPENING:
     "This client has NO fund opening balance yet — EVERY payment below will be charged from the client's advance in Fund Reconciliation",
   GIFT_NO_AGENCY_FEE:
-    'Gifts — no agency fee will be charged on them in Fund Reconciliation (the fee rules do not cover gifts yet; to be confirmed by the owner)',
-  GROSS_UP_TDS_NOT_INVOICED:
-    "194C gross-up payments to an Outlet ID NOT on the portal — their TDS invoice can't be raised now (no retailer record); they count in the PAN's base and are invoiced with the next portal payout for that PAN",
+    'Gifts — no agency fee is charged on them in Fund Reconciliation (owner decision 2026-11-26: off-portal gifts carry no agency fee)',
   REPLACES_TDS_ENTRY:
     'Matches an earlier TDS off-platform entry (same outlet / PAN, amount and date) — the payment REPLACES that entry in the 194R base (never counted twice)',
   PAID_ON_PORTAL:
@@ -98,9 +94,13 @@ export const OFF_PORTAL_CATEGORY_LABEL: Record<OffPortalCategory, string> = {
     "Dated before the client's fund opening balance — NOT shown in Fund Reconciliation (already inside the opening figure)",
   TDS_NOT_WITHHELD:
     'The client is on the Deduct method — these were paid in full with NO TDS withheld. They count toward the yearly threshold, ' +
-    'but NO TDS is ever withheld for them from later portal payouts: visibility TDS on them is reported as a SHORTFALL; ' +
-    'incentive / gift TDS is borne by the client (194R liability)',
+    'but NO TDS is ever withheld for them from later portal payouts: visibility TDS on them (with a PAN) is reported as a SHORTFALL; ' +
+    'incentive / gift TDS is borne by the client (194R liability); 194C without a PAN is recovered from the client with the outlet\'s next portal payout run (not a shortfall)',
 };
+
+/** Owner decision 2026-11-26: a gross-up client's visibility (194C, TDS paid on top) must go through the portal. */
+export const GROSS_UP_194C_REFUSED =
+  "Visibility payouts for this client (194C, TDS paid on top) must be paid through the portal's payout flow, not recorded as off-portal.";
 
 export interface AnalysedRow extends ParsedOffPortalRow {
   onPortal: boolean;
@@ -174,7 +174,6 @@ export class OffPortalPaymentsService {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly tenantSettings: TenantSettingsService,
-    private readonly credits: CreditsService,
   ) {}
 
   /** Nav / screen hint: does this client have any off-portal payment? (Gifsy admins always see the screen.) */
@@ -427,13 +426,12 @@ export class OffPortalPaymentsService {
             ? `194R · Deduct: counts toward the threshold; TDS NOT withheld — shortfall (never withheld from later payouts) · ${keyWords}`
             : `194R · borne by the client (gross-up) · ${keyWords}`;
       } else {
-        tdsTreatment =
-          tdsMethodology === 'DEDUCT'
-            ? `194C · Deduct: counts toward the threshold; TDS NOT withheld — shortfall · ${keyWords}`
-            : `194C · Gross-up: TDS invoiced to the client when recorded (if over the threshold) · ${keyWords}`;
+        // 194C rows are always Deduct here (a gross-up client's visibility is refused — owner 2026-11-26).
+        tdsTreatment = panNumber
+          ? `194C · Deduct: counts toward the threshold; TDS NOT withheld — shortfall (never withheld from later payouts) · ${keyWords}`
+          : `194C · no PAN: never withheld; recovered from the client with this outlet's next portal payout run (not a shortfall) · ${keyWords}`;
       }
       if (policy.methodology === 'DEDUCT') flags.push('TDS_NOT_WITHHELD');
-      if (tdsSection === 'SEC_194C' && tdsMethodology === 'GROSS_UP' && panNumber && !o) flags.push('GROSS_UP_TDS_NOT_INVOICED');
       rows.push({
         ...r,
         onPortal: !!o,
@@ -467,6 +465,20 @@ export class OffPortalPaymentsService {
     };
   }
 
+  /**
+   * Owner decision 2026-11-26: a client whose visibility is 194C on GROSS-UP (TDS paid on top by Gifsy and invoiced to
+   * the client) must pay visibility through the portal's payout flow — such rows are never recorded off-portal. The
+   * WHOLE file is refused, listing every such row.
+   */
+  private refuseGrossUp194C(parsed: ParsedOffPortalFile, policy: { section: TdsSection; methodology: TdsMethodology }): void {
+    if (!(policy.section === 'SEC_194C' && policy.methodology === 'GROSS_UP')) return;
+    const bad = parsed.rows.filter((r) => r.payoutStream === 'VISIBILITY').map((r) => r.rowNumber);
+    if (!bad.length) return;
+    throw new BadRequestException({
+      message: `${GROSS_UP_194C_REFUSED} Rows: ${bad.join(', ')}. Nothing was recorded.`,
+      details: { refusedRows: bad, reason: 'GROSS_UP_194C_VISIBILITY' },
+    });
+  }
   private presentCategories(a: Analysis): OffPortalCategory[] {
     return OFF_PORTAL_CATEGORIES.filter((c) => (a.counts[c] ?? 0) > 0);
   }
@@ -524,6 +536,7 @@ export class OffPortalPaymentsService {
     const clientId = this.writerClient(user);
     const parsed = this.parseOrThrow(file);
     const policy = await this.tenantSettings.resolveTdsPolicy(clientId);
+    this.refuseGrossUp194C(parsed, policy);
     const a = await this.analyse(this.prisma, clientId, parsed, policy);
     return this.previewBody(a);
   }
@@ -541,6 +554,7 @@ export class OffPortalPaymentsService {
     const ackRaw = Array.isArray(body.acknowledged) ? body.acknowledged : typeof body.acknowledged === 'string' ? body.acknowledged.split(',') : [];
     const acked = new Set(ackRaw.map((s) => s.trim()).filter(Boolean));
     const policy = await this.tenantSettings.resolveTdsPolicy(clientId);
+    this.refuseGrossUp194C(parsed, policy);
 
     const fileKey = this.storage.generateKey(`off-portal-payments/${clientId}`, file!.originalname || 'off-portal-payments.xlsx');
     await this.storage.uploadFile(file!.buffer, fileKey, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -575,24 +589,6 @@ export class OffPortalPaymentsService {
               uploadedById: user.sub,
             },
           });
-          // 194C (owner 2026-11-26): gross-up TDS invoice + recovery / no-PAN recovery raised NOW, through the payout
-          // engine, BEFORE the rows are inserted (they are this "event"). Deduct rows: nothing is written (never withheld).
-          const c194 = a.rows.filter((r) => r.tdsSection === 'SEC_194C');
-          const tds194c = c194.length
-            ? await this.credits.recordOffPortal194C(tx, {
-                clientId,
-                uploadId: upload.id,
-                rows: c194.map((r) => ({
-                  ref: `row ${r.rowNumber}`,
-                  outletCode: r.portalOutletCode ?? r.outletCode,
-                  onPortal: r.onPortal,
-                  amountPaise: r.amountPaise,
-                  period: r.period,
-                  panNumber: r.panNumber,
-                  tdsMethodology: r.tdsMethodology,
-                })),
-              })
-            : { invoices: 0, recoveryPaise: 0n, notInvoiced: [] as string[], deferred: [] as string[] };
           for (const part of chunks(a.rows, 500)) {
             await tx.offPortalPayment.createMany({
               data: part.map((r) => ({
@@ -670,46 +666,21 @@ export class OffPortalPaymentsService {
                 totalPaise: a.totalPaise.toString(),
                 fileSha256: a.sha256,
                 acknowledged,
-                tds194c: {
-                  invoices: tds194c.invoices,
-                  recoveryPaise: tds194c.recoveryPaise.toString(),
-                  notInvoiced: tds194c.notInvoiced.length,
-                  deferred: tds194c.deferred.length,
-                },
               },
               metadata: { action: 'off_portal_payments_upload', tdsPolicy: { section: policy.section, methodology: policy.methodology } },
             },
           });
           invalidateOffPortalPresence(clientId);
-          const tdsLines: string[] = [];
-          if (tds194c.invoices > 0) {
-            tdsLines.push(`${tds194c.invoices} TDS 194C invoice${tds194c.invoices === 1 ? '' : 's'} raised to the client (${formatINR(tds194c.recoveryPaise)} recovered from this client, gross-up).`);
-          }
-          if (tds194c.notInvoiced.length) {
-            tdsLines.push(`194C gross-up TDS NOT invoiced now for ${tds194c.notInvoiced.join(', ')} (Outlet ID not on the portal) — raised with the next portal payout for that PAN.`);
-          }
-          if (tds194c.deferred.length) {
-            tdsLines.push(
-              `No 194C TDS invoice now for ${tds194c.deferred.join(', ')} (below the threshold, or this period's TDS invoice was already raised) — any TDS due is raised with the next payout run for that PAN.`,
-            );
-          }
           return {
             uploadId: upload.id,
             recorded: a.rows.length,
             recordedTotalPaise: a.totalPaise.toString(),
             skippedInvalid: a.invalid.length,
             acknowledged,
-            tds194c: {
-              invoices: tds194c.invoices,
-              recoveryPaise: tds194c.recoveryPaise.toString(),
-              notInvoiced: tds194c.notInvoiced,
-              deferred: tds194c.deferred,
-            },
             message:
               `Recorded ${a.rows.length} off-portal payment${a.rows.length === 1 ? '' : 's'} (${formatINR(a.totalPaise)})` +
               (a.invalid.length ? `; ${a.invalid.length} row${a.invalid.length === 1 ? '' : 's'} with errors NOT recorded` : '') +
-              '.' +
-              (tdsLines.length ? ` ${tdsLines.join(' ')}` : ''),
+              '.',
           };
         },
         { timeout: 120_000, maxWait: 15_000 },
@@ -732,16 +703,18 @@ export class OffPortalPaymentsService {
         where: { id, clientId },
         select: {
           id: true, voidedAt: true, amountPaise: true, paymentDate: true, outletCode: true, uploadId: true, supersedesOffPlatformEntryId: true,
-          panNumber: true, tdsSection: true, outletCodeKey: true,
+          panNumber: true, tdsSection: true, outletCodeKey: true, period: true,
         },
       });
       if (!p) throw new NotFoundException('Off-portal payment not found.');
       if (p.voidedAt) throw new ConflictException('This off-portal payment is already void.');
-      // A 194R payee (PAN or no-PAN key — the same key the base uses) from whom TDS was already WITHHELD this FY: that
-      // TDS stays deposited; after the void it may show as excess. Said, never silent.
-      let withheld: { id: string } | null = null;
+      // TDS already WITHHELD (on portal payouts) from the SAME payee key in the same FY — matched exactly as the ledger
+      // keys it (retailerKeyOfLedgerPan; 194R per client by payment-date FY, 194C per PAN by payout-period FY). Off-portal
+      // amounts never drive withholding, so the void never "gives back" TDS; it can lower the year's TDS due, which the
+      // next payout run nets against what was already withheld. Said, never silent.
+      let withheldPaise = 0n;
       if (p.tdsSection === 'SEC_194R') {
-        let key = p.panNumber;
+        let key = p.panNumber ? normalisePan(p.panNumber) : null;
         if (!key) {
           const o = await tx.outlet.findFirst({
             where: { clientId, outletCode: { equals: p.outletCodeKey, mode: 'insensitive' } },
@@ -749,16 +722,20 @@ export class OffPortalPaymentsService {
           });
           key = offPortalNoPanKey(clientId, p.outletCode, o);
         }
-        withheld = await tx.tdsDeductionEntry.findFirst({
-          where: { clientId, section: 'SEC_194R', fyLabel: financialYear(p.paymentDate).fyLabel, panNumber: key, tdsDeductedThisPaise: { gt: 0n } },
-          select: { id: true },
+        const rows = await tx.tdsDeductionEntry.findMany({
+          where: { clientId, section: 'SEC_194R', fyLabel: financialYear(p.paymentDate).fyLabel },
+          select: { panNumber: true, tdsDeductedThisPaise: true },
         });
+        for (const r of rows) if (r.panNumber?.trim() && retailerKeyOfLedgerPan(r.panNumber) === key) withheldPaise += r.tdsDeductedThisPaise;
+      } else if (p.panNumber) {
+        const pan = normalisePan(p.panNumber);
+        const rows = await tx.tdsDeductionEntry.findMany({
+          where: { section: 'SEC_194C', fyLabel: fyLabelForPeriod(p.period), panNumber: { equals: pan, mode: 'insensitive' } },
+          select: { panNumber: true, tdsDeductedThisPaise: true },
+        });
+        for (const r of rows) if (r.panNumber && normalisePan(r.panNumber) === pan) withheldPaise += r.tdsDeductedThisPaise;
       }
-      // 194C: TDS invoiced / recovered when it was recorded (gross-up, or no-PAN recovery) stays — never reversed here.
-      const recovered194c =
-        p.tdsSection === 'SEC_194C'
-          ? await tx.tdsRecoveryEntry.findFirst({ where: { clientId, offPortalUploadId: p.uploadId }, select: { id: true } })
-          : null;
+      const withheld = withheldPaise > 0n;
       const now = new Date();
       const res = await tx.offPortalPayment.updateMany({
         where: { id, clientId, voidedAt: null },
@@ -774,8 +751,7 @@ export class OffPortalPaymentsService {
           oldValues: { voidedAt: null },
           newValues: {
             clientId,
-            tdsWithheldThisFy: !!withheld,
-            tds194cRecoveredAtUpload: !!recovered194c,
+            tdsWithheldThisFyPaise: withheldPaise.toString(),
             voidedAt: now.toISOString(),
             reason,
             amountPaise: p.amountPaise.toString(),
@@ -794,10 +770,9 @@ export class OffPortalPaymentsService {
           'Fund Reconciliation shows it returned today.' +
           (p.supersedesOffPlatformEntryId ? ' The earlier TDS off-platform entry it replaced counts again.' : '') +
           (withheld
-            ? ' NOTE: TDS was already withheld from this payee this financial year — it stays deposited and may now show as "TDS taken in excess" in the 194R report.'
-            : '') +
-          (recovered194c
-            ? " NOTE: 194C TDS was invoiced / recovered from the client when this upload was recorded — it is NOT reversed automatically; adjust the client's TDS invoice / Fund Reconciliation by hand if needed."
+            ? ` NOTE: ${formatINR(withheldPaise)} TDS was already withheld (${p.tdsSection === 'SEC_194R' ? '194R' : '194C'}) from this payee's portal payouts this financial year — it stays deposited. ` +
+              "This void can lower the year's TDS due (e.g. back below the threshold): the next payout run nets that against what was already withheld, " +
+              'and any part that is never needed is flagged as "TDS taken in excess" in the TDS report (no automatic refund).'
             : ''),
       };
     });
@@ -943,14 +918,15 @@ export class OffPortalPaymentsService {
         Narration: s.narration ?? '',
         'TDS section': s.tdsSection,
         // B6: "not withheld — shortfall" only on rows that carry TDS_NOT_WITHHELD and are on the Deduct method.
+        // #4: a no-PAN 194C payment is recovered from the client with the outlet's next portal run — not a shortfall.
         'TDS method':
           r.tdsMethodology === 'DEDUCT'
-            ? (s.flags as string[]).includes('TDS_NOT_WITHHELD')
-              ? 'Deduct — TDS not withheld (shortfall)'
-              : 'Deduct'
-            : r.tdsSection === 'SEC_194R'
-              ? 'Borne by the client (gross-up)'
-              : 'Gross-up (invoiced to the client)',
+            ? r.tdsSection === 'SEC_194C' && !r.panNumber
+              ? 'Deduct — no PAN: recovered from the client (not a shortfall)'
+              : (s.flags as string[]).includes('TDS_NOT_WITHHELD')
+                ? 'Deduct — TDS not withheld (shortfall)'
+                : 'Deduct'
+            : 'Borne by the client (gross-up)',
         Warnings: (s.flags as string[]).map((f) => OFF_PORTAL_CATEGORY_LABEL[f as OffPortalCategory] ?? f).join(' | '),
         Status: s.voidedAt ? 'VOID' : 'Recorded',
         'Void reason': s.voidReason ?? '',

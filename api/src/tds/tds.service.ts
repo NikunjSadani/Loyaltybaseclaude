@@ -1089,7 +1089,7 @@ export class TdsService {
     // the per-OUTLET no-PAN key (194C granularity, the portal's spelling of the code). On Deduct nothing was withheld
     // and nothing is ever withheld later → the TDS stays in "outstanding" and the row says SHORTFALL. On Gross-up its
     // TDS was invoiced / recovered when recorded (shown in "recovered"). Voided rows never count. ──
-    const offPortalPaid = new Map<string, { paid: bigint; notWithheld: bigint; count: number }>();
+    const offPortalPaid = new Map<string, { paid: bigint; notWithheld: bigint; count: number; noPanRecovered?: bigint }>();
     {
       // `offPortalPayment` is absent only on narrow unit-test fakes; the real client always has it.
       const delegate = (this.prisma as Partial<PrismaService>).offPortalPayment;
@@ -1115,7 +1115,10 @@ export class TdsService {
           const cur = offPortalPaid.get(key) ?? { paid: 0n, notWithheld: 0n, count: 0 };
           cur.paid += p.amountPaise;
           cur.count += 1;
-          if (p.tdsMethodology === 'DEDUCT') cur.notWithheld += p.amountPaise;
+          // #4: only a PAN holder's Deduct amount is a shortfall — no-PAN 194C is never withheld; it is recovered from the
+          // client with the outlet's next portal payout run (the engine's per-outlet recovery base includes it).
+          if (p.tdsMethodology === 'DEDUCT' && hasPan) cur.notWithheld += p.amountPaise;
+          else if (!hasPan) cur.noPanRecovered = (cur.noPanRecovered ?? 0n) + p.amountPaise;
           offPortalPaid.set(key, cur);
         }
       }
@@ -1363,6 +1366,11 @@ export class TdsService {
       if (!op) continue;
       r.offPortalPaidPaise = op.paid;
       const notes = [`Includes ${formatINR(op.paid)} paid off-portal in full (${op.count} payment${op.count === 1 ? '' : 's'}) — no TDS was withheld on it.`];
+      if ((op.noPanRecovered ?? 0n) > 0n) {
+        notes.push(
+          `No PAN: 194C is never withheld here — the TDS on ${formatINR(op.noPanRecovered!)} off-portal is recovered from the client with this outlet's next portal payout run (not a shortfall).`,
+        );
+      }
       if (op.notWithheld > 0n) {
         r.offPortalNotWithheldPaise = op.notWithheld;
         // Owner 2026-11-26: counts toward the threshold, NEVER withheld from later portal payouts → standing shortfall.

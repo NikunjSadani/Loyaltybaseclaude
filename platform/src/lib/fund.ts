@@ -84,7 +84,8 @@ export const FLAG_TEXT: Record<FundFlag, { chip: string; detail: string }> = {
   TDS_RUN_UNMATCHED: { chip: 'Bank run not identified', detail: 'An older TDS entry whose bank run could not be identified — it is charged in full on the day it was recorded and shown as paid.' },
   TDS_OTHER_CLIENT_RUN: { chip: 'Other client run', detail: "Recovered with a payout run outside this client's statement (the payee's PAN is shared with another client) — charged on the day it was recorded." },
   TDS_PAYOUTS_REVERSED: { chip: 'Payouts reversed', detail: 'The payouts of this bank run were reversed. TDS on a reversed payout stays deposited. It is absorbed only if the same PAN/outlet gets more 194C payouts later in the same financial year; otherwise it is not recovered.' },
-  GIFT_NO_AGENCY_FEE: { chip: 'Gift — no fee', detail: 'Off-portal gift — no agency fee charged' },
+  // Owner decision 2026-11-26: off-portal gifts carry NO agency fee (a settled rule, not a pending item).
+  GIFT_NO_AGENCY_FEE: { chip: 'No agency fee — gift', detail: 'No agency fee — gift (off-portal gifts carry no agency fee).' },
 };
 
 export function flagDetail(flag: string): string {

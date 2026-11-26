@@ -57,7 +57,7 @@ export type FundFlag =
   | 'TDS_RUN_UNMATCHED' // an older TDS row whose bank run could not be identified — charged in full on the day recorded
   | 'TDS_OTHER_CLIENT_RUN' // recovered with a payout run outside this client's statement (a PAN shared with another client)
   | 'TDS_PAYOUTS_REVERSED' // the run's payouts were reversed — the TDS stays deposited (not given back)
-  | 'GIFT_NO_AGENCY_FEE'; // an off-portal GIFT: no agency fee charged (the fee rules don't cover gifts — owner to confirm)
+  | 'GIFT_NO_AGENCY_FEE'; // an off-portal GIFT: no agency fee (owner decision 2026-11-26) — an informational note
 
 export type FundSourceRef = {
   kind: 'redemptionOrder' | 'payoutTransaction' | 'creditPayoutEntry' | 'tdsRecoveryEntry' | 'creditReversal' | 'offPortalPayment';
@@ -107,7 +107,7 @@ export interface FundSpendItem {
   /** Paid, then reversed: the amount to recover off-platform (shown as "to recover", NOT a credit). */
   receivablePaise?: bigint;
   flags?: FundFlag[];
-  /** Off-portal gifts (owner 2026-11-26): no agency fee unless the fee rules explicitly cover gifts (they don't yet). */
+  /** Off-portal gifts — owner decision 2026-11-26: NO agency fee (charged at face value). */
   feeExempt?: boolean;
 }
 

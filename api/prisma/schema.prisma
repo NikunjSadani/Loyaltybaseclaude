@@ -2501,14 +2501,10 @@ model TdsRecoveryEntry {
   /// NULL for rows written before 2026-11-24 (no backfill). No FK on purpose (additive; a download row is never
   /// deleted). Read by the fund statement to date the TDS line with its own run exactly.
   downloadId       String?
-  /// Off-portal payments register (2026-11-26): the OffPortalPaymentUpload whose confirm wrote this row (194C gross-up
-  /// TDS / no-PAN recovery on payments made outside the portal) — downloadId is then NULL. No FK (additive).
-  offPortalUploadId String?
   createdAt        DateTime   @default(now())
 
   @@index([clientId, fyLabel])
   @@index([downloadId])
-  @@index([offPortalUploadId])
   @@index([panNumber, section, fyLabel])
   @@index([tdsInvoiceId])
   @@map("tds_recovery_entries")

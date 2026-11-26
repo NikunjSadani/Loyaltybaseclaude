@@ -64,8 +64,6 @@ export interface OffPortalConfirmResult {
   recordedTotalPaise: string;
   skippedInvalid: number;
   acknowledged: Record<string, number>;
-  /** 194C gross-up TDS raised at record time (the message already says it in words). */
-  tds194c?: { invoices: number; recoveryPaise: string; notInvoiced: string[]; deferred: string[] };
   message: string;
 }
 
@@ -154,9 +152,8 @@ export const CATEGORY_SHORT: Record<string, string> = {
   TDS_ENTRY_OTHER_PAYEE: 'TDS entry, other payee',
   NO_FUND_OPENING: 'No fund opening',
   BEFORE_FUND_OPENING: 'Before fund opening',
-  GIFT_NO_AGENCY_FEE: 'Gift — no fee',
+  GIFT_NO_AGENCY_FEE: 'No agency fee — gift',
   TDS_NOT_WITHHELD: 'TDS not withheld',
-  GROSS_UP_TDS_NOT_INVOICED: '194C not invoiced yet',
 };
 
 export const categoryShort = (c: string): string => CATEGORY_SHORT[c] ?? c;

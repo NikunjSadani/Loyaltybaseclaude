@@ -291,8 +291,6 @@ export interface TdsRecoveryRow {
   tenantSharePaise: bigint;
   /** The bank run (CreditPayoutDownload.id) whose transaction wrote the row — NULL for rows before 2026-11-24. */
   downloadId: string | null;
-  /** Off-portal payments register: the upload whose confirm raised this row (then downloadId is null). */
-  offPortalUploadId?: string | null;
   createdAt: Date;
 }
 
@@ -393,19 +391,6 @@ export function tdsItems(recoveries: readonly TdsRecoveryRow[], runs: readonly T
     const mine = byKey.get(pan) ?? [];
     const base = { type: 'TDS_194C' as const, source: { kind: 'tdsRecoveryEntry' as const, id: r.id }, facePaise: r.tenantSharePaise, key: `tds:${r.id}` };
     const who = `${maskPan(pan)}, FY ${r.fyLabel}`;
-    if (r.offPortalUploadId && r.tenantSharePaise > 0n) {
-      // Owner 2026-11-26: 194C gross-up TDS (or no-PAN recovery) on payments made OUTSIDE the portal — raised when they
-      // were recorded (already paid), charged in full on that day.
-      out.push({
-        ...base,
-        ref: `TDS 194C · off-portal · FY ${r.fyLabel}`,
-        description: `TDS 194C borne by Gifsy on off-portal payments — ${who}`,
-        status: 'PAID',
-        committedAt: r.createdAt,
-        paidAt: r.createdAt,
-      });
-      continue;
-    }
     if (r.tenantSharePaise < 0n) {
       out.push({ ...base, ref: `TDS 194C true-up · FY ${r.fyLabel}`, description: `TDS 194C true-up (credit) — ${who}`, status: 'PAID', committedAt: r.createdAt, paidAt: r.createdAt });
       continue;
@@ -545,7 +530,7 @@ export function offPortalItem(p: OffPortalRow): FundSpendItem {
     returnedAt: p.voidedAt,
     utr: p.utr,
     flags: [],
-    // Owner 2026-11-26: a GIFT is not charged the agency fee (flagged GIFT_NO_AGENCY_FEE) until the fee rules cover gifts.
+    // Owner decision 2026-11-26: a GIFT carries NO agency fee (noted on the line as GIFT_NO_AGENCY_FEE).
     ...(p.paymentMode === 'GIFT' ? { feeExempt: true } : {}),
   };
 }
@@ -728,7 +713,7 @@ export async function loadFundInputs(db: Db, clientId: string): Promise<FundInpu
   const recoveries = await allPages((p) =>
     db.tdsRecoveryEntry.findMany({
       where: { clientId, section: 'SEC_194C' },
-      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, downloadId: true, offPortalUploadId: true, createdAt: true },
+      select: { id: true, panNumber: true, fyLabel: true, tenantSharePaise: true, downloadId: true, createdAt: true },
       orderBy: { id: 'asc' },
       ...p,
     }),
