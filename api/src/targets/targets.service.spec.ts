@@ -919,7 +919,8 @@ describe('TargetsService', () => {
         expect(r.willSaveCount).toBe(2);
         expect(r.newCount).toBe(1);
         expect(r.overwriteCount).toBe(1);
-        expect(r.perMonth).toEqual([{ month: WRITABLE_MONTH.ym, newCount: 1, overwriteCount: 1 }]);
+        expect(r.perMonth).toEqual([{ month: WRITABLE_MONTH.ym, newCount: 1, overwriteCount: 1, unchangedCount: 0 }]);
+        expect(r.unchangedCount).toBe(0);
         expect(r.rejectedCount).toBe(1);
         expect(r.problemRows.map((p) => p.outletCode)).toEqual(['GHOST']);
         expect(r.overwriteExamples).toEqual([{
@@ -1181,7 +1182,8 @@ describe('TargetsService', () => {
           savedCount: 2,
           newCount: 1,
           overwriteCount: 1,
-          perMonth: [{ month: WRITABLE_MONTH.ym, newCount: 1, overwriteCount: 1 }],
+          unchangedCount: 0,
+          perMonth: [{ month: WRITABLE_MONTH.ym, newCount: 1, overwriteCount: 1, unchangedCount: 0 }],
           historyRowCount: 4,
           acknowledged: acks,
           notApplied: p.notApplied,
@@ -1216,13 +1218,152 @@ describe('TargetsService', () => {
           .toBeGreaterThan(insertOrder('last'));
       });
 
-      it('TARGET HISTORY: re-applying the SAME values logs nothing (unchanged values are never logged)', async () => {
+      it('TARGET HISTORY: re-applying the SAME values logs nothing — and the UNCHANGED outlet-month is not rewritten', async () => {
+        const notify = (service as unknown as { salesNotifications: { targetsUploaded: jest.Mock } }).salesNotifications;
         const same = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 5]]);
         const p = await service.previewTargetUpload(admin, xfile(same));
-        await service.uploadTargets(admin, xfile(same), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
-        expect(writtenTargets()).toHaveLength(1);
+        // UNCHANGED, not OVERWRITE: nothing to tick, nothing to save.
+        expect(p.overwriteCount).toBe(0);
+        expect(p.unchangedCount).toBe(1);
+        expect(p.unchangedSample).toEqual([`O001 · ${WRITABLE_MONTH.ym}`]);
+        expect(p.willSaveCount).toBe(0);
+        expect(p.notApplied.find((c) => c.category === 'OVERWRITE')).toBeUndefined();
+        const r = await service.uploadTargets(admin, xfile(same), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
+        expect(writtenTargets()).toHaveLength(0);
+        expect(r.savedCount).toBe(0);
+        expect(r.unchangedCount).toBe(1);
+        expect(notify.targetsUploaded).not.toHaveBeenCalled();
         expect(historyRows()).toEqual([]);
         expect(historyInsertCalls()).toHaveLength(0);
+      });
+
+      it('OVERWRITE counts ONLY outlet-months whose values change: 3 stored, 1 changed → OVERWRITE 1 (+ 2 unchanged, untouched)', async () => {
+        const notify = (service as unknown as { salesNotifications: { targetsUploaded: jest.Mock } }).salesNotifications;
+        sharedTargetFindMany.mockImplementation(async () => [
+          { outletCode: 'O001', targetValues: { MONTH_TGT: 10, FOCUS_PACK_1: 5 } },
+          { outletCode: 'O002', targetValues: { MONTH_TGT: 20, FOCUS_PACK_1: 6 } },
+          { outletCode: 'O003', targetValues: { MONTH_TGT: 30, FOCUS_PACK_1: 7 } },
+        ]);
+        mockPrisma.outlet.findMany.mockResolvedValue([
+          { outletCode: 'O001', name: 'Outlet One', outletType: { code: 'RETAIL' } },
+          { outletCode: 'O002', name: 'Outlet Two', outletType: { code: 'HORECA' } },
+          { outletCode: 'O003', name: 'Outlet Three', outletType: { code: 'RETAIL' } },
+        ]);
+        const b = buildTestXlsx([
+          ['O001', 'Outlet One', 'RETAIL', 10, 5],
+          ['O002', 'Outlet Two', 'HORECA', 25, 6], // the only change
+          ['O003', 'Outlet Three', 'RETAIL', 30, 7],
+        ]);
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        expect(p.overwriteCount).toBe(1);
+        expect(p.unchangedCount).toBe(2);
+        expect(p.willSaveCount).toBe(1);
+        expect(p.perMonth).toEqual([{ month: WRITABLE_MONTH.ym, newCount: 0, overwriteCount: 1, unchangedCount: 2 }]);
+        const ow = p.notApplied.find((c) => c.category === 'OVERWRITE')!;
+        expect(ow.count).toBe(1);
+        expect(ow.sample).toEqual([`O002 · ${WRITABLE_MONTH.ym}`]);
+        const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
+        expect(r.savedCount).toBe(1);
+        expect(writtenTargets().map((t) => t.outletCode)).toEqual(['O002']);
+        expect(notify.targetsUploaded).toHaveBeenCalledWith('deoleo', ['O002']);
+      });
+
+      it('OVERWRITE fingerprint follows the NEW definition: an unchanged outlet-month that changed since the preview → 412', async () => {
+        sharedTargetFindMany.mockImplementation(async () => [{ outletCode: 'O001', targetValues: { MONTH_TGT: 10, FOCUS_PACK_1: 5 } }]);
+        const same = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 5]]);
+        const p = await service.previewTargetUpload(admin, xfile(same));
+        expect(p.notApplied.find((c) => c.category === 'OVERWRITE')).toBeUndefined();
+        // Someone else changed O001 between the preview and the apply → it is now an OVERWRITE nobody acknowledged.
+        sharedTargetFindMany.mockImplementation(async () => [{ outletCode: 'O001', targetValues: { MONTH_TGT: 99, FOCUS_PACK_1: 5 } }]);
+        await expect(service.uploadTargets(admin, xfile(same), { confirmToken: p.previewToken, acknowledged: acksOf(p) }))
+          .rejects.toThrow(/\(OVERWRITE\)/);
+        expect(writtenTargets()).toHaveLength(0);
+      });
+
+      describe('ACHIEVEMENT-ONLY KPIs (Bajaj BSC CASES: achieved via Sales Import, never given a target)', () => {
+        const bscCases = { ...kpiRow2, id: 'kpi3', code: 'BSC CASES', label: 'BSC Cases', order: 3 };
+        /** The template layout + a "BSC Cases" column inside the month block. */
+        const withCasesColumn = (rows: (string | number | null)[][]) => {
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+            ['', '', '', WRITABLE_MONTH.label, '', ''],
+            ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'BSC Cases'],
+            ...rows,
+          ]), 'Targets');
+          return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+        };
+        // Bajaj's existing monthly file, built from the template BEFORE the cases KPIs existed: no BSC Cases column.
+        const oldFormat = () => buildTestXlsx([['O002', 'Outlet Two', 'HORECA', 1, 2]]);
+
+        it('THE BUG (unflagged): the old-format file is refused — with the SPECIFIC parser message, not "corrupted"', async () => {
+          mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2, { ...bscCases, achievementOnly: false }]);
+          const err = await service.previewTargetUpload(admin, xfile(oldFormat())).catch((e: unknown) => e);
+          expect(err).toBeInstanceOf(BadRequestException);
+          expect((err as Error).message).toMatch(/Template KPI columns don't match the configured KPIs .*missing: BSC CASES.*re-download the template/);
+          expect((err as Error).message).not.toMatch(/corrupted/i);
+        });
+
+        it('flagged achievementOnly: the old-format file previews and applies; the cases KPI is carried, never required', async () => {
+          mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2, { ...bscCases, achievementOnly: true }]);
+          const p = await service.previewTargetUpload(admin, xfile(oldFormat()));
+          expect(p.willSaveCount).toBe(1);
+          expect(p.newCount).toBe(1);
+          const r = await service.uploadTargets(admin, xfile(oldFormat()), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
+          expect(r.savedCount).toBe(1);
+          const w = writtenTargets();
+          expect(w).toHaveLength(1);
+          expect(w[0].targetValues).toEqual({ MONTH_TGT: 1, FOCUS_PACK_1: 2 }); // no BSC CASES key written
+          // The write statement carries the stored BSC CASES value over (never deletes it).
+          expect(((targetInsertCalls()[0][0] as { values: unknown[] }).values)).toContainEqual(['BSC CASES']);
+        });
+
+        it('a stored achievement-only value is carried, so re-uploading the same targets is UNCHANGED (not an overwrite)', async () => {
+          mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2, { ...bscCases, achievementOnly: true }]);
+          sharedTargetFindMany.mockImplementation(async () => [
+            { outletCode: 'O001', targetValues: { MONTH_TGT: 10, FOCUS_PACK_1: 5, 'BSC CASES': 3 } },
+          ]);
+          const p = await service.previewTargetUpload(admin, xfile(buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 5]])));
+          expect(p.overwriteCount).toBe(0);
+          expect(p.unchangedCount).toBe(1);
+          expect(p.overwriteExamples).toEqual([]);
+        });
+
+        it('a file that still has the column but leaves it BLANK is accepted', async () => {
+          mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2, { ...bscCases, achievementOnly: true }]);
+          const p = await service.previewTargetUpload(admin, xfile(withCasesColumn([['O002', 'Outlet Two', 'HORECA', 1, 2, null]])));
+          expect(p.willSaveCount).toBe(1);
+        });
+
+        it('NO SILENT DROP: a number typed under the achievement-only column refuses the file, naming the KPI', async () => {
+          mockPrisma.kpiDef.findMany.mockResolvedValue([kpiRow, kpiRow2, { ...bscCases, achievementOnly: true }]);
+          const b = withCasesColumn([['O001', 'Outlet One', 'RETAIL', 10, 5, 7], ['O002', 'Outlet Two', 'HORECA', 1, 2, 8]]);
+          await expect(service.previewTargetUpload(admin, xfile(b)))
+            .rejects.toThrow(/"BSC Cases" \(2 values\).*achievement-only.*Nothing was saved/);
+          await expect(service.uploadTargets(admin, xfile(b), { confirmToken: 'x' })).rejects.toThrow();
+          expect(writtenTargets()).toHaveLength(0);
+        });
+
+        it('every enabled KPI achievement-only → a clear 400', async () => {
+          mockPrisma.kpiDef.findMany.mockResolvedValue([{ ...bscCases, achievementOnly: true }]);
+          await expect(service.previewTargetUpload(admin, xfile(oldFormat())))
+            .rejects.toThrow(/Every enabled KPI is marked "achievement only"/);
+        });
+      });
+
+      describe('parse errors (#1: specific, actionable message passes through)', () => {
+        it('a non-template sheet (no "Outlet ID") → that exact reason, not "corrupted"', async () => {
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['a', 'b'], ['Code', 'Name'], ['X', 'Y']]), 'S');
+          const b = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+          await expect(service.previewTargetUpload(admin, xfile(b)))
+            .rejects.toThrow(/missing the required "Outlet ID" column\. Nothing was saved\./);
+        });
+
+        it('a file that is not xlsx at all keeps the generic message', async () => {
+          // A zip-signature buffer SheetJS cannot open → genuinely unreadable.
+          const b = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x01, 0x02]);
+          await expect(service.previewTargetUpload(admin, xfile(b))).rejects.toThrow(/^Invalid or corrupted xlsx file$/);
+        });
       });
 
       it('targetChangesFor: carried (out-of-scope) values and names are kept, not logged; names are tracked', () => {

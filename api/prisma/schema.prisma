@@ -3324,6 +3324,10 @@ model KpiDef {
   programs          String[] @default([])
   subPrograms       String[] @default([])
   enabled           Boolean  @default(true)
+  // ACHIEVEMENT-ONLY (2026-11-26): the KPI takes NO targets (e.g. Bajaj BSC/FB1/FB2 CASES — achieved only, filled by
+  // Sales Import). Not a column of the targets template / Final Targets export, not required in a target upload, and
+  // stored target values are carried over untouched. Default false → every existing KPI (Deoleo) byte-identical.
+  achievementOnly   Boolean  @default(false)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 

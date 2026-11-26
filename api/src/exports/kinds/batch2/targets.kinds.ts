@@ -68,10 +68,27 @@ function enabledKpiRows(prisma: Prisma, clientId: string) {
 
 type KpiRow = Awaited<ReturnType<typeof enabledKpiRows>>[number];
 
+const ALL_ACHIEVEMENT_ONLY_MESSAGE =
+  'Every enabled KPI is marked "achievement only" (no targets), so there are no targets to upload or download.';
+
 /** The KPI columns a template/export uses — throws the same 400s the old builders threw. */
-async function kpisFor(prisma: Prisma, clientId: string, kind: 'targets-template' | 'achievements-template' | 'export'): Promise<KpiRow[]> {
+async function kpisFor(
+  prisma: Prisma,
+  clientId: string,
+  kind: 'targets-template' | 'targets-export' | 'achievements-template' | 'export',
+): Promise<KpiRow[]> {
   let rows = await enabledKpiRows(prisma, clientId);
-  if (rows.length === 0) throw new BadRequestException(kind === 'export' ? NO_KPIS_MESSAGE : NO_KPIS_SEED_MESSAGE);
+  if (rows.length === 0) {
+    throw new BadRequestException(kind === 'export' || kind === 'targets-export' ? NO_KPIS_MESSAGE : NO_KPIS_SEED_MESSAGE);
+  }
+  if (kind === 'targets-template' || kind === 'targets-export') {
+    // ACHIEVEMENT-ONLY KPIs take no targets: no column in the targets template or the Final Targets export (so the
+    // export re-uploads cleanly). None flagged (Deoleo, every tenant by default) → no filtering, byte-identical files.
+    if (rows.some((k) => k.achievementOnly)) {
+      rows = rows.filter((k) => !k.achievementOnly);
+      if (rows.length === 0) throw new BadRequestException(ALL_ACHIEVEMENT_ONLY_MESSAGE);
+    }
+  }
   if (kind === 'achievements-template') {
     // Sales Import source ownership (§7.4): importer-owned KPIs get no column in the manual template.
     // A tenant with no SalesKpiDefinition (Deoleo, every tenant today) → [] → no filtering.
@@ -96,7 +113,7 @@ export async function assertTargetsDownloadable(
   await kpisFor(
     prisma,
     clientId,
-    kindId === 'targets-template' ? 'targets-template' : kindId === 'achievements-template' ? 'achievements-template' : 'export',
+    kindId === 'achievements-export' ? 'export' : kindId,
   );
 }
 
@@ -251,7 +268,7 @@ export const TARGETS_EXPORT_KIND: ExportKindDef<MonthParams> = {
   fileName: (p) => `final-targets-${p.month}.xlsx`,
   async run(ctx, p, out) {
     const { prisma, clientId } = ctx;
-    const kpis = (await kpisFor(prisma, clientId, 'export')).map(toKpiLike);
+    const kpis = (await kpisFor(prisma, clientId, 'targets-export')).map(toKpiLike);
     async function* pages() {
       for await (const page of keysetPages((q) =>
         prisma.outletTarget.findMany({

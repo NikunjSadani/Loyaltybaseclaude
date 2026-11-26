@@ -131,6 +131,49 @@ describe('target upload — preview', () => {
     expect(screen.queryByTestId('target-upload-preview')).not.toBeInTheDocument();
   });
 
+  it('the server\'s specific template message (KPI columns don\'t match) is shown as-is', async () => {
+    const msg = 'Template KPI columns don\'t match the configured KPIs for "2026-12" (missing: BSC CASES) — re-download the template. Nothing was saved.';
+    stub(async () => json({ success: false, error: msg }, 400));
+    render(<TargetUploadPage />);
+    await pick();
+    expect(await screen.findByRole('alert')).toHaveTextContent(msg);
+  });
+
+  it('UNCHANGED outlet-months: shown separately as "unchanged (no effect)" with NO tick; only the changed one is acknowledged', async () => {
+    const ow1 = { category: 'OVERWRITE', count: 1, fingerprint: FP_O, sample: ['O2 · 2026-12'] };
+    stub(async () => json({ success: true, data: previewBody({
+      willSaveCount: 1, newCount: 0, overwriteCount: 1, unchangedCount: 2, unchangedSample: ['O1 · 2026-12', 'O3 · 2026-12'],
+      perMonth: [{ month: '2026-12', newCount: 0, overwriteCount: 1, unchangedCount: 2 }],
+      notApplied: [ow1],
+    }) }));
+    render(<TargetUploadPage />);
+    await pick();
+    const un = await screen.findByTestId('target-upload-unchanged');
+    expect(un).toHaveTextContent('2 outlet-months unchanged (no effect)');
+    expect(un).toHaveTextContent('O1 · 2026-12; O3 · 2026-12');
+    expect(un.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(screen.getByTestId('target-upload-overwrite')).toHaveTextContent('1 outlet-month will be overwritten');
+    expect(screen.getByTestId('target-upload-overwrite')).toHaveTextContent("Dec '26: 0 new · 1 overwritten · 2 unchanged");
+    const boxes = screen.getByTestId('target-upload-acks').querySelectorAll('input[type="checkbox"]');
+    expect(boxes).toHaveLength(1);
+    expect(screen.getByTestId('target-upload-acks')).toHaveTextContent('I understand 1 existing outlet-month target will be replaced');
+  });
+
+  it('every outlet-month unchanged → Confirm disabled with an honest reason, no boxes', async () => {
+    stub(async () => json({ success: true, data: previewBody({
+      willSaveCount: 0, newCount: 0, overwriteCount: 0, unchangedCount: 3, unchangedSample: ['O1 · 2026-12'],
+      perMonth: [{ month: '2026-12', newCount: 0, overwriteCount: 0, unchangedCount: 3 }],
+      rejectedCount: 0, problemRows: [], problemRowCount: 0, overwriteExamples: [], notApplied: [],
+    }) }));
+    render(<TargetUploadPage />);
+    await pick();
+    expect(await screen.findByTestId('target-upload-unchanged')).toHaveTextContent('3 outlet-months unchanged (no effect)');
+    expect(screen.getByTestId('confirm-disabled-reason'))
+      .toHaveTextContent('Nothing to apply — every outlet-month in this file already has exactly these target values.');
+    expect(confirmBtn()).toBeDisabled();
+    expect(screen.queryByTestId('target-upload-acks')).not.toBeInTheDocument();
+  });
+
   it('nothing valid → Confirm disabled with the reason, no acknowledgement boxes', async () => {
     stub(async () => json({ success: true, data: previewBody({
       acceptedCount: 0, rejectedCount: 4, willSaveCount: 0, newCount: 0, overwriteCount: 0, perMonth: [],

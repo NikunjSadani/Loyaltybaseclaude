@@ -448,6 +448,25 @@ describe('targets-template / achievements-template export kinds', () => {
     expect(readBook(ach).sheets.Targets.aoa.flat()).toContain(OUT_OF_SCOPE_CELL);
   }, XLSX_TIMEOUT);
 
+  it('ACHIEVEMENT-ONLY KPI: no column in the target template / Final Targets (identical to a tenant without it); kept in the achievement template', async () => {
+    const cases = { ...KPIS[2], code: 'BSC CASES', label: 'BSC Cases', order: 99, achievementOnly: true };
+    const withCases = db({ kpis: [...KPIS, cases], outlets: roster() });
+    const without = db({ kpis: KPIS, outlets: roster() });
+    // Same bytes as the tenant that never had the KPI (and = the old builder) — Deoleo's file is untouched by the flag.
+    const tpl = (await render(TARGETS_TEMPLATE_KIND, withCases, { months: '2026-07' })).buffer;
+    expectSameWorkbook(tpl, (await render(TARGETS_TEMPLATE_KIND, without, { months: '2026-07' })).buffer);
+    expectSameWorkbook(tpl, await oldTemplate(without, ADMIN, ['2026-07'], false));
+    expect(readBook(tpl).sheets.Targets.aoa[1]).not.toContain('BSC Cases');
+    expect(readBook((await render(ACHIEVEMENTS_TEMPLATE_KIND, withCases, { month: '2026-07' })).buffer).sheets.Targets.aoa[1])
+      .toContain('BSC Cases');
+    const fin = (await render(TARGETS_EXPORT_KIND, withCases, { month: '2026-07' })).buffer;
+    expect(XLSX.utils.sheet_to_json<unknown[]>(XLSX.read(fin, { type: 'buffer' }).Sheets[XLSX.read(fin, { type: 'buffer' }).SheetNames[0]], { header: 1 })[1])
+      .not.toContain('BSC Cases');
+    const allAo = db({ kpis: [cases], outlets: roster() });
+    await expect(assertTargetsDownloadable(allAo as any, 'bajaj', 'targets-template')).rejects.toThrow(/achievement only/);
+    await expect(assertTargetsDownloadable(allAo as any, 'bajaj', 'achievements-template')).resolves.toBeUndefined();
+  }, XLSX_TIMEOUT);
+
   it('round trip: a filled streamed template parses back through the upload parser', async () => {
     const prisma = db({ kpis: KPIS.slice(0, 2), outlets: roster() });
     const { buffer } = await render(ACHIEVEMENTS_TEMPLATE_KIND, prisma, { month: '2026-06' });

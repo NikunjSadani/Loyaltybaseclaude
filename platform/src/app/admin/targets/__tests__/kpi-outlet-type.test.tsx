@@ -176,6 +176,27 @@ describe('KPI applies-to scope', () => {
     expect(getMock).toHaveBeenCalledWith('/api/admin/kpis/scope-count?programs=Unnati');
   });
 
+  it('KA1: "Achievement only (no targets)" — ticking it on Edit sends achievementOnly: true; a flagged KPI shows the badge', async () => {
+    const CASES = { ...ROW, id: 'k4', code: 'BSC CASES', label: 'BSC Cases', isPrimary: false, order: 4, achievementOnly: true };
+    getMock.mockImplementation(async (url: string) => {
+      if (url === '/api/admin/kpis') return { success: true, data: [{ ...ROW, achievementOnly: false }, CASES] };
+      if (url === '/api/admin/kpis/scope-options') return optionsResponse;
+      if (url.startsWith('/api/admin/kpis/scope-count')) return { success: true, data: { count: 1 } };
+      return { success: false, error: 'unexpected' };
+    });
+    postMock.mockResolvedValue({ success: true, data: ROW });
+    await act(async () => { render(<AdminTargetsPage />); });
+    expect(await screen.findByTestId('kpi-achievement-only-BSC CASES')).toHaveTextContent('Achievement only');
+    expect(screen.queryByTestId('kpi-achievement-only-MONTH_TGT')).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByTitle('Edit')[0]); // MONTH_TGT
+    const box = await screen.findByRole('checkbox', { name: /Achievement only \(no targets\)/ });
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    fireEvent.click(screen.getByRole('button', { name: /Save Changes/ }));
+    await waitFor(() => expect(postMock).toHaveBeenCalledTimes(1));
+    expect(lastBody()).toMatchObject({ code: 'MONTH_TGT', achievementOnly: true });
+  });
+
   it('KO5b: scope-options failure is shown with Retry; outlet types fall back to the tenant list', async () => {
     optionsResponse = { success: false, error: 'Boom' };
     await renderPage();

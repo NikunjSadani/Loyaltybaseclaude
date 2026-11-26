@@ -71,8 +71,11 @@ interface UploadSummaryData {
   rejectedCount: number;
   /** Outlet-months created vs existing ones replaced (absent on older API builds). */
   newCount?:       number;
+  /** Existing outlet-months where at least one stored value actually CHANGES (the OVERWRITE acknowledgement). */
   overwriteCount?: number;
-  perMonth?:       { month: string; newCount: number; overwriteCount: number }[];
+  /** Existing outlet-months that already hold exactly these values — not rewritten, no effect, no tick. */
+  unchangedCount?: number;
+  perMonth?:       { month: string; newCount: number; overwriteCount: number; unchangedCount?: number }[];
   /** APPLIES-TO D1: values ignored because the KPI does not apply to that outlet (absent on older API builds). */
   ignoredOutOfScope?: number;
   /** FOCUS-FROM-TARGETS §7: early, NON-blocking check of the focus product names (absent on older API builds). */
@@ -143,8 +146,10 @@ interface PreviewResult extends UploadSummaryData {
   previewToken:  string;
   /** ISO time after which the preview can no longer be confirmed (absent on older API builds). */
   previewExpiresAt?: string;
-  /** Outlet-months the apply would write if confirmed now. */
+  /** Outlet-months the apply would write if confirmed now (new + changed; unchanged ones are not rewritten). */
   willSaveCount: number;
+  /** A few unchanged outlet-months ("OUT123 · 2026-12"). */
+  unchangedSample?: string[];
   overwriteExamples?: {
     outletCode: string;
     outletName: string;
@@ -184,6 +189,9 @@ function nothingToApplyReason(p: PreviewResult): string | null {
   }
   if ((p.skippedLockedMonths?.length ?? 0) > 0 && (p.writableMonths?.length ?? 0) === 0) {
     return 'Nothing to apply — every month in this file is in the past, and past months are locked.';
+  }
+  if ((p.unchangedCount ?? 0) > 0) {
+    return 'Nothing to apply — every outlet-month in this file already has exactly these target values.';
   }
   return 'Nothing to apply — no accepted row has a value for the current or a future month.';
 }
@@ -761,6 +769,7 @@ export default function TargetUploadPage() {
                   {preview.perMonth.map(m => (
                     <li key={m.month}>
                       <span className="font-semibold">{formatMonth(m.month)}</span>: {m.newCount.toLocaleString('en-IN')} new · {m.overwriteCount.toLocaleString('en-IN')} overwritten
+                      {(m.unchangedCount ?? 0) > 0 ? ` · ${m.unchangedCount!.toLocaleString('en-IN')} unchanged` : ''}
                     </li>
                   ))}
                 </ul>
@@ -788,6 +797,26 @@ export default function TargetUploadPage() {
               {preview.overwriteExamples && preview.overwriteExamples.length === 0 && (preview.overwriteExamplesSampled ?? 0) > 0 && (
                 <p className="text-[11px] text-amber-700">
                   The first {preview.overwriteExamplesSampled} overwritten outlet-months checked already have exactly these values.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Unchanged outlet-months: shown, but no tick — they already hold exactly these values and are not rewritten. */}
+          {(preview.unchangedCount ?? 0) > 0 && (
+            <div data-testid="target-upload-unchanged" className="rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 space-y-1">
+              <p className="text-sm font-semibold text-gray-800">
+                {preview.unchangedCount!.toLocaleString('en-IN')} outlet-month{preview.unchangedCount !== 1 ? 's' : ''} unchanged (no effect)
+              </p>
+              <p className="text-xs text-gray-600">
+                These outlets already have exactly these target values for that month, so they are left as they are —
+                nothing about them is saved or replaced.
+              </p>
+              {preview.unchangedSample && preview.unchangedSample.length > 0 && (
+                <p className="text-[11px] text-gray-500">
+                  {preview.unchangedCount! > preview.unchangedSample.length ? 'For example: ' : ''}{preview.unchangedSample.join('; ')}
+                  {preview.unchangedCount! > preview.unchangedSample.length
+                    ? ` … and ${(preview.unchangedCount! - preview.unchangedSample.length).toLocaleString('en-IN')} more` : ''}
                 </p>
               )}
             </div>
@@ -895,6 +924,9 @@ export default function TargetUploadPage() {
                   to the system{savedMonths > 0 ? ` across ${savedMonths} month${savedMonths !== 1 ? 's' : ''}` : ''}
                   {result.newCount !== undefined && result.overwriteCount !== undefined
                     ? ` (${result.newCount.toLocaleString()} new, ${result.overwriteCount.toLocaleString()} overwritten)`
+                    : ''}
+                  {(result.unchangedCount ?? 0) > 0
+                    ? ` · ${result.unchangedCount!.toLocaleString()} unchanged outlet-month${result.unchangedCount !== 1 ? 's' : ''} left as they were`
                     : ''}
                   {result.rejectedCount > 0 ? ` · ${result.rejectedCount} row${result.rejectedCount !== 1 ? 's' : ''} rejected (see below)` : ''}
                   {(result.skippedBlankCount ?? 0) > 0 ? ` · ${result.skippedBlankCount} blank row${result.skippedBlankCount !== 1 ? 's' : ''} skipped` : ''}.

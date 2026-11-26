@@ -41,6 +41,14 @@ export class UpsertKpiDefDto {
   enabled?: boolean;
 
   /**
+   * ACHIEVEMENT-ONLY: true = this KPI takes no targets (achieved only, e.g. filled by Sales Import) — left out of the
+   * targets template / Final Targets export / upload column check. Omitted → unchanged (create → false).
+   */
+  @IsBoolean()
+  @IsOptional()
+  achievementOnly?: boolean;
+
+  /**
    * Per-outlet-TYPE tag (E1). Omitted → unchanged on update / null (all types) on create.
    * null or '' → SHARED (applies to every outlet type). A code → that type only; it must be one of
    * the tenant's ENABLED outlet type codes (validated in TargetsService.upsertKpi; 400 otherwise).

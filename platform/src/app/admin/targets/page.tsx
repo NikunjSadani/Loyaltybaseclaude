@@ -56,6 +56,9 @@ export interface KpiDef {
   outletTypes?:      string[];
   programs?:         string[];
   subPrograms?:      string[];
+  /** ACHIEVEMENT-ONLY: no targets for this KPI (achieved only, e.g. filled by Sales Import) — not a column of the
+   *  targets template / Final Targets, not required in a target upload. Absent on older payloads → false. */
+  achievementOnly?:  boolean;
 }
 
 type UpsertPayload = Omit<KpiDef, 'id'>;
@@ -75,6 +78,8 @@ function toUpsertBody(f: UpsertPayload, scope?: AppliesTo): UpsertPayload {
     order:             f.order,
     rollup:            f.rollup ?? 'SUM',
     enabled:           f.enabled,
+    // Sent only once known (a row from the API, or the box was touched); omitted = unchanged / false on create.
+    ...(f.achievementOnly !== undefined ? { achievementOnly: f.achievementOnly } : {}),
     // Scope arrays are sent ONLY when the operator changed the scope (omitted = unchanged on the backend, and an
     // unchanged resend is not re-validated). The legacy single `outletType` is never sent: arrays win server-side.
     ...(scope ? { outletTypes: scope.outletTypes, programs: scope.programs, subPrograms: scope.subPrograms } : {}),
@@ -149,6 +154,15 @@ function KpiRow({
         {kpi.hasNameOverride && (
           <span className="ml-1 text-[10px] font-semibold bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded">
             Override: {kpi.nameOverrideLabel}
+          </span>
+        )}
+        {kpi.achievementOnly && (
+          <span
+            data-testid={`kpi-achievement-only-${kpi.code}`}
+            title="No targets: not in the targets template or Final Targets; achievement comes from Sales Import / the sales upload"
+            className="ml-1 text-[10px] font-semibold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded"
+          >
+            Achievement only
           </span>
         )}
       </td>
@@ -325,6 +339,23 @@ function KpiForm({
             className="rounded"
           />
           <span className="text-xs text-gray-700 font-medium">Enabled</span>
+        </label>
+
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={form.achievementOnly ?? false}
+            onChange={e => set('achievementOnly', e.target.checked)}
+            className="rounded mt-0.5"
+            aria-describedby="kpi-achievement-only-help"
+          />
+          <span>
+            <span className="text-xs text-gray-700 font-medium">Achievement only (no targets)</span>
+            <span id="kpi-achievement-only-help" className="block text-[11px] text-gray-500">
+              Not a column in the targets template or Final Targets, and not needed in a target upload. Achievement
+              still comes from Sales Import / the sales upload.
+            </span>
+          </span>
         </label>
       </div>
 

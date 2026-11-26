@@ -57,7 +57,17 @@ import {
   kpiCodeKeys,
   KpiDefLike,
   NAMES_KEY,
+  TemplateFormatError,
 } from './targets.helpers';
+
+/**
+ * The 400 for an upload the shared parser could not use: the parser's own specific, actionable message (template
+ * shape / KPI columns) when it gave one; the generic message only for a file that cannot be read as xlsx at all.
+ */
+export function uploadParseError(e: unknown): BadRequestException {
+  if (e instanceof TemplateFormatError) return new BadRequestException(`${e.message}. Nothing was saved.`);
+  return new BadRequestException('Invalid or corrupted xlsx file');
+}
 import { SQL_NOW_UTC } from '../sales-import/sql-time';
 import { targetUploadFocusCheck } from '../sales-import/kpi/focus-upload-check';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -175,8 +185,21 @@ export function targetChangesFor(
   stored: ReadonlyMap<string, Record<string, unknown>>,
 ): TargetChange[] {
   const out: TargetChange[] = [];
-  for (const w of writes) {
-    const old = stored.get(`${w.month}|${w.outletCode}`) ?? {};
+  for (const w of writes) out.push(...targetChangesForWrite(w, stored.get(`${w.month}|${w.outletCode}`)));
+  return out;
+}
+
+/**
+ * targetChangesFor for ONE outlet-month write against its stored map (undefined = no stored row). Empty = the write
+ * would leave every stored value and custom name exactly as it is (the upload preview's UNCHANGED outlet-months).
+ */
+export function targetChangesForWrite(
+  w: { month: string; outletCode: string; kpiMap: Record<string, unknown>; carry: readonly string[] },
+  stored: Record<string, unknown> | undefined,
+): TargetChange[] {
+  const out: TargetChange[] = [];
+  {
+    const old = stored ?? {};
     const next: Record<string, unknown> = { ...pick(old, w.carry), ...w.kpiMap };
     const oldNames = (old[NAMES_KEY] ?? {}) as Record<string, unknown>;
     const carriedNames = pick(oldNames, w.carry);
@@ -366,7 +389,7 @@ export class TargetsService {
    * Creates if it does not exist; updates only the supplied fields otherwise.
    */
   async upsertKpi(user: JwtPayload, dto: UpsertKpiDefDto) {
-    const { code, label, unit, isPrimary, hasNameOverride, nameOverrideLabel, order, rollup, enabled } =
+    const { code, label, unit, isPrimary, hasNameOverride, nameOverrideLabel, order, rollup, enabled, achievementOnly } =
       dto;
     // APPLIES-TO scope (plan §4; E1 generalised). Each facet: omitted = unchanged (create → []).
     // `outletTypes` wins over the legacy single `outletType` (null/'' = all types). An UPDATE whose
@@ -406,6 +429,7 @@ export class TargetsService {
             order: order ?? 0,
             rollup: rollup ?? 'SUM',
             enabled: enabled ?? true,
+            achievementOnly: achievementOnly ?? false,
             outletType: scopeData?.outletType ?? null,
             ...(scopeData
               ? { outletTypes: scopeData.outletTypes, programs: scopeData.programs, subPrograms: scopeData.subPrograms }
@@ -420,6 +444,7 @@ export class TargetsService {
             ...(order !== undefined ? { order } : {}),
             ...(rollup !== undefined ? { rollup } : {}),
             ...(enabled !== undefined ? { enabled } : {}),
+            ...(achievementOnly !== undefined ? { achievementOnly } : {}),
             ...(scopeData ? scopeData : {}),
           },
         });
@@ -868,16 +893,27 @@ export class TargetsService {
     if (!file) throw new BadRequestException('No file uploaded');
 
     // ── Fetch KPIs ────────────────────────────────────────────────────────────
-    const kpiRows = await this.prisma.kpiDef.findMany({
+    const allKpiRows = await this.prisma.kpiDef.findMany({
       where: { clientId: user.clientId, enabled: true },
       orderBy: [{ order: 'asc' }, { code: 'asc' }],
     });
 
-    if (kpiRows.length === 0) {
+    if (allKpiRows.length === 0) {
       throw new BadRequestException(
         'No enabled KPIs found. Seed KPIs first via POST /v1/admin/kpis/seed-defaults.',
       );
     }
+    // ACHIEVEMENT-ONLY KPIs (KpiDef.achievementOnly, e.g. Bajaj BSC/FB1/FB2 CASES filled by Sales Import) take no
+    // targets: they are not template columns, not required in the file, and their stored values (if any) are carried
+    // over untouched by every write. No such KPI (Deoleo, every tenant by default) → kpiRows = allKpiRows, unchanged.
+    const achievementOnlyRows = allKpiRows.filter((k) => k.achievementOnly);
+    const kpiRows = achievementOnlyRows.length > 0 ? allKpiRows.filter((k) => !k.achievementOnly) : allKpiRows;
+    if (kpiRows.length === 0) {
+      throw new BadRequestException(
+        'Every enabled KPI is marked "achievement only" (no targets), so there are no targets to upload.',
+      );
+    }
+    const achievementOnlyCodes = achievementOnlyRows.map((k) => k.code);
 
     // ── Fetch all non-deleted outlet codes ────────────────────────────────────
     // Targets can be uploaded for any outlet regardless of KYC/active state
@@ -913,13 +949,40 @@ export class TargetsService {
 
     // A malformed/corrupt or empty workbook makes XLSX.read (or sheet access)
     // throw — surface a clean 400 rather than a 500 from the global filter.
+    const excludedKpis: KpiDefLike[] = achievementOnlyRows.map((k) => ({
+      code: k.code,
+      label: k.label,
+      isPrimary: k.isPrimary,
+      hasNameOverride: false,
+      nameOverrideLabel: null,
+      order: k.order,
+      enabled: k.enabled,
+    }));
+    const parseOpts = {
+      ...(parseScope ? { scope: parseScope } : {}),
+      ...(excludedKpis.length > 0 ? { excludedKpis } : {}),
+    };
     let parseResult: ReturnType<typeof parseTargetUploadBuffer>;
     try {
-      parseResult = parseScope
-        ? parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes, { scope: parseScope })
+      parseResult = Object.keys(parseOpts).length > 0
+        ? parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes, parseOpts)
         : parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes);
-    } catch {
-      throw new BadRequestException('Invalid or corrupted xlsx file');
+    } catch (e) {
+      throw uploadParseError(e);
+    }
+
+    // NO SILENT FAILURE: a number typed under an achievement-only KPI's column (an older template) would be dropped —
+    // refuse the file and say exactly which columns, rather than save the rest and quietly lose those values.
+    const typedAchievementOnly = Object.entries(parseResult.summary.excludedValues ?? {}).filter(([, n]) => n > 0);
+    if (typedAchievementOnly.length > 0) {
+      const labelOf = new Map(achievementOnlyRows.map((k) => [k.code, k.label]));
+      throw new BadRequestException(
+        `This file has target values under ${typedAchievementOnly
+          .map(([c, n]) => `"${labelOf.get(c) ?? c}" (${n.toLocaleString('en-IN')} value${n === 1 ? '' : 's'})`)
+          .join(', ')}, but ${typedAchievementOnly.length === 1 ? 'that KPI is' : 'those KPIs are'} achievement-only ` +
+          '(filled by Sales Import — targets are not uploaded for them). Clear those columns or download the current ' +
+          'template, then upload again. Nothing was saved.',
+      );
     }
 
     // ── Determine months present in the upload ────────────────────────────────
@@ -941,7 +1004,13 @@ export class TargetsService {
     // Batch is labelled by the earliest WRITABLE month (else the earliest present).
     const batchMonth = writableMonths[0] ?? sortedMonths[0] ?? 'unknown';
 
-    // One write per (outletCode, writable month) with ≥1 non-blank value — exactly the rows apply upserts.
+    const carryFor = (outletCode: string): string[] => {
+      const scoped = parseScope ? parseScope.outOfScopeCodes(outletCode) : [];
+      return achievementOnlyCodes.length > 0 ? [...scoped, ...achievementOnlyCodes.filter((c) => !scoped.includes(c))] : scoped;
+    };
+
+    // One write per (outletCode, writable month) with ≥1 non-blank value — the candidate rows apply upserts (an
+    // outlet-month whose stored values would not change is classified UNCHANGED and not rewritten).
     const writes: TargetUploadWrite[] = [];
     // Accepted outlet-months with values in a LOCKED (past) month — not written ("<outlet> · <month>").
     const lockedKeys: string[] = [];
@@ -960,7 +1029,8 @@ export class TargetsService {
           kpiMap,
           // Owner decision (audit #3): a re-upload NEVER deletes stored values of KPIs that are out of scope
           // for this outlet (their cells were ignored by the parser). Only a scope-enforced tenant has any.
-          carry: parseScope ? parseScope.outOfScopeCodes(outletCode) : [],
+          // Achievement-only codes are always carried (never in the file), after the scope codes (stable order).
+          carry: carryFor(outletCode),
         });
       }
     }
@@ -1083,16 +1153,19 @@ export class TargetsService {
   }
 
   /**
-   * NEW vs OVERWRITTEN split of the upload's writes, against the targets stored NOW (read through `db` — the apply reads
-   * it INSIDE its transaction). One key-only read per month (outlet codes only, no values). `overwriteKeys` lists every
-   * overwritten "<outlet> · <month>"; `sample` keeps the first OVERWRITE_SAMPLE writes for the example read.
+   * NEW vs OVERWRITTEN vs UNCHANGED split of the upload's writes, against the targets stored NOW (read through `db` — the
+   * apply reads it INSIDE its transaction). One read per month (outlet codes + stored values).
+   *  - NEW        — no stored row for the outlet-month;
+   *  - OVERWRITE  — a stored row where at least one value / custom name actually changes (`targetChangesForWrite`);
+   *  - UNCHANGED  — a stored row the write would leave exactly as it is: NOT counted as an overwrite, needs no
+   *                 acknowledgement, and is NOT rewritten (`toWrite` excludes it), so it truly has no effect.
+   * `overwriteKeys` lists every overwritten "<outlet> · <month>" (the OVERWRITE fingerprint is over exactly these);
+   * `sample` keeps the first OVERWRITE_SAMPLE overwritten writes for the example read.
    */
   private async classifyTargetWrites(
     db: Pick<Prisma.TransactionClient, 'outletTarget'>,
     clientId: string,
     writes: readonly TargetUploadWrite[],
-    /** The apply transaction: the same read also returns the stored values (for the change history). */
-    withValues = false,
   ) {
     const byMonth = new Map<string, TargetUploadWrite[]>();
     for (const w of writes) {
@@ -1100,38 +1173,51 @@ export class TargetsService {
       list.push(w);
       byMonth.set(w.month, list);
     }
-    const perMonth: Array<{ month: string; newCount: number; overwriteCount: number }> = [];
+    const perMonth: Array<{ month: string; newCount: number; overwriteCount: number; unchangedCount: number }> = [];
     const sample: TargetUploadWrite[] = [];
     const overwriteKeys: string[] = [];
-    /** `${month}|${outletCode}` → stored targetValues (withValues only). */
+    const unchangedKeys: string[] = [];
+    /** The writes apply performs: NEW + OVERWRITE (an UNCHANGED outlet-month is left alone). */
+    const toWrite: TargetUploadWrite[] = [];
+    /** `${month}|${outletCode}` → stored targetValues. */
     const storedValues = new Map<string, Record<string, unknown>>();
     let newCount = 0;
     let overwriteCount = 0;
+    let unchangedCount = 0;
     for (const month of [...byMonth.keys()].sort()) {
       const stored = await db.outletTarget.findMany({
         where: { clientId, month },
-        select: withValues ? { outletCode: true, targetValues: true } : { outletCode: true },
+        select: { outletCode: true, targetValues: true },
       });
-      const existing = new Set((stored ?? []).map((r) => r.outletCode));
-      if (withValues) {
-        for (const r of (stored ?? []) as Array<{ outletCode: string; targetValues?: unknown }>) {
-          storedValues.set(`${month}|${r.outletCode}`, (r.targetValues ?? {}) as Record<string, unknown>);
-        }
+      for (const r of (stored ?? []) as Array<{ outletCode: string; targetValues?: unknown }>) {
+        storedValues.set(`${month}|${r.outletCode}`, (r.targetValues ?? {}) as Record<string, unknown>);
       }
       let n = 0;
       let o = 0;
+      let u = 0;
       for (const w of byMonth.get(month)!) {
-        if (existing.has(w.outletCode)) {
+        const old = storedValues.get(`${month}|${w.outletCode}`);
+        if (old === undefined) {
+          n++;
+          toWrite.push(w);
+        } else if (targetChangesForWrite(w, old).length > 0) {
           o++;
+          toWrite.push(w);
           overwriteKeys.push(`${w.outletCode} · ${month}`);
           if (sample.length < TargetsService.OVERWRITE_SAMPLE) sample.push(w);
-        } else n++;
+        } else {
+          u++;
+          unchangedKeys.push(`${w.outletCode} · ${month}`);
+        }
       }
-      perMonth.push({ month, newCount: n, overwriteCount: o });
+      perMonth.push({ month, newCount: n, overwriteCount: o, unchangedCount: u });
       newCount += n;
       overwriteCount += o;
+      unchangedCount += u;
     }
-    return { newCount, overwriteCount, perMonth, sample, overwriteKeys, storedValues };
+    return {
+      newCount, overwriteCount, unchangedCount, perMonth, sample, overwriteKeys, unchangedKeys, toWrite, storedValues,
+    };
   }
 
   /**
@@ -1197,10 +1283,13 @@ export class TargetsService {
       previewToken: token,
       previewExpiresAt: expiresAt,
       ...TargetsService.uploadSummary(p),
-      // What apply WOULD write if confirmed now (one upsert per outlet × writable month with ≥1 value).
-      willSaveCount:  p.writes.length,
+      // What apply WOULD write if confirmed now: NEW + OVERWRITE outlet-months (UNCHANGED ones are not rewritten).
+      willSaveCount:  cls.toWrite.length,
       newCount:       cls.newCount,
       overwriteCount: cls.overwriteCount,
+      // Outlet-months already holding exactly these values — shown as "unchanged (no effect)", no acknowledgement.
+      unchangedCount: cls.unchangedCount,
+      unchangedSample: cls.unchangedKeys.slice(0, TargetsService.NOT_APPLIED_SAMPLE),
       perMonth:       cls.perMonth,
       overwriteExamples,
       // How many overwritten outlet-months were compared to find the examples (the examples are a sample).
@@ -1365,14 +1454,14 @@ export class TargetsService {
       baseMeta.fileKey = fileKey;
     }
 
-    const statements = this.targetWriteStatements(user.clientId, batch.id, p.writes);
-    const savedCount = p.writes.length;
     const overwriteAcked = notApplied.find((c) => c.category === 'OVERWRITE');
     let final: {
       newCount: number;
       overwriteCount: number;
-      perMonth: Array<{ month: string; newCount: number; overwriteCount: number }>;
+      unchangedCount?: number;
+      perMonth: Array<{ month: string; newCount: number; overwriteCount: number; unchangedCount?: number }>;
       historyRowCount?: number;
+      writtenOutletCodes?: string[];
     };
     try {
       final = await this.prisma.$transaction(
@@ -1384,7 +1473,7 @@ export class TargetsService {
             if (prior) throw new TargetUploadAbort('ALREADY_APPLIED', new ConflictException(TargetsService.alreadyAppliedMessage(prior)));
           }
           // The split AND the stored values (for the change history) come from ONE read per month, under the lock.
-          const cls = await this.classifyTargetWrites(tx, user.clientId, p.writes, true);
+          const cls = await this.classifyTargetWrites(tx, user.clientId, p.writes);
           if (tokenNonce) {
             const nowOverwrite = TargetsService.notApplied(p, cls.overwriteKeys).find((c) => c.category === 'OVERWRITE');
             if ((nowOverwrite?.fingerprint ?? null) !== (overwriteAcked?.fingerprint ?? null)) {
@@ -1394,10 +1483,12 @@ export class TargetsService {
               ));
             }
           }
-          // Multi-row statements (WRITE_CHUNK rows each) — ≤ ~80 statements for 6,500 outlets × 12 months.
-          for (const stmt of statements) await tx.$executeRaw(stmt);
+          // Multi-row statements (WRITE_CHUNK rows each) — ≤ ~80 statements for 6,500 outlets × 12 months. Only NEW +
+          // OVERWRITE outlet-months (decided under the lock): an UNCHANGED one keeps its row, batchId and updatedAt.
+          for (const stmt of this.targetWriteStatements(user.clientId, batch.id, cls.toWrite)) await tx.$executeRaw(stmt);
+          const savedCount = cls.toWrite.length;
           // TARGET CHANGE HISTORY (owner 2026-11-25): one row per value that ACTUALLY changed, in this same transaction.
-          const changes = targetChangesFor(p.writes, cls.storedValues);
+          const changes = targetChangesFor(cls.toWrite, cls.storedValues);
           for (const stmt of this.historyStatements(user.clientId, batch.id, user.sub, changes)) await tx.$executeRaw(stmt);
           await tx.targetUploadBatch.update({ where: { id: batch.id }, data: { status: 'APPLIED' } });
           await tx.auditLog.create({
@@ -1412,12 +1503,17 @@ export class TargetsService {
                 savedCount,
                 newCount:       cls.newCount,
                 overwriteCount: cls.overwriteCount,
+                unchangedCount: cls.unchangedCount,
                 perMonth:       cls.perMonth,
                 historyRowCount: changes.length,
               } as unknown as Prisma.InputJsonValue,
             },
           });
-          return { newCount: cls.newCount, overwriteCount: cls.overwriteCount, perMonth: cls.perMonth, historyRowCount: changes.length };
+          return {
+            newCount: cls.newCount, overwriteCount: cls.overwriteCount, unchangedCount: cls.unchangedCount,
+            perMonth: cls.perMonth, historyRowCount: changes.length,
+            writtenOutletCodes: cls.toWrite.map((w) => w.outletCode),
+          };
         },
         { maxWait: 10_000, timeout: TargetsService.APPLY_TX_TIMEOUT_MS },
       );
@@ -1455,7 +1551,10 @@ export class TargetsService {
     // are already saved, so a notification failure never turns this into an error — it is reported on the response.
     let notificationWarning: string | undefined;
     try {
-      await this.salesNotifications.targetsUploaded(user.clientId, [...new Set(p.writes.map((w) => w.outletCode))]);
+      // Only outlets whose targets were actually written (an UNCHANGED outlet-month got no new target). The rare
+      // lost-reply recovery path does not know the split → every outlet in the file, as before.
+      const notified = final.writtenOutletCodes ?? p.writes.map((w) => w.outletCode);
+      if (notified.length > 0) await this.salesNotifications.targetsUploaded(user.clientId, [...new Set(notified)]);
     } catch (e) {
       this.logger.error(`targetsUploaded notification failed for batch ${batch.id}: ${(e as Error)?.message ?? e}`);
       notificationWarning = 'The targets were saved, but the sales team could not be notified about them.';
@@ -1474,12 +1573,14 @@ export class TargetsService {
       batchId:       batch.id,
       status:        'APPLIED' as const,
       ...TargetsService.uploadSummary(p),
-      // The GROUND TRUTH of what was persisted (in ONE transaction): one OutletTarget row per (outlet,
-      // writable-month) with ≥1 non-blank KPI. `acceptedCount` can be higher (it counts LOCKED past-month rows too).
-      savedCount,
+      // The GROUND TRUTH of what was persisted (in ONE transaction): one OutletTarget row per NEW or CHANGED (outlet,
+      // writable-month). `acceptedCount` can be higher (LOCKED past-month rows, UNCHANGED outlet-months).
+      savedCount:     final.newCount + final.overwriteCount,
       // Of savedCount: outlet-months created vs existing ones replaced (split read inside the write transaction).
       newCount:       final.newCount,
       overwriteCount: final.overwriteCount,
+      // Already held exactly these values — not rewritten (no effect).
+      unchangedCount: final.unchangedCount ?? 0,
       perMonth:       final.perMonth,
       // What was NOT applied as typed (the done screen lists it), + what the admin acknowledged (confirm path).
       notApplied,
@@ -1499,7 +1600,7 @@ export class TargetsService {
   private async applyOutcome(
     batchId: string,
   ): Promise<
-    | { kind: 'APPLIED'; newCount: number; overwriteCount: number; perMonth: Array<{ month: string; newCount: number; overwriteCount: number }> }
+    | { kind: 'APPLIED'; newCount: number; overwriteCount: number; unchangedCount: number; perMonth: Array<{ month: string; newCount: number; overwriteCount: number }> }
     | { kind: 'PENDING' }
     | { kind: 'UNKNOWN' }
   > {
@@ -1517,6 +1618,7 @@ export class TargetsService {
         kind: 'APPLIED',
         newCount: Number(m.newCount ?? 0),
         overwriteCount: Number(m.overwriteCount ?? 0),
+        unchangedCount: Number(m.unchangedCount ?? 0),
         perMonth: (m.perMonth as Array<{ month: string; newCount: number; overwriteCount: number }>) ?? [],
       };
     } catch {
@@ -1820,8 +1922,8 @@ export class TargetsService {
       parseResult = parseScope
         ? parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes, { scope: parseScope })
         : parseTargetUploadBuffer(file.buffer, parseKpis, knownOutletCodes);
-    } catch {
-      throw new BadRequestException('Invalid or corrupted xlsx file');
+    } catch (e) {
+      throw uploadParseError(e);
     }
 
     // ── Determine months present in the upload ────────────────────────────────

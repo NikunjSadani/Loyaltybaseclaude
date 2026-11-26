@@ -102,6 +102,18 @@ export interface ParseScopeOptions {
   isInScope: (outletCode: string, kpiCode: string) => boolean;
 }
 
+/**
+ * The uploaded file is not a usable template (wrong/missing header rows, no "Outlet ID" column, KPI columns that don't
+ * match the configured KPIs). Its message is specific and actionable, so the upload endpoints show it as-is — unlike a
+ * file SheetJS cannot read at all, which gets the generic "Invalid or corrupted xlsx file".
+ */
+export class TemplateFormatError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TemplateFormatError';
+  }
+}
+
 // ── Row status ────────────────────────────────────────────────────────────────
 
 export type RowStatus = 'accepted' | 'rejected_outlet' | 'rejected_kpi' | 'skipped_blank';
@@ -138,6 +150,11 @@ export interface ParseResult {
     rejected: number;
     /** Numeric values dropped because the (outlet, KPI) pair is out of the KPI's scope (D1). 0 when unscoped. */
     ignoredOutOfScope: number;
+    /**
+     * Only when `opts.excludedKpis` was passed: KPI code → numeric cells typed under that (excluded, e.g.
+     * achievement-only) KPI's column. Those cells are never stored; the caller decides how to report them.
+     */
+    excludedValues?: Record<string, number>;
   };
 }
 
@@ -476,7 +493,7 @@ export function targetUploadRowsEcho(rows: readonly ParsedRow[]): {
 function readFirstSheetAoa(buffer: Buffer | ArrayBuffer): (string | number | null | undefined)[][] {
   const wb = XLSX.read(buffer, { type: 'buffer' });
   if (wb.SheetNames.length === 0) {
-    throw new Error('Unrecognized file: no worksheet found');
+    throw new TemplateFormatError('Unrecognized file: no worksheet found');
   }
   const ws = wb.Sheets[wb.SheetNames[0]];
   return XLSX.utils.sheet_to_json<(string | number | null | undefined)[]>(ws, {
@@ -513,11 +530,22 @@ export function parseTargetUploadBuffer(
   buffer: Buffer | ArrayBuffer,
   kpis: KpiDefLike[],
   knownOutletCodes: Set<string>,
-  opts?: { scope?: ParseScopeOptions },
+  opts?: {
+    scope?: ParseScopeOptions;
+    /**
+     * KPIs that exist but take NO values from this file (achievement-only KPIs on a target upload). Their columns are
+     * optional (a file without them is complete), never stored, and their numeric cells are counted in
+     * `summary.excludedValues` so the caller can refuse/report them — never silently dropped.
+     */
+    excludedKpis?: KpiDefLike[];
+  },
 ): ParseResult {
   const scope = opts?.scope;
   let ignoredOutOfScope = 0;
   const enabled = getEnabledKpis(kpis);
+  const excludedLabelToCode = new Map<string, string>();
+  for (const k of opts?.excludedKpis ?? []) excludedLabelToCode.set(k.label.toLowerCase().trim(), k.code);
+  const excludedValues: Record<string, number> = {};
 
   // label → code map (for resolving uploaded VALUE headers back to KPI codes)
   const labelToCode = new Map<string, string>();
@@ -542,7 +570,7 @@ export function parseTargetUploadBuffer(
   // non-xlsx / corrupt file XLSX salvaged into a 1-cell sheet) → reject rather
   // than silently accept an empty upload.
   if (rawAoa.length < 2) {
-    throw new Error(
+    throw new TemplateFormatError(
       'Unrecognized file: expected the target/achievement template (missing header rows)',
     );
   }
@@ -563,7 +591,7 @@ export function parseTargetUploadBuffer(
   // "Outlet ID" is a mandatory template column; its absence means the uploaded
   // file is not the expected template → reject.
   if (outletIdCol === -1) {
-    throw new Error('Unrecognized template: missing the required "Outlet ID" column');
+    throw new TemplateFormatError('Unrecognized template: missing the required "Outlet ID" column');
   }
 
   // ── Detect month blocks from row 1 ─────────────────────────────────────────
@@ -595,7 +623,7 @@ export function parseTargetUploadBuffer(
   interface KpiColumn {
     colIndex: number;  // ABSOLUTE row-2 column index
     code: string;
-    kind: 'value' | 'name';  // 'value' = KPI target value; 'name' = override name
+    kind: 'value' | 'name' | 'excluded';  // 'value' = KPI target value; 'name' = override name; 'excluded' = opts.excludedKpis
   }
   const monthKpiCols: KpiColumn[][] = monthBlocks.map((block, bi) => {
     const blockStart = block.startCol;
@@ -619,7 +647,11 @@ export function parseTargetUploadBuffer(
       if (nameCode && !seenNames.has(nameCode)) {
         seenNames.add(nameCode);
         cols.push({ colIndex: ci, code: nameCode, kind: 'name' });
+        continue;
       }
+      // An excluded KPI's column (e.g. achievement-only on a target upload): read only to count typed values.
+      const excludedCode = excludedLabelToCode.get(label);
+      if (excludedCode) cols.push({ colIndex: ci, code: excludedCode, kind: 'excluded' });
       // Skip fixed columns / blanks / unknown labels.
     }
     return cols;
@@ -640,7 +672,7 @@ export function parseTargetUploadBuffer(
     );
     const missing = enabledCodes.filter((code) => !matchedCodes.has(code));
     if (matchedCodes.size === 0 || missing.length > 0) {
-      throw new Error(
+      throw new TemplateFormatError(
         `Template KPI columns don't match the configured KPIs for "${monthBlocks[bi].month}" ` +
           `(missing: ${missing.join(', ') || '(none resolved)'}) — re-download the template`,
       );
@@ -702,6 +734,12 @@ export function parseTargetUploadBuffer(
 
         // CRITICAL: blank / null / undefined / empty string → omit the key
         if (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') continue;
+
+        if (kind === 'excluded') {
+          const n = typeof rawVal === 'number' ? rawVal : parseFloat(String(rawVal).trim().replace(/,/g, ''));
+          if (isFinite(n)) excludedValues[code] = (excludedValues[code] ?? 0) + 1;
+          continue;
+        }
 
         // D1 (scoped tenants only): an out-of-scope (outlet, KPI) cell is IGNORED — value and name.
         // Only a NUMERIC value counts as "ignored" (the template's `N/A` is just non-numeric).
@@ -782,6 +820,12 @@ export function parseTargetUploadBuffer(
   return {
     rows,
     acceptedTargets,
-    summary: { total: rows.length, accepted, rejected, ignoredOutOfScope },
+    summary: {
+      total: rows.length,
+      accepted,
+      rejected,
+      ignoredOutOfScope,
+      ...(opts?.excludedKpis ? { excludedValues } : {}),
+    },
   };
 }
