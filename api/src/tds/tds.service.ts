@@ -88,6 +88,7 @@ import { withholdingTdsPaise } from './tds-methodology.helper';
 import type { UploadResult, UploadRowError } from './dto/tds.dto';
 import { buildXlsx } from '../common/xlsx';
 import { formatINR, paiseToRupees } from '../common/money';
+import { istDateKey as istDateKeyOf } from '../common/ist-date';
 
 // ─── Result types ─────────────────────────────────────────────────────────────
 
@@ -1537,7 +1538,11 @@ export class TdsService {
     const result = parsed.result;
     // No-PAN marker rows must name an outlet of THIS tenant (and are flagged when that outlet's
     // owner has a PAN on file — the amount then counts under that PAN).
-    const rows = await this.validateNoPanUploadRows(parsed.rows, result, { clientId, section: '194R' });
+    const validated = await this.validateNoPanUploadRows(parsed.rows, result, { clientId, section: '194R' });
+    // Off-portal payments register (2026-11-25): a row that is the SAME benefit as a live off-portal payment (same
+    // IST day + amount + outlet code or PAN) is refused, loudly — it is already in the 194R base (never counted twice,
+    // whichever was uploaded first). A matching marker uploaded BEFORE the payment is replaced by it at confirm.
+    const rows = await this.refuseRowsInOffPortalRegister(clientId, validated, result);
 
     if (!apply || rows.length === 0) {
       return capUploadResult(result);
@@ -1614,6 +1619,51 @@ export class TdsService {
     }
 
     return capUploadResult(result);
+  }
+
+  /** See uploadOffPlatform: drop (as row errors) the rows already recorded in the off-portal payments register. */
+  private async refuseRowsInOffPortalRegister<T extends { entryDate: Date; panNumber: string; outletCode?: string | null; amountPaise: bigint }>(
+    clientId: string,
+    rows: T[],
+    result: UploadResult,
+  ): Promise<T[]> {
+    const delegate = (this.prisma as Partial<PrismaService>).offPortalPayment; // absent only on narrow test fakes
+    if (!rows.length || !delegate) return rows;
+    const times = rows.map((r) => r.entryDate.getTime());
+    const live = await delegate.findMany({
+      where: {
+        clientId,
+        voidedAt: null,
+        tdsSection: 'SEC_194R',
+        paymentDate: { gte: new Date(Math.min(...times) - 86_400_000), lt: new Date(Math.max(...times) + 2 * 86_400_000) },
+      },
+      select: { outletCodeKey: true, panNumber: true, amountPaise: true, paymentDate: true },
+    });
+    if (!live.length) return rows;
+    const day = (d: Date) => istDateKeyOf(d);
+    const keep: T[] = [];
+    rows.forEach((r, idx) => {
+      const pan = isNoPanCell(r.panNumber) ? null : normalisePan(r.panNumber);
+      const code = r.outletCode?.trim().toUpperCase() || null;
+      const hit = live.some(
+        (p) =>
+          p.amountPaise === r.amountPaise &&
+          day(p.paymentDate) === day(r.entryDate) &&
+          ((code && p.outletCodeKey === code) || (pan && p.panNumber === pan)),
+      );
+      if (!hit) {
+        keep.push(r);
+        return;
+      }
+      const sheetRow = this.sheetRowOf(r) || idx + 2;
+      result.succeeded -= 1;
+      result.failed += 1;
+      result.errors.push({
+        row: sheetRow,
+        message: `Row ${sheetRow}: refused — the same payment (date, amount, outlet / PAN) is already recorded in the off-portal payments register, so it already counts in 194R`,
+      });
+    });
+    return keep;
   }
 
   /**

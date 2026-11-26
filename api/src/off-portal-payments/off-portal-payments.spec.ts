@@ -341,6 +341,37 @@ describe('preview → confirm', () => {
     expect(p.rows[1].flags).toEqual(['NAME_DIFFERS']);
   });
 
+  it('a payment already PAID through the portal (same outlet + UTR, or amount + day) → PAID_ON_PORTAL', async () => {
+    const { svc, db } = setup();
+    const day = parseOffPortalFile(fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 1, date: fyDay(5), utr: 'X' }]).buffer).rows[0].paymentDate;
+    db.creditPayoutEntry = {
+      findMany: async ({ where }: any) =>
+        [{ clientId: CLIENT, status: 'PAID', outletId: 'out1', amountPaise: 250_000n, paidAt: new Date(day.getTime() + 3_600_000), utr: 'BANK77' }]
+          .filter((e) => matches(e, where))
+          .map((e) => pick(e, { outletId: true, amountPaise: true, paidAt: true, utr: true })),
+    };
+    const p = await svc.preview(gifsy(), fileOf([
+      { id: 'OUT1', name: 'Sharma Stores', amount: 999, date: fyDay(5), utr: 'bank 77' }, // same UTR
+      { id: 'OUT1', name: 'Sharma Stores', amount: 2500, date: fyDay(5), utr: 'OTHER' }, // same amount + day
+      { id: 'OUT1', name: 'Sharma Stores', amount: 2500, date: fyDay(5), utr: 'OTHER2', pan: 'ABCDE1234F' },
+    ]));
+    expect(p.rows.map((r) => r.flags.includes('PAID_ON_PORTAL'))).toEqual([true, true, true]);
+    expect(p.requiredAcknowledgements).toContain('PAID_ON_PORTAL');
+  });
+
+  it('a legacy TDS entry under a DIFFERENT payee is never silently replaced (flagged, both count)', async () => {
+    const { svc, s, db } = setup({ section: 'SEC_194R', methodology: 'GROSS_UP' });
+    const p0 = parseOffPortalFile(fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 5_000, date: fyDay(5), utr: 'L1' }]).buffer).rows[0];
+    s.legacy.push({ id: 'leg2', clientId: CLIENT, section: 'SEC_194R', panNumber: 'KLMNO5555P', outletCode: 'OUT1', amountPaise: 500_000n, entryDate: new Date(`${p0.paymentDay}T00:00:00Z`) });
+    const f = fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 5_000, date: fyDay(5), utr: 'L1' }]);
+    const { preview } = await previewAndConfirm(svc, f);
+    expect(preview.requiredAcknowledgements).toEqual(['TDS_ENTRY_OTHER_PAYEE']);
+    expect(s.payments[0].supersedesOffPlatformEntryId).toBeNull();
+    const bases = await collect194RBases(db, { clientId: CLIENT, fyLabel: FY.fyLabel, importedCountFrom: null });
+    expect(bases.get('KLMNO5555P')).toMatchObject({ nonCashPaise: 500_000n });
+    expect(bases.get('ABCDE1234F')).toMatchObject({ cashPaise: 500_000n });
+  });
+
   it('visibility on the Deduct method → TDS_NOT_WITHHELD; dated before the fund opening → BEFORE_FUND_OPENING', async () => {
     const { svc, s } = setup({ section: 'SEC_194R', methodology: 'DEDUCT' });
     s.openings.push({ clientId: CLIENT, receivedAt: new Date(NOW.getTime() - 86_400_000) });
@@ -438,6 +469,18 @@ describe('consumers', () => {
     await ctx.svc.void(gifsy(), ctx.s.payments[0].id, 'entered in error');
     const voided = await collect194RBases(ctx.db, { clientId: CLIENT, fyLabel: FY.fyLabel, importedCountFrom: null });
     expect(voided.get('ABCDE1234F')).toMatchObject({ nonCashPaise: 500_000n, cashPaise: 0n }); // the legacy row counts again
+  });
+
+  it('the reverse order is guarded too: a legacy off-platform upload of an already-recorded payment is refused per row', async () => {
+    const ctx = await recorded({ section: 'SEC_194R', methodology: 'GROSS_UP' });
+    const day = ctx.s.payments.find((p) => p.utr === 'C1')!.paymentDate as Date;
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['Date', 'PAN', 'Outlet Code', 'Amount (₹)'], [istDateKey(day), 'ABCDE1234F', 'OUT1', 10_000], [istDateKey(day), 'ABCDE1234F', 'OUT1', 123]]), 'S');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+    const tds = new TdsService(ctx.db, { getForFy: async () => DEFAULT_RESOLVED_TDS_STATUTORY } as any, {} as any);
+    const res = await tds.uploadOffPlatform(CLIENT, 'u', { buffer } as Express.Multer.File, false);
+    expect(res.succeeded).toBe(1);
+    expect(res.errors.map((e) => e.message).join(' ')).toMatch(/already recorded in the off-portal payments register/);
   });
 
   it('194R report: off-portal amount said on the row; Deduct visibility → TDS NOT WITHHELD shortfall', async () => {
