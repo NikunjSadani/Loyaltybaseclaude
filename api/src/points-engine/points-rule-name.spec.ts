@@ -345,6 +345,6 @@ describe('Points rule name — migration', () => {
   it('the schema declares the column as a nullable String', () => {
     const schema = readFileSync(join(__dirname, '..', '..', 'prisma', 'schema.prisma'), 'utf8');
     const model = schema.slice(schema.indexOf('model PointsRule {'), schema.indexOf('@@map("points_rules")'));
-    expect(model).toMatch(/\n\s+name\s+String\?\n/);
+    expect(model).toMatch(/\r?\n\s+name\s+String\?\r?\n/); // CRLF-safe (Windows checkouts)
   });
 });
