@@ -38,7 +38,8 @@ import {
   type SalesImportDetail, type SalesImportPreview,
 } from '@/lib/sales-import/types';
 import {
-  MonthReconciliationPanel, reconciliationNeedsAttention, useDimensionLabels, useOutletTypeNames, type OutletTypeNames,
+  MonthReconciliationPanel, reconciliationNeedsAttention, reconciliationProblems, useDimensionLabels, useOutletTypeNames,
+  type OutletTypeNames,
 } from '../_components/month-reconciliation-panel';
 import { NotCalculatedAck, notCalculatedMonths } from '../_components/not-calculated-ack';
 import { DayDataNotice } from '../_components/day-data-notice';
@@ -568,6 +569,8 @@ function PreviewSection({
   const showBlockers = (selected.size > 0 || noKpis) && blockers.length > 0;
   const anyOlder = months.some((m) => selected.has(m.month) && m.warnings.includes('OLDER_THAN_LAST_APPLIED'));
   const kpiNames = Array.from(new Set(months.flatMap((m) => m.kpis.map((k) => k.label || k.kpiCode))));
+  /** The screen-top summary: each month's open problems per KPI (exactly what blocks it). */
+  const focusProblems = months.flatMap((m) => reconciliationProblems(m.reconciliation).map((p) => ({ month: m.month, ...p })));
   /** The job this page shows (this import's) and whether it is still going. */
   const job = jobId ? jobs[jobId] ?? null : null;
   const jobRunning = !!job && !jobEnded(job);
@@ -821,6 +824,71 @@ function PreviewSection({
       </div>
       {downloadError && <Banner tone="red">{downloadError}</Banner>}
 
+      {/* Owner 2026-11-26: what still needs doing + Apply at the TOP (sticky), so hundreds of "not found" rows can never
+          push Apply out of sight. Apply stays disabled until resolved; the reason is shown, not only read out. */}
+      <div className="sticky top-0 z-20 max-h-[45vh] overflow-y-auto bg-white/95 backdrop-blur rounded-xl border border-gray-200 shadow-sm px-4 py-3 space-y-2"
+        data-testid="sales-import-apply-bar">
+        {focusProblems.length > 0 ? (
+          <div className="text-xs text-red-800 space-y-0.5" data-testid="sales-import-problem-summary">
+            <p className="font-semibold">Still to resolve before {focusProblems.some((p) => p.month !== focusProblems[0].month) ? 'these months' : 'this month'} can be applied:</p>
+            <ul className="list-disc pl-4">
+              {focusProblems.map((p) => (
+                <li key={`${p.month}-${p.kpiCode}`} data-testid={`sales-import-problem-${p.month}-${p.kpiCode}`}>
+                  <span className="font-medium">{monthLabel(p.month)} · {p.label}</span>: {p.text}
+                </li>
+              ))}
+            </ul>
+            <p className="text-gray-600">The details are under each month below.</p>
+          </div>
+        ) : months.some((m) => (m.reconciliation?.focus.length ?? 0) > 0) ? (
+          <p className="text-xs text-gray-600" data-testid="sales-import-problem-summary-none">
+            No focus product problems in this file.
+          </p>
+        ) : null}
+        {canAct && anyOlder && (
+          <label className="flex items-start gap-2 text-sm text-gray-800 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+            <input type="checkbox" className="mt-1" checked={olderAck} onChange={(e) => setOlderAck(e.target.checked)}
+              aria-label="I want to apply this older file over the newer one" />
+            <span>
+              For a ticked month, this file&apos;s sales stop earlier than the file applied now. Applying rolls that month
+              back to this file&apos;s older data. I want to apply it anyway.
+            </span>
+          </label>
+        )}
+
+        {canAct ? (
+          <div className="flex flex-wrap items-start gap-3">
+            <Button variant="primary" onClick={apply} loading={applying} data-testid="sales-import-apply"
+              disabled={blockers.length > 0 || busy} aria-describedby={applyWhy ? 'sales-import-apply-why' : undefined}>
+              Apply {selected.size > 0 ? `${selected.size} month${selected.size > 1 ? 's' : ''}` : ''}
+            </Button>
+            {applyWhy && <span id="sales-import-apply-why" className="sr-only">{applyWhy}</span>}
+            {selected.size === 0 && !noKpis && !busy && months.some((m) => m.canApply) && (
+              <span className="text-xs text-gray-600 self-center" data-testid="sales-import-apply-hint">
+                Tick the months to apply in the table below.
+              </span>
+            )}
+            {showBlockers && (
+              <ul className="text-xs text-gray-600 list-disc pl-4" data-testid="sales-import-apply-blockers">
+                {blockers.map((b) => <li key={b}>{b}</li>)}
+              </ul>
+            )}
+            {heldBack.length > 0 && (
+              <div className="text-xs text-gray-600 min-w-0" data-testid="sales-import-unavailable-months">
+                <p className="font-medium text-gray-700">Not available:</p>
+                <ul className="list-disc pl-4">
+                  {heldBack.map((b) => <li key={b}>{b}</li>)}
+                </ul>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-gray-500" data-testid="sales-import-apply-denied">
+            You can view this preview, but you don&apos;t have permission to apply sales files.
+          </p>
+        )}
+      </div>
+
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-x-auto">
         <div className="px-4 py-3 border-b border-gray-100 flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -883,44 +951,6 @@ function PreviewSection({
           </table>
         )}
       </div>
-
-      {canAct && anyOlder && (
-        <label className="flex items-start gap-2 text-sm text-gray-800 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
-          <input type="checkbox" className="mt-1" checked={olderAck} onChange={(e) => setOlderAck(e.target.checked)}
-            aria-label="I want to apply this older file over the newer one" />
-          <span>
-            For a ticked month, this file&apos;s sales stop earlier than the file applied now. Applying rolls that month
-            back to this file&apos;s older data. I want to apply it anyway.
-          </span>
-        </label>
-      )}
-
-      {canAct ? (
-        <div className="flex flex-wrap items-start gap-3">
-          <Button variant="primary" onClick={apply} loading={applying} data-testid="sales-import-apply"
-            disabled={blockers.length > 0 || busy} aria-describedby={applyWhy ? 'sales-import-apply-why' : undefined}>
-            Apply {selected.size > 0 ? `${selected.size} month${selected.size > 1 ? 's' : ''}` : ''}
-          </Button>
-          {applyWhy && <span id="sales-import-apply-why" className="sr-only">{applyWhy}</span>}
-          {showBlockers && (
-            <ul className="text-xs text-gray-600 list-disc pl-4" data-testid="sales-import-apply-blockers">
-              {blockers.map((b) => <li key={b}>{b}</li>)}
-            </ul>
-          )}
-          {heldBack.length > 0 && (
-            <div className="text-xs text-gray-600 min-w-0" data-testid="sales-import-unavailable-months">
-              <p className="font-medium text-gray-700">Not available:</p>
-              <ul className="list-disc pl-4">
-                {heldBack.map((b) => <li key={b}>{b}</li>)}
-              </ul>
-            </div>
-          )}
-        </div>
-      ) : (
-        <p className="text-xs text-gray-500" data-testid="sales-import-apply-denied">
-          You can view this preview, but you don&apos;t have permission to apply sales files.
-        </p>
-      )}
 
       {!results && !jobRunning && lastResults.length > 0 && (
         <div className="space-y-2" data-testid="sales-import-last-results">

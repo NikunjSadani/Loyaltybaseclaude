@@ -45,6 +45,7 @@ import { UploadTruncationNote, TRUNCATION_NEXT } from '@/components/admin/Upload
 import { normalizeRowsEcho } from '@/lib/upload-rows-echo';
 import { TargetUploadHistory } from '@/components/admin/target-upload-history';
 import { TargetHistoryCard } from '@/components/admin/target-history';
+import { NumericFocusNamesList, numericFocusNamesOf, type NumericFocusNamesDetails } from '@/components/admin/numeric-focus-names';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -220,6 +221,8 @@ export default function TargetUploadPage() {
   /** previewing = step 1 in flight · applying = step 2 in flight. */
   const [busy,        setBusy]        = useState<'idle' | 'previewing' | 'applying'>('idle');
   const [uploadError, setUploadError] = useState('');
+  /** The refusal's full list of focus names that are numbers (shown under the error, downloadable). */
+  const [numericNames, setNumericNames] = useState<NumericFocusNamesDetails | null>(null);
   const [preview,     setPreview]     = useState<PreviewResult | null>(null);
   const [result,      setResult]      = useState<UploadResult | null>(null);
   /** The preview the shown result was applied from — to say so when the final numbers differ. */
@@ -334,7 +337,7 @@ export default function TargetUploadPage() {
    */
   async function postUpload(
     file: File, query: string, savedNote: string, seq: number,
-  ): Promise<{ ok: true; data: UploadResponse } | { ok: false; status: number | null; error: string } | null> {
+  ): Promise<{ ok: true; data: UploadResponse } | { ok: false; status: number | null; error: string; details?: unknown } | null> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -349,14 +352,14 @@ export default function TargetUploadPage() {
       if (seq !== requestSeq.current) return null;
       return { ok: false, status: null, error: networkErrorMessage(savedNote) };
     }
-    const json = await readJsonSafe<{ success: boolean; data?: UploadResponse; error?: string }>(res);
+    const json = await readJsonSafe<{ success: boolean; data?: UploadResponse; error?: string; details?: unknown }>(res);
     if (seq !== requestSeq.current) return null; // superseded (Cancel / another file) — ignore
     if (!json) {
       // Non-JSON (proxy truncation / plain-text 5xx / edge 413): readable + honest, never a raw SyntaxError.
       return { ok: false, status: res.status, error: responseErrorMessage(res, json, savedNote) };
     }
     if (!res.ok || !json.success) {
-      return { ok: false, status: res.status, error: json.error ?? `Upload failed (HTTP ${res.status})` };
+      return { ok: false, status: res.status, error: json.error ?? `Upload failed (HTTP ${res.status})`, details: json.details };
     }
     return { ok: true, data: json.data! };
   }
@@ -372,6 +375,7 @@ export default function TargetUploadPage() {
       if (!out.ok) {
         pendingFileRef.current = null;
         setUploadError(notice ? `${notice} ${out.error}` : out.error);
+        setNumericNames(numericFocusNamesOf(out.details));
         return;
       }
       const normalized = normalizeRowsEcho(out.data) as unknown as UploadResponse;
@@ -401,6 +405,7 @@ export default function TargetUploadPage() {
     setFileName(picked.name);
     setBusy('previewing');
     setUploadError('');
+    setNumericNames(null);
     setResult(null);
     setAppliedFrom(null);
     setPreview(null);
@@ -437,6 +442,7 @@ export default function TargetUploadPage() {
     const seq = ++requestSeq.current;
     setBusy('applying');
     setUploadError('');
+    setNumericNames(null);
     try {
       const out = await postUpload(
         file,
@@ -468,6 +474,7 @@ export default function TargetUploadPage() {
         // 500 / 503 / network: nothing (or, for a lost reply, possibly everything) was saved — the preview stays and
         // Confirm & apply can be pressed again safely (an applied preview is refused, never applied twice).
         setUploadError(out.error);
+        setNumericNames(numericFocusNamesOf(out.details));
         return;
       }
       const applied = normalizeRowsEcho(out.data) as unknown as UploadResult;
@@ -494,6 +501,7 @@ export default function TargetUploadPage() {
     setAppliedFrom(null);
     setAcks(new Set());
     setUploadError('');
+    setNumericNames(null);
     setFileName('');
     setBusy('idle');
   }
@@ -723,6 +731,7 @@ export default function TargetUploadPage() {
             <span>{uploadError}</span>
           </div>
         )}
+        {uploadError && numericNames && <NumericFocusNamesList details={numericNames} />}
       </div>
 
       {/* ── Section 4a: Preview (nothing written) ──────────────────────────── */}

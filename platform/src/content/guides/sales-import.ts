@@ -116,9 +116,11 @@ Click a month to open it. It shows, for each KPI, **From this file**, **Stored n
 
 - **"Targets were uploaded after this month was last applied — apply again (or Recalculate) to use them."** Apply the latest file again, or use **Recalculate** (Step 6).
 - **"No targets uploaded for this month yet — focus KPIs are not calculated."** Upload the month's targets first, then recalculate.
-- **Focus brands** shows each product name from the target file and the products it counts. A red **"<name> — not found in sales data"** blocks the month: the message **"<Month> can't be applied until … fixed"** lists the problems.
+- **Focus brands** shows each product name from the target file and the products it counts, one section per KPI (a large section starts collapsed; its heading says how many names are not found). A red **"<name> — not found in sales data"** blocks the month: the message **"<Month> can't be applied until … fixed"** lists the problems.
   - If the name is a spelling mistake, fix it in the target file and upload the targets again.
   - If the product simply has not sold yet, press **Accept — not sold yet**. It then counts as 0 (you can **Undo** it).
+  - Many names in one KPI: open the group (its heading shows the count, e.g. "Focus Brand 1 — 38 names not found") and press **Accept all N as not sold yet…**. The exact list is shown first; tick "I checked these N names…" and press **Accept N names**. Nothing is accepted until you do.
+  - **"This looks like a number, not a product — fix the target file."** A ₹ figure was typed into the name (e.g. "1011.2697 & ADHO500"). Fix the target file and upload it again. It is left out of "Accept all" and has no Accept button unless you tick the override. (A new target upload with such a name is refused, listing the outlets.)
   - **"could mean more than one product"** — make the name more specific in the target file.
   - **"N outlets have a target for this KPI but no product name in the target file"** — add the names and upload the target file again.
 - **For your information** lists outlets with a target but no sales, and outlets with sales but no target. Nothing blocks; check them if the numbers look surprising.
@@ -126,7 +128,7 @@ Click a month to open it. It shows, for each KPI, **From this file**, **Stored n
 ## Step 4 — Apply
 
 1. Tick the month(s) to update. Months that cannot be ticked say why under the month name (for example "… is CLOSED. Only Gifsy can reopen it.").
-2. Tick any confirmation boxes the warnings ask for. Until everything is in order, the reasons are listed next to the button (for example "Tick at least one month.").
+2. Tick any confirmation boxes the warnings ask for. The **Apply** button and a summary of what is still to resolve stay at the **top** of the screen while you scroll. Until everything is in order, the reasons are listed next to the button (for example "Tick at least one month.").
 3. Press **Apply N months** and confirm. The message reminds you that the Sales Import KPIs are **fully replaced** for every programme outlet, outlets with no sales in the file get **0**, and other KPIs are not touched.
 4. The apply runs **in the background** (large files take a minute or more per month). The page shows **"Queued — waiting its turn for the processor"**, then **"Applying in the background"** with each month's progress ("<Month>: applying (started 10:32)…"). You can leave the page — it carries on. When you come back the page shows the progress, or the result under **"Last apply from this file"** (who applied it, when, and the reason for any month that was not applied). Apply, Reprocess, Cancel and Delete stay greyed out until it finishes, and anyone else opening the file sees "Started by <name>". Never apply the same months again while it runs.
 5. Each month then shows a result card: **"<Month>: applied"** with "N outlets updated, M set to 0. Targets cards and dashboards now show these numbers." — or **"not applied"** with the reason. One month failing does not undo the others.

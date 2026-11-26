@@ -10,6 +10,7 @@ import type {
   ApplyResult,
   SalesApplyJobDto,
   FocusAcceptanceList,
+  FocusAcceptanceBulkRequest,
   FocusAcceptanceRequest,
   SalesColumnMapping,
   SalesHistoryCombos,
@@ -118,6 +119,9 @@ export const salesImportApi = {
   /** Accept one UNMATCHED focus product name (month + KPI + token key) as "not sold yet" — it then counts as 0. */
   acceptFocusToken: (month: string, body: FocusAcceptanceRequest) =>
     api.post<FocusAcceptanceList>(`${MONTHS}/${id(month)}/focus-acceptances`, body),
+  /** Accept SEVERAL UNMATCHED names of ONE KPI in one request — all or nothing (owner 2026-11-26 "Accept all"). */
+  acceptFocusTokens: (month: string, body: FocusAcceptanceBulkRequest) =>
+    api.post<FocusAcceptanceList & { acceptedCount: number }>(`${MONTHS}/${id(month)}/focus-acceptances/bulk`, body),
   /** Removes that acceptance (the name blocks applying again until it is matched or accepted). */
   undoFocusAcceptance: (month: string, kpiCode: string, key: string) =>
     api.del<FocusAcceptanceList>(

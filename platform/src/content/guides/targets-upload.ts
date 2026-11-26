@@ -56,6 +56,10 @@ The preview also says until when it can be confirmed (**This preview can be conf
    - If the preview is older than 30 minutes, **nothing is saved** and the file is checked again the same way.
 3. The green **Targets submitted successfully** box shows how many outlet-month targets were saved (new and overwritten), and **Not applied as typed** lists what was not saved. Check the stored targets anytime with **Download Final Targets**.
 
+**A file that is refused (nothing saved):**
+
+- **"Focus brand names must be product names, not numbers — check column …"** A focus brand name has a number in it (e.g. **"1011.2697 & ADHO500"** — a ₹ figure typed into the name). The table under the message shows the outlet, month, column and number for the first 20; **Download the full list** gives every one. Fix those names in the file and upload it again.
+
 **Messages you may see on Confirm:**
 
 - **"This preview was already applied on … — it was not applied again."** The first press really did save it (for example after a network drop). Check with **Download Final Targets** or in **Upload history**. To upload the same file again, pick it again for a new preview.
