@@ -47,6 +47,15 @@ export const HUBBLE_NEVER_PLACED_REASONS: ReadonlySet<string> = new Set([
   'HUBBLE_INVALID_AMOUNT',
 ]);
 
+/**
+ * Is this the API fulfiller's provider stamp? The server stores 'Hubble'; a non-Gifsy viewer receives it as
+ * "Via API" (owner rule 2026-11-26 — the client never sees the name), so both spellings count.
+ */
+export function isApiFulfillerProvider(provider: string | null | undefined): boolean {
+  const p = (provider ?? '').trim().toLowerCase();
+  return p === 'hubble' || p === 'via api';
+}
+
 /** Mirrors the backend `hasIssuedVoucher` (null / '' / whitespace-only = none). */
 export function hasIssuedVoucher(code: string | null | undefined): boolean {
   return typeof code === 'string' && code.trim() !== '';
@@ -65,7 +74,7 @@ export function hasIssuedVoucher(code: string | null | undefined): boolean {
 export function nextStatusOptions(order: TransitionableOrder): string[] {
   const edges = NEXT_STATUS[order.status] ?? [];
   const isCash = CASH_REDEMPTION_MODES.has(order.redemptionMode ?? '');
-  const isHubble = (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble';
+  const isHubble = isApiFulfillerProvider(order.voucherProvider);
   const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
   const hubbleWithoutCode = (order.hubbleHanded === true || isHubble) && !voucherIssued;
   return edges.filter((to) => {

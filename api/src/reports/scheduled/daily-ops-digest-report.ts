@@ -13,6 +13,7 @@
 import type { KycSlaTargets } from '../../common/kyc-sla-stage';
 import { kycPendingAge } from '../../admin-core/dashboards/kyc-pending-sla';
 import { formatDateIST } from '../../common/ist-date';
+import { neutralFulfillerText } from '../../common/fulfiller-name';
 import { isFastTrackRow, type KycFastTrackHistoryRow } from '../../kyc/kyc-fast-track.helper';
 import { monthLabel } from '../../sales-import/months/month-state';
 import { emailShell, esc, intIN, rupees, sectionHeading, statRow, table } from './email-html';
@@ -214,7 +215,7 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
   const hubbleFailed = t.vouchers?.ok ? t.vouchers.data.failed : 0;
   if (t.redemptions.ok) {
     const r = t.redemptions.data;
-    const share = hubbleFailed > 0 ? `, ${intIN(Math.min(hubbleFailed, r.failed))} via Hubble` : '';
+    const share = hubbleFailed > 0 ? `, ${intIN(Math.min(hubbleFailed, r.failed))} via API` : '';
     const held = r.failedNotRefunded;
     if (r.failed > 0) {
       push(
@@ -225,14 +226,14 @@ export function attentionItems(t: TenantDigest): AttentionItem[] {
       push(`Still open: ${plural(held, 'failed redemption still holds', 'failed redemptions still hold')} the outlet's points (not refunded)`, held);
     }
   } else if (hubbleFailed > 0) {
-    push(`Hubble: ${plural(hubbleFailed, 'voucher', 'vouchers')} failed`, hubbleFailed);
+    push(`Via API: ${plural(hubbleFailed, 'voucher', 'vouchers')} failed`, hubbleFailed);
   }
 
-  failed('Vouchers (Hubble)', t.vouchers);
+  failed('Vouchers (Via API)', t.vouchers);
   if (t.vouchers?.ok) {
     const v = t.vouchers.data;
-    if (v.stuckProcessing > 0) push(`Hubble: ${plural(v.stuckProcessing, 'voucher', 'vouchers')} stuck in processing > 30 min`, v.stuckProcessing);
-    if (v.needsReconcile > 0) push(`Hubble: ${plural(v.needsReconcile, 'order needs', 'orders need')} reconcile`, v.needsReconcile);
+    if (v.stuckProcessing > 0) push(`Via API: ${plural(v.stuckProcessing, 'voucher', 'vouchers')} stuck in processing > 30 min`, v.stuckProcessing);
+    if (v.needsReconcile > 0) push(`Via API: ${plural(v.needsReconcile, 'order needs', 'orders need')} reconcile`, v.needsReconcile);
     if ((v.voucherNotifyFailed ?? 0) > 0) {
       const n = v.voucherNotifyFailed ?? 0;
       push(`Vouchers: ${plural(n, 'code message', 'code messages')} to members not sent`, n);
@@ -405,7 +406,7 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
   if (msg) out.push(msg);
   if (d.pendingRetryable > 0) {
     out.push({
-      text: `Voucher dispersal: ${plural(d.pendingRetryable, 'purchase', 'purchases')} unconfirmed by Hubble for over 2 h (Retry available)`,
+      text: `Voucher dispersal: ${plural(d.pendingRetryable, 'purchase', 'purchases')} unconfirmed via API for over 2 h (Retry available)`,
       events: d.pendingRetryable,
     });
   }
@@ -427,31 +428,31 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
   if (by) {
     if (by.superseded > 0) {
       out.push({
-        text: `Voucher dispersal: Hubble reported activity on ${plural(by.superseded, 'earlier order', 'earlier orders')} retired by a retry (in the window) — check with Hubble (a voucher may have been issued twice)`,
+        text: `Voucher dispersal: The API provider reported activity on ${plural(by.superseded, 'earlier order', 'earlier orders')} retired by a retry (in the window) — check with the API provider (a voucher may have been issued twice)`,
         events: by.superseded,
       });
     }
     if (by.marked > 0) {
       out.push({
-        text: `Voucher dispersal: Hubble reported activity on the ${by.marked === 1 ? 'order of 1 row' : `orders of ${intIN(by.marked)} rows`} marked "not bought" (in the window) — check with Hubble (a voucher may have been issued; the row stays closed)`,
+        text: `Voucher dispersal: The API provider reported activity on the ${by.marked === 1 ? 'order of 1 row' : `orders of ${intIN(by.marked)} rows`} marked "not bought" (in the window) — check with the API provider (a voucher may have been issued; the row stays closed)`,
         events: by.marked,
       });
     }
     if (by.notApplied > 0) {
       out.push({
-        text: `Voucher dispersal: ${plural(by.notApplied, 'order', 'orders')} Hubble completed could not be applied to ${by.notApplied === 1 ? 'its row' : 'their rows'} (in the window) — check with Hubble (a paid voucher may not have reached the person)`,
+        text: `Voucher dispersal: ${plural(by.notApplied, 'order', 'orders')} the API provider completed could not be applied to ${by.notApplied === 1 ? 'its row' : 'their rows'} (in the window) — check with the API provider (a paid voucher may not have reached the person)`,
         events: by.notApplied,
       });
     }
     if (by.couldNotCheck > 0) {
       out.push({
-        text: `Voucher dispersal: couldn't check ${plural(by.couldNotCheck, 'earlier order', 'earlier orders')} with Hubble — the lookup failed and no status is known yet (in the window); check ${by.couldNotCheck === 1 ? 'it' : 'them'} with Hubble`,
+        text: `Voucher dispersal: couldn't check ${plural(by.couldNotCheck, 'earlier order', 'earlier orders')} with the API provider — the lookup failed and no status is known yet (in the window); check ${by.couldNotCheck === 1 ? 'it' : 'them'} with the API provider`,
         events: by.couldNotCheck,
       });
     }
     if ((by.noOrderUnverified ?? 0) > 0) {
       out.push({
-        text: `Voucher dispersal: Hubble said "no order" for ${plural(by.noOrderUnverified, 'order', 'orders')} but it could not be verified yet (in the window) — kept open and re-checked automatically`,
+        text: `Voucher dispersal: The API provider said "no order" for ${plural(by.noOrderUnverified, 'order', 'orders')} but it could not be verified yet (in the window) — kept open and re-checked automatically`,
         events: by.noOrderUnverified,
       });
     }
@@ -467,25 +468,25 @@ export function gifsyWideItems(input: Pick<DigestInput, 'voucherDispersal' | 'gi
       open.noOrderUnverified ? `${intIN(open.noOrderUnverified)} no order (unverified)` : null,
     ].filter(Boolean);
     out.push({
-      text: `Voucher dispersal: still open: ${plural(d.earlierOrderAlertsOpen!, 'order alert', 'order alerts')} (${parts.join(', ')}) — open until Hubble confirms the order failed / there is no order; see the campaign pages`,
+      text: `Voucher dispersal: still open: ${plural(d.earlierOrderAlertsOpen!, 'order alert', 'order alerts')} (${parts.join(', ')}) — open until the API provider confirms the order failed / there is no order; see the campaign pages`,
       events: d.earlierOrderAlertsOpen!,
     });
   }
   if (!by && (d.earlierOrderAlerts ?? 0) > 0) {
     out.push({
-      text: `Voucher dispersal: Hubble reported activity on ${plural(d.earlierOrderAlerts!, 'earlier order', 'earlier orders')} after a retry or a "not bought" mark (in the window) — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)`,
+      text: `Voucher dispersal: The API provider reported activity on ${plural(d.earlierOrderAlerts!, 'earlier order', 'earlier orders')} after a retry or a "not bought" mark (in the window) — check with the API provider (a voucher may have been issued twice, or a paid voucher may not have reached the person)`,
       events: d.earlierOrderAlerts!,
     });
   }
   if ((d.unrecognisedStatus ?? 0) > 0) {
     out.push({
-      text: `Voucher dispersal: ${plural(d.unrecognisedStatus!, 'purchase', 'purchases')} with a Hubble status we do not recognise — needs Gifsy tech`,
+      text: `Voucher dispersal: ${plural(d.unrecognisedStatus!, 'purchase', 'purchases')} with an API status we do not recognise — needs Gifsy tech`,
       events: d.unrecognisedStatus!,
     });
   }
   if ((d.lateCompleted ?? 0) > 0) {
     out.push({
-      text: `Voucher dispersal: ${plural(d.lateCompleted!, 'purchase', 'purchases')} bought later by Hubble after ${d.lateCompleted === 1 ? 'it' : 'they'} had failed / been refused (in the window)`,
+      text: `Voucher dispersal: ${plural(d.lateCompleted!, 'purchase', 'purchases')} bought later via API after ${d.lateCompleted === 1 ? 'it' : 'they'} had failed / been refused (in the window)`,
       events: d.lateCompleted!,
     });
   }
@@ -501,7 +502,7 @@ const SECTION_KEYS: Array<[keyof TenantDigest, string]> = [
   ['kyc', 'KYC'],
   ['points', 'Points'],
   ['redemptions', 'Redemptions'],
-  ['vouchers', 'Vouchers (Hubble)'],
+  ['vouchers', 'Vouchers (Via API)'],
   ['payouts', 'Payouts'],
   ['messages', 'Messages'],
   ['visibility', 'Visibility'],
@@ -716,8 +717,8 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['purchase failed', intIN(d.buyFailed), accentIf(d.buyFailed, 'red')],
       ['WhatsApp failed', intIN(d.messageFailed), accentIf(d.messageFailed, 'red')],
       ['bought later after failing', intIN(d.lateCompleted ?? 0), accentIf(d.lateCompleted ?? 0, 'red')],
-      ['earlier order reported by Hubble', intIN(d.earlierOrderAlerts ?? 0), accentIf(d.earlierOrderAlerts ?? 0, 'red')],
-      ['earlier-order alert resolved (Hubble: failed / no order)', intIN(d.earlierOrderAlertsResolved ?? 0)],
+      ['earlier order reported via API', intIN(d.earlierOrderAlerts ?? 0), accentIf(d.earlierOrderAlerts ?? 0, 'red')],
+      ['earlier-order alert resolved (Via API: failed / no order)', intIN(d.earlierOrderAlertsResolved ?? 0)],
     ]) +
     metricLine('Right now', [
       ['pending', intIN(d.pending), accentIf(d.pending, 'amber')],
@@ -726,7 +727,7 @@ function dispersalBlock(r: SectionResult<VoucherDispersalSection> | undefined): 
       ['WhatsApp still failed', intIN(d.messageFailedOpen), accentIf(d.messageFailedOpen, 'red')],
       ['campaigns over budget', intIN(d.overBudgetCampaigns ?? 0), accentIf(d.overBudgetCampaigns ?? 0, 'red')],
       ['status update failing', intIN(d.settleErrorCampaigns ?? 0), accentIf(d.settleErrorCampaigns ?? 0, 'red')],
-      ['Hubble status not recognised', intIN(d.unrecognisedStatus ?? 0), accentIf(d.unrecognisedStatus ?? 0, 'red')],
+      ['API status not recognised', intIN(d.unrecognisedStatus ?? 0), accentIf(d.unrecognisedStatus ?? 0, 'red')],
       ['order alerts still open', intIN(d.earlierOrderAlertsOpen ?? 0), accentIf(d.earlierOrderAlertsOpen ?? 0, 'red')],
       ['closed (marked not bought)', intIN(d.markedClosed ?? 0)],
     ]),
@@ -803,7 +804,7 @@ function tenantSections(t: TenantDigest): string {
         (r.failedRows.length > 0
           ? table(
               [{ label: 'Outlet' }, { label: 'Reward' }, { label: 'Reason' }],
-              r.failedRows.slice(0, MAX_FAILED_REDEMPTION_ROWS).map((f) => [esc(f.outlet), esc(f.reward), esc(f.reason || '—')]),
+              r.failedRows.slice(0, MAX_FAILED_REDEMPTION_ROWS).map((f) => [esc(f.outlet), esc(f.reward), esc(neutralFulfillerText(f.reason || '—'))]),
             ) +
             (r.failed > Math.min(r.failedRows.length, MAX_FAILED_REDEMPTION_ROWS)
               ? `<div style="font-size:12px;color:${MUTED};margin:0 0 6px;">Showing the latest ${esc(intIN(Math.min(r.failedRows.length, MAX_FAILED_REDEMPTION_ROWS)))} of ${esc(intIN(r.failed))}.</div>`
@@ -811,7 +812,7 @@ function tenantSections(t: TenantDigest): string {
           : ''),
     ),
     renderSection(
-      t.hubbleEnabled === false ? 'Vouchers (Hubble) — integration switched off' : 'Vouchers (Hubble)',
+      t.hubbleEnabled === false ? 'Vouchers (Via API) — integration switched off' : 'Vouchers (Via API)',
       t.vouchers,
       (v) => v.issued === 0 && v.failed === 0 && v.stuckProcessing === 0 && v.needsReconcile === 0 && !(v.voucherNotifyFailed ?? 0),
       (v) =>

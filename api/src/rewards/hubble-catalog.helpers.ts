@@ -76,7 +76,7 @@ function describeProductAmounts(product: HubbleProduct): string {
   if (product.denominationType === 'FIXED') {
     return product.denominations.length
       ? `fixed amounts only: ${product.denominations.map(fmt).join(', ')}`
-      : "fixed amounts only (Hubble didn't return them — enter the amounts Hubble shows for this brand)";
+      : "fixed amounts only (the API didn't return them — enter the amounts the API shows for this brand)";
   }
   const lo = product.minValue != null ? fmt(product.minValue) : 'any';
   const hi = product.maxValue != null ? fmt(product.maxValue) : 'any';
@@ -114,7 +114,7 @@ export function validateHubbleItemAmounts(
     const bad = input.denominations.filter((d) => !isAmountIssuable(product, d));
     if (bad.length) {
       throw new BadRequestException(
-        `${brand} on Hubble can't issue ${bad.map(fmt).join(', ')} — it allows ${describeProductAmounts(product)}.`,
+        `${brand} via API can't issue ${bad.map(fmt).join(', ')} — it allows ${describeProductAmounts(product)}.`,
       );
     }
     const floor = input.minVoucherFreeAmount || 0;
@@ -139,7 +139,7 @@ export function validateHubbleItemAmounts(
   if (isBand) {
     if (product.denominationType === 'FIXED') {
       throw new BadRequestException(
-        `${brand} on Hubble issues ${describeProductAmounts(product)}. Load the brand from Hubble and choose which amounts to offer instead of a free range.`,
+        `${brand} via API issues ${describeProductAmounts(product)}. Load the brand via API and choose which amounts to offer instead of a free range.`,
       );
     }
     if (!Number.isFinite(rate) || rate <= 0) return null; // the existing guards report the rate problem
@@ -151,7 +151,7 @@ export function validateHubbleItemAmounts(
       (maxInr != null && product.maxValue != null && maxInr > product.maxValue + eps)
     ) {
       throw new BadRequestException(
-        `The amount range must sit inside what ${brand} on Hubble allows (${describeProductAmounts(product)}).`,
+        `The amount range must sit inside what ${brand} via API allows (${describeProductAmounts(product)}).`,
       );
     }
     return null;
@@ -161,7 +161,7 @@ export function validateHubbleItemAmounts(
     const rupees = input.sellingValuePaise / 100;
     if (!isAmountIssuable(product, rupees)) {
       throw new BadRequestException(
-        `${brand} on Hubble can't issue a ${Number.isInteger(rupees) ? fmt(rupees) : `₹${rupees}`} voucher — it allows ${describeProductAmounts(product)}.`,
+        `${brand} via API can't issue a ${Number.isInteger(rupees) ? fmt(rupees) : `₹${rupees}`} voucher — it allows ${describeProductAmounts(product)}.`,
       );
     }
   }

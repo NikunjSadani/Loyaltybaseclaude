@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { CreditBatchReader, resolveCreditFieldNames } from './credit-field-name.helper';
 import { istMonthBounds } from './ist-date';
+import { neutralRefundNarration } from './fulfiller-name';
 
 // Shared POINTS-STATEMENT builder:the single source of truth for a wallet's
 // statement (passbook rows + opening/closing balance), used by BOTH the partner
@@ -338,8 +339,9 @@ export async function buildStatementResponse(
       id: r.id,
       date: r.createdAt.toISOString(),
       transactionType: r.transactionType,
-      description: r.description ?? defaultTxDescription(r.transactionType),
-      narration: r.description,
+      // Owner rule 2026-11-26: the old fulfiller-refund narration is shown in neutral words (exact match only).
+      description: neutralRefundNarration(r.description) ?? defaultTxDescription(r.transactionType),
+      narration: neutralRefundNarration(r.description),
       fieldName: r.fieldName,
       points: r.points,
       balanceBefore: r.balanceBefore,

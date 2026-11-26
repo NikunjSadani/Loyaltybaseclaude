@@ -133,7 +133,7 @@ describe('GIFS — orders search + Redeemed on', () => {
     fireEvent.change(screen.getByLabelText('Search orders'), { target: { value: 'amazon' } });
     await waitFor(() =>
       expect(screen.getByTestId('fulfilment-export-scope')).toHaveTextContent(
-        /all orders awaiting fulfilment matching “amazon” — not just the rows loaded below\. Vouchers still with Hubble \(no code yet\) are left out/,
+        /all orders awaiting fulfilment matching “amazon” — not just the rows loaded below\. Vouchers still being issued via API \(no code yet\) are left out/,
       ),
       { timeout: 1500 },
     );

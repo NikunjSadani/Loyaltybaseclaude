@@ -47,7 +47,11 @@ import { useAdminSession } from '@/lib/admin-session';
 import { redemptionModeLabel, canonicalRedemptionMode, CASH_REDEMPTION_MODES } from '@/lib/redemption-mode';
 import { usePermissions } from '@/lib/use-permissions';
 import { derivePointsCost, parseRupeesToPaise } from '@/lib/gift-catalogue';
-import { nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS } from '@/lib/redemption-order-transitions';
+import {
+  nextStatusOptions, hasIssuedVoucher, REFUND_TARGETS, HUBBLE_NEVER_PLACED_REASONS,
+  isApiFulfillerProvider,
+} from '@/lib/redemption-order-transitions';
+import { neutralFulfillerText } from '@/lib/fulfiller-name';
 import type { GifsySettings } from '@/types';
 import { pointsForAmount, type HubbleProductLookup } from '@/lib/hubble-product';
 import { WHOLE_RUPEE_INVALID_MESSAGE, useWholeRupeeField } from '@/lib/whole-rupee-input';
@@ -717,11 +721,11 @@ function ItemModal({
         !p || (p.denominationType !== 'FIXED' && p.denominationType !== 'FLEXIBLE') ||
         !Array.isArray(p.denominations) || typeof data.conversionRate !== 'number'
       ) {
-        throw new Error('Hubble returned an unexpected response for this product.');
+        throw new Error('The API returned an unexpected response for this product.');
       }
       setHubbleLoad({ status: 'ok', forId: productId, data });
     } catch (e) {
-      setHubbleLoad({ status: 'error', forId: productId, error: (e as Error).message || 'Could not load from Hubble' });
+      setHubbleLoad({ status: 'error', forId: productId, error: (e as Error).message || 'Could not load via API' });
     }
   }, []);
 
@@ -745,8 +749,8 @@ function ItemModal({
     const p = hubbleData?.product;
     let err = '';
     if (!Number.isInteger(amt) || amt <= 0) err = 'Enter a whole-rupee amount';
-    else if (p?.minValue != null && amt < p.minValue) err = `Hubble's minimum for this brand is ${fmtInr(p.minValue)}`;
-    else if (p?.maxValue != null && amt > p.maxValue) err = `Hubble's maximum for this brand is ${fmtInr(p.maxValue)}`;
+    else if (p?.minValue != null && amt < p.minValue) err = `The API minimum for this brand is ${fmtInr(p.minValue)}`;
+    else if (p?.maxValue != null && amt > p.maxValue) err = `The API maximum for this brand is ${fmtInr(p.maxValue)}`;
     else if (hubbleData && amt < hubbleData.minVoucherFreeAmount) err = `Below this program's minimum voucher amount (${fmtInr(hubbleData.minVoucherFreeAmount)})`;
     if (err) { setErrors((e) => ({ ...e, hubbleDenominations: err })); return; }
     setErrors(({ hubbleDenominations: _drop, ...rest }) => rest);
@@ -1027,7 +1031,7 @@ function ItemModal({
               </div>
               {usesAmountList ? (
                 <p className="text-xs text-amber-900" data-testid="amount-list-note">
-                  Members choose from the Hubble amounts selected below
+                  Members choose from the API amounts selected below
                   ({form.hubbleDenominations.map(fmtInr).join(' · ')}). Points = amount × this program&apos;s conversion rate.
                 </p>
               ) : (
@@ -1092,14 +1096,14 @@ function ItemModal({
           {form.redemptionMode === 'GIFT_CARD' && (
             <div className="space-y-1">
               <label className="text-xs font-medium text-gray-700">
-                Hubble product ID <span className="text-gray-400 font-normal">(auto-issue voucher)</span>
+                API product ID <span className="text-gray-400 font-normal">(auto-issue voucher via API)</span>
               </label>
               <div className="flex gap-2">
                 <input
                   value={form.hubbleProductId}
                   onChange={(e) => set('hubbleProductId', e.target.value)}
                   placeholder="e.g. amazon-pay-product-id (leave blank for manual fulfilment)"
-                  aria-label="Hubble product ID"
+                  aria-label="API product ID"
                   className="flex-1 min-w-0 text-sm border border-gray-200 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]"
                 />
                 <button
@@ -1109,13 +1113,13 @@ function ItemModal({
                   className="shrink-0 inline-flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-xl border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                 >
                   <RefreshCw className={`h-3.5 w-3.5 ${hubbleResult?.status === 'loading' ? 'animate-spin' : ''}`} />
-                  {hubbleResult?.status === 'loading' ? 'Loading…' : 'Load from Hubble'}
+                  {hubbleResult?.status === 'loading' ? 'Loading…' : 'Load via API'}
                 </button>
               </div>
               <p className="text-[10px] text-gray-400">
-                Set the Hubble Money productId to auto-issue this voucher on redemption
-                (enabled only for tenants with the Hubble feature on). Blank = manual fulfilment.
-                Use “Load from Hubble” to see the amounts this brand can issue.
+                Set the API product ID to auto-issue this voucher on redemption
+                (enabled only for programs with API voucher issuance on). Blank = manual fulfilment.
+                Use “Load via API” to see the amounts this brand can issue.
               </p>
 
               {hubbleResult?.status === 'error' && (
@@ -1141,7 +1145,7 @@ function ItemModal({
                          validates each order. */
                       <div className="space-y-2">
                         <p className="text-xs text-amber-800" data-testid="fixed-list-unknown">
-                          Hubble didn&apos;t return its amounts — enter the amounts Hubble shows for this brand.
+                          The API didn&apos;t return its amounts — enter the amounts the API shows for this brand.
                         </p>
                         {customAmountRow}
                       </div>
@@ -1186,7 +1190,7 @@ function ItemModal({
                   ) : (
                     <div className="space-y-2">
                       <p className="text-xs text-gray-700">
-                        Hubble issues any whole-rupee amount from{' '}
+                        The API issues any whole-rupee amount from{' '}
                         <strong>{hubbleData.product.minValue != null ? fmtInr(hubbleData.product.minValue) : '—'}</strong> to{' '}
                         <strong>{hubbleData.product.maxValue != null ? fmtInr(hubbleData.product.maxValue) : '—'}</strong>.
                         Let members type an amount in a range, or offer specific amounts.
@@ -1196,7 +1200,7 @@ function ItemModal({
                         onClick={applyHubbleRange}
                         className="text-xs font-medium px-3 py-1.5 rounded-lg border border-blue-200 bg-white text-blue-700 hover:bg-blue-50"
                       >
-                        Use Hubble&apos;s range (members type an amount)
+                        Use the API range (members type an amount)
                       </button>
                       {customAmountRow}
                     </div>
@@ -1719,23 +1723,24 @@ type OrderPatch = Pick<OrderItem, 'id'> &
 
 /** Human copy for the backend's Hubble reconcile reasons (fallback: the raw code). */
 const HUBBLE_REASON_LABEL: Record<string, string> = {
-  HUBBLE_NOT_CONFIGURED: 'Hubble not configured',
-  HUBBLE_INVALID_AMOUNT: 'Amount not issuable on Hubble',
-  HUBBLE_SUCCESS_NO_CODE: 'Hubble succeeded without a code',
-  HUBBLE_PROCESSING_NOT_FOUND: 'Hubble has no record of this order',
-  HUBBLE_INDETERMINATE: 'Hubble state unknown',
-  HUBBLE_UNEXPECTED: 'Unexpected Hubble error',
-  HUBBLE_SUCCESS_MANUAL_CODE_PRESENT: 'Hubble issued a voucher on top of a manual code',
-  HUBBLE_FAILED_VOUCHER_PRESENT: 'Hubble failed but a code is on the order',
-  HUBBLE_PROCESSING_AFTER_MANUAL: 'Hubble processing after a manual takeover',
-  HUBBLE_PROCESSING_CLAIM_LOST: 'Order changed while Hubble was processing',
-  HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND: 'Hubble webhook arrived after the points were refunded — check the order in Hubble’s portal',
-  HUBBLE_ISSUED_AFTER_REFUND: 'Hubble may have issued a voucher for refunded points — check the order in Hubble’s portal',
-  HUBBLE_WEBHOOK_BUT_NOT_FOUND: 'Hubble sent a webhook but has no order for this reference — check the order in Hubble’s portal',
-  // Set by the automatic re-check when an order is still not delivered an hour after it reached Hubble.
-  HUBBLE_STILL_OPEN_STALE: 'Still processing at Hubble',
-  // The auto re-check found the order no longer eligible for Hubble (tenant flag off / product gone).
-  HUBBLE_NOT_ELIGIBLE_NOW: 'Hubble can’t be checked — fulfil manually',
+  // Neutral words: a CLIENT admin reads these on the view-only list (owner rule 2026-11-26 — "Via API").
+  HUBBLE_NOT_CONFIGURED: 'API issuance not configured',
+  HUBBLE_INVALID_AMOUNT: 'Amount not issuable via API',
+  HUBBLE_SUCCESS_NO_CODE: 'Issued via API without a code',
+  HUBBLE_PROCESSING_NOT_FOUND: 'The API provider has no record of this order',
+  HUBBLE_INDETERMINATE: 'API state unknown',
+  HUBBLE_UNEXPECTED: 'Unexpected API error',
+  HUBBLE_SUCCESS_MANUAL_CODE_PRESENT: 'A voucher was issued via API on top of a manual code',
+  HUBBLE_FAILED_VOUCHER_PRESENT: 'API issuance failed but a code is on the order',
+  HUBBLE_PROCESSING_AFTER_MANUAL: 'API processing after a manual takeover',
+  HUBBLE_PROCESSING_CLAIM_LOST: 'Order changed while the API was processing',
+  HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND: 'API update arrived after the points were refunded — check the order in the API provider’s portal',
+  HUBBLE_ISSUED_AFTER_REFUND: 'A voucher may have been issued via API for refunded points — check the order in the API provider’s portal',
+  HUBBLE_WEBHOOK_BUT_NOT_FOUND: 'API update received but the provider has no order for this reference — check the order in the API provider’s portal',
+  // Set by the automatic re-check when an order is still not delivered an hour after it was sent via API.
+  HUBBLE_STILL_OPEN_STALE: 'Still processing via API',
+  // The auto re-check found the order no longer eligible for API issuance (tenant flag off / product gone).
+  HUBBLE_NOT_ELIGIBLE_NOW: 'API can’t be checked — fulfil manually',
 };
 
 /** "just now" / "4 min ago" / "3 h ago" / "2 d ago" — for the "last checked" hint. */
@@ -1755,8 +1760,12 @@ function relativeAgo(iso: string | null | undefined, nowMs: number = Date.now())
 const HUBBLE_POST_REFUND_FLAGS = new Set(['HUBBLE_ISSUED_AFTER_REFUND', 'HUBBLE_WEBHOOK_AFTER_NO_ORDER_REFUND']);
 /** Terminal, points-returned order statuses: any Hubble flag on one is cleared by "Acknowledge". */
 const TERMINAL_REFUND_STATUSES = new Set(['FAILED', 'CANCELLED', 'RETURNED']);
-const hubbleReasonLabel = (r?: string | null) =>
-  !r ? 'Needs review' : HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown Hubble status' : r);
+/** A non-Gifsy viewer receives the reason CODE as API_X (owner rule 2026-11-26) — same label either way. */
+const hubbleReasonLabel = (raw?: string | null) => {
+  if (!raw) return 'Needs review';
+  const r = raw.replace(/^API_/, 'HUBBLE_');
+  return HUBBLE_REASON_LABEL[r] ?? (r.startsWith('HUBBLE_UNKNOWN_STATUS') ? 'Unknown API status' : neutralFulfillerText(r));
+};
 
 /** Human copy for the "Retry with Hubble" outcome (fallback: the raw outcome code). */
 const HUBBLE_RETRY_OUTCOME_LABEL: Record<string, string> = {
@@ -1800,7 +1809,7 @@ function OrderRow({
   canCancelVoucher: boolean;
 }) {
   const voucherIssued = hasIssuedVoucher(order.voucherCode) || order.voucherIssued === true;
-  const isHubble = (order.voucherProvider ?? '').trim().toLowerCase() === 'hubble';
+  const isHubble = isApiFulfillerProvider(order.voucherProvider);
   const options = nextStatusOptions({
     status: order.status,
     redemptionMode: order.redemptionMode ?? order.reward?.redemptionMode ?? null,
@@ -2067,13 +2076,13 @@ function OrderRow({
             <span
               className="block mt-1 text-[10px] font-semibold text-amber-700"
               data-testid="hubble-needs-reconcile"
-              title={order.hubbleReconcileReason ?? undefined}
+              title={hubbleReasonLabel(order.hubbleReconcileReason)}
             >
               Needs reconcile · {hubbleReasonLabel(order.hubbleReconcileReason)}
             </span>
           )}
           {needsReconcile && order.hubbleLatestReason && order.hubbleLatestReason !== order.hubbleReconcileReason && (
-            <span className="block mt-0.5 text-[10px] text-amber-700" data-testid="hubble-latest-reason" title={order.hubbleLatestReason}>
+            <span className="block mt-0.5 text-[10px] text-amber-700" data-testid="hubble-latest-reason" title={hubbleReasonLabel(order.hubbleLatestReason)}>
               Newer: {hubbleReasonLabel(order.hubbleLatestReason)}
             </span>
           )}
@@ -2083,19 +2092,19 @@ function OrderRow({
               data-testid="hubble-waiting"
             >
               {hubbleOverWindow
-                ? <>Waiting for Hubble since {formatISTDateTime(order.hubbleWaitingSince)} — over 7 days — needs ops action</>
-                : <>Waiting for Hubble since {formatISTDateTime(order.hubbleWaitingSince)} · last checked {relativeAgo(order.hubbleLastCheckedAt, loadedAtMs)}</>}
+                ? <>Waiting via API since {formatISTDateTime(order.hubbleWaitingSince)} — over 7 days — needs ops action</>
+                : <>Waiting via API since {formatISTDateTime(order.hubbleWaitingSince)} · last checked {relativeAgo(order.hubbleLastCheckedAt, loadedAtMs)}</>}
             </span>
           )}
           {needsReconcile && order.hubbleNoOrderUnverifiedWhy && (
             <span
               className="block mt-0.5 text-[10px] text-amber-700"
               data-testid="hubble-no-order-unverified"
-              title={order.hubbleNoOrderUnverifiedWhy}
+              title={neutralFulfillerText(order.hubbleNoOrderUnverifiedWhy)}
             >
-              Hubble said “no order”, not trusted: {order.hubbleNoOrderUnverifiedWhy.length > 120
+              API said “no order”, not trusted: {neutralFulfillerText(order.hubbleNoOrderUnverifiedWhy.length > 120
                 ? `${order.hubbleNoOrderUnverifiedWhy.slice(0, 120)}…`
-                : order.hubbleNoOrderUnverifiedWhy}
+                : order.hubbleNoOrderUnverifiedWhy)}
             </span>
           )}
         </td>
@@ -2111,7 +2120,7 @@ function OrderRow({
                 </button>
               ) : !canCancelVoucher && hubbleHeld ? (
                 <span className="text-[10px] text-gray-500" data-testid="hubble-held-note">
-                  With Hubble — a Gifsy admin can retry or fulfil
+                  With the API — a Gifsy admin can retry or fulfil
                 </span>
               ) : (
                 <span className="text-[10px] text-gray-300">—</span>
@@ -2869,8 +2878,8 @@ function FulfilmentQueue({
         {/* Say exactly what the download contains — it follows the list's filter + search. */}
         <p className="text-xs text-gray-500" data-testid="fulfilment-export-scope">
           The sheet includes {statusFilter === 'all' ? 'all orders awaiting fulfilment' : `all ${statusFilter} orders`}
-          {query ? <> matching &ldquo;{query}&rdquo;</> : null} — not just the rows loaded below. Vouchers still with
-          Hubble (no code yet) are left out: Hubble delivers them, or use Retry / Fulfil manually here.
+          {query ? <> matching &ldquo;{query}&rdquo;</> : null} — not just the rows loaded below. Vouchers still being
+          issued via API (no code yet) are left out: the API delivers them, or use Retry / Fulfil manually here.
         </p>
 
         {downloadErr && (

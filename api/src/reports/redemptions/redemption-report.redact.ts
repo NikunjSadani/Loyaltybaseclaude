@@ -5,6 +5,8 @@
  *   • anything else is exported REDACTED: links, e-mails, PANs, hyphen-grouped codes (ABCD-1234), digit runs of 7+
  *     (phones, card numbers) and letter+digit runs of 8+ (voucher codes / PINs) become "[removed]".
  */
+import { neutralFulfillerText } from '../../common/fulfiller-name';
+
 /** = rewards.service HUBBLE_NO_ORDER_REFUND_REASON (copied to keep this pure module light; a spec asserts equality). */
 export const HUBBLE_NO_ORDER_REASON_TEXT = 'Hubble confirmed no order for this reference — refunded';
 
@@ -23,6 +25,10 @@ const KNOWN_REASONS: Record<string, string> = {
 const KNOWN_PREFIXES: Array<[RegExp, string]> = [
   [/^Hubble failed\b/i, 'E-voucher could not be issued — points refunded'],
   [/^Hubble issuance failed\b/i, 'E-voucher could not be issued'],
+  // "Hubble voucher issued (auto re-check)" / "(ops retry)" / "(Hubble webhook)" — the suffix is internal detail.
+  [/^Hubble voucher issued\b/i, 'E-voucher issued'],
+  [/^Hubble voucher processing\b/i, 'E-voucher being issued'],
+  [/^Hubble reported FAILED\b/i, 'E-voucher could not be issued'],
 ];
 
 const PATTERNS: RegExp[] = [
@@ -48,5 +54,6 @@ export function safeReasonText(v: string | null | undefined): string {
   if (!s) return '';
   if (KNOWN_REASONS[s]) return KNOWN_REASONS[s];
   for (const [re, words] of KNOWN_PREFIXES) if (re.test(s)) return words;
-  return redactFreeText(s);
+  // OWNER RULE (2026-11-26): the voucher fulfiller is never named in a report ("Hubble" → "Via API").
+  return neutralFulfillerText(redactFreeText(s));
 }

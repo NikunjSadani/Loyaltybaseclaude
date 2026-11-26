@@ -106,6 +106,7 @@ import {
 } from '../hubble/hubble.service';
 import { checkHubbleCanaryOrder } from '../hubble/hubble-canary';
 import { hubbleVoucherCredentials } from '../hubble/hubble-voucher';
+import { FULFILLER_REFUND_SUFFIX, neutralFulfillerText } from '../common/fulfiller-name';
 import {
   extractHubbleDenominations,
   isAmountIssuable,
@@ -313,6 +314,21 @@ export function hubbleReconcileFlags(metadata: unknown): {
     ...(unverifiedWhy ? { hubbleNoOrderUnverifiedWhy: unverifiedWhy } : {}),
     ...(needs && typeof m.hubbleLatestReason === 'string' && m.hubbleLatestReason ? { hubbleLatestReason: m.hubbleLatestReason } : {}),
   };
+}
+
+/**
+ * OWNER RULE (2026-11-26, all clients): a NON-Gifsy viewer (client admin, partner, sales) never reads the voucher
+ * fulfiller's name. Field-level, on the order VALUES that carry it: the provider stamp ('Hubble' → "Via API"),
+ * the cancel reason, and the reconcile reason codes / "not trusted" text (HUBBLE_X → API_X; the console maps
+ * either spelling to the same neutral label). Keys and every other field are untouched.
+ */
+export function clientSafeOrderFulfiller<T extends object>(o: T): T {
+  const r = o as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...r };
+  for (const k of ['voucherProvider', 'cancelReason', 'hubbleReconcileReason', 'hubbleLatestReason', 'hubbleNoOrderUnverifiedWhy']) {
+    if (typeof r[k] === 'string') out[k] = neutralFulfillerText(r[k] as string);
+  }
+  return out as T;
 }
 
 export function decodeOrderCursor(cursor: string): { createdAt: Date; id: string } | null {
@@ -1258,9 +1274,11 @@ export class RewardsService {
       ...(memberView || hideCodes ? {} : { voucherFillable: canFillStoredVoucher({ ...o, pointsDeducted, metadata }) }),
       returnedAt: o.status === 'RETURNED' ? o.updatedAt : null,
     }));
+    // Non-Gifsy viewer (client admin / partner / sales): the fulfiller is shown as "Via API" (owner 2026-11-26).
+    const visible = this.isGifsy(user) ? mapped : mapped.map(clientSafeOrderFulfiller);
 
     return {
-      orders: mapped,
+      orders: visible,
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
       nextCursor: hasMore && last ? encodeOrderCursor(last.createdAt, last.id) : null,
     };
@@ -1314,9 +1332,9 @@ export class RewardsService {
 
     // A SALES rep never gets the card number / PIN (defence in depth — see isSalesViewer).
     if (isSalesViewer(user.role)) {
-      return { order: { ...order, ...hiddenVoucherFields(order.voucherCode) } };
+      return { order: clientSafeOrderFulfiller({ ...order, ...hiddenVoucherFields(order.voucherCode) }) };
     }
-    return { order };
+    return { order: clientSafeOrderFulfiller(order) };
   }
 
   /**
@@ -4120,16 +4138,16 @@ export class RewardsService {
   private hubbleProductHttpError(e: unknown, productId: string): Error {
     if (e instanceof HubbleNotConfiguredError) {
       return new ServiceUnavailableException(
-        'Hubble is not configured in this environment, so the brand and its amounts cannot be loaded.',
+        'API voucher issuance is not configured in this environment, so the brand and its amounts cannot be loaded.',
       );
     }
     if (e instanceof HubbleProductNotFoundError) {
       return new NotFoundException(
-        `No active Hubble product with ID "${productId}". Check the product ID in the Hubble partner portal.`,
+        `No active API product with ID "${productId}". Check the product ID with the Gifsy team.`,
       );
     }
     this.logger.error(`[hubble] product lookup failed for ${productId}: ${e}`);
-    return new ServiceUnavailableException('Could not reach Hubble to load this brand — try again in a minute.');
+    return new ServiceUnavailableException('Could not reach the API to load this brand — try again in a minute.');
   }
 
   /**
@@ -4140,7 +4158,7 @@ export class RewardsService {
    */
   async getHubbleProductForAdmin(user: JwtPayload, productId: string) {
     if (!(await this.isHubbleEnabledForTenant(user.clientId))) {
-      throw new BadRequestException('Hubble gift cards are not enabled for this program.');
+      throw new BadRequestException('API gift cards are not enabled for this program.');
     }
     let product: HubbleProduct;
     try {
@@ -5390,7 +5408,7 @@ export class RewardsService {
         await this.wallet.reverse(
           order.partnerId,
           order.pointsDeducted,
-          { referenceId: order.id, description: `Refund ${order.orderNumber} (Hubble failed)` },
+          { referenceId: order.id, description: `Refund ${order.orderNumber} ${FULFILLER_REFUND_SUFFIX}` },
           tx,
         );
       }
@@ -6553,7 +6571,7 @@ export class RewardsService {
       : null;
     if (hubbleDenoms && !isHubbleGiftCard) {
       throw new BadRequestException(
-        'Gift card amounts can only be chosen for a Hubble gift card (Hubble enabled for this program and a Hubble product ID set).',
+        'Gift card amounts can only be chosen for an API gift card (API issuance enabled for this program and an API product ID set).',
       );
     }
     let minRedemptionPoints = dto.minRedemptionPoints;
@@ -6728,7 +6746,7 @@ export class RewardsService {
     const isHubbleGiftCard = !!effProductId && effMode === PayoutMode.GIFT_CARD;
     if (dto.hubbleDenominations?.length && !(isHubbleGiftCard && hubbleOn)) {
       throw new BadRequestException(
-        'Gift card amounts can only be chosen for a Hubble gift card (Hubble enabled for this program and a Hubble product ID set).',
+        'Gift card amounts can only be chosen for an API gift card (API issuance enabled for this program and an API product ID set).',
       );
     }
     // An amounts list only lives alongside a Hubble GIFT_CARD productId — drop it otherwise.

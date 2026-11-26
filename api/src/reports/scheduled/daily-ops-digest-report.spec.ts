@@ -271,8 +271,8 @@ describe('needsAttention', () => {
       '2 KYCs breaching the Gifsy SLA',
       '12 KYCs breaching the field SLA',
       '5 negative wallets',
-      '3 redemptions failed in the window, 2 via Hubble',
-      'Hubble: 1 voucher stuck in processing > 30 min',
+      '3 redemptions failed in the window, 2 via API',
+      'Via API: 1 voucher stuck in processing > 30 min',
       '3 payouts failed or returned in the window (still open: 4 credit payouts (₹8,000) awaiting re-bank or reversal)',
       '8 messages failed delivery',
       'Targets changed — recalculate November 2026',
@@ -318,9 +318,9 @@ describe('needsAttention', () => {
     const t = quietTenant('x', 'X');
     t.redemptions = ok({ requested: 2, completed: 0, failed: 2, failedNotRefunded: 0, failedRows: [] });
     t.vouchers = ok({ issued: 0, failed: 2, stuckProcessing: 0, needsReconcile: 0 });
-    expect(needsAttention(t)).toEqual(['2 redemptions failed in the window, 2 via Hubble']);
+    expect(needsAttention(t)).toEqual(['2 redemptions failed in the window, 2 via API']);
     t.redemptions = { ok: false, error: 'boom' };
-    expect(needsAttention(t)).toEqual(["Couldn't load the Redemptions section", 'Hubble: 2 vouchers failed']);
+    expect(needsAttention(t)).toEqual(["Couldn't load the Redemptions section", 'Via API: 2 vouchers failed']);
   });
 
   it('D4: a window figure and its still-open figure are ONE bullet; events = the larger of the two (no double count)', () => {
@@ -366,7 +366,7 @@ describe('needsAttention', () => {
     const t = quietTenant('x', 'X');
     t.vouchers = ok({ issued: 0, failed: 0, stuckProcessing: 0, needsReconcile: 2 });
     t.salesImport = ok({ processed: 0, failed: 1, failedOpen: 0, openMonths: [] });
-    expect(needsAttention(t)).toEqual(['Hubble: 2 orders need reconcile', 'Sales Import: 1 import failed in the window']);
+    expect(needsAttention(t)).toEqual(['Via API: 2 orders need reconcile', 'Sales Import: 1 import failed in the window']);
   });
 
   it('voucher code messages that could not be sent are an attention item (no silent pass-through)', () => {
@@ -400,7 +400,7 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
     expect(gifsyWideAttention({ voucherDispersal: busyDispersal() })).toEqual([
       'Voucher dispersal: 2 purchases failed in the window (3 still open)',
       'Voucher dispersal: 4 WhatsApp messages failed in the window (4 still open)',
-      'Voucher dispersal: 1 purchase unconfirmed by Hubble for over 2 h (Retry available)',
+      'Voucher dispersal: 1 purchase unconfirmed via API for over 2 h (Retry available)',
     ]);
   });
 
@@ -430,7 +430,7 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
     expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
       "Voucher dispersal: 1 campaign over budget — spending is over the budget; see the campaign's budget breakdown",
       'Voucher dispersal: 2 campaigns whose status update keeps failing (contact Gifsy tech)',
-      'Voucher dispersal: 3 purchases bought later by Hubble after they had failed / been refused (in the window)',
+      'Voucher dispersal: 3 purchases bought later via API after they had failed / been refused (in the window)',
     ]);
     const html = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html;
     expect(html).toContain('data-section="Voucher dispersal (Gifsy-wide)"');
@@ -442,7 +442,7 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
       bought: 0, buyFailed: 0, messageFailed: 0, pending: 0, pendingRetryable: 0, buyFailedOpen: 0, messageFailedOpen: 0, earlierOrderAlerts: 2,
     });
     expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
-      'Voucher dispersal: Hubble reported activity on 2 earlier orders after a retry or a "not bought" mark (in the window) — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)',
+      'Voucher dispersal: The API provider reported activity on 2 earlier orders after a retry or a "not bought" mark (in the window) — check with the API provider (a voucher may have been issued twice, or a paid voucher may not have reached the person)',
     ]);
   });
 
@@ -452,14 +452,14 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
       unrecognisedStatus: 1, earlierOrderAlerts: 1, markedClosed: 2,
     });
     expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
-      'Voucher dispersal: Hubble reported activity on 1 earlier order after a retry or a "not bought" mark (in the window) — check with Hubble (a voucher may have been issued twice, or a paid voucher may not have reached the person)',
-      'Voucher dispersal: 1 purchase with a Hubble status we do not recognise — needs Gifsy tech',
+      'Voucher dispersal: The API provider reported activity on 1 earlier order after a retry or a "not bought" mark (in the window) — check with the API provider (a voucher may have been issued twice, or a paid voucher may not have reached the person)',
+      'Voucher dispersal: 1 purchase with an API status we do not recognise — needs Gifsy tech',
     ]);
     const html = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html;
     const inWindow = html.slice(html.indexOf('In window'), html.indexOf('Right now'));
-    expect(inWindow).toContain('earlier order reported by Hubble');
+    expect(inWindow).toContain('earlier order reported via API');
     expect(html.slice(html.indexOf('Right now'))).toContain('closed (marked not bought)');
-    expect(html.slice(html.indexOf('Right now'))).toContain('Hubble status not recognised');
+    expect(html.slice(html.indexOf('Right now'))).toContain('API status not recognised');
   });
 
   it('earlier-order alerts are worded per kind / status; resolved ones are listed apart (not an attention item)', () => {
@@ -468,14 +468,14 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
       earlierOrderAlerts: 5, earlierOrderAlertsBy: { superseded: 2, marked: 1, notApplied: 1, couldNotCheck: 1, noOrderUnverified: 0 }, earlierOrderAlertsResolved: 3,
     });
     expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
-      'Voucher dispersal: Hubble reported activity on 2 earlier orders retired by a retry (in the window) — check with Hubble (a voucher may have been issued twice)',
-      'Voucher dispersal: Hubble reported activity on the order of 1 row marked "not bought" (in the window) — check with Hubble (a voucher may have been issued; the row stays closed)',
-      'Voucher dispersal: 1 order Hubble completed could not be applied to its row (in the window) — check with Hubble (a paid voucher may not have reached the person)',
-      "Voucher dispersal: couldn't check 1 earlier order with Hubble — the lookup failed and no status is known yet (in the window); check it with Hubble",
+      'Voucher dispersal: The API provider reported activity on 2 earlier orders retired by a retry (in the window) — check with the API provider (a voucher may have been issued twice)',
+      'Voucher dispersal: The API provider reported activity on the order of 1 row marked "not bought" (in the window) — check with the API provider (a voucher may have been issued; the row stays closed)',
+      'Voucher dispersal: 1 order the API provider completed could not be applied to its row (in the window) — check with the API provider (a paid voucher may not have reached the person)',
+      "Voucher dispersal: couldn't check 1 earlier order with the API provider — the lookup failed and no status is known yet (in the window); check it with the API provider",
     ]);
     const html = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html;
     const inWindow = html.slice(html.indexOf('In window'), html.indexOf('Right now'));
-    expect(inWindow).toContain('earlier-order alert resolved (Hubble: failed / no order)');
+    expect(inWindow).toContain('earlier-order alert resolved (Via API: failed / no order)');
   });
 
   it('an alert still OPEN from earlier days stays an attention item every day ("still open", by kind) until resolved', () => {
@@ -485,7 +485,7 @@ describe('gifsyWideAttention (voucher dispersal)', () => {
       earlierOrderAlertsOpen: 5, earlierOrderAlertsOpenBy: { superseded: 1, marked: 1, notApplied: 1, couldNotCheck: 1, noOrderUnverified: 1 },
     });
     expect(gifsyWideAttention({ voucherDispersal: d })).toEqual([
-      "Voucher dispersal: still open: 5 order alerts (1 earlier order, 1 marked row, 1 order not applied, 1 couldn't check, 1 no order (unverified)) — open until Hubble confirms the order failed / there is no order; see the campaign pages",
+      "Voucher dispersal: still open: 5 order alerts (1 earlier order, 1 marked row, 1 order not applied, 1 couldn't check, 1 no order (unverified)) — open until the API provider confirms the order failed / there is no order; see the campaign pages",
     ]);
     const html = buildDailyOpsDigest(input([quietTenant('d', 'D')], { voucherDispersal: d })).html;
     expect(html.slice(html.indexOf('Right now'))).toContain('order alerts still open');
@@ -613,12 +613,12 @@ describe('buildDailyOpsDigest', () => {
     expect(r.html).toContain('Window: Thu 12 Nov, 09:30 → Fri 13 Nov, 09:30 IST — (manual re-run)');
   });
 
-  it('vouchers show live problems for a tenant with Hubble switched off, labelled so', () => {
+  it('vouchers show live problems for a tenant with the API provider switched off, labelled so', () => {
     const t = { ...quietTenant('x', 'X'), hubbleEnabled: false };
     t.vouchers = ok({ issued: 0, failed: 0, stuckProcessing: 1, needsReconcile: 0 });
     const html = buildDailyOpsDigest(input([t])).html;
-    expect(html).toContain('data-section="Vouchers (Hubble) — integration switched off"');
-    expect(needsAttention(t)).toEqual(['Hubble: 1 voucher stuck in processing > 30 min']);
+    expect(html).toContain('data-section="Vouchers (Via API) — integration switched off"');
+    expect(needsAttention(t)).toEqual(['Via API: 1 voucher stuck in processing > 30 min']);
   });
 
   it('payouts: the batches line shows outlets (old Credits email figure) and a still-open line', () => {
@@ -740,11 +740,11 @@ describe('buildDailyOpsDigest', () => {
 
   it('hides empty Hubble / Visibility / Sales Import, shows them when present', () => {
     const quiet = buildDailyOpsDigest(input([quietTenant('deoleo', 'Deoleo')])).html;
-    expect(quiet).not.toContain('Vouchers (Hubble)');
+    expect(quiet).not.toContain('Vouchers (Via API)');
     expect(quiet).not.toContain('data-section="Visibility"');
     expect(quiet).not.toContain('data-section="Sales Import"');
     const busy = buildDailyOpsDigest(input([busyTenant()])).html;
-    expect(busy).toContain('Vouchers (Hubble)');
+    expect(busy).toContain('Vouchers (Via API)');
     expect(busy).toContain('data-section="Visibility"');
     expect(busy).toContain('data-section="Sales Import"');
     expect(busy).toContain('Yes — recalculate');
@@ -975,5 +975,25 @@ describe('Daily Ops Digest — client fund line (fund reconciliation)', () => {
 
   it('a client without a fund set-up gets no fund line', () => {
     expect(buildDailyOpsDigest(input([quietTenant('deoleo', 'Deoleo')])).html).not.toContain('committed, not yet paid');
+  });
+});
+
+// OWNER RULE (2026-11-26): an e-mailed digest can be forwarded to a client — the digest AS SENT never names the
+// voucher fulfiller: the section wording is neutral at source, and a stored failure reason (provider error text)
+// is shown in neutral words. Links and every other value are untouched.
+describe('digest — no fulfiller name', () => {
+  it('a busy digest (vouchers, failed-redemption reasons, dispersal alerts) contains no "hubble" in subject or HTML', () => {
+    const d = buildDailyOpsDigest(
+      input([busyTenant()], {
+        voucherDispersal: ok({
+          bought: 180, buyFailed: 2, messageFailed: 4, pending: 12, pendingRetryable: 1, buyFailedOpen: 3, messageFailedOpen: 4,
+          unrecognisedStatus: 1, lateCompleted: 2, earlierOrderAlerts: 2, earlierOrderAlertsResolved: 1,
+        }),
+      }),
+    );
+    expect(d.subject).not.toMatch(/hubble/i);
+    expect(d.html).not.toMatch(/hubble/i);
+    expect(d.html).toContain('Vouchers (Via API)');
+    expect(d.html).toContain('Via API: insufficient balance');
   });
 });

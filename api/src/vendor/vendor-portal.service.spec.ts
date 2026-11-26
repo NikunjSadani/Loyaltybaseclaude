@@ -278,7 +278,7 @@ describe('VendorPortalService', () => {
         id: 'o1', status: from, partnerId: 'cp1', orderNumber: 'D-26-1', voucherCode: null, ...extra,
       });
       await expect(service.transition(vendor, 'o1', { toStatus: to as never })).rejects.toThrow(
-        "This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.",
+        "This voucher is being issued via API — a Gifsy admin can retry via API to fetch the code, or 'Fulfil manually'.",
       );
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
@@ -583,7 +583,7 @@ describe('VendorPortalService', () => {
       it('updateFulfilment: a Hubble-managed order refuses a vendor code', async () => {
         grantScope();
         mockPrisma.redemptionOrder.findFirst.mockResolvedValue(open({ metadata: { hubbleStatus: 'PROCESSING' } }));
-        await expect(service.updateFulfilment(vendor, 'o1', { voucherCode: 'NEW-1' } as never)).rejects.toThrow(/Hubble integration/);
+        await expect(service.updateFulfilment(vendor, 'o1', { voucherCode: 'NEW-1' } as never)).rejects.toThrow(/issuance via API/);
         expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
       });
 

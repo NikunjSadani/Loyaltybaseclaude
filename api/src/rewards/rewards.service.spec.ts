@@ -3991,9 +3991,11 @@ describe('RewardsService', () => {
 
       it('a stored Hubble provider can never be relabelled, and Hubble is never hand-set', async () => {
         mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid({ voucherProvider: 'Hubble' }));
-        await expect(service.updateOrder(gifsy, 'o1', { voucherProvider: 'Gifsy' })).rejects.toThrow(/Hubble integration/);
+        await expect(service.updateOrder(gifsy, 'o1', { voucherProvider: 'Gifsy' })).rejects.toThrow(/issuance via API/);
         mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid());
-        await expect(service.updateOrder(gifsy, 'o1', { voucherProvider: 'hubble' })).rejects.toThrow("The 'Hubble' provider is set by the integration only.");
+        await expect(service.updateOrder(gifsy, 'o1', { voucherProvider: 'hubble' })).rejects.toThrow('The API provider is set by the integration only.');
+        // Owner rule 2026-11-26: "Via API" is how clients see the integration — never hand-set either.
+        await expect(service.updateOrder(gifsy, 'o1', { voucherProvider: 'Via API' })).rejects.toThrow('The API provider is set by the integration only.');
         noWrite();
       });
 
@@ -4024,7 +4026,7 @@ describe('RewardsService', () => {
         ['hubbleStatus PROCESSING', { metadata: { hubbleStatus: 'PROCESSING' } }],
       ])('a Hubble-managed order (%s) refuses ANY manual voucher write', async (_n, extra) => {
         mockPrisma.redemptionOrder.findFirst.mockResolvedValue(paid(extra));
-        await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'MANUAL-1' })).rejects.toThrow(/Hubble integration/);
+        await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'MANUAL-1' })).rejects.toThrow(/issuance via API/);
         noWrite();
       });
 
@@ -4231,6 +4233,81 @@ describe('RewardsService', () => {
       expect(leaks(s)).toBe(false);
       const g = await service.getOrder(gifsy, 'o1');
       expect(g.order).toMatchObject(DELIVERY);
+    });
+  });
+
+  // ─── OWNER RULE (2026-11-26, all clients): no client ever reads the fulfiller's name ──────────────
+  describe('fulfiller name — non-Gifsy order list / detail / tracking', () => {
+    const clientAdmin: JwtPayload = { sub: 'ca1', role: 'CLIENT_ADMIN', clientId: 'deoleo', phone: '9990002222', name: '' };
+    const at = new Date(Date.now() - 3 * 3_600_000);
+    const DATA_URL = 'data:image/png;base64,aHViYmxlSHViYmxl/Hubble+hubble==';
+    const meta = {
+      hubbleNeedsReconcile: true, hubbleReconcileReason: 'HUBBLE_INDETERMINATE', hubbleLatestReason: 'HUBBLE_WEBHOOK_BUT_NOT_FOUND',
+      hubbleNoOrderUnverified: { why: 'no delivered Hubble order on this Hubble account to verify against' },
+      hubblePlaceAttemptAt: at.toISOString(),
+    };
+    const order = {
+      id: 'o1', partnerId: 'cp1', orderNumber: 'D-1', status: 'PROCESSING', redemptionMode: 'GIFT_CARD',
+      voucherCode: null, voucherProvider: 'Hubble', createdAt: at, updatedAt: at, metadata: meta, pointsDeducted: 500,
+      cancelReason: 'Hubble confirmed no order for this reference — refunded',
+      reward: { id: 'r1', name: 'Hubble Amazon Pay', imageUrls: [DATA_URL], redemptionMode: 'GIFT_CARD' },
+      partner: { id: 'cp1', businessName: 'Hubble Traders', phone: '9991112222', user: null, outlets: [] },
+    };
+    /** Every VALUE of the response (keys are not user-visible and stay as they are). */
+    const values = (x: unknown): string[] =>
+      x == null ? [] : typeof x === 'string' ? [x] : Array.isArray(x) ? x.flatMap(values)
+        : typeof x === 'object' && !(x instanceof Date) ? Object.values(x as object).flatMap(values) : [];
+    /** Values that are NOT real data (reward / outlet names, image URLs) must carry no trace of the name. */
+    const leaked = (res: unknown) =>
+      values(res).filter((v) => /hubble/i.test(v) && !['Hubble Amazon Pay', 'Hubble Traders', DATA_URL].includes(v));
+
+    it('CLIENT_ADMIN list: provider "Via API", codes API_*, texts neutral — names and data URLs UNCHANGED', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read']));
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([order]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+      const res = await service.listOrders(clientAdmin, {});
+      const o = res.orders[0] as Record<string, unknown>;
+      expect(leaked(res)).toEqual([]);
+      expect(o.voucherProvider).toBe('Via API');
+      expect(o.hubbleNeedsReconcile).toBe(true); // the signal (and its key) is kept
+      expect(o.hubbleReconcileReason).toBe('API_INDETERMINATE');
+      expect((o.reward as { name: string; imageUrls: string[] }).name).toBe('Hubble Amazon Pay');
+      expect((o.reward as { imageUrls: string[] }).imageUrls[0]).toBe(DATA_URL);
+      expect((o.partner as { businessName: string }).businessName).toBe('Hubble Traders');
+    });
+
+    it('a member list / own detail and a SALES list get the same field-level mapping', async () => {
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([order]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+      expect(leaked(await service.listOrders(partner, {}))).toEqual([]);
+      // The member SELECT (MEMBER_ORDER_SELECT) never reads metadata — mirror it in the mock.
+      const { metadata: _m, pointsDeducted: _p, ...memberRow } = order;
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue(memberRow);
+      const own = await service.getOrder(partner, 'o1');
+      expect(own.order.voucherProvider).toBe('Via API');
+      expect(leaked(own)).toEqual([]);
+      mockPrisma.redemptionOrder.findFirst.mockReset();
+    });
+
+    it('member tracking carries no fulfiller field at all', async () => {
+      mockPrisma.redemptionOrder.findFirst.mockResolvedValue({
+        ...order, quantity: 1, logisticsPartner: null, trackingNumber: null, trackingUrl: null,
+        dispatchedAt: null, deliveredAt: null, cancelledAt: null, statusHistory: [],
+      });
+      mockPrisma.channelPartner.findFirst.mockResolvedValue({ id: 'cp1' });
+      const res = await service.trackOrder(partner, 'o1');
+      expect(leaked(res)).toEqual([]);
+      mockPrisma.redemptionOrder.findFirst.mockReset();
+    });
+
+    it('a Gifsy operator still reads the raw provider (Gifsy-only console)', async () => {
+      mockGifsyRoles.getPermissions.mockResolvedValue(new Set(['rewards:read', 'rewards:manage_orders']));
+      mockPrisma.redemptionOrder.findMany.mockResolvedValue([order]);
+      mockPrisma.redemptionOrder.count.mockResolvedValue(1);
+      const res = await service.listOrders(gifsy, {});
+      expect(res.orders[0].voucherProvider).toBe('Hubble');
+      expect((res.orders[0] as Record<string, unknown>).hubbleReconcileReason).toBe('HUBBLE_INDETERMINATE');
     });
   });
 
@@ -4703,7 +4780,7 @@ describe('RewardsService', () => {
 
     it('without the override, a stuck Hubble order refuses a manual code (400, no write)', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck());
-      await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'POOL-1' })).rejects.toThrow(/sent to the Hubble integration/);
+      await expect(service.updateOrder(gifsy, 'o1', { voucherCode: 'POOL-1' })).rejects.toThrow(/sent for issuance via API/);
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
@@ -4738,14 +4815,14 @@ describe('RewardsService', () => {
     ])('forward move refused with the plain message: %s', async (_l, over, to) => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(handedNoFlag(over));
       await expect(service.transitionOrder(gifsy, 'o1', { toStatus: to }))
-        .rejects.toThrow("This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.");
+        .rejects.toThrow("This voucher is being issued via API — a Gifsy admin can retry via API to fetch the code, or 'Fulfil manually'.");
       expect(mockPrisma.redemptionOrder.updateMany).not.toHaveBeenCalled();
     });
 
     it('a FLAGGED Hubble order is refused too (any Hubble hand-off marker counts, e.g. hubbleOrderId only)', async () => {
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck({ voucherProvider: null }));
       await expect(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))
-        .rejects.toThrow(/This voucher is with Hubble/);
+        .rejects.toThrow(/This voucher is being issued via API/);
     });
 
     it('NOT refused: an order ops took over manually (hubbleStatus MANUAL_OVERRIDE) or a Hubble order that holds a code', async () => {
@@ -4754,9 +4831,9 @@ describe('RewardsService', () => {
       );
       // Whatever else happens downstream (mock-dependent), it is never the Hubble forward block.
       const msgOf = (p: Promise<unknown>) => p.then(() => '', (e: Error) => e.message);
-      expect(await msgOf(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))).not.toMatch(/This voucher is with Hubble/);
+      expect(await msgOf(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))).not.toMatch(/This voucher is being issued via API/);
       mockPrisma.redemptionOrder.findFirst.mockResolvedValue(stuck({ voucherCode: 'HUB-CARD-1', metadata: { hubbleStatus: 'SUCCESS' } }));
-      expect(await msgOf(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))).not.toMatch(/This voucher is with Hubble/);
+      expect(await msgOf(service.transitionOrder(gifsy, 'o1', { toStatus: UpdatableOrderStatus.DISPATCHED }))).not.toMatch(/This voucher is being issued via API/);
     });
 
     it('the bulk fulfilment upload shows that message as the ROW error (not a silent skip)', async () => {
@@ -4773,7 +4850,7 @@ describe('RewardsService', () => {
       expect(res).toMatchObject({ failed: 1, succeeded: 0 });
       expect(res.errors[0]).toMatchObject({
         orderNumber: 'RDM-h',
-        message: "This voucher is with Hubble — use 'Retry with Hubble' to fetch the code, or 'Fulfil manually'.",
+        message: "This voucher is being issued via API — a Gifsy admin can retry via API to fetch the code, or 'Fulfil manually'.",
       });
     });
 
@@ -6794,7 +6871,7 @@ describe('RewardsService', () => {
         });
         expect(mockWallet.reverse).toHaveBeenCalledTimes(1);
         expect(mockWallet.reverse).toHaveBeenCalledWith(
-          'cp1', 1000, { referenceId: 'o1', description: 'Refund RDM-x (Hubble failed)' }, mockPrisma,
+          'cp1', 1000, { referenceId: 'o1', description: 'Refund RDM-x (voucher could not be issued)' }, mockPrisma,
         );
         expect(mockPrisma.redemptionOrder.updateMany).toHaveBeenCalledWith({
           where: { id: 'o1', status: nonTerminal, OR: [{ voucherCode: null }, { voucherCode: '' }] },

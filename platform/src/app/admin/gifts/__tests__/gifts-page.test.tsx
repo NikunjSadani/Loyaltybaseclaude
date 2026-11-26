@@ -383,7 +383,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'FK');
       await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Flipkart');
       await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'fk-1');
-      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+      await userEvent.click(scope.getByRole('button', { name: /load via api/i }));
 
       const panel = await scope.findByTestId('hubble-product-panel');
       expect(await within(panel).findByText('Flipkart')).toBeInTheDocument();
@@ -420,7 +420,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'FK');
       await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Flipkart');
       await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'fk-1');
-      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+      await userEvent.click(scope.getByRole('button', { name: /load via api/i }));
       await scope.findByTestId('hubble-product-panel');
       await userEvent.click(scope.getByRole('button', { name: /free amount/i }));
       await userEvent.type(scope.getByPlaceholderText('100'), '100');
@@ -439,7 +439,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'AMZ');
       await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Amazon');
       await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'amz-1');
-      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+      await userEvent.click(scope.getByRole('button', { name: /load via api/i }));
       const panel = await scope.findByTestId('hubble-product-panel');
       expect(await within(panel).findByText(/flexible amount/i)).toBeInTheDocument();
       expect(panel).toHaveTextContent('₹500');
@@ -477,10 +477,10 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       await userEvent.type(scope.getByPlaceholderText('AMZ-500'), 'FK');
       await userEvent.type(scope.getByPlaceholderText('Amazon Voucher ₹500'), 'Flipkart');
       await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'fk-1');
-      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+      await userEvent.click(scope.getByRole('button', { name: /load via api/i }));
       const panel = await scope.findByTestId('hubble-product-panel');
       expect(await within(panel).findByTestId('fixed-list-unknown'))
-        .toHaveTextContent("Hubble didn't return its amounts — enter the amounts Hubble shows for this brand");
+        .toHaveTextContent("The API didn't return its amounts — enter the amounts the API shows for this brand");
 
       const amt = await within(panel).findByLabelText('Amount to offer');
       // F2/F6: an invalid amount never disables "Add amount" — the tap shows "Check the amount" (and
@@ -520,7 +520,7 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
       render(<AdminGiftsPage />);
       const scope = await openAdd();
       await userEvent.type(scope.getByPlaceholderText(/amazon-pay-product-id/i), 'bad-id');
-      await userEvent.click(scope.getByRole('button', { name: /load from hubble/i }));
+      await userEvent.click(scope.getByRole('button', { name: /load via api/i }));
       expect(await scope.findByRole('alert')).toHaveTextContent('No active Hubble product with ID "bad-id".');
       expect(scope.queryByTestId('hubble-product-panel')).not.toBeInTheDocument();
     });

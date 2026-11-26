@@ -12,6 +12,7 @@
  */
 import type { RedemptionStatus } from '@prisma/client';
 import { istDateTimeCell } from '../../common/ist-date';
+import { neutralFulfillerText } from '../../common/fulfiller-name';
 import { HIERARCHY_RUNG_CODES, rungDisplayLabel } from '../../common/hierarchy-labels';
 import type { HyperlinkCell } from '../../common/xlsx';
 import type { XlsxCell } from '../../common/xlsx-stream';
@@ -511,7 +512,8 @@ function podCell(o: ReportOrder): XlsxCell {
 
 function fulfilledBy(o: ReportOrder, type: RedemptionRewardType): string {
   if (o.fulfilledByVendor?.name) return o.fulfilledByVendor.name;
-  if (type === 'E_VOUCHER') return o.voucherProvider?.trim() ? o.voucherProvider.trim() : NOT_RECORDED;
+  // OWNER RULE (2026-11-26): the API fulfiller (stored 'Hubble') is shown as "Via API" — never by name.
+  if (type === 'E_VOUCHER') return o.voucherProvider?.trim() ? neutralFulfillerText(o.voucherProvider.trim()) : NOT_RECORDED;
   if (type === 'CASH') return 'Gifsy (bank / UPI payout)';
   if (o.fulfilmentChannel === 'FULFILLED_BY_AMAZON') return 'Gifsy (via Amazon)';
   if (o.fulfilmentChannel === 'BRAND') return 'Brand (direct)';
