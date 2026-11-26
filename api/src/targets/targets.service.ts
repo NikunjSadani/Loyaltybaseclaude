@@ -953,8 +953,9 @@ export class TargetsService {
       code: k.code,
       label: k.label,
       isPrimary: k.isPrimary,
-      hasNameOverride: false,
-      nameOverrideLabel: null,
+      // Its "<KPI> Name" column (an older template) is read only to refuse typed names — never stored.
+      hasNameOverride: k.hasNameOverride,
+      nameOverrideLabel: k.nameOverrideLabel ?? null,
       order: k.order,
       enabled: k.enabled,
     }));
@@ -971,17 +972,21 @@ export class TargetsService {
       throw uploadParseError(e);
     }
 
-    // NO SILENT FAILURE: a number typed under an achievement-only KPI's column (an older template) would be dropped —
-    // refuse the file and say exactly which columns, rather than save the rest and quietly lose those values.
-    const typedAchievementOnly = Object.entries(parseResult.summary.excludedValues ?? {}).filter(([, n]) => n > 0);
-    if (typedAchievementOnly.length > 0) {
-      const labelOf = new Map(achievementOnlyRows.map((k) => [k.code, k.label]));
+    // NO SILENT FAILURE: a number under an achievement-only KPI's column, or a name under its "<KPI> Name" column (an
+    // older template), would be dropped — refuse the file and name exactly which columns, rather than save the rest
+    // and quietly lose what was typed.
+    const typed: string[] = [];
+    for (const k of achievementOnlyRows) {
+      const v = parseResult.summary.excludedValues?.[k.code] ?? 0;
+      const n = parseResult.summary.excludedNames?.[k.code] ?? 0;
+      if (v > 0) typed.push(`"${k.label}" (${v.toLocaleString('en-IN')} value${v === 1 ? '' : 's'})`);
+      if (n > 0) typed.push(`"${k.nameOverrideLabel ?? `${k.label} Name`}" (${n.toLocaleString('en-IN')} name${n === 1 ? '' : 's'})`);
+    }
+    if (typed.length > 0) {
       throw new BadRequestException(
-        `This file has target values under ${typedAchievementOnly
-          .map(([c, n]) => `"${labelOf.get(c) ?? c}" (${n.toLocaleString('en-IN')} value${n === 1 ? '' : 's'})`)
-          .join(', ')}, but ${typedAchievementOnly.length === 1 ? 'that KPI is' : 'those KPIs are'} achievement-only ` +
-          '(filled by Sales Import — targets are not uploaded for them). Clear those columns or download the current ' +
-          'template, then upload again. Nothing was saved.',
+        `This file has entries under ${typed.join(', ')}, but ${typed.length === 1 ? 'that column belongs' : 'those columns belong'} ` +
+          'to an achievement-only KPI (filled by Sales Import — targets and target names are not uploaded for it). ' +
+          'Clear those columns or download the current template, then upload again. Nothing was saved.',
       );
     }
 
@@ -1179,6 +1184,11 @@ export class TargetsService {
     const unchangedKeys: string[] = [];
     /** The writes apply performs: NEW + OVERWRITE (an UNCHANGED outlet-month is left alone). */
     const toWrite: TargetUploadWrite[] = [];
+    /**
+     * UNCHANGED outlet-months whose stored outletName differs from the file's: apply refreshes ONLY that name (no
+     * targetValues / batchId / updatedAt change, no history row, no notification, not an overwrite).
+     */
+    const nameOnly: TargetUploadWrite[] = [];
     /** `${month}|${outletCode}` → stored targetValues. */
     const storedValues = new Map<string, Record<string, unknown>>();
     let newCount = 0;
@@ -1187,10 +1197,12 @@ export class TargetsService {
     for (const month of [...byMonth.keys()].sort()) {
       const stored = await db.outletTarget.findMany({
         where: { clientId, month },
-        select: { outletCode: true, targetValues: true },
+        select: { outletCode: true, outletName: true, targetValues: true },
       });
-      for (const r of (stored ?? []) as Array<{ outletCode: string; targetValues?: unknown }>) {
+      const storedNames = new Map<string, unknown>();
+      for (const r of (stored ?? []) as Array<{ outletCode: string; outletName?: unknown; targetValues?: unknown }>) {
         storedValues.set(`${month}|${r.outletCode}`, (r.targetValues ?? {}) as Record<string, unknown>);
+        storedNames.set(r.outletCode, r.outletName);
       }
       let n = 0;
       let o = 0;
@@ -1208,6 +1220,8 @@ export class TargetsService {
         } else {
           u++;
           unchangedKeys.push(`${w.outletCode} · ${month}`);
+          const storedName = storedNames.get(w.outletCode);
+          if (typeof storedName === 'string' && storedName !== w.outletName) nameOnly.push(w);
         }
       }
       perMonth.push({ month, newCount: n, overwriteCount: o, unchangedCount: u });
@@ -1216,7 +1230,7 @@ export class TargetsService {
       unchangedCount += u;
     }
     return {
-      newCount, overwriteCount, unchangedCount, perMonth, sample, overwriteKeys, unchangedKeys, toWrite, storedValues,
+      newCount, overwriteCount, unchangedCount, perMonth, sample, overwriteKeys, unchangedKeys, toWrite, nameOnly, storedValues,
     };
   }
 
@@ -1290,6 +1304,8 @@ export class TargetsService {
       // Outlet-months already holding exactly these values — shown as "unchanged (no effect)", no acknowledgement.
       unchangedCount: cls.unchangedCount,
       unchangedSample: cls.unchangedKeys.slice(0, TargetsService.NOT_APPLIED_SAMPLE),
+      // Of unchangedCount: the ones whose stored outlet NAME will be refreshed from the file (values untouched).
+      ...(cls.nameOnly.length > 0 ? { outletNameUpdatedCount: cls.nameOnly.length } : {}),
       perMonth:       cls.perMonth,
       overwriteExamples,
       // How many overwritten outlet-months were compared to find the examples (the examples are a sample).
@@ -1462,6 +1478,7 @@ export class TargetsService {
       perMonth: Array<{ month: string; newCount: number; overwriteCount: number; unchangedCount?: number }>;
       historyRowCount?: number;
       writtenOutletCodes?: string[];
+      outletNameUpdatedCount?: number;
     };
     try {
       final = await this.prisma.$transaction(
@@ -1486,6 +1503,16 @@ export class TargetsService {
           // Multi-row statements (WRITE_CHUNK rows each) — ≤ ~80 statements for 6,500 outlets × 12 months. Only NEW +
           // OVERWRITE outlet-months (decided under the lock): an UNCHANGED one keeps its row, batchId and updatedAt.
           for (const stmt of this.targetWriteStatements(user.clientId, batch.id, cls.toWrite)) await tx.$executeRaw(stmt);
+          // UNCHANGED values but a different outlet name in the file: refresh ONLY "outletName" (raw SQL, so updatedAt —
+          // Sales Import's "targets changed" signal — batchId and targetValues stay as they are; no history, no notify).
+          for (let i = 0; i < cls.nameOnly.length; i += TargetsService.WRITE_CHUNK) {
+            const chunk = cls.nameOnly.slice(i, i + TargetsService.WRITE_CHUNK);
+            await tx.$executeRaw(Prisma.sql`
+              UPDATE "outlet_targets" AS t SET "outletName" = v.name
+              FROM unnest(${chunk.map((w) => w.outletCode)}::text[], ${chunk.map((w) => w.month)}::text[],
+                          ${chunk.map((w) => w.outletName)}::text[]) AS v(code, month, name)
+              WHERE t."clientId" = ${user.clientId} AND t."outletCode" = v.code AND t."month" = v.month`);
+          }
           const savedCount = cls.toWrite.length;
           // TARGET CHANGE HISTORY (owner 2026-11-25): one row per value that ACTUALLY changed, in this same transaction.
           const changes = targetChangesFor(cls.toWrite, cls.storedValues);
@@ -1504,6 +1531,7 @@ export class TargetsService {
                 newCount:       cls.newCount,
                 overwriteCount: cls.overwriteCount,
                 unchangedCount: cls.unchangedCount,
+                ...(cls.nameOnly.length > 0 ? { outletNameUpdatedCount: cls.nameOnly.length } : {}),
                 perMonth:       cls.perMonth,
                 historyRowCount: changes.length,
               } as unknown as Prisma.InputJsonValue,
@@ -1513,6 +1541,7 @@ export class TargetsService {
             newCount: cls.newCount, overwriteCount: cls.overwriteCount, unchangedCount: cls.unchangedCount,
             perMonth: cls.perMonth, historyRowCount: changes.length,
             writtenOutletCodes: cls.toWrite.map((w) => w.outletCode),
+            outletNameUpdatedCount: cls.nameOnly.length,
           };
         },
         { maxWait: 10_000, timeout: TargetsService.APPLY_TX_TIMEOUT_MS },
@@ -1581,6 +1610,8 @@ export class TargetsService {
       overwriteCount: final.overwriteCount,
       // Already held exactly these values — not rewritten (no effect).
       unchangedCount: final.unchangedCount ?? 0,
+      // Of unchangedCount: outlet-months whose stored outlet NAME was refreshed from the file (values untouched).
+      ...((final.outletNameUpdatedCount ?? 0) > 0 ? { outletNameUpdatedCount: final.outletNameUpdatedCount } : {}),
       perMonth:       final.perMonth,
       // What was NOT applied as typed (the done screen lists it), + what the admin acknowledged (confirm path).
       notApplied,

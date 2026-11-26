@@ -1268,6 +1268,43 @@ describe('TargetsService', () => {
         expect(notify.targetsUploaded).toHaveBeenCalledWith('deoleo', ['O002']);
       });
 
+      it('UNCHANGED values but a different outlet NAME: only "outletName" is updated — no overwrite, no history, no notify', async () => {
+        const notify = (service as unknown as { salesNotifications: { targetsUploaded: jest.Mock } }).salesNotifications;
+        sharedTargetFindMany.mockImplementation(async () => [
+          { outletCode: 'O001', outletName: 'Old Shop Name', targetValues: { MONTH_TGT: 10, FOCUS_PACK_1: 5 } },
+        ]);
+        const b = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 5]]);
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        expect(p.overwriteCount).toBe(0);
+        expect(p.unchangedCount).toBe(1);
+        expect(p.outletNameUpdatedCount).toBe(1);
+        expect(p.notApplied.find((c) => c.category === 'OVERWRITE')).toBeUndefined();
+        const r = await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
+        expect(writtenTargets()).toHaveLength(0); // no target upsert (values, batchId, updatedAt untouched)
+        const nameUpdates = mockTx.$executeRaw.mock.calls.filter((c: unknown[]) => /UPDATE "outlet_targets"/.test(sqlStr(c)));
+        expect(nameUpdates).toHaveLength(1);
+        expect(sqlStr(nameUpdates[0])).toMatch(/SET "outletName" = v\.name/);
+        expect(sqlStr(nameUpdates[0])).not.toMatch(/updatedAt|targetValues|batchId/);
+        const bound = (nameUpdates[0][0] as { values: unknown[] }).values;
+        expect(bound).toEqual(expect.arrayContaining([['O001'], [WRITABLE_MONTH.ym], ['Outlet One'], 'deoleo']));
+        expect(historyInsertCalls()).toHaveLength(0);
+        expect(notify.targetsUploaded).not.toHaveBeenCalled();
+        expect(r.savedCount).toBe(0);
+        expect(r.outletNameUpdatedCount).toBe(1);
+        expect(uploadAudits()[0].metadata).toEqual(expect.objectContaining({ unchangedCount: 1, outletNameUpdatedCount: 1 }));
+      });
+
+      it('same values AND same outlet name → nothing at all is written', async () => {
+        sharedTargetFindMany.mockImplementation(async () => [
+          { outletCode: 'O001', outletName: 'Outlet One', targetValues: { MONTH_TGT: 10, FOCUS_PACK_1: 5 } },
+        ]);
+        const b = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 5]]);
+        const p = await service.previewTargetUpload(admin, xfile(b));
+        expect(p).not.toHaveProperty('outletNameUpdatedCount');
+        await service.uploadTargets(admin, xfile(b), { confirmToken: p.previewToken, acknowledged: acksOf(p) });
+        expect(mockTx.$executeRaw.mock.calls.filter((c: unknown[]) => /outlet_targets/.test(sqlStr(c)))).toHaveLength(0);
+      });
+
       it('OVERWRITE fingerprint follows the NEW definition: an unchanged outlet-month that changed since the preview → 412', async () => {
         sharedTargetFindMany.mockImplementation(async () => [{ outletCode: 'O001', targetValues: { MONTH_TGT: 10, FOCUS_PACK_1: 5 } }]);
         const same = buildTestXlsx([['O001', 'Outlet One', 'RETAIL', 10, 5]]);
@@ -1340,6 +1377,22 @@ describe('TargetsService', () => {
           await expect(service.previewTargetUpload(admin, xfile(b)))
             .rejects.toThrow(/"BSC Cases" \(2 values\).*achievement-only.*Nothing was saved/);
           await expect(service.uploadTargets(admin, xfile(b), { confirmToken: 'x' })).rejects.toThrow();
+          expect(writtenTargets()).toHaveLength(0);
+        });
+
+        it('NO SILENT DROP: a name typed under the achievement-only KPI\'s "<KPI> Name" column refuses the file too', async () => {
+          mockPrisma.kpiDef.findMany.mockResolvedValue([
+            kpiRow, kpiRow2, { ...bscCases, achievementOnly: true, hasNameOverride: true, nameOverrideLabel: 'BSC Cases Name' },
+          ]);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+            ['', '', '', WRITABLE_MONTH.label, '', '', ''],
+            ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'BSC Cases', 'BSC Cases Name'],
+            ['O001', 'Outlet One', 'RETAIL', 10, 5, null, 'Diwali pack'],
+          ]), 'Targets');
+          const b = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+          await expect(service.previewTargetUpload(admin, xfile(b)))
+            .rejects.toThrow(/"BSC Cases Name" \(1 name\).*achievement-only KPI.*Nothing was saved/);
           expect(writtenTargets()).toHaveLength(0);
         });
 

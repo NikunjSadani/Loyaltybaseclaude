@@ -150,6 +150,8 @@ interface PreviewResult extends UploadSummaryData {
   willSaveCount: number;
   /** A few unchanged outlet-months ("OUT123 · 2026-12"). */
   unchangedSample?: string[];
+  /** Of the unchanged ones: whose stored outlet name is refreshed from the file (target values untouched). */
+  outletNameUpdatedCount?: number;
   overwriteExamples?: {
     outletCode: string;
     outletName: string;
@@ -810,7 +812,11 @@ export default function TargetUploadPage() {
               </p>
               <p className="text-xs text-gray-600">
                 These outlets already have exactly these target values for that month, so they are left as they are —
-                nothing about them is saved or replaced.
+                no target value is saved or replaced.
+                {(preview.outletNameUpdatedCount ?? 0) > 0 && (
+                  <> Only the outlet name is updated for {plural(preview.outletNameUpdatedCount!, 'of them', 'of them')} (the
+                    name in this file differs from the stored one).</>
+                )}
               </p>
               {preview.unchangedSample && preview.unchangedSample.length > 0 && (
                 <p className="text-[11px] text-gray-500">

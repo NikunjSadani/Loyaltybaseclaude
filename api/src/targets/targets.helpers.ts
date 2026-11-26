@@ -155,6 +155,8 @@ export interface ParseResult {
      * achievement-only) KPI's column. Those cells are never stored; the caller decides how to report them.
      */
     excludedValues?: Record<string, number>;
+    /** Only with `opts.excludedKpis`: KPI code → non-blank cells typed under that excluded KPI's "<KPI> Name" column. */
+    excludedNames?: Record<string, number>;
   };
 }
 
@@ -544,8 +546,13 @@ export function parseTargetUploadBuffer(
   let ignoredOutOfScope = 0;
   const enabled = getEnabledKpis(kpis);
   const excludedLabelToCode = new Map<string, string>();
-  for (const k of opts?.excludedKpis ?? []) excludedLabelToCode.set(k.label.toLowerCase().trim(), k.code);
+  const excludedNameLabelToCode = new Map<string, string>();
+  for (const k of opts?.excludedKpis ?? []) {
+    excludedLabelToCode.set(k.label.toLowerCase().trim(), k.code);
+    if (k.hasNameOverride && k.nameOverrideLabel) excludedNameLabelToCode.set(k.nameOverrideLabel.toLowerCase().trim(), k.code);
+  }
   const excludedValues: Record<string, number> = {};
+  const excludedNames: Record<string, number> = {};
 
   // label → code map (for resolving uploaded VALUE headers back to KPI codes)
   const labelToCode = new Map<string, string>();
@@ -623,7 +630,8 @@ export function parseTargetUploadBuffer(
   interface KpiColumn {
     colIndex: number;  // ABSOLUTE row-2 column index
     code: string;
-    kind: 'value' | 'name' | 'excluded';  // 'value' = KPI target value; 'name' = override name; 'excluded' = opts.excludedKpis
+    // 'value' = KPI target value; 'name' = override name; 'excluded' / 'excludedName' = an opts.excludedKpis value / name column
+    kind: 'value' | 'name' | 'excluded' | 'excludedName';
   }
   const monthKpiCols: KpiColumn[][] = monthBlocks.map((block, bi) => {
     const blockStart = block.startCol;
@@ -651,7 +659,12 @@ export function parseTargetUploadBuffer(
       }
       // An excluded KPI's column (e.g. achievement-only on a target upload): read only to count typed values.
       const excludedCode = excludedLabelToCode.get(label);
-      if (excludedCode) cols.push({ colIndex: ci, code: excludedCode, kind: 'excluded' });
+      if (excludedCode) {
+        cols.push({ colIndex: ci, code: excludedCode, kind: 'excluded' });
+        continue;
+      }
+      const excludedNameCode = excludedNameLabelToCode.get(label);
+      if (excludedNameCode) cols.push({ colIndex: ci, code: excludedNameCode, kind: 'excludedName' });
       // Skip fixed columns / blanks / unknown labels.
     }
     return cols;
@@ -740,6 +753,11 @@ export function parseTargetUploadBuffer(
           if (isFinite(n)) excludedValues[code] = (excludedValues[code] ?? 0) + 1;
           continue;
         }
+        if (kind === 'excludedName') {
+          // Any non-blank text (blank already skipped above) — a custom name typed for a KPI that takes none here.
+          excludedNames[code] = (excludedNames[code] ?? 0) + 1;
+          continue;
+        }
 
         // D1 (scoped tenants only): an out-of-scope (outlet, KPI) cell is IGNORED — value and name.
         // Only a NUMERIC value counts as "ignored" (the template's `N/A` is just non-numeric).
@@ -825,7 +843,7 @@ export function parseTargetUploadBuffer(
       accepted,
       rejected,
       ignoredOutOfScope,
-      ...(opts?.excludedKpis ? { excludedValues } : {}),
+      ...(opts?.excludedKpis ? { excludedValues, excludedNames } : {}),
     },
   };
 }

@@ -151,6 +151,7 @@ describe('target upload — preview', () => {
     const un = await screen.findByTestId('target-upload-unchanged');
     expect(un).toHaveTextContent('2 outlet-months unchanged (no effect)');
     expect(un).toHaveTextContent('O1 · 2026-12; O3 · 2026-12');
+    expect(un).not.toHaveTextContent('Only the outlet name is updated');
     expect(un.querySelector('input[type="checkbox"]')).toBeNull();
     expect(screen.getByTestId('target-upload-overwrite')).toHaveTextContent('1 outlet-month will be overwritten');
     expect(screen.getByTestId('target-upload-overwrite')).toHaveTextContent("Dec '26: 0 new · 1 overwritten · 2 unchanged");
@@ -159,15 +160,18 @@ describe('target upload — preview', () => {
     expect(screen.getByTestId('target-upload-acks')).toHaveTextContent('I understand 1 existing outlet-month target will be replaced');
   });
 
-  it('every outlet-month unchanged → Confirm disabled with an honest reason, no boxes', async () => {
+  it('every outlet-month unchanged → Confirm disabled with an honest reason, no boxes; a name-only refresh is said', async () => {
     stub(async () => json({ success: true, data: previewBody({
       willSaveCount: 0, newCount: 0, overwriteCount: 0, unchangedCount: 3, unchangedSample: ['O1 · 2026-12'],
+      outletNameUpdatedCount: 1,
       perMonth: [{ month: '2026-12', newCount: 0, overwriteCount: 0, unchangedCount: 3 }],
       rejectedCount: 0, problemRows: [], problemRowCount: 0, overwriteExamples: [], notApplied: [],
     }) }));
     render(<TargetUploadPage />);
     await pick();
-    expect(await screen.findByTestId('target-upload-unchanged')).toHaveTextContent('3 outlet-months unchanged (no effect)');
+    const un = await screen.findByTestId('target-upload-unchanged');
+    expect(un).toHaveTextContent('3 outlet-months unchanged (no effect)');
+    expect(un).toHaveTextContent('Only the outlet name is updated for 1 of them');
     expect(screen.getByTestId('confirm-disabled-reason'))
       .toHaveTextContent('Nothing to apply — every outlet-month in this file already has exactly these target values.');
     expect(confirmBtn()).toBeDisabled();
