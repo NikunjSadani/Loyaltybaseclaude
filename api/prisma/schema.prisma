@@ -2411,6 +2411,10 @@ model OffPortalPayment {
   @@index([clientId, paymentDate])
   @@index([uploadId])
   @@index([supersedesOffPlatformEntryId])
+  // MIGRATION-ONLY (Prisma cannot model a partial unique index): "off_portal_payments_one_live_supersede" UNIQUE
+  // (supersedesOffPlatformEntryId) WHERE supersedesOffPlatformEntryId IS NOT NULL AND voidedAt IS NULL — one live
+  // payment per legacy TDS marker row. Also migration-only: CHECK "off_portal_payments_amount_positive" (amountPaise > 0).
+  // Guarded against drift by off-portal-payments.schema-guard.spec.ts.
   @@map("off_portal_payments")
 }
 
@@ -2497,10 +2501,14 @@ model TdsRecoveryEntry {
   /// NULL for rows written before 2026-11-24 (no backfill). No FK on purpose (additive; a download row is never
   /// deleted). Read by the fund statement to date the TDS line with its own run exactly.
   downloadId       String?
+  /// Off-portal payments register (2026-11-26): the OffPortalPaymentUpload whose confirm wrote this row (194C gross-up
+  /// TDS / no-PAN recovery on payments made outside the portal) — downloadId is then NULL. No FK (additive).
+  offPortalUploadId String?
   createdAt        DateTime   @default(now())
 
   @@index([clientId, fyLabel])
   @@index([downloadId])
+  @@index([offPortalUploadId])
   @@index([panNumber, section, fyLabel])
   @@index([tdsInvoiceId])
   @@map("tds_recovery_entries")

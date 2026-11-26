@@ -97,4 +97,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS "off_portal_payments_one_live_supersede"
   ON "off_portal_payments" ("supersedesOffPlatformEntryId")
   WHERE "supersedesOffPlatformEntryId" IS NOT NULL AND "voidedAt" IS NULL;
 
+-- 194C gross-up TDS / no-PAN recovery raised when off-portal payments are recorded: the upload that wrote the row
+-- (downloadId stays NULL). Nullable, additive.
+ALTER TABLE "tds_recovery_entries" ADD COLUMN IF NOT EXISTS "offPortalUploadId" TEXT;
+CREATE INDEX IF NOT EXISTS "tds_recovery_entries_offPortalUploadId_idx"
+  ON "tds_recovery_entries" ("offPortalUploadId");
+
 RESET lock_timeout;

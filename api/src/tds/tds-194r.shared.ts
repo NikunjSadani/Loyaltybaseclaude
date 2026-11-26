@@ -68,6 +68,23 @@ export const noPanOutletKey = (clientId: string, outletCode: string): string =>
 export const isNoPanKey = (key: string): boolean => key === NO_PAN_KEY || key.startsWith(`${NO_PAN_KEY}:`);
 
 /**
+ * Off-portal payments register: the 194R key of a NO-PAN off-portal payment — payeeKeyFor on the outlet's (current)
+ * owner with no PAN: `__NO_PAN__:<partnerId>`, else (no owner / not on the portal) `__NO_PAN__:outlet:<client>:<code>`
+ * using the portal's spelling of the code when the outlet exists. Shared by the upload preview and the 194R base.
+ */
+export function offPortalNoPanKey(
+  clientId: string,
+  outletCode: string,
+  portalOutlet: { outletCode: string; partnerId: string | null } | null | undefined,
+): string {
+  return payeeKeyFor(
+    clientId,
+    portalOutlet?.outletCode ?? outletCode,
+    portalOutlet?.partnerId ? { id: portalOutlet.partnerId, panNumber: null } : null,
+  );
+}
+
+/**
  * A-M2 — the ONE PAN normaliser. Every character in PAN_WS_CLASS (space, \t \n \r \f \v, NBSP, zero-width
  * space, BOM) is removed — anywhere, not only at the ends — and the result upper-cased. The SQL twin is
  * PAN_NORMALISE_SQL (identical character class, used by the engine scope query, the DELIVERED snapshot and
@@ -279,6 +296,13 @@ export interface Collect194RArgs {
   reversedSink?: (key: string, item: Reversed194RItem) => void;
   /** Off-portal payments register (2026-11-25): every off-portal payment counted, under its key (report call-outs). */
   offPortalSink?: (key: string, item: OffPortal194RItem) => void;
+  /**
+   * ENGINE view (owner 2026-11-26): off-portal payments COUNT toward the yearly threshold but NEVER drive automatic
+   * withholding on later portal payouts. True → off-portal visibility is counted in the non-cash bucket (still in the
+   * total base → threshold) instead of the visibility bucket the DEDUCT engine withholds on. The report leaves it
+   * false (the full liability, with the shortfall said on the row).
+   */
+  offPortalForThresholdOnly?: boolean;
 }
 
 /** An off-portal payment counted in the 194R base (paid in full outside the portal — nothing withheld). */
@@ -543,12 +567,14 @@ export async function collect194RBases(db: Tds194RDb, args: Collect194RArgs): Pr
       } else {
         const m = opOutlets.get(p.outletCodeKey) ?? [];
         const o = m.length === 1 ? m[0] : null;
-        key = o?.partnerId ? noPanPartnerKey(o.partnerId) : noPanOutletKey(clientId, o?.outletCode ?? p.outletCode);
+        // The SAME resolver the portal's payee snapshot uses (payeeKeyFor), on the outlet's CURRENT owner, without a PAN
+        // (owner rule: a no-PAN payment stays no-PAN even if the owner adds a PAN later — the year splits at the change).
+        key = offPortalNoPanKey(clientId, p.outletCode, o);
         hasPan = false;
       }
       const bucket: OffPortal194RItem['bucket'] =
         p.paymentMode === 'GIFT' ? 'nonCashPaise' : p.payoutStream === 'VISIBILITY' ? 'visPaise' : 'cashPaise';
-      add(key, hasPan, bucket, p.amountPaise);
+      add(key, hasPan, args.offPortalForThresholdOnly && bucket === 'visPaise' ? 'nonCashPaise' : bucket, p.amountPaise);
       noteOutlet?.(key, p.outletCode);
       offPortalSink?.(key, { id: p.id, hasPan, bucket, amountPaise: p.amountPaise, paymentDate: p.paymentDate, outletCode: p.outletCode });
     }

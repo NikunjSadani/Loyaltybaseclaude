@@ -22,6 +22,7 @@
 
 /** One payout row as surfaced to the wallet / ledger (INR, integer paise). */
 import { istMonthKey } from './ist-date';
+import { clientHasOffPortalPayments, type PresenceDb } from '../off-portal-payments/off-portal-presence';
 
 export interface PayoutRow {
   id: string;
@@ -96,7 +97,10 @@ export interface PayoutStatementReader {
   payoutTransaction: { findMany: (args: unknown) => Promise<unknown[]> };
   creditPayoutEntry: { findMany: (args: unknown) => Promise<CreditEntryRow[]> };
   /** Optional only so narrow unit-test fakes keep working; PrismaService / a tx client always has it. */
-  offPortalPayment?: { findMany: (args: unknown) => Promise<OffPortalRow[]> };
+  offPortalPayment?: {
+    findMany: (args: unknown) => Promise<OffPortalRow[]>;
+    findFirst?: (args: { where: { clientId: string }; select: { id: true } }) => Promise<{ id: string } | null>;
+  };
 }
 
 /**
@@ -225,7 +229,8 @@ export async function buildPayoutStatement(
   // by Outlet ID, case-insensitive — an Outlet ID paid before it registered links automatically). Paid in full; voided
   // entries are hidden (like FAILED / REVERSED payouts).
   const offPortalRows =
-    outletCodes.length && prisma.offPortalPayment
+    // B7: the (cached) presence check skips this read for clients with no off-portal payment at all.
+    outletCodes.length && prisma.offPortalPayment && (await clientHasOffPortalPayments(prisma as PresenceDb, clientId))
       ? await prisma.offPortalPayment.findMany({
           where: { clientId, voidedAt: null, outletCodeKey: { in: [...new Set(outletCodes.map((c) => c.trim().toUpperCase()))] } },
           select: { id: true, period: true, payoutStream: true, paymentMode: true, amountPaise: true, paymentDate: true, utr: true, narration: true, createdAt: true },
@@ -235,7 +240,11 @@ export async function buildPayoutStatement(
   const offPortalPayouts = offPortalRows.map((p) => ({
     id: p.id,
     period: p.period,
-    kpiLabel: `Off-portal ${p.payoutStream === 'VISIBILITY' ? 'visibility' : 'incentive'} payment${p.paymentMode === 'GIFT' ? ' (gift)' : ''}`,
+    // Owner 2026-11-26: gifts stay in the outlet's totals / statement, clearly labelled "Gift (off-portal)".
+    kpiLabel:
+      p.paymentMode === 'GIFT'
+        ? `Gift (off-portal) — ${p.payoutStream === 'VISIBILITY' ? 'visibility' : 'incentive'}`
+        : `Off-portal ${p.payoutStream === 'VISIBILITY' ? 'visibility' : 'incentive'} payment`,
     achievedPct: 100,
     payoutAmountPaise: Number(p.amountPaise),
     uploadedAt: p.createdAt.toISOString(),

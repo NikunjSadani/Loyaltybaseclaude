@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { isLoyaltyEnabledForPartner } from './loyalty-eligibility';
+import { clientHasOffPortalPayments, type PresenceDb } from '../off-portal-payments/off-portal-presence';
 import {
   PRIMARY_OUTLET_ORDER_BY,
   partnerOutletsWhere,
@@ -122,7 +123,7 @@ export async function resolveOutletWalletActivity(
   ]);
   // The payout LIST also shows off-portal payments (not void) to these outlets → they flip the card too.
   const offPortal =
-    !payoutEntry && !payoutTxn && outletCodes.length && db.offPortalPayment
+    !payoutEntry && !payoutTxn && outletCodes.length && db.offPortalPayment && (await clientHasOffPortalPayments(db as PresenceDb, clientId))
       ? await db.offPortalPayment.findFirst({
           where: { clientId, voidedAt: null, outletCodeKey: { in: [...new Set(outletCodes.map((c) => c.trim().toUpperCase()))] } },
           select: { id: true },

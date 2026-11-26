@@ -60,6 +60,7 @@ import {
   importedCountFromForFy,
   importedPayoutsNote,
   capUploadResult,
+  toTdsRate,
 } from './tds.helpers';
 import { TdsStatutoryConfigService } from './tds-statutory.config.service';
 import { TenantSettingsService } from '../tenant/tenant-settings.service';
@@ -316,6 +317,8 @@ export interface TdsRow194R {
   offPortalPaidPaise?: bigint;
   /** …of which visibility on the Deduct method — TDS due but NOT withheld (shortfall; absent when none). */
   offPortalNotWithheldPaise?: bigint;
+  /** The TDS on offPortalNotWithheldPaise that is due and never withheld (0 below the threshold). */
+  offPortalShortfallTdsPaise?: bigint;
 }
 
 /**
@@ -359,6 +362,8 @@ export interface TdsRow194C {
   offPortalPaidPaise?: bigint;
   /** …of which on the Deduct method — TDS not withheld (shortfall; absent when none). */
   offPortalNotWithheldPaise?: bigint;
+  /** The TDS on offPortalNotWithheldPaise that is due and never withheld (0 below the threshold). */
+  offPortalShortfallTdsPaise?: bigint;
   /** Plain-words call-out (absent when none). */
   note?: string;
 }
@@ -372,6 +377,7 @@ export interface TdsSummary194R {
   /** Off-portal payments register (present only when the FY has any). */
   totalOffPortalPaidPaise?: bigint;
   totalOffPortalNotWithheldPaise?: bigint;
+  totalOffPortalShortfallTdsPaise?: bigint;
   offPortalNotWithheldRetailerCount?: number;
   totalBasePaise: bigint;
   totalLiabilityPaise: bigint;
@@ -521,6 +527,7 @@ export class TdsService {
           ? {
               totalOffPortalPaidPaise: rows.reduce((s, r) => s + (r.offPortalPaidPaise ?? 0n), 0n),
               totalOffPortalNotWithheldPaise: rows.reduce((s, r) => s + (r.offPortalNotWithheldPaise ?? 0n), 0n),
+              totalOffPortalShortfallTdsPaise: rows.reduce((s, r) => s + (r.offPortalShortfallTdsPaise ?? 0n), 0n),
               offPortalNotWithheldRetailerCount: rows.filter((r) => (r.offPortalNotWithheldPaise ?? 0n) > 0n).length,
             }
           : {}),
@@ -691,12 +698,21 @@ export class TdsService {
         );
         if (notWithheld > 0n) {
           r.offPortalNotWithheldPaise = notWithheld;
-          notes.push(
+          // Owner 2026-11-26: off-portal amounts count toward the threshold but are NEVER withheld from later portal
+          // payouts — the TDS on them is a standing shortfall, said here with its amount.
+          const rate = toTdsRate(r.ratePct);
+          const shortTds =
             r.deductLiabilityPaise > 0n
-              ? `TDS NOT WITHHELD — SHORTFALL: ${formatINR(notWithheld)} of visibility was paid off-portal on the Deduct method; ` +
-                  "the year's deducted part includes TDS on it, which was not withheld (the next visibility payout run carries it forward)."
+              ? withholdingTdsPaise(r.deductBasePaise, rate) - withholdingTdsPaise(r.deductBasePaise - notWithheld, rate)
+              : 0n;
+          r.offPortalShortfallTdsPaise = shortTds;
+          notes.push(
+            shortTds > 0n
+              ? `TDS NOT WITHHELD — SHORTFALL ${formatINR(shortTds)}: ${formatINR(notWithheld)} of visibility was paid off-portal on the ` +
+                  'Deduct method. It counts toward the yearly threshold, but its TDS is NOT withheld from later portal payouts — ' +
+                  'recover or bear it outside the portal.'
               : `TDS NOT WITHHELD: ${formatINR(notWithheld)} of visibility was paid off-portal on the Deduct method — below the ` +
-                  'yearly threshold today, so no TDS is due yet; if the year crosses it, TDS on this amount is a shortfall.',
+                  'yearly threshold today, so no TDS is due yet; if the year crosses it, TDS on this amount is a shortfall (never withheld automatically).',
           );
         }
       }
@@ -1067,18 +1083,19 @@ export class TdsService {
       }
     }
 
-    // ── Source: OFF-PORTAL payments register (owner 2026-11-25) — 194C visibility paid IN FULL outside the portal, in
-    // the FY of the PAYMENT DATE, under the methodology FROZEN at upload. Key: the PAN frozen at upload, else the
-    // per-OUTLET no-PAN key (194C granularity). Nothing was withheld → on Deduct the TDS on it stays in "outstanding"
-    // and the row says SHORTFALL. Voided rows never count. ──
+    // ── Source: OFF-PORTAL payments register (owner 2026-11-25/26) — 194C visibility paid IN FULL outside the portal, in
+    // the FY of its payout PERIOD (the same rule as portal 194C entries; the period defaults to the payment month),
+    // under the methodology FROZEN at upload. Key: the PAN frozen at upload (file PAN, else the portal PAN then), else
+    // the per-OUTLET no-PAN key (194C granularity, the portal's spelling of the code). On Deduct nothing was withheld
+    // and nothing is ever withheld later → the TDS stays in "outstanding" and the row says SHORTFALL. On Gross-up its
+    // TDS was invoiced / recovered when recorded (shown in "recovered"). Voided rows never count. ──
     const offPortalPaid = new Map<string, { paid: bigint; notWithheld: bigint; count: number }>();
     {
-      const { start: fyStart, endExclusive: fyEnd } = fyFromLabel(fyLabel);
       // `offPortalPayment` is absent only on narrow unit-test fakes; the real client always has it.
       const delegate = (this.prisma as Partial<PrismaService>).offPortalPayment;
       const op = delegate
         ? await delegate.findMany({
-            where: { voidedAt: null, tdsSection: 'SEC_194C', paymentDate: { gte: fyStart, lt: fyEnd } },
+            where: { voidedAt: null, tdsSection: 'SEC_194C', period: { gte: startPeriod, lte: endPeriod } },
             select: { clientId: true, outletCode: true, outletCodeKey: true, panNumber: true, amountPaise: true, tdsMethodology: true },
           })
         : [];
@@ -1348,10 +1365,14 @@ export class TdsService {
       const notes = [`Includes ${formatINR(op.paid)} paid off-portal in full (${op.count} payment${op.count === 1 ? '' : 's'}) — no TDS was withheld on it.`];
       if (op.notWithheld > 0n) {
         r.offPortalNotWithheldPaise = op.notWithheld;
+        // Owner 2026-11-26: counts toward the threshold, NEVER withheld from later portal payouts → standing shortfall.
+        const shortTds = r.thresholdMet ? withholdingTdsPaise(op.notWithheld, rate194CFrom(cfg, !isNoPanKey(r.panNumber), r.entityType)) : 0n;
+        r.offPortalShortfallTdsPaise = shortTds;
         notes.push(
-          r.thresholdMet
-            ? `TDS NOT WITHHELD — SHORTFALL: ${formatINR(op.notWithheld)} was paid off-portal on the Deduct method; the TDS on it is in the outstanding.`
-            : `TDS NOT WITHHELD: ${formatINR(op.notWithheld)} was paid off-portal on the Deduct method — below the threshold today; if it is crossed, TDS on it is a shortfall.`,
+          shortTds > 0n
+            ? `TDS NOT WITHHELD — SHORTFALL ${formatINR(shortTds)}: ${formatINR(op.notWithheld)} was paid off-portal on the Deduct method. ` +
+                'It counts toward the threshold, but its TDS is NOT withheld from later portal payouts (it stays in the outstanding).'
+            : `TDS NOT WITHHELD: ${formatINR(op.notWithheld)} was paid off-portal on the Deduct method — below the threshold today; if it is crossed, TDS on it is a shortfall (never withheld automatically).`,
         );
       }
       r.note = notes.join(' ');

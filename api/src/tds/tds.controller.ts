@@ -325,6 +325,7 @@ function serializeRow194R(r: import('./tds.service').TdsRow194R) {
     // Off-portal payments register (only on rows that have any).
     ...(r.offPortalPaidPaise !== undefined ? { offPortalPaidPaise: r.offPortalPaidPaise.toString() } : {}),
     ...(r.offPortalNotWithheldPaise !== undefined ? { offPortalNotWithheldPaise: r.offPortalNotWithheldPaise.toString() } : {}),
+    ...(r.offPortalShortfallTdsPaise !== undefined ? { offPortalShortfallTdsPaise: r.offPortalShortfallTdsPaise.toString() } : {}),
   };
 }
 
@@ -363,6 +364,7 @@ function serializeRow194C(r: import('./tds.service').TdsRow194C) {
     // Off-portal payments register (only on rows that have any).
     ...(r.offPortalPaidPaise !== undefined ? { offPortalPaidPaise: r.offPortalPaidPaise.toString() } : {}),
     ...(r.offPortalNotWithheldPaise !== undefined ? { offPortalNotWithheldPaise: r.offPortalNotWithheldPaise.toString() } : {}),
+    ...(r.offPortalShortfallTdsPaise !== undefined ? { offPortalShortfallTdsPaise: r.offPortalShortfallTdsPaise.toString() } : {}),
     ...(r.note ? { note: r.note } : {}),
   };
 }
@@ -388,6 +390,7 @@ function serializeSummary194R(s: import('./tds.service').TdsSummary194R) {
       ? {
           totalOffPortalPaidPaise: s.totalOffPortalPaidPaise.toString(),
           totalOffPortalNotWithheldPaise: (s.totalOffPortalNotWithheldPaise ?? 0n).toString(),
+          totalOffPortalShortfallTdsPaise: (s.totalOffPortalShortfallTdsPaise ?? 0n).toString(),
           offPortalNotWithheldRetailerCount: s.offPortalNotWithheldRetailerCount ?? 0,
         }
       : {}),

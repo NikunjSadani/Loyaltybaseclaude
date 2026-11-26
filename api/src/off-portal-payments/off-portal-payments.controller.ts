@@ -74,6 +74,13 @@ export class OffPortalPaymentsController {
     return this.svc.list(user, q);
   }
 
+  @Get('presence')
+  @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
+  @RequirePermission('payouts:read')
+  presence(@CurrentUser() user: JwtPayload) {
+    return this.svc.presence(user);
+  }
+
   @Get('uploads')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('payouts:read')

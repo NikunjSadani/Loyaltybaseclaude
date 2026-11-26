@@ -10,12 +10,14 @@ import { parseAmountCell, parseOffPortalFile } from './off-portal-payments.parse
 import { collect194RBases, liability194R, noPanOutletKey, noPanPartnerKey } from '../tds/tds-194r.shared';
 import { DEFAULT_RESOLVED_TDS_STATUTORY, financialYear } from '../tds/tds.helpers';
 import { TdsService } from '../tds/tds.service';
-import { offPortalItem } from '../fund/fund-sources.loader';
+import { offPortalItem, tdsItems } from '../fund/fund-sources.loader';
 import { buildFundStatement } from '../fund/fund-statement.engine';
 import { buildPayoutStatement } from '../common/payout-statement.helper';
 import { offPortalTotals, offPortalWhere } from '../payments-report/payments-report.query';
 import { istDateKey } from '../common/ist-date';
 import type { JwtPayload } from '../common/decorators/current-user.decorator';
+import { CreditsService } from '../credits/credits.service';
+import { invalidateOffPortalPresence } from './off-portal-presence';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -85,8 +87,11 @@ interface Store {
   payees: any[];
   audits: any[];
   openings: Array<{ clientId: string; receivedAt: Date }>;
+  recoveries: any[];
+  invoices: any[];
+  portalEntries: any[];
 }
-const newStore = (): Store => ({ outlets: [], partners: [], payments: [], legacy: [], uploads: [], payees: [], audits: [], openings: [] });
+const newStore = (): Store => ({ outlets: [], partners: [], payments: [], legacy: [], uploads: [], payees: [], audits: [], openings: [], recoveries: [], invoices: [], portalEntries: [] });
 
 let idSeq = 0;
 function fakeDb(s: Store): any {
@@ -154,11 +159,28 @@ function fakeDb(s: Store): any {
     user: { findMany: async () => [] },
     programSetting: { findUnique: async () => null },
     creditField: { findMany: async () => [] },
+    tdsRecoveryEntry: {
+      findMany: async ({ where, select }: any) => s.recoveries.filter((r) => matches(r, where)).map((r) => pick(r, select)),
+      findFirst: async ({ where }: any) => s.recoveries.find((r) => matches(r, where)) ?? null,
+      createMany: async ({ data }: any) => {
+        for (const d of data) s.recoveries.push({ id: `rec${++idSeq}`, createdAt: new Date(), ...d });
+        return { count: data.length };
+      },
+    },
+    // Portal payout entries (PAID / PROCESSING) for the engine's prior base + the PAID_ON_PORTAL check.
+    creditPayoutEntry: {
+      findMany: async ({ where, select }: any) =>
+        s.portalEntries
+          .filter((e) => matches(e, where))
+          .map((e) => ({ ...pick(e, select), ...(select?.download ? { download: e.download ?? null } : {}) })),
+    },
   };
   const db: any = new Proxy(models, {
     get(t, k: string) {
       if (k === '$transaction') return async (fn: any) => fn(db);
       if (k === '$executeRaw') return async () => 0;
+      // scope194R: SELECT id, panNumber FROM channel_partners WHERE clientId = $1 AND normalised PAN = ANY($2)
+      if (k === '$queryRaw') return async (q: any) => s.partners.filter((p) => p.clientId === q.values[0] && p.panNumber && q.values[1].includes(p.panNumber)).map((p) => ({ id: p.id, panNumber: p.panNumber }));
       if (k === 'then') return undefined;
       if (!(k in t)) t[k] = { findMany: async () => [], findFirst: async () => null, findUnique: async () => null, aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }) };
       return t[k];
@@ -193,12 +215,24 @@ function setup(policy: { section: 'SEC_194R' | 'SEC_194C'; methodology: 'DEDUCT'
     { clientId: CLIENT, outletCode: 'OUT2', name: 'Gupta Traders', partnerId: 'p-nopan' },
     { clientId: OTHER, outletCode: 'OUTX', name: 'Other Co', partnerId: 'p-other' },
   );
+  // A fund opening long ago (so the default rows carry no fund warning; the no-opening case is tested on its own).
+  s.openings.push({ clientId: CLIENT, receivedAt: new Date(Date.UTC(2015, 0, 1)) });
   const db = fakeDb(s);
   const storage = { generateKey: jest.fn((f: string, n: string) => `${f}/${n}`), uploadFile: jest.fn(async () => 'url'), deleteFile: jest.fn(async () => undefined) };
   const tenantSettings = { resolveTdsPolicy: jest.fn(async () => policy) };
-  const svc = new OffPortalPaymentsService(db, storage as any, tenantSettings as any);
-  return { s, db, svc, storage, tenantSettings };
+  const invoices = {
+    createTdsInvoice: jest.fn(async (_tx: unknown, p: any) => {
+      const id = `inv${++idSeq}`;
+      s.invoices.push({ id, ...p });
+      return { invoiceId: id, gstPaise: 0n, gstApplicable: false };
+    }),
+  };
+  const statutory = { getForFy: jest.fn(async () => DEFAULT_RESOLVED_TDS_STATUTORY) };
+  const credits = new CreditsService(db, {} as any, {} as any, {} as any, tenantSettings as any, invoices as any, statutory as any);
+  const svc = new OffPortalPaymentsService(db, storage as any, tenantSettings as any, credits);
+  return { s, db, svc, storage, tenantSettings, credits, invoices };
 }
+beforeEach(() => invalidateOffPortalPresence());
 
 async function previewAndConfirm(svc: OffPortalPaymentsService, file: Express.Multer.File, user = gifsy()) {
   const p = await svc.preview(user, file);
@@ -265,15 +299,19 @@ describe('preview → confirm', () => {
     ]);
     const p = await svc.preview(gifsy(), f);
     const byRow = new Map(p.rows.map((r) => [r.rowNumber, r]));
-    expect(byRow.get(2)).toMatchObject({ onPortal: true, panNumber: 'ABCDE1234F', panSource: 'PORTAL', flags: [] });
-    expect(byRow.get(3)).toMatchObject({ panNumber: 'PQRST6789K', panSource: 'FILE', flags: ['PAN_MISMATCH'] });
-    expect(byRow.get(4)!.flags).toEqual(['NEW_PAYEE', 'NO_PAN']);
-    expect(byRow.get(5)!.flags).toEqual(['NO_PAN']);
-    expect(p.requiredAcknowledgements).toEqual(['NEW_PAYEE', 'PAN_MISMATCH', 'NO_PAN']);
+    // Keys (audit A1): the SAME resolution as portal payouts of the outlet — PAN, else the owner's / outlet's no-PAN key.
+    expect(byRow.get(2)).toMatchObject({ onPortal: true, panNumber: 'ABCDE1234F', panSource: 'PORTAL', tdsKey: 'ABCDE1234F', flags: ['PORTAL_PAN_USED'] });
+    expect(byRow.get(3)).toMatchObject({ panNumber: 'PQRST6789K', panSource: 'FILE', tdsKey: 'PQRST6789K', flags: ['PAN_MISMATCH'] });
+    expect(byRow.get(4)).toMatchObject({ tdsKey: noPanOutletKey(CLIENT, 'NEW9'), flags: ['NEW_PAYEE', 'NO_PAN'] });
+    expect(byRow.get(5)).toMatchObject({ tdsKey: noPanPartnerKey('p-nopan'), flags: ['NO_PAN', 'GIFT_NO_AGENCY_FEE'] });
+    expect(byRow.get(5)!.tdsTreatment).toMatch(/borne by the client/);
+    expect(p.requiredAcknowledgements).toEqual(['NEW_PAYEE', 'PAN_MISMATCH', 'NO_PAN', 'PORTAL_PAN_USED', 'GIFT_NO_AGENCY_FEE']);
 
-    // Server-enforced ticks: one missing → refused, nothing written, stored file removed.
-    await expect(svc.confirm(gifsy(), f, { fileSha256: p.fileSha256, acknowledged: ['NEW_PAYEE', 'NO_PAN'] })).rejects.toMatchObject({
-      response: { missingAcknowledgements: ['PAN_MISMATCH'] },
+    // Server-enforced ticks: one missing → refused (listed in `details` for the screen), nothing written.
+    await expect(
+      svc.confirm(gifsy(), f, { fileSha256: p.fileSha256, acknowledged: ['NEW_PAYEE', 'NO_PAN', 'PORTAL_PAN_USED', 'GIFT_NO_AGENCY_FEE'] }),
+    ).rejects.toMatchObject({
+      response: { missingAcknowledgements: ['PAN_MISMATCH'], details: { missingAcknowledgements: ['PAN_MISMATCH'] } },
     });
     expect(s.payments).toHaveLength(0);
     // A different file than the one previewed → refused.
@@ -302,10 +340,10 @@ describe('preview → confirm', () => {
       { id: '', name: 'No id', amount: 100, date: fyDay(5), utr: 'U2' },
     ]);
     const p = await svc.preview(gifsy(), f);
-    expect(p.categories).toEqual([expect.objectContaining({ category: 'INVALID', count: 1 })]);
+    expect(p.categories).toEqual([expect.objectContaining({ category: 'INVALID', count: 1 }), expect.objectContaining({ category: 'PORTAL_PAN_USED' })]);
     expect(p.invalid[0].errors).toContain('Outlet ID is required');
-    await expect(svc.confirm(gifsy(), f, { fileSha256: p.fileSha256, acknowledged: [] })).rejects.toBeInstanceOf(BadRequestException);
-    const r = await svc.confirm(gifsy(), f, { fileSha256: p.fileSha256, acknowledged: ['INVALID'] });
+    await expect(svc.confirm(gifsy(), f, { fileSha256: p.fileSha256, acknowledged: ['PORTAL_PAN_USED'] })).rejects.toBeInstanceOf(BadRequestException);
+    const r = await svc.confirm(gifsy(), f, { fileSha256: p.fileSha256, acknowledged: ['INVALID', 'PORTAL_PAN_USED'] });
     expect(r).toMatchObject({ recorded: 1, skippedInvalid: 1 });
     expect(s.payments).toHaveLength(1);
   });
@@ -315,20 +353,33 @@ describe('preview → confirm', () => {
     const f = fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 100, date: fyDay(5), utr: 'utr 1' }]);
     await previewAndConfirm(svc, f);
     const again = await svc.preview(gifsy(), fileOf([{ id: 'out1', name: 'Sharma Stores', amount: 100, date: fyDay(5), utr: 'UTR1' }]));
-    expect(again.requiredAcknowledgements).toEqual(['DUPLICATE']);
-    expect(again.rows[0].notes[0]).toMatch(/already recorded/);
+    expect(again.requiredAcknowledgements).toEqual(['PORTAL_PAN_USED', 'DUPLICATE']);
+    expect(again.rows[0].notes.join(' ')).toMatch(/already recorded/);
     const f2 = fileOf([{ id: 'out1', name: 'Sharma Stores', amount: 100, date: fyDay(5), utr: 'UTR1' }]);
-    await expect(svc.confirm(gifsy(), f2, { fileSha256: again.fileSha256, acknowledged: [] })).rejects.toBeInstanceOf(BadRequestException);
+    await expect(svc.confirm(gifsy(), f2, { fileSha256: again.fileSha256, acknowledged: ['PORTAL_PAN_USED'] })).rejects.toBeInstanceOf(BadRequestException);
     expect(s.payments).toHaveLength(1);
-    await svc.confirm(gifsy(), f2, { fileSha256: again.fileSha256, acknowledged: ['DUPLICATE'] });
+    await svc.confirm(gifsy(), f2, { fileSha256: again.fileSha256, acknowledged: ['PORTAL_PAN_USED', 'DUPLICATE'] });
     expect(s.payments).toHaveLength(2);
 
     const inFile = await svc.preview(gifsy(), fileOf([
       { id: 'OUT2', name: 'Gupta Traders', amount: 5, date: fyDay(9), utr: 'Z', pan: 'AAAAA1111A' },
       { id: 'OUT2', name: 'Gupta Traders', amount: 5, date: fyDay(9), utr: 'Z', pan: 'AAAAA1111A' },
     ]));
-    expect(inFile.rows[1].flags).toEqual(['DUPLICATE']);
-    expect(inFile.rows[1].notes[0]).toMatch(/Repeats row 2/);
+    expect(inFile.rows[1].flags).toEqual(['FILE_PAN_ONLY', 'DUPLICATE']);
+    expect(inFile.rows[1].notes.join(' ')).toMatch(/Repeats row 2/);
+    // FILE_PAN_ONLY (audit A4): the file has a PAN, the portal owner has none — says which key it counts under.
+    expect(inFile.rows[0].notes.join(' ')).toMatch(/file PAN AAAAA1111A; the outlet's portal payouts count under its no-PAN key/);
+  });
+
+  it('possible duplicate (B4): same outlet + amount within ±3 days with a different UTR', async () => {
+    const { svc } = setup();
+    await previewAndConfirm(svc, fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 700, date: fyDay(20), utr: 'A1' }]));
+    const p = await svc.preview(gifsy(), fileOf([
+      { id: 'OUT1', name: 'Sharma Stores', amount: 700, date: fyDay(22), utr: 'B2' }, // 2 days later, other UTR
+      { id: 'OUT1', name: 'Sharma Stores', amount: 700, date: fyDay(40), utr: 'C3' }, // far away → not flagged
+    ]));
+    expect(p.rows[0].flags).toContain('POSSIBLE_DUPLICATE');
+    expect(p.rows[1].flags).not.toContain('POSSIBLE_DUPLICATE');
   });
 
   it('tenant isolation: another client\'s outlet code never matches; name mismatch is flagged', async () => {
@@ -344,18 +395,27 @@ describe('preview → confirm', () => {
   it('a payment already PAID through the portal (same outlet + UTR, or amount + day) → PAID_ON_PORTAL', async () => {
     const { svc, db } = setup();
     const day = parseOffPortalFile(fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 1, date: fyDay(5), utr: 'X' }]).buffer).rows[0].paymentDate;
+    const portal = [
+      { clientId: CLIENT, status: 'PAID', outletId: 'out1', amountPaise: 250_000n, paidAt: new Date(day.getTime() + 3_600_000), utr: 'BANK77', download: null },
+      // In a bank file (PROCESSING, no paidAt yet) two days later — B4 / A5: counts too, ±3 days, UTR irrelevant.
+      { clientId: CLIENT, status: 'PROCESSING', outletId: 'OUT1', amountPaise: 41_100n, paidAt: null, utr: null, download: { downloadedAt: new Date(day.getTime() + 2 * 86_400_000) } },
+    ];
     db.creditPayoutEntry = {
       findMany: async ({ where }: any) =>
-        [{ clientId: CLIENT, status: 'PAID', outletId: 'out1', amountPaise: 250_000n, paidAt: new Date(day.getTime() + 3_600_000), utr: 'BANK77' }]
-          .filter((e) => matches(e, where))
-          .map((e) => pick(e, { outletId: true, amountPaise: true, paidAt: true, utr: true })),
+        portal
+          .filter((e) =>
+            matches({ clientId: e.clientId, outletId: e.outletId }, { clientId: where.clientId, outletId: where.outletId }) &&
+            where.OR.some((c: any) => c.status === e.status && (c.paidAt ? fieldOk(e.paidAt, c.paidAt) : !!e.download && fieldOk(e.download.downloadedAt, c.download.downloadedAt))),
+          )
+          .map((e) => ({ outletId: e.outletId, amountPaise: e.amountPaise, paidAt: e.paidAt, utr: e.utr, status: e.status, download: e.download })),
     };
     const p = await svc.preview(gifsy(), fileOf([
       { id: 'OUT1', name: 'Sharma Stores', amount: 999, date: fyDay(5), utr: 'bank 77' }, // same UTR
       { id: 'OUT1', name: 'Sharma Stores', amount: 2500, date: fyDay(5), utr: 'OTHER' }, // same amount + day
-      { id: 'OUT1', name: 'Sharma Stores', amount: 2500, date: fyDay(5), utr: 'OTHER2', pan: 'ABCDE1234F' },
+      { id: 'OUT1', name: 'Sharma Stores', amount: 411, date: fyDay(5), utr: 'OTHER2', pan: 'ABCDE1234F' }, // PROCESSING ±3 days
+      { id: 'OUT1', name: 'Sharma Stores', amount: 12, date: fyDay(5), utr: 'NOPE' }, // nothing matches
     ]));
-    expect(p.rows.map((r) => r.flags.includes('PAID_ON_PORTAL'))).toEqual([true, true, true]);
+    expect(p.rows.map((r) => r.flags.includes('PAID_ON_PORTAL'))).toEqual([true, true, true, false]);
     expect(p.requiredAcknowledgements).toContain('PAID_ON_PORTAL');
   });
 
@@ -365,19 +425,29 @@ describe('preview → confirm', () => {
     s.legacy.push({ id: 'leg2', clientId: CLIENT, section: 'SEC_194R', panNumber: 'KLMNO5555P', outletCode: 'OUT1', amountPaise: 500_000n, entryDate: new Date(`${p0.paymentDay}T00:00:00Z`) });
     const f = fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 5_000, date: fyDay(5), utr: 'L1' }]);
     const { preview } = await previewAndConfirm(svc, f);
-    expect(preview.requiredAcknowledgements).toEqual(['TDS_ENTRY_OTHER_PAYEE']);
+    expect(preview.requiredAcknowledgements).toEqual(['PORTAL_PAN_USED', 'TDS_ENTRY_OTHER_PAYEE']);
     expect(s.payments[0].supersedesOffPlatformEntryId).toBeNull();
     const bases = await collect194RBases(db, { clientId: CLIENT, fyLabel: FY.fyLabel, importedCountFrom: null });
     expect(bases.get('KLMNO5555P')).toMatchObject({ nonCashPaise: 500_000n });
     expect(bases.get('ABCDE1234F')).toMatchObject({ cashPaise: 500_000n });
   });
 
-  it('visibility on the Deduct method → TDS_NOT_WITHHELD; dated before the fund opening → BEFORE_FUND_OPENING', async () => {
+  it('Deduct client → TDS_NOT_WITHHELD on EVERY row (A3); incentive rows show the client-borne method (B5); fund opening notices (A8)', async () => {
     const { svc, s } = setup({ section: 'SEC_194R', methodology: 'DEDUCT' });
-    s.openings.push({ clientId: CLIENT, receivedAt: new Date(NOW.getTime() - 86_400_000) });
-    const p = await svc.preview(gifsy(), fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 100, date: prevFyDay(), utr: 'U', type: 'Visibility' }]));
-    expect(p.rows[0].flags).toEqual(['BEFORE_FUND_OPENING', 'TDS_NOT_WITHHELD']);
-    expect(p.rows[0].tdsSection).toBe('194R');
+    s.openings.splice(0, 1, { clientId: CLIENT, receivedAt: new Date(NOW.getTime() - 86_400_000) });
+    const p = await svc.preview(gifsy(), fileOf([
+      { id: 'OUT1', name: 'Sharma Stores', amount: 100, date: prevFyDay(), utr: 'U', type: 'Visibility' },
+      { id: 'OUT1', name: 'Sharma Stores', amount: 100, date: prevFyDay(), utr: 'W', type: 'Incentive' },
+    ]));
+    expect(p.rows[0].flags).toEqual(['PORTAL_PAN_USED', 'BEFORE_FUND_OPENING', 'TDS_NOT_WITHHELD']);
+    expect(p.rows[0]).toMatchObject({ tdsSection: '194R', tdsMethodology: 'DEDUCT' });
+    expect(p.rows[0].tdsTreatment).toMatch(/never withheld from later payouts/);
+    expect(p.rows[1]).toMatchObject({ tdsMethodology: 'GROSS_UP', flags: expect.arrayContaining(['TDS_NOT_WITHHELD']) });
+    expect(p.rows[1].tdsTreatment).toMatch(/borne by the client/);
+    // No opening at all → a loud notice on every row: everything is charged from the advance.
+    s.openings.splice(0, 1);
+    const q = await svc.preview(gifsy(), fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 100, date: fyDay(3), utr: 'U' }]));
+    expect(q.requiredAcknowledgements).toContain('NO_FUND_OPENING');
   });
 });
 
@@ -463,7 +533,7 @@ describe('consumers', () => {
     const before = await collect194RBases(ctx.db, { clientId: CLIENT, fyLabel: FY.fyLabel, importedCountFrom: null });
     expect(before.get('ABCDE1234F')).toMatchObject({ nonCashPaise: 500_000n, cashPaise: 0n });
     const { preview } = await previewAndConfirm(ctx.svc, fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 5_000, date: day, utr: 'L1' }]));
-    expect(preview.requiredAcknowledgements).toEqual(['REPLACES_TDS_ENTRY']);
+    expect(preview.requiredAcknowledgements).toEqual(['PORTAL_PAN_USED', 'REPLACES_TDS_ENTRY']);
     const after = await collect194RBases(ctx.db, { clientId: CLIENT, fyLabel: FY.fyLabel, importedCountFrom: null });
     expect(after.get('ABCDE1234F')).toMatchObject({ nonCashPaise: 0n, cashPaise: 500_000n }); // once, as cash
     await ctx.svc.void(gifsy(), ctx.s.payments[0].id, 'entered in error');
@@ -523,11 +593,144 @@ describe('consumers', () => {
     const { db, s } = await recorded();
     const hist = await buildPayoutStatement(db, CLIENT, 'p-pan');
     expect(hist.filter((h) => h.offPortal)).toHaveLength(4);
-    expect(hist.find((h) => h.gift)).toMatchObject({ kpiLabel: 'Off-portal incentive payment (gift)' });
+    expect(hist.find((h) => h.gift)).toMatchObject({ kpiLabel: 'Gift (off-portal) — incentive' });
     const tot = await offPortalTotals(db, offPortalWhere({ clientId: CLIENT }));
     expect(tot).toEqual({ count: 6, amountPaise: 2_699_900n });
     s.payments[0].voidedAt = new Date();
     expect((await buildPayoutStatement(db, CLIENT, 'p-pan')).filter((h) => h.offPortal)).toHaveLength(3);
     expect(offPortalWhere({ clientId: CLIENT, status: 'FAILED' as any })).toBeNull();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// Owner decisions 2026-11-26: off-portal payments COUNT toward the yearly TDS threshold (194R + 194C) but NEVER drive
+// automatic catch-up withholding on later portal payouts; 194C gross-up TDS is invoiced to the client when recorded.
+
+const taxInfo = (pan: string | null) => ({
+  partnerId: 'p-pan', panNumber: pan, entityType: null, gstNumber: null, gstRegistrationType: null, businessName: 'Sharma Stores',
+  ownerName: 'R Sharma', phone: null, bankName: null, accountNumber: null, ifscCode: null, outletName: 'Sharma Stores', retailerState: null,
+});
+const thisPeriod = () => istDateKey(NOW).slice(0, 7);
+
+describe('owner 2026-11-26 — threshold yes, catch-up withholding never', () => {
+  it('194R Deduct: an off-portal ₹30,000 visibility payment crosses the threshold; the next portal payout withholds ONLY its own TDS; the report shows the shortfall', async () => {
+    const { svc, credits, db } = setup({ section: 'SEC_194R', methodology: 'DEDUCT' });
+    const plan0 = await (credits as any).buildPayoutTdsPlan(db, {
+      clientId: CLIENT, period: thisPeriod(), outletTaxMap: new Map([['OUT1', taxInfo('ABCDE1234F')]]), runAt: NOW,
+      currentMethodology: 'DEDUCT', importedCountFrom: null,
+      engineEntries: [{ id: 'e1', outletId: 'OUT1', amountPaise: 500_000n, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' }],
+    });
+    expect(plan0.deductionByOutlet.get('OUT1') ?? 0n).toBe(0n); // ₹5,000 alone is below ₹20,000
+
+    await previewAndConfirm(svc, fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 30_000, date: fyDay(3), utr: 'V9', type: 'Visibility' }]));
+    const plan = await (credits as any).buildPayoutTdsPlan(db, {
+      clientId: CLIENT, period: thisPeriod(), outletTaxMap: new Map([['OUT1', taxInfo('ABCDE1234F')]]), runAt: NOW,
+      currentMethodology: 'DEDUCT', importedCountFrom: null,
+      engineEntries: [{ id: 'e1', outletId: 'OUT1', amountPaise: 500_000n, tdsSection: 'SEC_194R', tdsMethodology: 'DEDUCT' }],
+    });
+    // Threshold now met (₹35,000) → 10% of THIS payout only (₹500) — never the ₹3,000 on the off-portal ₹30,000.
+    expect(plan.deductionByOutlet.get('OUT1')).toBe(50_000n);
+
+    const tds = new TdsService(db, { getForFy: async () => DEFAULT_RESOLVED_TDS_STATUTORY } as any, { resolveTdsPolicy: async () => ({ section: 'SEC_194R', methodology: 'DEDUCT' }) } as any);
+    const { rows, summary } = await tds.report194R(CLIENT, FY.fyLabel);
+    const row = rows.find((r) => r.panNumber === 'ABCDE1234F')!;
+    expect(row).toMatchObject({ offPortalNotWithheldPaise: 3_000_000n, offPortalShortfallTdsPaise: 300_000n });
+    expect(row.note).toMatch(/SHORTFALL ₹3,000\.00/);
+    expect(row.note).toMatch(/NOT withheld from later portal payouts/);
+    expect(summary).toMatchObject({ totalOffPortalShortfallTdsPaise: 300_000n });
+  });
+
+  it('194C Deduct: off-portal ₹2,00,000 crosses the 194C threshold; the next ₹10,000 portal payout withholds only its own 2%', async () => {
+    const { svc, credits, db, invoices } = setup({ section: 'SEC_194C', methodology: 'DEDUCT' });
+    await previewAndConfirm(svc, fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 200_000, date: fyDay(3), utr: 'C9', type: 'Visibility' }]));
+    expect(invoices.createTdsInvoice).not.toHaveBeenCalled(); // Deduct → nothing invoiced, nothing withheld
+    const plan = await (credits as any).buildPayoutTdsPlan(db, {
+      clientId: CLIENT, period: thisPeriod(), outletTaxMap: new Map([['OUT1', taxInfo('ABCDE1234F')]]), runAt: NOW,
+      currentMethodology: 'DEDUCT', importedCountFrom: null,
+      engineEntries: [{ id: 'e2', outletId: 'OUT1', amountPaise: 1_000_000n, tdsSection: 'SEC_194C', tdsMethodology: 'DEDUCT' }],
+    });
+    expect(plan.deductionByOutlet.get('OUT1')).toBe(20_000n); // 2% × ₹10,000 = ₹200 (not 2% × ₹2,10,000)
+    const tds = new TdsService(db, { getForFy: async () => DEFAULT_RESOLVED_TDS_STATUTORY } as any, {} as any);
+    const [r] = await tds.compute194C(FY.fyLabel);
+    expect(r).toMatchObject({ offPortalNotWithheldPaise: 20_000_000n, offPortalShortfallTdsPaise: 400_000n });
+    expect(r.note).toMatch(/SHORTFALL ₹4,000\.00/);
+  });
+
+  it('194C Gross-up: the client TDS invoice + recovery are raised WHEN RECORDED (through the engine), and charged in Fund Reconciliation', async () => {
+    const { svc, s, invoices } = setup({ section: 'SEC_194C', methodology: 'GROSS_UP' });
+    const { result } = await previewAndConfirm(svc, fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 150_000, date: fyDay(3), utr: 'G9', type: 'Visibility' }]));
+    expect(invoices.createTdsInvoice).toHaveBeenCalledTimes(1);
+    expect(invoices.createTdsInvoice.mock.calls[0][1]).toMatchObject({ panNumber: 'ABCDE1234F', bodyPaise: 306_100n, partnerId: 'p-pan' }); // ₹1,50,000 × 2/98 → ₹3,061
+    expect(s.recoveries).toEqual([expect.objectContaining({ clientId: CLIENT, section: 'SEC_194C', tenantSharePaise: 306_100n, offPortalUploadId: s.uploads[0].id, downloadId: null })]);
+    expect(result.message).toMatch(/1 TDS 194C invoice raised/);
+    const lines = tdsItems(s.recoveries, [], []);
+    expect(lines).toEqual([expect.objectContaining({ type: 'TDS_194C', status: 'PAID', facePaise: 306_100n, description: expect.stringMatching(/off-portal payments/) })]);
+  });
+
+  it('194C FY follows the payout PERIOD (A6): a March-period payment paid in April lands in the March FY', async () => {
+    const { svc, db } = setup({ section: 'SEC_194C', methodology: 'GROSS_UP' });
+    const prevFyLabel = financialYear(new Date(FY.start.getTime() - 86_400_000)).fyLabel;
+    const marchOfPrevFy = `${FY.start.getUTCFullYear()}-03`;
+    await previewAndConfirm(svc, fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 1_000, date: fyDay(3), utr: 'P1', type: 'Visibility', month: marchOfPrevFy }]));
+    const tds = new TdsService(db, { getForFy: async () => DEFAULT_RESOLVED_TDS_STATUTORY } as any, {} as any);
+    expect(await tds.compute194C(FY.fyLabel)).toHaveLength(0);
+    expect((await tds.compute194C(prevFyLabel))[0]).toMatchObject({ offPortalPaidPaise: 100_000n });
+  });
+
+  it('a 194C gross-up payment to an Outlet ID NOT on the portal is flagged (cannot be invoiced now)', async () => {
+    const { svc } = setup({ section: 'SEC_194C', methodology: 'GROSS_UP' });
+    const p = await svc.preview(gifsy(), fileOf([{ id: 'NEW5', name: 'Fresh', amount: 1_000, date: fyDay(3), utr: 'Q', type: 'Visibility', pan: 'LMNOP1234Q' }]));
+    expect(p.rows[0].flags).toContain('GROSS_UP_TDS_NOT_INVOICED');
+  });
+});
+
+describe('fund — gifts carry no agency fee (A8)', () => {
+  it('a gift line is charged at face with GIFT_NO_AGENCY_FEE; a cash line gets the fee', () => {
+    const at = new Date(FY.start.getTime() + 86_400_000);
+    const row = { id: 'g', outletCode: 'OUT1', outletName: 'S', amountPaise: 100_000n, paymentDate: at, utr: null, payoutStream: 'INCENTIVE', period: '2026-04', voidedAt: null };
+    const rates = [{ kind: 'AGENCY_FEE' as const, feeType: 'PERCENT' as const, rateBps: 500, effectiveFrom: new Date(0), createdAt: new Date(0) }];
+    const st = buildFundStatement({ items: [offPortalItem({ ...row, paymentMode: 'GIFT' }), offPortalItem({ ...row, id: 'c', paymentMode: 'CASH' })], entries: [], rates });
+    const gift = st.lines.find((l) => l.source.id === 'g')!;
+    const cash = st.lines.find((l) => l.source.id === 'c')!;
+    expect(gift).toMatchObject({ feePaise: 0n, chargedPaise: 100_000n, flags: ['GIFT_NO_AGENCY_FEE'] });
+    expect(cash).toMatchObject({ feePaise: 5_000n });
+  });
+});
+
+describe('credits confirm — "Before you confirm" warns about a possible duplicate of an off-portal payment (A5)', () => {
+  it('a PAYOUT row of the same outlet + amount for the month → OFF_PORTAL_DUPLICATE item', async () => {
+    const { svc, credits, db } = setup();
+    await previewAndConfirm(svc, fileOf([{ id: 'OUT1', name: 'Sharma Stores', amount: 2_500, date: fyDay(3), utr: 'Z1' }]));
+    const period = s0Period(fyDay(3));
+    const req = await (credits as any).presentAckItems(db, CLIENT, 'b1', period, [
+      { outletId: 'OUT1', fieldId: 'f1', fieldName: 'Incentive', amount: 250_000, awardType: 'PAYOUT', status: 'OK' },
+      { outletId: 'OUT1', fieldId: 'f1', fieldName: 'Incentive', amount: 999, awardType: 'PAYOUT', status: 'OK' },
+    ], []);
+    expect(req.OFF_PORTAL_DUPLICATE).toHaveLength(1);
+    expect(req.OFF_PORTAL_DUPLICATE[0].text).toMatch(/possible duplicate of an off-portal payment/);
+  });
+});
+
+/** "DD/MM/YYYY" → "YYYY-MM". */
+function s0Period(ddmmyyyy: string): string {
+  return `${ddmmyyyy.slice(6, 10)}-${ddmmyyyy.slice(3, 5)}`;
+}
+
+describe('upload history shows voided counts (B8)', () => {
+  it('Recorded N · voided M · counting N − M', async () => {
+    const { svc, s, db } = setup();
+    db.offPortalPayment.groupBy = async ({ where }: any) => {
+      const rows = s.payments.filter((p) => matches(p, where));
+      const by = new Map<string, any[]>();
+      for (const r of rows) by.set(r.uploadId, [...(by.get(r.uploadId) ?? []), r]);
+      return [...by].map(([uploadId, rs]) => ({ uploadId, _count: { _all: rs.length }, _sum: { amountPaise: rs.reduce((a: bigint, r: any) => a + r.amountPaise, 0n) } }));
+    };
+    await previewAndConfirm(svc, fileOf([
+      { id: 'OUT1', name: 'Sharma Stores', amount: 100, date: fyDay(3), utr: 'A' },
+      { id: 'OUT1', name: 'Sharma Stores', amount: 200, date: fyDay(30), utr: 'B' },
+    ]));
+    await svc.void(gifsy(), s.payments[0].id, 'entered twice');
+    const [u] = await svc.uploads(gifsy());
+    expect(u).toMatchObject({ recordedCount: 2, voidedCount: 1, countingCount: 1, countingPaise: '20000' });
   });
 });

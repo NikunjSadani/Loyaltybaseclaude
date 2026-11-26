@@ -113,7 +113,7 @@ import {
 import { ensureOutletAccount } from '../common/reward-account.helper';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { formatINR, paiseToRupees, toPaiseBigInt } from '../common/money';
-import { monthYearIST, formatDateIST, IST_OFFSET_MIN } from '../common/ist-date';
+import { monthYearIST, formatDateIST, IST_OFFSET_MIN, istDateKey, istMonthBounds } from '../common/ist-date';
 import { loadOutletTypeDisplayNames, labelFor } from '../common/outlet-type-display';
 import {
   resolveEffectiveKycStatus,
@@ -611,6 +611,8 @@ export class CreditsService {
       importedCountFrom: a.importedCountFrom,
       scope,
       reversedSink: (key) => reversedKeys.add(key),
+      // Owner 2026-11-26: off-portal payments count toward the threshold only — never withheld from this run.
+      offPortalForThresholdOnly: true,
     });
     // Already deducted for this (client, PAN-or-no-PAN key, FY) — net of FAILED/reversal negative rows —
     // by the ledger row's OWN stored key (owner rule 2026-11-18: by PAN; a PAN change splits the year).
@@ -757,7 +759,8 @@ export class CreditsService {
     const importedCountFrom = await importedPayoutsCountFromOrThrow(db, q.clientId);
     const scope = await this.scope194R(db, q.clientId, [{ key, hasPan, partnerId }]);
     // The caller marked the entry first → the shared definition already leaves it (and any earlier one) out.
-    const bases = await collect194RBases(db, { clientId: q.clientId, fyLabel: q.fyLabel, importedCountFrom, scope });
+    // Same engine view as plan194RDeductions (off-portal = threshold only), so the cap matches what was withheld.
+    const bases = await collect194RBases(db, { clientId: q.clientId, fyLabel: q.fyLabel, importedCountFrom, scope, offPortalForThresholdOnly: true });
     const after = { ...(bases.get(key) ?? emptyBases194R(hasPan)), hasPan };
     const lAfter = liability194R(after, methodology, cfg);
     // "Before" = with the payout this reversal took off — only the THRESHOLD is read from it (on the total base, so
@@ -984,6 +987,44 @@ export class CreditsService {
             }
             tmap.set(pe.clientId, (tmap.get(pe.clientId) ?? 0n) + pe.amountPaise);
           }
+        }
+      }
+    }
+
+    // Off-portal payments register (owner 2026-11-26): 194C payments made OUTSIDE the portal to these PANs (any tenant —
+    // 194C is per PAN; FY of the payout PERIOD, the same rule as portal 194C entries) are treated like portal payouts
+    // EXCEPT that they never drive withholding:
+    //   - THRESHOLD: always counted (combined base + max single);
+    //   - DEDUCT: NOT in the withholding base — a later portal payout withholds only its own TDS; the 194C report
+    //     shows the off-portal TDS as a shortfall;
+    //   - GROSS-UP: in the gross-up AMOUNT base + the tenant split — their TDS is invoiced / recovered when they are
+    //     recorded (recordOffPortal194C), so later runs telescope on the recovery ledger exactly as for portal payouts.
+    // `offPortalPayment` is absent only on narrow unit-test fakes.
+    const offPortalDb = (db as Partial<Prisma.TransactionClient>).offPortalPayment;
+    if (panSet.size && sectionSet.has(TdsSection.SEC_194C) && offPortalDb) {
+      const op = await offPortalDb.findMany({
+        where: {
+          voidedAt: null,
+          tdsSection: TdsSection.SEC_194C,
+          panNumber: { in: [...panSet] },
+          period: { gte: startPeriod, lte: endPeriod },
+        },
+        select: { clientId: true, panNumber: true, amountPaise: true, tdsMethodology: true },
+      });
+      for (const p of op) {
+        if (!p.panNumber) continue;
+        const ps = `${p.panNumber}${SEP}${TdsSection.SEC_194C}`;
+        priorBaseByPS.set(ps, (priorBaseByPS.get(ps) ?? 0n) + p.amountPaise);
+        if (p.amountPaise > (priorMaxSingleByPS.get(ps) ?? 0n)) priorMaxSingleByPS.set(ps, p.amountPaise);
+        if (p.tdsMethodology === TdsMethodology.GROSS_UP) {
+          const psm = `${ps}${SEP}${TdsMethodology.GROSS_UP}`;
+          priorBaseByPSM.set(psm, (priorBaseByPSM.get(psm) ?? 0n) + p.amountPaise);
+          let tmap = priorGuBaseByPSByTenant.get(ps);
+          if (!tmap) {
+            tmap = new Map<string, bigint>();
+            priorGuBaseByPSByTenant.set(ps, tmap);
+          }
+          tmap.set(p.clientId, (tmap.get(p.clientId) ?? 0n) + p.amountPaise);
         }
       }
     }
@@ -1227,6 +1268,30 @@ export class CreditsService {
         },
         select: { panNumber: true, section: true, tenantSharePaise: true },
       });
+      // Off-portal no-PAN 194C payments to these outlets (this client, FY of the payout period): treated like portal no-PAN
+      // payouts (owner 2026-11-26) — no-PAN 194C is never withheld, only RECOVERED from the client, and the off-portal
+      // recovery is recorded when they are entered (recordOffPortal194C), so they count in the threshold AND the base.
+      const opNoPan = new Map<string, { total: bigint; max: bigint }>(); // `<OUTLETKEY>|<section>`
+      if (offPortalDb) {
+        const rows = await offPortalDb.findMany({
+          where: {
+            clientId,
+            voidedAt: null,
+            tdsSection: TdsSection.SEC_194C,
+            panNumber: null,
+            outletCodeKey: { in: [...noPanOutletCodes].map((c) => c.trim().toUpperCase()) },
+            period: { gte: startPeriod, lte: endPeriod },
+          },
+          select: { outletCodeKey: true, amountPaise: true },
+        });
+        for (const r of rows) {
+          const k = `${r.outletCodeKey}${SEP}${TdsSection.SEC_194C}`;
+          const cur = opNoPan.get(k) ?? { total: 0n, max: 0n };
+          cur.total += r.amountPaise;
+          if (r.amountPaise > cur.max) cur.max = r.amountPaise;
+          opNoPan.set(k, cur);
+        }
+      }
       const noPanRecByKS = new Map<string, bigint>(); // `<encodedKey>|<section>` → recovered
       for (const r of existingNoPanRec) {
         const k = `${r.panNumber}${SEP}${r.section}`;
@@ -1242,10 +1307,11 @@ export class CreditsService {
         const os = `${ng.outletCode}${SEP}${ng.section}`;
         const thisEventBase = ng.entries.reduce((s, e) => s + e.amountPaise, 0n);
         const priorBase = priorNoPanByOS.get(os) ?? 0n;
-        const cumulativeBase = priorBase + thisEventBase;
+        const op = opNoPan.get(`${ng.outletCode.trim().toUpperCase()}${SEP}${ng.section}`);
+        const cumulativeBase = priorBase + thisEventBase + (op?.total ?? 0n);
         const eventMaxSingle = ng.entries.reduce((m, e) => (e.amountPaise > m ? e.amountPaise : m), 0n);
         const priorMaxSingle = priorNoPanMaxByOS.get(os) ?? 0n;
-        const cumMaxSingle = eventMaxSingle > priorMaxSingle ? eventMaxSingle : priorMaxSingle;
+        const cumMaxSingle = [eventMaxSingle, priorMaxSingle, op?.max ?? 0n].reduce((m, x) => (x > m ? x : m), 0n);
         const nowCrossed = this.tdsThresholdMet(ng.section, cumulativeBase, cumMaxSingle, cfg);
         if (!nowCrossed) continue;
         const encodedKey = CreditsService.noPanRecoveryKey(ng.outletCode);
@@ -1265,6 +1331,179 @@ export class CreditsService {
     }
 
     return plan;
+  }
+
+  /**
+   * Off-portal payments register (owner decision 2026-11-26) — 194C payments ALREADY made outside the portal are treated
+   * like a portal payout run for TDS purposes, EXCEPT that nothing is ever withheld:
+   *   - GROSS-UP (PAN): the client's TDS invoice + pro-rata recovery are raised NOW (the payments are already paid —
+   *     "invoice only on PAID"), through the SAME engine (buildPayoutTdsPlan) a bank-file run uses, so the next portal run
+   *     telescopes on the same recovery ledger;
+   *   - no PAN: the per-outlet recovery is recorded now (no-PAN 194C is never withheld, only recovered);
+   *   - DEDUCT (PAN): nothing is written — the engine's withholding plan for these rows is DISCARDED (never withheld); the
+   *     194C report shows the TDS on them as a shortfall.
+   * Must run INSIDE the caller's transaction BEFORE the payments are inserted (they are this "event"; once inserted they
+   * are read as prior base). Rows of an Outlet ID that is not on the portal but has a PAN cannot be invoiced (no retailer
+   * record for the invoice) — returned in `notInvoiced` for the caller to say loudly; they count in the base, so the next
+   * portal run for that PAN raises their TDS. 194R is never touched here (the client is the deductor).
+   */
+  async recordOffPortal194C(
+    db: Prisma.TransactionClient,
+    a: {
+      clientId: string;
+      uploadId: string;
+      rows: Array<{ ref: string; outletCode: string; onPortal: boolean; amountPaise: bigint; period: string; panNumber: string | null; tdsMethodology: TdsMethodology }>;
+    },
+  ): Promise<{ invoices: number; recoveryPaise: bigint; notInvoiced: string[]; deferred: string[] }> {
+    const out = { invoices: 0, recoveryPaise: 0n, notInvoiced: [] as string[], deferred: [] as string[] };
+    const rows = a.rows.filter((r) => r.tdsMethodology === TdsMethodology.GROSS_UP || !r.panNumber);
+    const invoiceable = rows.filter((r) => !(r.panNumber && !r.onPortal));
+    out.notInvoiced.push(...rows.filter((r) => r.panNumber && !r.onPortal).map((r) => r.ref));
+    if (invoiceable.length === 0) return out;
+    const codes = [...new Set(invoiceable.filter((r) => r.onPortal).map((r) => r.outletCode))];
+    const outlets = codes.length
+      ? await db.outlet.findMany({
+          where: { clientId: a.clientId, outletCode: { in: codes } },
+          select: {
+            outletCode: true,
+            name: true,
+            state: true,
+            partner: {
+              select: {
+                id: true, panNumber: true, entityType: true, gstNumber: true, gstRegistrationType: true, businessName: true,
+                ownerName: true, phone: true, bankName: true, bankAccountNumber: true, ifscCode: true,
+              },
+            },
+          },
+        })
+      : [];
+    const byCode = new Map(outlets.map((o) => [o.outletCode, o]));
+    // One engine call per (period, PAN-or-outlet) so two rows of one outlet with different PANs never share a tax map.
+    const groups = new Map<string, typeof invoiceable>();
+    for (const r of invoiceable) {
+      const k = `${r.period}|${r.outletCode}|${r.panNumber ?? ''}`;
+      groups.set(k, [...(groups.get(k) ?? []), r]);
+    }
+    const byPeriod = new Map<string, Array<typeof invoiceable>>();
+    for (const g of groups.values()) byPeriod.set(g[0].period, [...(byPeriod.get(g[0].period) ?? []), g]);
+    for (const [period, gs] of byPeriod) {
+      // Rows of one outlet with DIFFERENT PANs in the same period go in separate passes (the tax map is per outlet).
+      const passes: Array<typeof invoiceable> = [];
+      for (const g of gs) {
+        const pass = passes.find((p) => !p.some((r) => r.outletCode === g[0].outletCode));
+        if (pass) pass.push(...g);
+        else passes.push([...g]);
+      }
+      for (const pass of passes) {
+        const outletTaxMap = new Map<string, PartnerTaxInfo>();
+        for (const r of pass) {
+          const o = byCode.get(r.outletCode);
+          const p = o?.partner;
+          if (!r.panNumber || !o || !p) continue; // no PAN → no tax map → the engine's per-outlet no-PAN recovery path
+          outletTaxMap.set(r.outletCode, {
+            partnerId: p.id,
+            panNumber: r.panNumber, // the PAN frozen on the payment (file PAN, else the portal PAN at upload)
+            entityType: p.entityType ?? null,
+            gstNumber: p.gstNumber ?? null,
+            gstRegistrationType: p.gstRegistrationType ?? null,
+            businessName: p.businessName ?? null,
+            ownerName: p.ownerName ?? null,
+            phone: p.phone ?? null,
+            bankName: p.bankName ?? null,
+            accountNumber: p.bankAccountNumber ?? null,
+            ifscCode: p.ifscCode ?? null,
+            outletName: o.name,
+            retailerState: o.state ?? null,
+          });
+        }
+        const plan = await this.buildPayoutTdsPlan(db, {
+          clientId: a.clientId,
+          period,
+          engineEntries: pass.map((r, i) => ({
+            id: `off-portal:${a.uploadId}:${r.ref}:${i}`,
+            outletId: r.outletCode,
+            amountPaise: r.amountPaise,
+            tdsSection: TdsSection.SEC_194C,
+            tdsMethodology: r.tdsMethodology,
+          })),
+          outletTaxMap,
+          runAt: new Date(),
+          currentMethodology: TdsMethodology.GROSS_UP, // 194R-only input; no 194R rows are passed
+          importedCountFrom: null,
+        });
+        // plan.entryDeductions / deductionLedger (DEDUCT) are DISCARDED on purpose — never withheld.
+        const invoicedPans = new Set<string>();
+        for (const gi of plan.grossUpInvoices) {
+          const rep = gi.representative;
+          const inv = await this.invoicesService.createTdsInvoice(db, {
+            clientId: a.clientId,
+            period,
+            panNumber: gi.panNumber,
+            fyLabel: gi.fyLabel,
+            bodyPaise: gi.bodyPaise,
+            seq: gi.seq,
+            isAnchor: gi.isAnchor,
+            partnerId: rep.partnerId,
+            outletCode: rep.outletCode,
+            outletName: rep.outletName,
+            retailerState: rep.retailerState,
+            businessName: rep.businessName,
+            ownerName: rep.ownerName,
+            phone: rep.phone,
+            entityType: rep.entityType,
+            gstRegistrationType: rep.gstRegistrationType,
+            gstNumber: rep.gstNumber,
+            bankName: rep.bankName,
+            accountNumber: rep.accountNumber,
+            ifscCode: rep.ifscCode,
+          });
+          out.invoices += 1;
+          invoicedPans.add(gi.panNumber);
+          if (gi.recovery.length > 0) {
+            await db.tdsRecoveryEntry.createMany({
+              data: gi.recovery.map((r) => ({
+                clientId: r.clientId,
+                panNumber: gi.panNumber,
+                section: gi.section,
+                fyLabel: gi.fyLabel,
+                tdsInvoiceId: inv.invoiceId,
+                downloadId: null,
+                offPortalUploadId: a.uploadId,
+                panTdsTotalPaise: gi.bodyPaise,
+                tenantBasePaise: r.tenantBasePaise,
+                panBasePaise: gi.panBasePaise,
+                tenantSharePaise: r.tenantSharePaise,
+              })),
+            });
+            out.recoveryPaise += gi.recovery.filter((r) => r.clientId === a.clientId).reduce((s, r) => s + r.tenantSharePaise, 0n);
+          }
+        }
+        if (plan.noPanRecovery.length > 0) {
+          await db.tdsRecoveryEntry.createMany({
+            data: plan.noPanRecovery.map((r) => ({
+              clientId: r.clientId,
+              panNumber: CreditsService.noPanRecoveryKey(r.outletCode),
+              section: r.section,
+              fyLabel: r.fyLabel,
+              tdsInvoiceId: null,
+              downloadId: null,
+              offPortalUploadId: a.uploadId,
+              panTdsTotalPaise: r.tenantSharePaise,
+              tenantBasePaise: r.eventBasePaise,
+              panBasePaise: r.cumulativeBasePaise,
+              tenantSharePaise: r.tenantSharePaise,
+            })),
+          });
+          out.recoveryPaise += plan.noPanRecovery.reduce((s, r) => s + r.tenantSharePaise, 0n);
+        }
+        // A GROSS-UP PAN over the threshold whose top-up for this period was ALREADY raised by a portal run gets no new
+        // invoice now (one per PAN + period) — its TDS is raised with the next run for that PAN. Said, never silent.
+        for (const r of pass) {
+          if (r.panNumber && r.tdsMethodology === TdsMethodology.GROSS_UP && !invoicedPans.has(r.panNumber)) out.deferred.push(r.ref);
+        }
+      }
+    }
+    return out;
   }
 
   /**
@@ -1696,6 +1935,31 @@ export class CreditsService {
           text: `${x.outletCode}: already deducted in batch ${x.batchCode} (${fmt(x.points)} pts still deducted) — check this isn't a repeat`,
         }));
       }
+    }
+    // Off-portal payments register (owner 2026-11-26, reverse order of the off-portal PAID_ON_PORTAL check): a PAYOUT row
+    // whose outlet was already paid the SAME amount outside the portal for this month (or within 3 days of it).
+    const payoutRows = ok.filter((r) => r.awardType === 'PAYOUT' && r.amount > 0);
+    const offPortalDb = (db as Partial<Prisma.TransactionClient>).offPortalPayment; // absent only on narrow test fakes
+    if (payoutRows.length > 0 && offPortalDb && /^\d{4}-\d{2}$/.test(period)) {
+      const { start, endExclusive } = istMonthBounds(period);
+      const lo = new Date(start.getTime() - 3 * 86_400_000);
+      const hi = new Date(endExclusive.getTime() + 3 * 86_400_000);
+      const keys = [...new Set(payoutRows.map((r) => r.outletId.trim().toUpperCase()))];
+      const live = await offPortalDb.findMany({
+        where: { clientId, voidedAt: null, outletCodeKey: { in: keys }, OR: [{ period }, { paymentDate: { gte: lo, lt: hi } }] },
+        select: { id: true, outletCodeKey: true, amountPaise: true, paymentDate: true, utr: true },
+      });
+      const hits: AckItem[] = [];
+      for (const r of payoutRows) {
+        const m = (live ?? []).find((p) => p.outletCodeKey === r.outletId.trim().toUpperCase() && p.amountPaise === BigInt(r.amount));
+        if (m) {
+          hits.push({
+            key: `${r.outletId}|${r.fieldId}|${m.id}`,
+            text: `${r.outletId} · ${r.fieldName ?? r.fieldId}: ₹${fmt(r.amount / 100)} — possible duplicate of an off-portal payment on ${istDateKey(m.paymentDate)}${m.utr ? ` (UTR ${m.utr})` : ''}`,
+          });
+        }
+      }
+      if (hits.length > 0) req.OFF_PORTAL_DUPLICATE = hits;
     }
     return req;
   }

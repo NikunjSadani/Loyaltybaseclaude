@@ -32,7 +32,9 @@ import { istDateKey, istDayRangeFilter } from '../common/ist-date';
 import { buildXlsx } from '../common/xlsx';
 import { formatINR } from '../common/money';
 import { financialYear } from '../tds/tds.helpers';
-import { isNoPanCell, isNoPanKey, normalisePan, noPanOutletKey, noPanPartnerKey, retailerKeyOfLedgerPan } from '../tds/tds-194r.shared';
+import { CreditsService } from '../credits/credits.service';
+import { clientHasOffPortalPayments, invalidateOffPortalPresence } from './off-portal-presence';
+import { isNoPanCell, isNoPanKey, normalisePan, offPortalNoPanKey, retailerKeyOfLedgerPan } from '../tds/tds-194r.shared';
 import {
   buildOffPortalTemplate,
   duplicateKey,
@@ -51,12 +53,18 @@ export const OFF_PORTAL_CATEGORIES = [
   'NAME_DIFFERS',
   'PAN_MISMATCH',
   'NO_PAN',
+  'FILE_PAN_ONLY',
+  'PORTAL_PAN_USED',
   'DUPLICATE',
+  'POSSIBLE_DUPLICATE',
   'PAID_ON_PORTAL',
   'REPLACES_TDS_ENTRY',
   'TDS_ENTRY_OTHER_PAYEE',
+  'NO_FUND_OPENING',
   'BEFORE_FUND_OPENING',
+  'GIFT_NO_AGENCY_FEE',
   'TDS_NOT_WITHHELD',
+  'GROSS_UP_TDS_NOT_INVOICED',
 ] as const;
 export type OffPortalCategory = (typeof OFF_PORTAL_CATEGORIES)[number];
 
@@ -67,8 +75,19 @@ export const OFF_PORTAL_CATEGORY_LABEL: Record<OffPortalCategory, string> = {
   NAME_DIFFERS: 'Outlet name in the file differs from the portal outlet — check the Outlet ID is the right outlet',
   PAN_MISMATCH: "PAN in the file differs from the portal PAN — TDS for these payments counts under the FILE's PAN",
   NO_PAN: 'No PAN in the file or on the portal — TDS at the no-PAN rate',
+  FILE_PAN_ONLY:
+    "PAN in the file, but the portal outlet's owner has NO PAN — these payments count under the FILE's PAN; the outlet's portal payouts keep counting under its no-PAN key (two separate yearly totals)",
+  PORTAL_PAN_USED: "No PAN in the file — these payments count under the PAN the portal holds for the outlet's owner",
   DUPLICATE:
     'Looks like a repeat (same outlet, amount, payment date and UTR already recorded, or repeated in this file) — these WILL be recorded again',
+  POSSIBLE_DUPLICATE:
+    'Possible repeat — the same outlet was already paid the same amount within 3 days (different or no UTR) — these WILL be recorded',
+  NO_FUND_OPENING:
+    "This client has NO fund opening balance yet — EVERY payment below will be charged from the client's advance in Fund Reconciliation",
+  GIFT_NO_AGENCY_FEE:
+    'Gifts — no agency fee will be charged on them in Fund Reconciliation (the fee rules do not cover gifts yet; to be confirmed by the owner)',
+  GROSS_UP_TDS_NOT_INVOICED:
+    "194C gross-up payments to an Outlet ID NOT on the portal — their TDS invoice can't be raised now (no retailer record); they count in the PAN's base and are invoiced with the next portal payout for that PAN",
   REPLACES_TDS_ENTRY:
     'Matches an earlier TDS off-platform entry (same outlet / PAN, amount and date) — the payment REPLACES that entry in the 194R base (never counted twice)',
   PAID_ON_PORTAL:
@@ -78,7 +97,9 @@ export const OFF_PORTAL_CATEGORY_LABEL: Record<OffPortalCategory, string> = {
   BEFORE_FUND_OPENING:
     "Dated before the client's fund opening balance — NOT shown in Fund Reconciliation (already inside the opening figure)",
   TDS_NOT_WITHHELD:
-    'Visibility payments on the Deduct method — paid in full, TDS NOT withheld: shown as a shortfall in the TDS report',
+    'The client is on the Deduct method — these were paid in full with NO TDS withheld. They count toward the yearly threshold, ' +
+    'but NO TDS is ever withheld for them from later portal payouts: visibility TDS on them is reported as a SHORTFALL; ' +
+    'incentive / gift TDS is borne by the client (194R liability)',
 };
 
 export interface AnalysedRow extends ParsedOffPortalRow {
@@ -90,6 +111,10 @@ export interface AnalysedRow extends ParsedOffPortalRow {
   panNumber: string | null;
   tdsSection: TdsSection;
   tdsMethodology: TdsMethodology;
+  /** The TDS key the payment counts under (PAN, or a no-PAN owner / outlet key). */
+  tdsKey: string;
+  /** Plain words: how its TDS is treated (shown on the preview). */
+  tdsTreatment: string;
   flags: OffPortalCategory[];
   notes: string[];
   supersedesOffPlatformEntryId: string | null;
@@ -108,7 +133,6 @@ export interface Analysis {
 
 type Db = Prisma.TransactionClient;
 
-const PREVIEW_ROW_CAP = 1000;
 const EXPORT_ROW_CAP = 50_000;
 const CHUNK = 1000;
 
@@ -150,7 +174,14 @@ export class OffPortalPaymentsService {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly tenantSettings: TenantSettingsService,
+    private readonly credits: CreditsService,
   ) {}
+
+  /** Nav / screen hint: does this client have any off-portal payment? (Gifsy admins always see the screen.) */
+  async presence(user: JwtPayload) {
+    const clientId = this.readerClient(user);
+    return { hasEntries: await clientHasOffPortalPayments(this.prisma, clientId), canWrite: user.role === 'GIFSY_ADMIN' && !!user.assumed };
+  }
 
   // ── Guards ──────────────────────────────────────────────────────────────────────────────────
 
@@ -199,6 +230,8 @@ export class OffPortalPaymentsService {
 
     // Already-recorded (live) payments for these outlets → duplicate keys.
     const existing = new Map<string, string>();
+    /** outletKey → recorded (live) payments, for the ±3-day "possible duplicate" check. */
+    const existingByOutlet = new Map<string, Array<{ amountPaise: bigint; day: string }>>();
     for (const part of chunks(keys)) {
       const rows = await db.offPortalPayment.findMany({
         where: { clientId, voidedAt: null, outletCodeKey: { in: part } },
@@ -209,6 +242,7 @@ export class OffPortalPaymentsService {
           duplicateKey({ outletKey: r.outletCodeKey, amountPaise: r.amountPaise, paymentDay: istDateKey(r.paymentDate), utr: r.utr }),
           istDateKey(r.createdAt),
         );
+        existingByOutlet.set(r.outletCodeKey, [...(existingByOutlet.get(r.outletCodeKey) ?? []), { amountPaise: r.amountPaise, day: istDateKey(r.paymentDate) }]);
       }
     }
 
@@ -242,11 +276,23 @@ export class OffPortalPaymentsService {
       const hi = new Date(Math.max(...parsed.rows.map((r) => r.paymentDate.getTime())) + 4 * 86_400_000);
       const push = (k: string, v: { amountPaise: bigint; day: string; utr: string | null }) => portalPaid.set(k, [...(portalPaid.get(k) ?? []), v]);
       for (const part of chunks(keys)) {
+        // PAID (by paid date) and PROCESSING (in a bank file, by the file's date) — both are portal payments.
         const paid = await db.creditPayoutEntry.findMany({
-          where: { clientId, status: 'PAID', outletId: { in: part, mode: 'insensitive' }, paidAt: { gte: lo, lt: hi } },
-          select: { outletId: true, amountPaise: true, paidAt: true, utr: true },
+          where: {
+            clientId,
+            outletId: { in: part, mode: 'insensitive' },
+            OR: [
+              { status: 'PAID', paidAt: { gte: lo, lt: hi } },
+              { status: 'PROCESSING', download: { downloadedAt: { gte: lo, lt: hi } } },
+            ],
+          },
+          select: { outletId: true, amountPaise: true, paidAt: true, utr: true, status: true, download: { select: { downloadedAt: true } } },
         });
-        for (const p of paid) push(outletKeyOf(p.outletId), { amountPaise: p.amountPaise, day: istDateKey(p.paidAt!), utr: p.utr });
+        for (const p of paid) {
+          const at = p.paidAt ?? p.download?.downloadedAt;
+          if (!at) continue;
+          push(outletKeyOf(p.outletId), { amountPaise: p.amountPaise, day: istDateKey(at), utr: p.status === 'PAID' ? p.utr : null });
+        }
       }
       const ownerToKeys = new Map<string, string[]>();
       for (const [k, list] of outletsByKey) for (const o of list) if (o.partner) ownerToKeys.set(o.partner.id, [...(ownerToKeys.get(o.partner.id) ?? []), k]);
@@ -262,6 +308,8 @@ export class OffPortalPaymentsService {
     const opening = await db.fundReceipt.findFirst({ where: { clientId, entryType: 'OPENING_BALANCE' }, select: { receivedAt: true } });
 
     const seenInFile = new Map<string, number>();
+    const seenNear = new Map<string, Array<{ amountPaise: bigint; day: string; row: number }>>();
+    const dayGap = (a: string, b: string) => Math.abs(Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000;
     const rows: AnalysedRow[] = [];
     for (const r of parsed.rows) {
       const matches = outletsByKey.get(r.outletKey) ?? [];
@@ -285,11 +333,26 @@ export class OffPortalPaymentsService {
         flags.push('NAME_DIFFERS');
         notes.push(`Portal outlet is "${o.name}"`);
       }
+      // TDS key — the SAME resolution the portal uses for this outlet now: the PAN (file, else the portal owner's),
+      // else the owner's no-PAN key, else the outlet's own no-PAN key (not on the portal / no owner).
+      const tdsKey = panNumber ?? offPortalNoPanKey(clientId, r.outletCode, o ? { outletCode: o.outletCode, partnerId: o.partner?.id ?? null } : null);
+      const keyWords = panNumber ? `PAN ${panNumber}` : o?.partner ? "the owner's no-PAN key" : "this Outlet ID's no-PAN key";
       if (r.filePan && portalPan && r.filePan !== portalPan) {
         flags.push('PAN_MISMATCH');
-        notes.push(`File PAN ${r.filePan} · portal PAN ${portalPan}`);
+        notes.push(`File PAN ${r.filePan} · portal PAN ${portalPan} — counts under ${r.filePan}`);
       }
-      if (!panNumber) flags.push('NO_PAN');
+      if (r.filePan && o?.partner && !portalPan) {
+        flags.push('FILE_PAN_ONLY');
+        notes.push(`Counts under file PAN ${r.filePan}; the outlet's portal payouts count under its no-PAN key`);
+      }
+      if (!r.filePan && portalPan) {
+        flags.push('PORTAL_PAN_USED');
+        notes.push(`Counts under portal PAN ${portalPan}`);
+      }
+      if (!panNumber) {
+        flags.push('NO_PAN');
+        notes.push(`Counts under ${keyWords} (no-PAN rate)`);
+      }
       const dk = duplicateKey(r);
       if (existing.has(dk)) {
         flags.push('DUPLICATE');
@@ -297,8 +360,18 @@ export class OffPortalPaymentsService {
       } else if (seenInFile.has(dk)) {
         flags.push('DUPLICATE');
         notes.push(`Repeats row ${seenInFile.get(dk)} of this file`);
+      } else {
+        // Same outlet + amount within ±3 days (UTR differs or is blank) — recorded earlier or earlier in this file.
+        const near = [...(existingByOutlet.get(r.outletKey) ?? []), ...(seenNear.get(r.outletKey) ?? [])].find(
+          (x) => x.amountPaise === r.amountPaise && dayGap(x.day, r.paymentDay) <= 3,
+        );
+        if (near) {
+          flags.push('POSSIBLE_DUPLICATE');
+          notes.push(`Same amount to this outlet on ${near.day}${'row' in near ? ` (row ${near.row} of this file)` : ' (already recorded)'}`);
+        }
       }
       if (!seenInFile.has(dk)) seenInFile.set(dk, r.rowNumber);
+      seenNear.set(r.outletKey, [...(seenNear.get(r.outletKey) ?? []), { amountPaise: r.amountPaise, day: r.paymentDay, row: r.rowNumber }]);
       let supersedes: string | null = null;
       if (tdsSection === 'SEC_194R') {
         const hit = legacy.find(
@@ -312,7 +385,7 @@ export class OffPortalPaymentsService {
           // Replace ONLY when the legacy entry counts under the SAME payee key as this payment — otherwise the base
           // would silently move from one PAN to another. A same-benefit entry under another payee is flagged instead
           // (both keep counting until someone fixes one of them).
-          const payKey = panNumber ?? (o?.partner ? noPanPartnerKey(o.partner.id) : noPanOutletKey(clientId, o?.outletCode ?? r.outletCode));
+          const payKey = tdsKey;
           const legacyKey = hit.resolvedKey
             ? retailerKeyOfLedgerPan(hit.resolvedKey)
             : !isNoPanCell(hit.panNumber)
@@ -331,18 +404,36 @@ export class OffPortalPaymentsService {
           }
         }
       }
-      // Already paid THROUGH the portal (same outlet; same UTR, or same amount on the same day) → it would be counted twice.
+      // Already paid THROUGH the portal (same outlet; same UTR, or the same amount within ±3 days — PAID or in a bank
+      // file) → recording it would count it twice.
       const portalHit = (portalPaid.get(r.outletKey) ?? []).find(
-        (p) => (r.utr && p.utr && normUtr(p.utr) === normUtr(r.utr)) || (p.amountPaise === r.amountPaise && p.day === r.paymentDay),
+        (p) => (r.utr && p.utr && normUtr(p.utr) === normUtr(r.utr)) || (p.amountPaise === r.amountPaise && dayGap(p.day, r.paymentDay) <= 3),
       );
       if (portalHit) {
         flags.push('PAID_ON_PORTAL');
         notes.push(`A portal payout of ${formatINR(portalHit.amountPaise)} on ${portalHit.day}${portalHit.utr ? ` (UTR ${portalHit.utr})` : ''} matches`);
       }
-      if (opening && r.paymentDate < opening.receivedAt) flags.push('BEFORE_FUND_OPENING');
-      if (r.payoutStream === 'VISIBILITY' && policy.methodology === 'DEDUCT' && (tdsSection === 'SEC_194C' || r.paymentMode === 'CASH')) {
-        flags.push('TDS_NOT_WITHHELD');
+      if (!opening) flags.push('NO_FUND_OPENING');
+      else if (r.paymentDate < opening.receivedAt) flags.push('BEFORE_FUND_OPENING');
+      if (r.paymentMode === 'GIFT') flags.push('GIFT_NO_AGENCY_FEE');
+      // How its TDS is treated. 194R: incentive and every gift are CLIENT-BORNE (gross-up) whatever the visibility
+      // method; only 194R visibility cash follows the client's method. 194C follows the client's method.
+      const tdsMethodology: TdsMethodology =
+        tdsSection === 'SEC_194R' && (r.payoutStream === 'INCENTIVE' || r.paymentMode === 'GIFT') ? 'GROSS_UP' : policy.methodology;
+      let tdsTreatment: string;
+      if (tdsSection === 'SEC_194R') {
+        tdsTreatment =
+          tdsMethodology === 'DEDUCT'
+            ? `194R · Deduct: counts toward the threshold; TDS NOT withheld — shortfall (never withheld from later payouts) · ${keyWords}`
+            : `194R · borne by the client (gross-up) · ${keyWords}`;
+      } else {
+        tdsTreatment =
+          tdsMethodology === 'DEDUCT'
+            ? `194C · Deduct: counts toward the threshold; TDS NOT withheld — shortfall · ${keyWords}`
+            : `194C · Gross-up: TDS invoiced to the client when recorded (if over the threshold) · ${keyWords}`;
       }
+      if (policy.methodology === 'DEDUCT') flags.push('TDS_NOT_WITHHELD');
+      if (tdsSection === 'SEC_194C' && tdsMethodology === 'GROSS_UP' && panNumber && !o) flags.push('GROSS_UP_TDS_NOT_INVOICED');
       rows.push({
         ...r,
         onPortal: !!o,
@@ -351,7 +442,9 @@ export class OffPortalPaymentsService {
         portalPan,
         panNumber,
         tdsSection,
-        tdsMethodology: policy.methodology,
+        tdsMethodology,
+        tdsKey,
+        tdsTreatment,
         flags,
         notes,
         supersedesOffPlatformEntryId: supersedes,
@@ -388,7 +481,8 @@ export class OffPortalPaymentsService {
   /** The preview the screen shows — Gifsy admins only, so values are unmasked. */
   private previewBody(a: Analysis) {
     const categories = this.presentCategories(a).map((c) => ({ category: c, label: OFF_PORTAL_CATEGORY_LABEL[c], count: a.counts[c] ?? 0 }));
-    const rows = a.rows.slice(0, PREVIEW_ROW_CAP).map((r) => ({
+    // EVERY row (uncapped — a file is at most MAX_ROWS rows): the screen groups the warned rows by category and pages them.
+    const rows = a.rows.map((r) => ({
       rowNumber: r.rowNumber,
       outletCode: r.outletCode,
       outletName: r.outletName,
@@ -403,6 +497,9 @@ export class OffPortalPaymentsService {
       panNumber: r.panNumber,
       panSource: r.filePan ? 'FILE' : r.portalPan ? 'PORTAL' : 'NONE',
       tdsSection: r.tdsSection === 'SEC_194R' ? '194R' : '194C',
+      tdsMethodology: r.tdsMethodology,
+      tdsKey: r.tdsKey,
+      tdsTreatment: r.tdsTreatment,
       flags: r.flags,
       notes: r.notes,
     }));
@@ -416,10 +513,10 @@ export class OffPortalPaymentsService {
       tdsPolicy: { visibilitySection: a.policy.section === 'SEC_194R' ? '194R' : '194C', methodology: a.policy.methodology },
       categories,
       requiredAcknowledgements: categories.map((c) => c.category),
-      invalid: a.invalid.slice(0, PREVIEW_ROW_CAP),
-      invalidTruncated: a.invalid.length > PREVIEW_ROW_CAP,
+      invalid: a.invalid,
+      invalidTruncated: false,
       rows,
-      rowsTruncated: a.rows.length > PREVIEW_ROW_CAP,
+      rowsTruncated: false,
     };
   }
 
@@ -478,6 +575,24 @@ export class OffPortalPaymentsService {
               uploadedById: user.sub,
             },
           });
+          // 194C (owner 2026-11-26): gross-up TDS invoice + recovery / no-PAN recovery raised NOW, through the payout
+          // engine, BEFORE the rows are inserted (they are this "event"). Deduct rows: nothing is written (never withheld).
+          const c194 = a.rows.filter((r) => r.tdsSection === 'SEC_194C');
+          const tds194c = c194.length
+            ? await this.credits.recordOffPortal194C(tx, {
+                clientId,
+                uploadId: upload.id,
+                rows: c194.map((r) => ({
+                  ref: `row ${r.rowNumber}`,
+                  outletCode: r.portalOutletCode ?? r.outletCode,
+                  onPortal: r.onPortal,
+                  amountPaise: r.amountPaise,
+                  period: r.period,
+                  panNumber: r.panNumber,
+                  tdsMethodology: r.tdsMethodology,
+                })),
+              })
+            : { invoices: 0, recoveryPaise: 0n, notInvoiced: [] as string[], deferred: [] as string[] };
           for (const part of chunks(a.rows, 500)) {
             await tx.offPortalPayment.createMany({
               data: part.map((r) => ({
@@ -555,20 +670,46 @@ export class OffPortalPaymentsService {
                 totalPaise: a.totalPaise.toString(),
                 fileSha256: a.sha256,
                 acknowledged,
+                tds194c: {
+                  invoices: tds194c.invoices,
+                  recoveryPaise: tds194c.recoveryPaise.toString(),
+                  notInvoiced: tds194c.notInvoiced.length,
+                  deferred: tds194c.deferred.length,
+                },
               },
               metadata: { action: 'off_portal_payments_upload', tdsPolicy: { section: policy.section, methodology: policy.methodology } },
             },
           });
+          invalidateOffPortalPresence(clientId);
+          const tdsLines: string[] = [];
+          if (tds194c.invoices > 0) {
+            tdsLines.push(`${tds194c.invoices} TDS 194C invoice${tds194c.invoices === 1 ? '' : 's'} raised to the client (${formatINR(tds194c.recoveryPaise)} recovered from this client, gross-up).`);
+          }
+          if (tds194c.notInvoiced.length) {
+            tdsLines.push(`194C gross-up TDS NOT invoiced now for ${tds194c.notInvoiced.join(', ')} (Outlet ID not on the portal) — raised with the next portal payout for that PAN.`);
+          }
+          if (tds194c.deferred.length) {
+            tdsLines.push(
+              `No 194C TDS invoice now for ${tds194c.deferred.join(', ')} (below the threshold, or this period's TDS invoice was already raised) — any TDS due is raised with the next payout run for that PAN.`,
+            );
+          }
           return {
             uploadId: upload.id,
             recorded: a.rows.length,
             recordedTotalPaise: a.totalPaise.toString(),
             skippedInvalid: a.invalid.length,
             acknowledged,
+            tds194c: {
+              invoices: tds194c.invoices,
+              recoveryPaise: tds194c.recoveryPaise.toString(),
+              notInvoiced: tds194c.notInvoiced,
+              deferred: tds194c.deferred,
+            },
             message:
               `Recorded ${a.rows.length} off-portal payment${a.rows.length === 1 ? '' : 's'} (${formatINR(a.totalPaise)})` +
               (a.invalid.length ? `; ${a.invalid.length} row${a.invalid.length === 1 ? '' : 's'} with errors NOT recorded` : '') +
-              '.',
+              '.' +
+              (tdsLines.length ? ` ${tdsLines.join(' ')}` : ''),
           };
         },
         { timeout: 120_000, maxWait: 15_000 },
@@ -591,19 +732,32 @@ export class OffPortalPaymentsService {
         where: { id, clientId },
         select: {
           id: true, voidedAt: true, amountPaise: true, paymentDate: true, outletCode: true, uploadId: true, supersedesOffPlatformEntryId: true,
-          panNumber: true, tdsSection: true,
+          panNumber: true, tdsSection: true, outletCodeKey: true,
         },
       });
       if (!p) throw new NotFoundException('Off-portal payment not found.');
       if (p.voidedAt) throw new ConflictException('This off-portal payment is already void.');
-      // A 194R payee from whom TDS was already WITHHELD this FY (e.g. a later portal payout carried this payment's
-      // shortfall) — the withheld TDS stays; after the void it may show as excess. Said, never silent.
-      const withheld =
-        p.tdsSection === 'SEC_194R' && p.panNumber
-          ? await tx.tdsDeductionEntry.findFirst({
-              where: { clientId, section: 'SEC_194R', fyLabel: financialYear(p.paymentDate).fyLabel, panNumber: p.panNumber, tdsDeductedThisPaise: { gt: 0n } },
-              select: { id: true },
-            })
+      // A 194R payee (PAN or no-PAN key — the same key the base uses) from whom TDS was already WITHHELD this FY: that
+      // TDS stays deposited; after the void it may show as excess. Said, never silent.
+      let withheld: { id: string } | null = null;
+      if (p.tdsSection === 'SEC_194R') {
+        let key = p.panNumber;
+        if (!key) {
+          const o = await tx.outlet.findFirst({
+            where: { clientId, outletCode: { equals: p.outletCodeKey, mode: 'insensitive' } },
+            select: { outletCode: true, partnerId: true },
+          });
+          key = offPortalNoPanKey(clientId, p.outletCode, o);
+        }
+        withheld = await tx.tdsDeductionEntry.findFirst({
+          where: { clientId, section: 'SEC_194R', fyLabel: financialYear(p.paymentDate).fyLabel, panNumber: key, tdsDeductedThisPaise: { gt: 0n } },
+          select: { id: true },
+        });
+      }
+      // 194C: TDS invoiced / recovered when it was recorded (gross-up, or no-PAN recovery) stays — never reversed here.
+      const recovered194c =
+        p.tdsSection === 'SEC_194C'
+          ? await tx.tdsRecoveryEntry.findFirst({ where: { clientId, offPortalUploadId: p.uploadId }, select: { id: true } })
           : null;
       const now = new Date();
       const res = await tx.offPortalPayment.updateMany({
@@ -620,6 +774,8 @@ export class OffPortalPaymentsService {
           oldValues: { voidedAt: null },
           newValues: {
             clientId,
+            tdsWithheldThisFy: !!withheld,
+            tds194cRecoveredAtUpload: !!recovered194c,
             voidedAt: now.toISOString(),
             reason,
             amountPaise: p.amountPaise.toString(),
@@ -639,6 +795,9 @@ export class OffPortalPaymentsService {
           (p.supersedesOffPlatformEntryId ? ' The earlier TDS off-platform entry it replaced counts again.' : '') +
           (withheld
             ? ' NOTE: TDS was already withheld from this payee this financial year — it stays deposited and may now show as "TDS taken in excess" in the 194R report.'
+            : '') +
+          (recovered194c
+            ? " NOTE: 194C TDS was invoiced / recovered from the client when this upload was recorded — it is NOT reversed automatically; adjust the client's TDS invoice / Fund Reconciliation by hand if needed."
             : ''),
       };
     });
@@ -783,8 +942,16 @@ export class OffPortalPaymentsService {
         Month: s.period,
         Narration: s.narration ?? '',
         'TDS section': s.tdsSection,
-        'TDS method': r.tdsMethodology === 'DEDUCT' ? 'Deduct (not withheld — shortfall)' : 'Gross-up',
-        Warnings: (s.flags as string[]).join(', '),
+        // B6: "not withheld — shortfall" only on rows that carry TDS_NOT_WITHHELD and are on the Deduct method.
+        'TDS method':
+          r.tdsMethodology === 'DEDUCT'
+            ? (s.flags as string[]).includes('TDS_NOT_WITHHELD')
+              ? 'Deduct — TDS not withheld (shortfall)'
+              : 'Deduct'
+            : r.tdsSection === 'SEC_194R'
+              ? 'Borne by the client (gross-up)'
+              : 'Gross-up (invoiced to the client)',
+        Warnings: (s.flags as string[]).map((f) => OFF_PORTAL_CATEGORY_LABEL[f as OffPortalCategory] ?? f).join(' | '),
         Status: s.voidedAt ? 'VOID' : 'Recorded',
         'Void reason': s.voidReason ?? '',
         'Recorded at': istDateKey(r.createdAt),
@@ -822,6 +989,16 @@ export class OffPortalPaymentsService {
       orderBy: { createdAt: 'desc' },
       take: 200,
     });
+    // B8: voided rows per upload → "Recorded N · voided M · counting N − M".
+    const voided = ups.length
+      ? await this.prisma.offPortalPayment.groupBy({
+          by: ['uploadId'],
+          where: { clientId, uploadId: { in: ups.map((u) => u.id) }, voidedAt: { not: null } },
+          _count: { _all: true },
+          _sum: { amountPaise: true },
+        })
+      : [];
+    const voidedOf = new Map(voided.map((v) => [v.uploadId, { count: v._count?._all ?? 0, paise: v._sum?.amountPaise ?? 0n }]));
     const userIds = [...new Set(ups.map((u) => u.uploadedById))];
     const users = userIds.length ? await this.prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true } }) : [];
     const nameOf = new Map(users.map((u) => [u.id, u.name]));
@@ -832,6 +1009,10 @@ export class OffPortalPaymentsService {
       recordedCount: u.recordedCount,
       skippedCount: u.skippedCount,
       totalPaise: u.totalPaise.toString(),
+      voidedCount: voidedOf.get(u.id)?.count ?? 0,
+      voidedPaise: (voidedOf.get(u.id)?.paise ?? 0n).toString(),
+      countingCount: u.recordedCount - (voidedOf.get(u.id)?.count ?? 0),
+      countingPaise: (u.totalPaise - (voidedOf.get(u.id)?.paise ?? 0n)).toString(),
       acknowledged: u.acknowledged,
       uploadedBy: nameOf.get(u.uploadedById) ?? null,
       createdAt: u.createdAt.toISOString(),
