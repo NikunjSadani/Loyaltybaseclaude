@@ -163,6 +163,11 @@ export interface ParseResult {
      * block — the 2nd occurrence is the per-outlet name). The preview / result say so.
      */
     legacyNameColumns?: Array<{ kpiCode: string; label: string; month: string; column: string }>;
+    /**
+     * Only with `opts.strict` and only when present: month-block columns whose header is not a KPI value / name label —
+     * all their cells blank (a filled one refuses the file). The preview / result say each was ignored.
+     */
+    ignoredColumns?: Array<{ column: string; header: string; month: string }>;
   };
 }
 
@@ -596,8 +601,16 @@ export function parseTargetUploadBuffer(
      * `summary.excludedValues` so the caller can refuse/report them — never silently dropped.
      */
     excludedKpis?: KpiDefLike[];
+    /**
+     * TARGET upload (owner no-silent rule, 2026-11-26): text in a KPI VALUE cell rejects the row with the reason (it is
+     * never dropped, and "12abc" is never read as 12); an unrecognised month-block header is reported, and refuses the
+     * file when its column has any filled cell; text under an excluded / out-of-scope column counts like a number.
+     * Absent (achievement upload) → the previous behaviour.
+     */
+    strict?: boolean;
   },
 ): ParseResult {
+  const strict = opts?.strict === true;
   const scope = opts?.scope;
   let ignoredOutOfScope = 0;
   const enabled = getEnabledKpis(kpis);
@@ -634,6 +647,9 @@ export function parseTargetUploadBuffer(
     }
   }
   const legacyNameColumns: Array<{ kpiCode: string; label: string; month: string; column: string }> = [];
+  /** Per month block (strict): headers that are no KPI value / name label and no fixed column. */
+  const unknownCols: Array<Array<{ ci: number; header: string }>> = [];
+  const FIXED_LABELS = new Set([...FIXED_COLS, ...SCOPE_INFO_COLS, PROGRAM_NAME_COL].map((c) => c.toLowerCase()));
   /** Per month block: the KPIs read from the old duplicate-header layout — [value column, name column]. */
   const legacyPairs: Array<Array<{ code: string; valueCol: number; nameCol: number }>> = [];
 
@@ -710,6 +726,8 @@ export function parseTargetUploadBuffer(
     const seenExcluded = new Set<string>();
     const pairs: Array<{ code: string; valueCol: number; nameCol: number }> = [];
     legacyPairs.push(pairs);
+    const unknown: Array<{ ci: number; header: string }> = [];
+    unknownCols.push(unknown);
     for (let ci = blockStart; ci < blockEnd && ci < headerRow2.length; ci++) {
       const label = headerRow2[ci].toLowerCase().trim();
       // Match KPI VALUE labels FIRST, override labels SECOND, so a string that is
@@ -747,8 +765,12 @@ export function parseTargetUploadBuffer(
         continue;
       }
       const excludedNameCode = excludedNameLabelToCode.get(label);
-      if (excludedNameCode) cols.push({ colIndex: ci, code: excludedNameCode, kind: 'excludedName' });
-      // Skip fixed columns / blanks / unknown labels.
+      if (excludedNameCode) {
+        cols.push({ colIndex: ci, code: excludedNameCode, kind: 'excludedName' });
+        continue;
+      }
+      // Skip fixed columns / blanks; an unknown label is collected (strict) — reported, or refused when filled.
+      if (strict && label !== '' && !FIXED_LABELS.has(label)) unknown.push({ ci, header: headerRow2[ci] });
     }
     return cols;
   });
@@ -771,6 +793,32 @@ export function parseTargetUploadBuffer(
       throw new TemplateFormatError(
         `Template KPI columns don't match the configured KPIs for "${monthBlocks[bi].month}" ` +
           `(missing: ${missing.join(', ') || '(none resolved)'}) — re-download the template`,
+      );
+    }
+  }
+
+  // ── Unrecognised month-block columns (strict) ──────────────────────────────
+  // Never silent: a filled one refuses the file (its cells would be dropped); an empty one is reported as ignored.
+  const ignoredColumns: Array<{ column: string; header: string; month: string }> = [];
+  if (strict) {
+    const filled: string[] = [];
+    for (let bi = 0; bi < monthBlocks.length; bi++) {
+      for (const u of unknownCols[bi] ?? []) {
+        let n = 0;
+        for (let ri = 2; ri < rawAoa.length; ri++) {
+          const v = ((rawAoa[ri] ?? []) as unknown[])[u.ci];
+          if (!(v === null || v === undefined || String(v).trim() === '')) n++;
+        }
+        const where = `column ${columnLetter(u.ci)} "${u.header}" (${headerRow1[monthBlocks[bi].startCol]})`;
+        if (n > 0) filled.push(`${where} — ${n} filled cell${n === 1 ? '' : 's'}`);
+        else ignoredColumns.push({ column: columnLetter(u.ci), header: u.header, month: monthBlocks[bi].month });
+      }
+    }
+    if (filled.length > 0) {
+      throw new TemplateFormatError(
+        `${filled.length === 1 ? 'A column was' : `${filled.length} columns were`} not recognised, so ${filled.length === 1 ? 'its' : 'their'} ` +
+          `values would be ignored: ${filled.join('; ')}. The heading is not a KPI (or KPI name) column of this ` +
+          'month block, or it appears more times than expected — re-download the template and copy the values into it',
       );
     }
   }
@@ -855,6 +903,8 @@ export function parseTargetUploadBuffer(
 
     // ── Read KPI values per month block ───────────────────────────────────────
     let hasAnyValue = false;
+    /** strict: "Focus Brand 1 target must be a number — got 'R3TEST Brand'" per bad value cell → the row is rejected. */
+    const cellErrors: string[] = [];
     // D1: KPI codes whose numeric value was ignored for this row (out of the KPI's scope).
     const ignoredCodes = new Set<string>();
 
@@ -874,9 +924,11 @@ export function parseTargetUploadBuffer(
         // CRITICAL: blank / null / undefined / empty string → omit the key
         if (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') continue;
 
+        const naCell = String(rawVal).trim().toUpperCase() === OUT_OF_SCOPE_CELL.toUpperCase();
         if (kind === 'excluded') {
           const n = typeof rawVal === 'number' ? rawVal : parseFloat(String(rawVal).trim().replace(/,/g, ''));
-          if (isFinite(n)) excludedValues[code] = (excludedValues[code] ?? 0) + 1;
+          // strict: ANY typed entry (text too, never the template's N/A) counts — it would be dropped otherwise.
+          if (isFinite(n) || (strict && !naCell)) excludedValues[code] = (excludedValues[code] ?? 0) + 1;
           continue;
         }
         if (kind === 'excludedName') {
@@ -891,7 +943,7 @@ export function parseTargetUploadBuffer(
           if (kind === 'value') {
             const n =
               typeof rawVal === 'number' ? rawVal : parseFloat(String(rawVal).trim().replace(/,/g, ''));
-            if (isFinite(n)) {
+            if (isFinite(n) || (strict && !naCell)) {
               ignoredCodes.add(code);
               ignoredOutOfScope++;
             }
@@ -917,6 +969,25 @@ export function parseTargetUploadBuffer(
             ? rawVal
             : parseFloat(String(rawVal).trim().replace(/,/g, ''));
 
+        if (strict) {
+          // Whole-cell number only ("1,23,456.78" ok; "12abc" / "1011.2697 & ADHO500" are NOT 12 / 1011.2697).
+          // The template's N/A marker reads as blank.
+          if (naCell) continue;
+          const exact = typeof rawVal === 'number' ? rawVal : Number(String(rawVal).trim().replace(/,/g, ''));
+          if (!Number.isFinite(exact)) {
+            const kpiLabel = enabled.find((k) => k.code === code)?.label ?? code;
+            const shown = String(rawVal).trim();
+            cellErrors.push(
+              `${kpiLabel} target must be a number — got '${shown.length > 60 ? `${shown.slice(0, 60)}…` : shown}'` +
+                (monthBlocks.length > 1 ? ` (${headerRow1[monthBlocks[bi].startCol]})` : ''),
+            );
+            continue;
+          }
+          monthTargetMap[code] = exact;
+          hasAnyValue = true;
+          continue;
+        }
+
         // CRITICAL: only store valid finite numbers; non-numeric → omit the key
         if (!isFinite(num)) continue;
 
@@ -935,6 +1006,15 @@ export function parseTargetUploadBuffer(
         }
         parsedRow.monthTargets[month] = monthTargetMap;
       }
+    }
+
+    if (cellErrors.length > 0) {
+      // NO SILENT DROP: the row is rejected (none of its values saved) and listed with every reason.
+      parsedRow.status = 'rejected_kpi';
+      parsedRow.remarks = `${cellErrors.join('; ')} — row rejected`;
+      parsedRow.monthTargets = {};
+      rows.push(parsedRow);
+      continue;
     }
 
     const ignoredRemark =
@@ -971,6 +1051,7 @@ export function parseTargetUploadBuffer(
       ignoredOutOfScope,
       ...(opts?.excludedKpis ? { excludedValues, excludedNames } : {}),
       ...(legacyNameColumns.length > 0 ? { legacyNameColumns } : {}),
+      ...(ignoredColumns.length > 0 ? { ignoredColumns } : {}),
     },
   };
 }

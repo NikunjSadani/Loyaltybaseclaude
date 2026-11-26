@@ -1053,12 +1053,13 @@ export class TargetsService {
     const parseOpts = {
       ...(parseScope ? { scope: parseScope } : {}),
       ...(excludedKpis.length > 0 ? { excludedKpis } : {}),
+      // NO SILENT FAILURE (owner 2026-11-26): text in a target cell rejects its row; an unknown column is reported /
+      // refused when filled.
+      strict: true,
     };
     let parseResult: ReturnType<typeof parseTargetUploadBuffer>;
     try {
-      parseResult = Object.keys(parseOpts).length > 0
-        ? parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes, parseOpts)
-        : parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes);
+      parseResult = parseTargetUploadBuffer(file.buffer, kpis, knownOutletCodes, parseOpts);
     } catch (e) {
       throw uploadParseError(e);
     }
@@ -1251,6 +1252,13 @@ export class TargetsService {
       ...(p.scopeEnforced ? { ignoredOutOfScope: p.parseResult.summary.ignoredOutOfScope } : {}),
       // Owner 2026-11-26: name columns read from the OLD duplicate-header layout — said in words (absent otherwise).
       ...(TargetsService.legacyLayoutNotes(p).length > 0 ? { layoutNotes: TargetsService.legacyLayoutNotes(p) } : {}),
+      // Unrecognised, EMPTY month-block columns — said loudly (a filled one refuses the file in the parser).
+      ...((p.parseResult.summary.ignoredColumns?.length ?? 0) > 0
+        ? {
+          ignoredColumnNotes: p.parseResult.summary.ignoredColumns!.map((c) =>
+            `Column ${c.column} "${c.header}" was not recognised and was ignored — re-download the template.`),
+        }
+        : {}),
     };
   }
 

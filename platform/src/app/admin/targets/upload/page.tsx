@@ -83,6 +83,8 @@ interface UploadSummaryData {
   focusCheck?:   TargetUploadFocusCheck;
   /** Owner 2026-11-26: e.g. "Read column F as Focus Brand 1 names (old template layout)." (absent when none). */
   layoutNotes?:  string[];
+  /** Owner 2026-11-26: 'Column G "Notes" was not recognised and was ignored — re-download the template.' (absent when none). */
+  ignoredColumnNotes?: string[];
   /**
    * Memory-safety (2026-11-13): the API no longer echoes every parsed row. It returns the
    * REJECTED rows (problemRows) and the saved rows whose values were partly ignored
@@ -1059,6 +1061,14 @@ function UploadSummary({ data, mode, badge, errorReportName }: {
           className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-900 space-y-0.5">
           {data.layoutNotes.map((n) => <p key={n}>{n}</p>)}
           <p className="text-blue-800">Download the current template next time — its name columns have their own headings.</p>
+        </div>
+      )}
+
+      {data.ignoredColumnNotes && data.ignoredColumnNotes.length > 0 && (
+        <div role="alert" data-testid="target-upload-ignored-columns"
+          className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-900 space-y-0.5">
+          <p className="font-semibold flex items-center gap-1.5"><AlertTriangle className="w-3.5 h-3.5" /> Columns not read from this file</p>
+          {data.ignoredColumnNotes.map((n) => <p key={n}>{n}</p>)}
         </div>
       )}
 

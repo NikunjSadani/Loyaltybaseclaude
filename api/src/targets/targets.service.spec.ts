@@ -1535,6 +1535,26 @@ describe('TargetsService', () => {
           expect(writtenTargets()[0].targetValues).toEqual({ MONTH_TGT: 10, FOCUS_PACK_1: 5, __names: { FOCUS_PACK_1: 'Diwali Combo' } });
         });
 
+        it('NO SILENT DROP: text in a target cell → that row is a rejected row (needs the REJECTED_ROWS tick); an empty unknown column → ignoredColumnNotes', async () => {
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+            ['', '', '', WRITABLE_MONTH.label, '', '', ''],
+            ['Outlet ID', 'Outlet Name', 'Outlet Type', 'Month Target', 'Focus Pack - 1', 'Focus Pack - 1 Name', 'Notes'],
+            ['O001', 'Outlet One', 'RETAIL', 10, 'R3TEST Brand', 'Diwali', null],
+            ['O002', 'Outlet Two', 'HORECA', 1, 2, 'CNO', null],
+          ]), 'Targets');
+          const b = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+          const p = await service.previewTargetUpload(admin, xfile(b));
+          expect(p.rejectedCount).toBe(1);
+          expect(p.problemRows).toEqual([expect.objectContaining({
+            outletCode: 'O001', status: 'rejected_kpi',
+            remarks: "Focus Pack - 1 target must be a number — got 'R3TEST Brand' — row rejected",
+          })]);
+          expect(p.notApplied.map((n: { category: string }) => n.category)).toContain('REJECTED_ROWS');
+          expect(p.willSaveCount).toBe(1);
+          expect(p.ignoredColumnNotes).toEqual(['Column G "Notes" was not recognised and was ignored — re-download the template.']);
+        });
+
         it('the current template ("Focus Pack - 1 Name") → no note', async () => {
           const p = await service.previewTargetUpload(admin, xfile(file([['O001', 'Outlet One', 'RETAIL', 10, 5, 'Diwali']], 'Focus Pack - 1 Name')));
           expect(p).not.toHaveProperty('layoutNotes');
