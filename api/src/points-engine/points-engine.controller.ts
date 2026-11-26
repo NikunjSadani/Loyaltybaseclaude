@@ -31,6 +31,7 @@ import { RequirePermission } from '../common/decorators/require-permission.decor
 import {
   CreatePointsRuleDto,
   ListPointsRulesQueryDto,
+  PublishPointsRuleDto,
   RenamePointsRuleDto,
   UpdatePointsRuleDto,
 } from './dto/points-rule.dto';
@@ -94,8 +95,9 @@ export class PointsEngineController {
   @Post(':id/publish')
   @Roles('GIFSY_ADMIN', 'CLIENT_ADMIN')
   @RequirePermission('points_rules:write')
-  publish(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
-    return this.points.publish(user, id);
+  publish(@CurrentUser() user: JwtPayload, @Param('id') id: string, @Body() dto: PublishPointsRuleDto) {
+    // 412 VERSION_GAP when this version would leave already-started periods with no rule — resend with confirmGap.
+    return this.points.publish(user, id, { confirmGap: dto?.confirmGap === true });
   }
 
   /** POST /v1/admin/points-rules/:id/archive — archive a rule. */

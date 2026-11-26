@@ -59,7 +59,9 @@ export function renameRule(id: string, name: string): Promise<ApiResponse<Points
   const t = name.trim();
   return api.patch<PointsRuleRow>(`${RULES}/${id}/name`, { name: t === '' ? null : t });
 }
-export const publishRule = (id: string) => api.post<PointsRuleRow>(`${RULES}/${id}/publish`, {});
+/** 412 = VERSION_GAP (already-started periods would have no rule) — resend with `confirmGap: true` after the author confirms. */
+export const publishRule = (id: string, opts: { confirmGap?: boolean } = {}) =>
+  api.post<PointsRuleRow>(`${RULES}/${id}/publish`, opts.confirmGap ? { confirmGap: true } : {});
 export const archiveRule = (id: string) => api.post<PointsRuleRow>(`${RULES}/${id}/archive`, {});
 
 // ── Simulate (authoring aid) ────────────────────────────────────────────────────────

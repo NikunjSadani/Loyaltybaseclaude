@@ -271,6 +271,50 @@ zero "No BSC cases in {quarter}"; formula add
 `5 * (cases_m1 * min(1, 1.2 * tot_tgt_m1 / tot_ach_m1) + cases_m2 * min(1, 1.2 * tot_tgt_m2 / tot_ach_m2) + cases_m3 * min(1, 1.2 * tot_tgt_m3 / tot_ach_m3))`
 (120% cap applied PER MONTH, owner 2026-11-25); rounding half_up scale 0; narration "Consistency bonus".
 
+### 3d. Rule names, Rename, Duplicate, enum conditions, version gaps (owner-approved 2026-11-26, PLATFORM-WIDE)
+
+**Rule name (display-only).** `points_rules.name` — nullable TEXT (migration `20261126140000_points_rule_name`, additive,
+`ADD COLUMN IF NOT EXISTS`, `lock_timeout 5s`, no backfill → existing rules show "Unnamed rule" + ruleId). Trimmed,
+internal whitespace collapsed, non-blank when provided, ≤120 chars (`normalizeRuleName`). Duplicates allowed (the UI
+warns). The name is **never** read by the evaluator and is **not** part of `ruleId`/`version`, `ruleVersionsUsed`,
+`sourceKey` / `payoutKey` / `importedConfirmKey` or any credit idempotency key — a named vs unnamed vs renamed rule
+computes byte-identical rows (proved in `points-rule-name.spec.ts`). Preview rows carry `ruleName` **only when named**
+(unnamed rows unchanged) + `preview.ruleNames` (ruleId → name); the preview and payout reports have a `Rule Name`
+column before `Rule ID`.
+
+**One name per logical rule.** Every name write goes through `applyName`: it sets the name on **every version** of
+`(clientId, ruleId)` with a raw `UPDATE` (so `updatedAt` — the list's "Updated" = config last changed — is never
+bumped) and writes an `AuditLog` row `entityType POINTS_RULE_RENAME` (`entityId` = ruleId; `oldValues.names` = each
+version's previous name; `newValues.name`; `metadata.via` = `rename` | `draft_save` | `new_version`). A no-op writes
+nothing. Paths: `PATCH /v1/admin/points-rules/:id/name { name: string | null }` (any status incl. PUBLISHED — no new
+version; `null` = "Remove name"; GIFSY_ADMIN + CLIENT_ADMIN with `points_rules:write`, tenant-scoped); a draft save
+with a CHANGED name; a new version created with a different name (same transaction). A new version otherwise starts
+with the rule's current name. The builder sends `name` **only when the author changed it**, so a stale tab cannot
+overwrite a rename made elsewhere. UI: required for a NEW rule (soft — Save draft blocked with a clear issue),
+optional for existing; Rename / Remove name on the list and detail.
+
+**Rules list / detail.** Title = name (fallback "Unnamed rule" + ruleId; ruleId small for Gifsy admins). OUTPUT FIELD
+= the credit field NAME (`<id> (field not found)` / `<name> (inactive)` in red). Columns Program · Sub-programme · KPI ·
+Status (blank program / sub-programme = "All (blank)", sorts first in either direction); sub-programme filter = a
+dropdown of actual values + "All (blank)". Detail header shows Program · Sub-programme · KPI.
+
+**Duplicate rule.** List + detail → `/admin/points-engine/rules/new?from=<row id>`: a NEW draft (new ruleId on save)
+pre-filled from the source (attachment, basis, effective dates, inputs, pipeline with fresh step ids, output,
+rounding, name "<name> (copy)"). Original untouched; nothing saved until Save draft.
+
+**Enum (text) conditions.** In a Gate / Milestone condition whose other side is an enum input, the Value control is a
+dropdown of that input's allowed values and the ops offered are = / ≠. Nothing is auto-corrected: a stored ordering op,
+number or out-of-list value is kept and flagged ("value not in the allowed list") under the condition until the author
+fixes it (Input → Value starts empty, "pick a value"). The backend already accepted string literals (exact match);
+validation was NOT tightened (that would turn published rules into compute ERROR rows).
+
+**Version coverage gap.** Publishing a version ARCHIVES the overlapping published version it supersedes, and archived
+versions never resolve — so a new version starting after the prior's start leaves [prior start, new start − 1] with
+no rule. Therefore: "Edit as new version" pre-fills effective-from from the SOURCE version (was: today — owner trap
+2026-11-26, 1–25 Nov uncovered); the builder warns "Version N covered from DD-MM-YYYY; this version starts DD-MM-YYYY —
+periods in between will have no rule"; `POST /:id/publish` returns **412 `VERSION_GAP`** when such a gap starts on or
+before today (IST) unless the body says `{ confirmGap: true }` (the builder asks the author to confirm explicitly).
+
 ---
 
 ## 4. Evaluation pipeline (fixed, documented order)

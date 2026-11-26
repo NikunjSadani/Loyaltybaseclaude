@@ -9,7 +9,7 @@
  * node grammar as nested class-validator classes here (it would fork the contract).
  */
 
-import { Allow, IsIn, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import { Allow, IsBoolean, IsIn, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 import type { AwardType, RoundingSpec, RuleAttachment, RuleStatus } from '../points-engine.types';
 
 /**
@@ -143,6 +143,13 @@ export class RenamePointsRuleDto {
   @IsString()
   @MaxLength(1000) // raw-input guard only; the real ≤RULE_NAME_MAX check runs on the TRIMMED value (normalizeRuleName)
   name!: string | null;
+}
+
+/** Publish options. `confirmGap` = the author confirmed publishing a version that leaves a coverage gap (412 VERSION_GAP). */
+export class PublishPointsRuleDto {
+  @IsOptional()
+  @IsBoolean()
+  confirmGap?: boolean;
 }
 
 /** List filter — all optional, tenant scope is applied server-side from the JWT. */

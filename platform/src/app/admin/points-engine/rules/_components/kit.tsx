@@ -746,3 +746,32 @@ export function sortRules(rows: PointsRuleRow[], key: RuleSortKey | null, dir: '
     })
     .map((x) => x.r);
 }
+
+// ── Version coverage gap (owner trap 2026-11-26) ──────────────────────────────────────
+
+/** YYYY-MM-DD → DD-MM-YYYY. */
+export function dmyFromYmd(ymd: string): string {
+  const [y, m, d] = ymd.slice(0, 10).split('-');
+  return y && m && d ? `${d}-${m}-${y}` : ymd;
+}
+
+/**
+ * Warning when a new DRAFT version starts AFTER the version it will supersede: publishing archives that version, so
+ * the days in between would have no rule. The superseded version = the rule's published version (else the latest
+ * earlier version). Null when there is no gap.
+ */
+export function versionGapWarning(
+  effectiveFrom: string,
+  version: number,
+  siblings: ReadonlyArray<Pick<PointsRuleRow, 'version' | 'status' | 'effectiveFrom'>>,
+): string | null {
+  if (!effectiveFrom) return null;
+  const earlier = siblings.filter((r) => r.version < version);
+  const prior =
+    earlier.filter((r) => r.status === 'published').sort((a, b) => b.version - a.version)[0] ??
+    earlier.sort((a, b) => b.version - a.version)[0];
+  if (!prior) return null;
+  const priorFrom = prior.effectiveFrom.slice(0, 10);
+  if (effectiveFrom.slice(0, 10) <= priorFrom) return null;
+  return `Version ${prior.version} covered from ${dmyFromYmd(priorFrom)}; this version starts ${dmyFromYmd(effectiveFrom)} — periods in between will have no rule. Set Effective from back to ${dmyFromYmd(priorFrom)} unless that gap is intended.`;
+}

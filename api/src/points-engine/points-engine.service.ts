@@ -30,6 +30,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  PreconditionFailedException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { Prisma, PointsRule } from '@prisma/client';
@@ -275,7 +276,7 @@ export class PointsEngineService {
    * effectiveTo to the day before this rule's effectiveFrom) and flips this row to 'published'.
    * A published version is never mutated afterwards.
    */
-  async publish(user: JwtPayload, id: string): Promise<PointsRule> {
+  async publish(user: JwtPayload, id: string, opts: { confirmGap?: boolean } = {}): Promise<PointsRule> {
     const row = await this.loadForWrite(user, id);
     if (row.status === 'published') {
       throw new BadRequestException('Rule is already published.');
@@ -345,6 +346,22 @@ export class PointsEngineService {
             .map((p) => `v${p.version}`)
             .join(', ')} of this rule are ${isQuarterBasis(row.evaluationBasis) ? 'monthly' : 'quarterly'} — publishing would retire them. Create a new rule for a quarterly bonus instead.`,
         );
+      }
+      // VERSION GAP (owner trap 2026-11-26): superseding ARCHIVES the prior version, and archived versions never
+      // resolve — so a new version starting AFTER the prior's start leaves [prior start, new start − 1] with NO rule.
+      // If that gap touches a period that has already started (gap start ≤ today), require an explicit confirmation.
+      if (!opts.confirmGap) {
+        const today = todayIst();
+        const gaps = priors
+          .filter((p) => windowsOverlap(p.effectiveFrom, p.effectiveTo, newFrom, newTo))
+          .filter((p) => p.effectiveFrom < newFrom && p.effectiveFrom <= today)
+          .map((p) => versionGapMessage(p, row));
+        if (gaps.length > 0) {
+          throw new PreconditionFailedException({
+            message: `${gaps.join(' ')} Confirm to publish anyway, or set this version's effective-from back.`,
+            code: 'VERSION_GAP',
+          });
+        }
       }
       for (const prior of priors) {
         if (!windowsOverlap(prior.effectiveFrom, prior.effectiveTo, newFrom, newTo)) continue;
@@ -722,6 +739,25 @@ const MONTH_LONG = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep
 /** "15 Nov 2026" (UTC calendar day of a @db.Date). */
 export function longDay(d: Date): string {
   return `${d.getUTCDate()} ${MONTH_LONG[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+/** DD-MM-YYYY of a @db.Date (UTC calendar day) — the format the owner reads in the builder. */
+export function dmy(d: Date): string {
+  return `${String(d.getUTCDate()).padStart(2, '0')}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${d.getUTCFullYear()}`;
+}
+
+/** Today's business date (Asia/Kolkata) as a UTC-midnight Date, comparable with @db.Date columns. */
+function todayIst(): Date {
+  const ist = new Date(Date.now() + 330 * 60 * 1000);
+  return new Date(Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate()));
+}
+
+/** "Version 1 covered from 01-11-2026; this version starts 26-11-2026 — periods in between will have no rule." */
+export function versionGapMessage(
+  prior: Pick<PointsRule, 'version' | 'effectiveFrom'>,
+  next: Pick<PointsRule, 'effectiveFrom'>,
+): string {
+  return `Version ${prior.version} covered from ${dmy(prior.effectiveFrom)}; this version starts ${dmy(next.effectiveFrom)} — periods in between will have no rule.`;
 }
 
 /** Why an overlapping quarterly version does not pay a quarter (it starts after / ends before it), with the fix. */

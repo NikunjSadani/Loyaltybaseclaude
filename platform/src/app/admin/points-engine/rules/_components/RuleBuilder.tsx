@@ -26,7 +26,7 @@ import {
   Field, NumberField, SelectField, TextField, StatusBadge, cardCls,
   blankDraft, rowToDraft, defaultNode, firstNumericVar, draftIssues, inputCls, labelCls,
   RULE_NAME_MAX, RULE_NAME_PLACEHOLDER, ruleNameIssue, duplicateRuleNameWarning, ruleTitle, creditFieldLabel,
-  duplicateDraft, cleanRuleName, programCell,
+  duplicateDraft, cleanRuleName, programCell, versionGapWarning,
 } from './kit';
 import { InputsCard } from './InputsCard';
 import { NodeCard } from './NodeCard';
@@ -409,12 +409,16 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
 
   // ── lifecycle ───────────────────────────────────────────────────────────────────
   const baseIssues = draftIssues(draft);
+  // Coverage gap vs the version this draft will supersede (publishing archives it; archived versions never pay).
+  const gapWarning = !isNew && status === 'draft' && version !== null && version > 1 && storedRuleId
+    ? versionGapWarning(draft.effectiveFrom, version, allRules.filter((r) => r.ruleId === storedRuleId))
+    : null;
   // Name: REQUIRED for a new rule (soft — Save draft is blocked with a clear issue), optional for an existing one.
   const nameIssue = ruleNameIssue(draft.name, isNew);
   const nameDupWarning = duplicateRuleNameWarning(draft.name, storedRuleId ?? draft.ruleId ?? null, allRules);
   const issues = {
     blocking: nameIssue ? [nameIssue, ...baseIssues.blocking] : baseIssues.blocking,
-    warnings: nameDupWarning ? [nameDupWarning, ...baseIssues.warnings] : baseIssues.warnings,
+    warnings: [...(gapWarning ? [gapWarning] : []), ...(nameDupWarning ? [nameDupWarning] : []), ...baseIssues.warnings],
   };
   const canSave =
     draft.effectiveFrom.trim() !== '' &&
@@ -451,7 +455,16 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
     if (isNew) return;
     setPublishing(true);
     setPublishError(null);
-    const res = await publishRule(ruleId);
+    let res = await publishRule(ruleId);
+    // 412 VERSION_GAP: this version would leave already-started periods with no rule — say so and ask explicitly.
+    if (!res.success && res.status === 412) {
+      if (confirm(`${res.error}\n\nPublish anyway?`)) res = await publishRule(ruleId, { confirmGap: true });
+      else {
+        setPublishError(`Not published — ${res.error}`);
+        setPublishing(false);
+        return;
+      }
+    }
     if (res.success) {
       // Refresh the editor from the publish response so the on-screen config matches what is now live.
       setDraft(rowToDraft(res.data));
@@ -493,13 +506,11 @@ export function RuleBuilder({ ruleId, duplicateFromId }: { ruleId: string; dupli
   const handleEditAsNewVersion = async () => {
     setSaving(true);
     setSaveError(null);
-    // Carry the same ruleId → the backend mints version+1 as a fresh draft. Default the new version's
-    // effective-from to TODAY (the author can change it) so publishing it doesn't collapse the prior
-    // published version to a 1-day window by reusing its effectiveFrom.
-    // A QUARTERLY version pays a quarter only if it starts on or before the quarter's first day, so it defaults to the
-    // current quarter's first day (back-dating is allowed; the author can change it).
-    const today = new Date().toISOString().slice(0, 10);
-    const from = draft.evaluationBasis === 'QUARTER' ? currentQuarterStart() : today;
+    // Carry the same ruleId → the backend mints version+1 as a fresh draft. The new version's effective-from is
+    // pre-filled from THIS (source) version (owner trap 2026-11-26: defaulting to TODAY left 1st–25th of the month
+    // with no rule once the source version was archived on publish). The author may change it; a later start date
+    // shows a coverage-gap warning and publishing it then needs an explicit confirmation.
+    const from = draft.effectiveFrom;
     // name omitted → the new version starts with the rule's CURRENT server-side name (never a stale tab's copy).
     const res = await createRule({ ...draft, name: undefined, ruleId: storedRuleId ?? draft.ruleId, effectiveFrom: from });
     if (res.success) {
