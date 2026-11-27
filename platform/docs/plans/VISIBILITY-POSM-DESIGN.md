@@ -315,8 +315,8 @@ only**; AMOUNT_UPLOAD Excel mode kept as the alternate `visibilityCaptureMode`.
 Three tracks integrated on `feat/visibility-integration` (develop `54a6d63b` + `feat/visibility-review-history` +
 `feat/visibility-report-dashboards`), shipped in **`release/2026-11-21`** — **on staging** (code tip `27581819`; migrate
 execution `gifsy-migrate-staging-7hg7c` applied `20261120140000_visibility_review_events` cleanly 2026-11-20 19:20 UTC),
-real-login verified 2026-11-21 (§17.6); **`main` = `develop` = `97332c95`** (release + docs; gates green on push
-2026-11-21) — ready for the owner's prod deploy; not on prod yet (prod `4a48dc0d`). §17.1 holds the rules every surface shares (written once);
+real-login verified 2026-11-21 (§17.6); ✅ on prod since `97332c95` (deployed + verified 2026-11-21). Current prod:
+see `RESUME.md` §1. §17.1 holds the rules every surface shares (written once);
 §17.2–17.5 describe each surface; §17.6 = staging results + the photo-GPS note.
 
 ### 17.1 Shared rules — one module, one in-scope rule, one word list

@@ -1,6 +1,6 @@
 # Per-Photo Geotag — capture GPS at each photo (schemes + visibility) — plan
 
-> ## ✅ IN PROD (status 2026-11-10) — `ee00dd2` is an ancestor of `origin/main` (rode cutover #23, 2026-08-03; part of every prod release since; prod = `2eb8271d` as of 2026-11-15). Still DORMANT for every tenant (visibility not activated). The owner real-phone smoke below is NOT recorded — do it before activating visibility for a tenant.
+> ## ✅ IN PROD (status 2026-11-10) — `ee00dd2` is an ancestor of `origin/main` (rode cutover #23, 2026-08-03; part of every prod release since; current prod: see `RESUME.md` §1). Still DORMANT for every tenant (visibility not activated). The owner real-phone smoke below is NOT recorded — do it before activating visibility for a tenant.
 >
 > _(Original build note, 2026-08-01:)_ BUILT + GATED + DUAL-AUDITED on develop `ee00dd2`.
 > **NO DB migration** (per-photo geo `{key, geo:{lat,lng,accuracy,capturedAt}}` rides in the existing `formValues` JSON;

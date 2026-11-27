@@ -1,7 +1,8 @@
 # Off-portal payments register — design + owner decisions
 
 Branch `feat/off-portal-payments` (from `release/next6`). Owner-approved 2026-11-25, **platform-wide (all clients)**.
-Status: built + independently audited (twice); NOT pushed / deployed; migration not applied anywhere.
+Status: ✅ in prod since Release 3 (`fe7900af`, 2026-11-26 — merged into release/next7 that day; migration `20261125140000_off_portal_payments`). Built +
+independently audited (twice). Current prod: see `RESUME.md` §1.
 
 ## Purpose
 Record payments ALREADY MADE outside the portal (bank transfer / UPI / gift) so that:
