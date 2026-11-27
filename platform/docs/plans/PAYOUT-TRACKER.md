@@ -1,8 +1,8 @@
 # Payout tracker — daily client report + Mon–Sat email
 
-**Status:** on `main` / staging since `44341503` (staging verified serving it 2026-11-27 20:57 IST). **Not on prod
-yet** — prod still serves `fe7900af` until the owner runs "Deploy — Production"; current state lives in
-[`RESUME.md`](RESUME.md) §1. First user: **Bajaj**. Inert for every other tenant (no setting row ⇒ nothing runs).
+**Status:** LIVE on prod since `44341503` (owner-deployed + verified 2026-11-27 22:45 IST; staging since 20:57 IST).
+Bajaj prod `payoutTracker` setting written 2026-11-27 (358 recipients, 10:00 Mon–Sat); emails start once the Cloud
+Scheduler job `payout-tracker-prod` exists. Current state lives in [`RESUME.md`](RESUME.md) §1. First user: **Bajaj**. Inert for every other tenant (no setting row ⇒ nothing runs).
 Code: `api/src/reports/payout-tracker/` (each file's header comment is the detailed contract).
 
 ## 1. What it is

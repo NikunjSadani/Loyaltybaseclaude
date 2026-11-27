@@ -385,7 +385,7 @@ and the Performance trend (`GET /partner/targets/trend`).
   appName** (prod manifest "Deoleo" — current naming kept).
 - Note: phones that already installed the app may keep the old name until the app is reinstalled — TODO verify.
 
-## 16. Payout Tracker email + WhatsApp variable order (2026-11-27; on `main` / staging `44341503`, prod deploy pending)
+## 16. Payout Tracker email + WhatsApp variable order (2026-11-27; LIVE on prod `44341503`)
 
 **Payout Tracker (tenant-scoped).** A daily outlet-level payout report in Bajaj's own format (Book4 outlet sheets
 retail / Ws + Book3 summary), e-mailed Mon–Sat 10:00 IST with the workbook attached and the summary tables in the body.

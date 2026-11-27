@@ -10,8 +10,8 @@
 > [`archive/RESUME-ARCHIVE-2026-11-15.md`](archive/RESUME-ARCHIVE-2026-11-15.md) (the full chronology up to 2026-11-15,
 > incl. the CUTOVER LEDGER #14–#52). **Never trust a SHA written here over `git log` + the serving image (§7).**
 >
-> Last updated: **2026-11-27 ~22:00 IST** (prod = `fe7900af`, Release 3, deployed 2026-11-26; `main` = `develop` =
-> staging = `44341503` — **prod deploy pending** (owner); payout-tracker go-live steps + owner decisions — §1, §3, §4, §8).
+> Last updated: **2026-11-27 ~23:00 IST** (prod = `main` = `develop` = staging = `44341503`, owner-deployed + verified
+> 22:45 IST 27 Nov; Bajaj payout-tracker setting written on prod; scheduler + WhatsApp console steps left — §1, §3, §4, §8).
 
 Multi-tenant FMCG **trade-loyalty** platform. Operator **Gifsy**; live clients **Deoleo** (since July 2026) and
 **Bajaj Consumer Care** (go-live November 2026). Backend `api/` (NestJS + Prisma 7 — owns the DB and ALL business logic)
@@ -20,14 +20,19 @@ work on **`develop`** (auto-deploys to staging); prod ships from **`main`** by a
 
 ---
 
-## 1. Where things stand (2026-11-27 ~22:00 IST)
+## 1. Where things stand (2026-11-27 ~23:00 IST)
 
 | | SHA | Since | Notes |
 |---|---|---|---|
-| **Production** (`gifsy-api`, `gifsy-frontend`, jobs) | **`fe7900af`** ("Release 3" = release/next5 + next6 + next7) | 2026-11-26 ~19:20 IST | Owner-deployed. Since `763e463b` (prod 2026-11-24): migrations `20261125100000` … `20261126140000` (8); any 2026-11-25 intermediate prod deploys are not recorded in the repo. Contents: release log in [`../DOCS-INDEX.md`](../DOCS-INDEX.md) |
-| **`main` = `develop` = staging** | **`44341503`** | 2026-11-27 | Staging verified serving `44341503` at 20:57 IST 27 Nov. **Prod deploy PENDING** — the owner runs "Deploy — Production (main)" |
+| **Production** = **`main` = `develop` = staging** | **`44341503`** | 2026-11-27 22:45 IST | Owner-deployed. Verified: api + frontend images `44341503`, 100% traffic on `gifsy-api-00106-6sj`; migrate exec `gifsy-migrate-stqql` applied `20261127100000_payout_tracker_report_runs`; `PAYOUT_TRACKER_EMAIL_LIVE=true` on `gifsy-api`; 0 ERROR logs after deploy; Bajaj + Deoleo `/login` 200. Staging verified serving it 20:57 IST. |
+| Previous prod | `fe7900af` ("Release 3" = release/next5 + next6 + next7) | 2026-11-26 ~19:20 IST | Rollback target (leaves the additive `tenant_report_runs` table — harmless). Since `763e463b`: migrations `20261125100000` … `20261126140000` (8); any 2026-11-25 intermediate prod deploys are not recorded. Release log in [`../DOCS-INDEX.md`](../DOCS-INDEX.md) |
 
-**On `main`, not yet on prod (`fe7900af..44341503`, all gates green):**
+**Prod Bajaj payout tracker setting — WRITTEN 2026-11-27 ~23:00 IST** (owner-approved; job `bajaj-prod-vis-verify` exec
+`w49s6`; backup = no prior row): `program_settings` bajaj / `payoutTracker` = enabled, 358 recipients (unique, well-formed;
+domains bajajconsumer.com + banjaras.co.in), 10:00 IST, days 1–6, sendOnHolidays true. Emails start only once the Cloud
+Scheduler job exists (step 3 below).
+
+**Shipped in `44341503` (`fe7900af..44341503`, all gates green):**
 - `7cad7a6c` **Catalogue fix** (platform-wide, owner-approved 2026-11-27): partner Rewards + sales Catalogue load every
   page (they asked for one page of 20, sorted by points, so on Bajaj prod the 20 "choose an amount" vouchers hid every
   physical gift); a failed load shows "Couldn't load…" + Retry; admin Gifts pages through all items; id tiebreak on
@@ -47,10 +52,10 @@ owner approved clearing that one staging row (backup printed, 1 deleted) → re-
 "sales up to 18 Nov" because staging's latest Bajaj sales file (applied 25 Nov) only reaches 18 Nov — expected; prod
 has the 27-Nov file → "26 Nov".
 
-**Go-live steps after the prod deploy (owner-gated, in order):** (1) confirm prod serves `44341503` + migration
-`20261127100000` applied (§7); (2) owner approves the prod ProgramSetting write `bajaj / payoutTracker`
+**Go-live steps after the prod deploy (owner-gated, in order):** (1) ✅ DONE prod serves `44341503` + migration
+`20261127100000` applied (§7); (2) ✅ DONE prod ProgramSetting write `bajaj / payoutTracker`
 {enabled, 358 recipients, `sendTimeIst` 10:00, Mon–Sat, `sendOnHolidays` true} — backup printed, guarded `gifsy_prod`;
-(3) owner creates Cloud Scheduler `payout-tracker-prod` `*/15 9-21 * * 1-6` Asia/Kolkata, POST with
+(3) ⏳ owner creates Cloud Scheduler `payout-tracker-prod` `*/15 9-21 * * 1-6` Asia/Kolkata, POST with
 `REPORTS_RUN_SECRET`; (4) owner sets the Bajaj WhatsApp templates in the console: points `bajaj_loyalty_points` vars
 [ownerName, pointsCredited, redeemableBalance, dateCredited]; payout `bajaj_payout_loyalty`. **First automatic email
 target: Sat 28 Nov 10:00 IST.** Runbook: `PAYOUT-TRACKER.md` §8.
@@ -85,7 +90,7 @@ Everything listed here on 2026-11-24 (delivery address on the fulfilment sheet e
 
 ## 4. What's next / waiting on the owner
 
-0. **Prod deploy of `44341503`** + the payout-tracker go-live steps (§1). First email Sat 28 Nov 10:00 IST.
+0. **Payout-tracker go-live steps 3–4** (§1: owner creates the prod scheduler; Bajaj WhatsApp in the console). First email Sat 28 Nov 10:00 IST — verify the run row + delivery that morning.
 1. **Open owner decisions (2026-11-27):**
    - KYC business-document change — estimate only so far.
    - October cases for the Oct–Dec (Q3) consistency bonus.
