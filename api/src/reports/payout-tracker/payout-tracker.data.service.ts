@@ -10,6 +10,8 @@
  *   - a month before the tenant's points-engine first live month (imported from the old system) — checked BEFORE any
  *     compute, and again on the engine's own `importedMonths` flag;
  *   - the points engine switched OFF (preview-only figures are money-critical — never sent);
+ * KYC GATE (owner 2026-11-27): only outlets whose partner's CURRENT KYC (latest submission) is APPROVED are on the
+ * report; the rest are excluded with an ops note counting them by current status.
  * HELD BACK, not refused (owner 2026-11-27) — PER-OUTLET rule / config problems: an ERROR engine row (monthly or
  * quarterly), an OK row on a KPI the tracker has no column for, an award type that does not fit the programme (₹ PAYOUT
  * for Unnati / SAMT, POINTS for BSC), SAMT paying on ADHO / NON ADHO / FB, an Unnati TOTAL rule that is not the
@@ -28,6 +30,7 @@ import { PointsComputeService } from '../../points-engine/points-compute.service
 import { TenantSettingsService } from '../../tenant/tenant-settings.service';
 import { parseQuarter, quarterKeyForMonth } from '../../points-engine/points-engine.quarter';
 import { isVisibilityInput } from '../../points-engine/points-engine.helper';
+import { resolveEffectiveKycStatus, type KycSubmissionCandidate } from '../../kyc/kyc-eligibility';
 import type { JwtPayload } from '../../common/decorators/current-user.decorator';
 import type { ComputePreview, ComputePreviewRow } from '../../points-engine/points-compute.types';
 import { KPI, type ChainLink, type OutletInput, type PartResult, type TrackerInput, type TrackerNote, type VisStatus } from './payout-tracker.types';
@@ -190,7 +193,7 @@ export class PayoutTrackerDataService {
     const codes = [...new Set([...targetsBy.keys(), ...salesBy.keys()])];
 
     // ── 2. Master + related entities (one query each) ───────────────────────────────────────────────
-    const outlets = codes.length
+    const masterOutlets = codes.length
       ? await this.prisma.outlet.findMany({
           where: { clientId, deletedAt: null, outletCode: { in: codes } },
           select: {
@@ -202,17 +205,49 @@ export class PayoutTrackerDataService {
           orderBy: { outletCode: 'asc' },
         })
       : [];
-    const known = new Set(outlets.map((o) => o.outletCode));
-    const missing = codes.filter((c) => !known.has(c)).sort();
+    const inMaster = new Set(masterOutlets.map((o) => o.outletCode));
+    const missing = codes.filter((c) => !inMaster.has(c)).sort();
     if (missing.length) {
       opsNote(
         `${missing.length} outlet code(s) have targets/sales for ${monthLong(month)} but no live outlet master row (deleted or unknown) — not on the report: ${listCodes(missing)}`,
       );
     }
 
+    // ── KYC gate (owner 2026-11-27): only outlets whose partner's CURRENT KYC (the LATEST submission, canonical
+    // createdAt → updatedAt → id desc tiebreak) is APPROVED are on the report. Everything else — no partner, no
+    // submission, re-KYC, pending, rejected — is left OFF TrackerInput.outlets (rows / summary / totals) and counted
+    // by current status in an ops note. Never "any approved submission ever".
+    const partnerIds = [...new Set(masterOutlets.map((o) => o.partnerId).filter((p): p is string => !!p))];
+    const kyc = partnerIds.length
+      ? await this.prisma.kycSubmission.findMany({
+          where: { partnerId: { in: partnerIds } },
+          select: { partnerId: true, status: true, createdAt: true, updatedAt: true, id: true },
+        })
+      : [];
+    const subsByPartner = new Map<string, KycSubmissionCandidate[]>();
+    for (const k of kyc) {
+      if (!k.partnerId) continue;
+      let list = subsByPartner.get(k.partnerId);
+      if (!list) subsByPartner.set(k.partnerId, (list = []));
+      list.push({ status: String(k.status), createdAt: k.createdAt, updatedAt: k.updatedAt, id: k.id });
+    }
+    const NOT_STARTED = 'NOT_STARTED';
+    const excludedByStatus = new Map<string, number>();
+    const outlets = masterOutlets.filter((o) => {
+      const status = (o.partnerId ? resolveEffectiveKycStatus(subsByPartner.get(o.partnerId) ?? []) : null) ?? NOT_STARTED;
+      if (status === 'APPROVED') return true;
+      excludedByStatus.set(status, (excludedByStatus.get(status) ?? 0) + 1);
+      return false;
+    });
+    if (excludedByStatus.size) {
+      const n = masterOutlets.length - outlets.length;
+      const parts = [...excludedByStatus.entries()].sort(([a, x], [b, y]) => y - x || a.localeCompare(b)).map(([s, c]) => `${s} ${c}`);
+      opsNote(`${n} outlet(s) not KYC-approved excluded: ${parts.join(', ')}`);
+    }
+    const known = new Set(outlets.map((o) => o.outletCode));
+
     const outletIds = outlets.map((o) => o.id);
-    const partnerIds = [...new Set(outlets.map((o) => o.partnerId).filter((p): p is string => !!p))];
-    const [assignments, salesUsers, kyc, captures] = await Promise.all([
+    const [assignments, salesUsers, captures] = await Promise.all([
       outletIds.length
         ? this.prisma.salesUserAssignment.findMany({
             where: { outletId: { in: outletIds }, unassignedAt: null },
@@ -228,19 +263,12 @@ export class PayoutTrackerDataService {
           user: { select: { name: true } },
         },
       }),
-      partnerIds.length
-        ? this.prisma.kycSubmission.findMany({
-            where: { partnerId: { in: partnerIds }, status: 'APPROVED' },
-            select: { partnerId: true },
-          })
-        : Promise.resolve([]),
       this.prisma.visibilityCapture.findMany({
         where: { clientId, windowKey: { startsWith: `${month}-` } },
         select: { outletCode: true, status: true },
       }),
     ]);
 
-    const approvedPartners = new Set(kyc.map((k) => k.partnerId).filter((p): p is string => !!p));
     const leafByOutlet = new Map<string, string>();
     for (const a of assignments) if (a.outletId && !leafByOutlet.has(a.outletId)) leafByOutlet.set(a.outletId, a.salesUserId); // newest first
     const suById = new Map(salesUsers.map((s) => [s.id, s]));
@@ -588,7 +616,7 @@ export class PayoutTrackerDataService {
         subProgram: o.programCategory ?? null,
         outletTypeCode: o.outletType?.code ?? null,
         outletTypeLabel: o.outletType?.name ?? null,
-        gifsyApproved: !!o.partnerId && approvedPartners.has(o.partnerId),
+        gifsyApproved: true, // only outlets whose CURRENT KYC is APPROVED reach here (KYC gate above)
         visibility: visStatusOf(visBy.get(o.outletCode)),
         chain: chainOf(leafByOutlet.get(o.id), o.outletCode),
         targets: targetsBy.get(o.outletCode) ?? {},

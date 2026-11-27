@@ -295,8 +295,8 @@ export function formatIst(d: Date): string {
 
 export const ABOUT_NOTES = [
   'Payouts (₹) and points are calculated by Gifsy using the programme rules in force from 1 Nov 2026.',
-  'Gifsy Approval = 1 when the outlet earns a payout / points on the current figures AND is KYC-approved by Gifsy; outlets not yet KYC-approved show their figure with the reason "KYC not approved by Gifsy".',
-  'Summary counts ("Outlet Count - As approved by Gifsy" and everything after it) include only KYC-approved outlets.',
+  'Only outlets whose KYC is currently approved by Gifsy are included.',
+  'Gifsy Approval = 1 when the outlet earns a payout / points on the current figures.',
   'Ratios: Total Ach % and Line Ach % uncapped; ADHO / Non ADHO / FB Ach % capped at 120%.',
   'WoA = outlets at or above 100% of Total target ÷ outlets. ECO = outlet billed this month (Total Ach > 0). WORKING = visibility photo submitted this month.',
   'Visibility attempted = outlets that submitted a visibility photo this month (approved, pending review or rejected); Approved % = approved ÷ attempted.',

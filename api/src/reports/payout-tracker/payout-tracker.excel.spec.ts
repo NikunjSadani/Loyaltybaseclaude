@@ -334,7 +334,9 @@ describe('writeTrackerWorkbook', () => {
       expect(String(kv['Exceptions'])).toContain('1 outlet');
       const col1 = all.map((r) => r[0]);
       for (const n of ABOUT_NOTES) expect(col1).toContain(n);
-      expect(ABOUT_NOTES.some((n) => n.includes('KYC-approved by Gifsy'))).toBe(true);
+      expect(ABOUT_NOTES).toContain('Only outlets whose KYC is currently approved by Gifsy are included.');
+      expect(ABOUT_NOTES).toContain('Gifsy Approval = 1 when the outlet earns a payout / points on the current figures.');
+      expect(ABOUT_NOTES.some((n) => /KYC not approved|include only KYC-approved/.test(n))).toBe(false);
       expect(ABOUT_NOTES.some((n) => n.startsWith('Score = 30%'))).toBe(true);
     });
 

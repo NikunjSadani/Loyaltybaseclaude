@@ -6,6 +6,8 @@ import type { ComputePreview, ComputePreviewRow } from '../../points-engine/poin
 
 // ─── fixtures ───────────────────────────────────────────────────────────────────────────────────────────
 const NOW = new Date('2026-11-27T04:00:00.000Z');
+const T0 = new Date('2026-10-01T00:00:00.000Z');
+const at = (day: number) => new Date(Date.UTC(2026, 9, day));
 
 function outletRow(code: string, over: Record<string, unknown> = {}) {
   return {
@@ -70,7 +72,8 @@ interface World {
   lastMonth: Array<{ outletCode: string; kpiValues: unknown }>;
   assignments: Array<{ outletId: string; salesUserId: string; assignedAt: Date }>;
   salesUsers: ReturnType<typeof su>[];
-  kyc: Array<{ partnerId: string }>;
+  /** undefined = every requested partner has one APPROVED submission (the common case). */
+  kyc?: Array<{ partnerId: string; status: string; createdAt: Date; updatedAt: Date; id: string }>;
   captures: Array<{ outletCode: string; status: string }>;
   monthStatus: { state: string; lastAppliedAt?: Date | null } | null;
   daySet: { lastDay: number } | null;
@@ -92,7 +95,6 @@ function baseWorld(): World {
     lastMonth: [{ outletCode: 'U1', kpiValues: { TOTAL: 1234 } }],
     assignments: [],
     salesUsers: [],
-    kyc: [],
     captures: [],
     monthStatus: { state: 'OPEN' },
     daySet: { lastDay: 26 },
@@ -119,7 +121,14 @@ function makeService(w: World) {
     },
     salesUserAssignment: { findMany: jest.fn().mockImplementation(() => Promise.resolve(w.assignments)) },
     salesUser: { findMany: jest.fn().mockImplementation(() => Promise.resolve(w.salesUsers)) },
-    kycSubmission: { findMany: jest.fn().mockImplementation(() => Promise.resolve(w.kyc)) },
+    kycSubmission: {
+      findMany: jest.fn().mockImplementation((args: { where: { partnerId: { in: string[] } } }) =>
+        Promise.resolve(
+          w.kyc ??
+            args.where.partnerId.in.map((p) => ({ partnerId: p, status: 'APPROVED', createdAt: T0, updatedAt: T0, id: `k_${p}` })),
+        ),
+      ),
+    },
     visibilityCapture: { findMany: jest.fn().mockImplementation(() => Promise.resolve(w.captures)) },
     salesMonthStatus: { findUnique: jest.fn().mockImplementation(() => Promise.resolve(w.monthStatus)) },
     salesDaySet: { findUnique: jest.fn().mockImplementation(() => Promise.resolve(w.daySet)) },
@@ -189,7 +198,7 @@ describe('PayoutTrackerDataService.buildInput', () => {
     expect(o).toMatchObject({
       code: 'U1', name: 'Shop U1', ownerName: 'Partner U1', zone: 'North', state: 'Punjab', town: 'Patiala', beat: 'B1',
       metro: 'Metro', sapCode: '5000', dbName: 'DB One', program: 'Unnati', subProgram: 'Unnati',
-      outletTypeCode: 'SSS', outletTypeLabel: 'SSS', gifsyApproved: false, visibility: null, chain: [],
+      outletTypeCode: 'SSS', outletTypeLabel: 'SSS', gifsyApproved: true, visibility: null, chain: [],
       lastMonthTotal: 1234,
     });
     expect(o.targets).toEqual({ TOTAL: 4000, ADHO: 3600 });
@@ -214,18 +223,50 @@ describe('PayoutTrackerDataService.buildInput', () => {
     expect(prisma.outlet.findMany).toHaveBeenCalledTimes(1);
   });
 
-  it('gifsyApproved = partner has an APPROVED KycSubmission', async () => {
+  it('only outlets whose CURRENT (latest) KYC submission is APPROVED are on the report; the rest are excluded LOUDLY (ops note by status)', async () => {
     const w = baseWorld();
-    w.outlets.push(outletRow('U2'), outletRow('U3', { partnerId: null }));
-    w.targets.push({ outletCode: 'U2', targetValues: {} }, { outletCode: 'U3', targetValues: {} });
-    w.kyc = [{ partnerId: 'p_U1' }];
+    const extra = ['RK', 'RA', 'NS', 'NP', 'PA', 'PB', 'TIE'];
+    for (const c of extra) {
+      w.outlets.push(outletRow(c, c === 'NP' ? { partnerId: null } : {}));
+      w.targets.push({ outletCode: c, targetValues: {} });
+    }
+    const sub = (p: string, status: string, created: number, updated = created, id = `k_${p}_${status}`) => ({
+      partnerId: `p_${p}`, status, createdAt: at(created), updatedAt: at(updated), id,
+    });
+    w.kyc = [
+      sub('U1', 'APPROVED', 1),
+      sub('RK', 'APPROVED', 1), sub('RK', 'RE_KYC_REQUIRED', 5), // approved, then re-KYC → excluded
+      sub('RA', 'REJECTED', 1), sub('RA', 'APPROVED', 5), // rejected, then approved → included
+      // NS: partner but no submission → excluded (NOT_STARTED); NP: no partner → excluded (NOT_STARTED)
+      sub('PA', 'PENDING_ASM_APPROVAL', 3),
+      sub('PB', 'PENDING_ASM_APPROVAL', 2), sub('PB', 'APPROVED', 1),
+      // createdAt tie → updatedAt desc decides (the in-place reKyc mutation is newer)
+      sub('TIE', 'APPROVED', 4, 4, 'k_z'), sub('TIE', 'RE_KYC_REQUIRED', 4, 6, 'k_a'),
+    ];
     const { svc, prisma } = makeService(w);
     const out = await svc.buildInput('bajaj', '2026-11', NOW);
-    const by = new Map(out.outlets.map((o) => [o.code, o]));
-    expect(by.get('U1')!.gifsyApproved).toBe(true);
-    expect(by.get('U2')!.gifsyApproved).toBe(false);
-    expect(by.get('U3')!.gifsyApproved).toBe(false);
-    expect(prisma.kycSubmission.findMany.mock.calls[0][0].where).toMatchObject({ status: 'APPROVED', partnerId: { in: ['p_U1', 'p_U2'] } });
+    expect(out.outlets.map((o) => o.code).sort()).toEqual(['RA', 'U1']);
+    expect(out.outlets.every((o) => o.gifsyApproved)).toBe(true);
+    const ops = notesOf(out, 'ops', '\n');
+    expect(ops).toContain('6 outlet(s) not KYC-approved excluded: NOT_STARTED 2, PENDING_ASM_APPROVAL 2, RE_KYC_REQUIRED 2');
+    expect(notesOf(out, 'client', '\n')).not.toMatch(/KYC/);
+    // every submission of the partners (not only APPROVED ones) — the latest decides
+    const args = prisma.kycSubmission.findMany.mock.calls[0][0];
+    expect(args.where.status).toBeUndefined();
+    expect(args.where.partnerId.in.sort()).toEqual(['p_NS', 'p_PA', 'p_PB', 'p_RA', 'p_RK', 'p_TIE', 'p_U1']);
+  });
+
+  it('excluded (not KYC-approved) outlets never reach engine-driven notes / hold-backs', async () => {
+    const w = baseWorld();
+    w.outlets.push(outletRow('X1'));
+    w.targets.push({ outletCode: 'X1', targetValues: { TOTAL: 10 } });
+    w.kyc = [{ partnerId: 'p_U1', status: 'APPROVED', createdAt: T0, updatedAt: T0, id: 'k1' }];
+    w.monthly = preview([row('X1', 'ADHO', { status: 'ERROR', reason: 'boom' }), row('X1', 'LINES', { status: 'NO_RULE' })]);
+    const out = await only(w);
+    expect(out.outlets.map((o) => o.code)).toEqual(['U1']);
+    expect(notesOf(out, 'ops', '\n')).not.toContain('X1');
+    expect(notesOf(out, 'client', '\n')).not.toMatch(/held back/);
+    expect(notesOf(out, 'ops', '\n')).toContain('1 outlet(s) not KYC-approved excluded: NOT_STARTED 1');
   });
 
   it('chain: newest active assignment → reportingTo upwards; inactive/deleted = not active; cycle + depth guarded', async () => {
