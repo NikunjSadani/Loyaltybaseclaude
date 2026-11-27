@@ -18,6 +18,13 @@
  *   retried on the next scheduler hits up to MAX_ATTEMPTS in total (each failure alerts) — EXCEPT failures where the
  *   email may already have gone (SMTP lost after DATA, recording SENT failed, stale PENDING): those are never retried.
  *
+ * Large lists (owner 2026-11-27: Bajaj ~358 addresses, all visible in To/CC): to + cc above the per-message cap
+ * (MAX_RECIPIENTS_PER_EMAIL = 50, env PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL 1..500) go as consecutive copies of the
+ * SAME email — first message: configured To then Cc fill; later messages: their chunk in To. SENT only when every
+ * chunk was accepted. Delivered / uncertain addresses are recorded on the run row (recipients = {delivered, uncertain})
+ * after each chunk, so a retry sends ONLY the chunks not yet sent; an uncertain chunk is never retried (UNCERTAIN alert).
+ * Test mode is still ONE email to the test address (subject names the real recipient + message counts).
+ *
  * sendNow(clientId, month, recipients?, now?) — manual / test send. The tenant must have a valid ENABLED config and an
  * active client. Explicit recipients must each be internal (REPORTS_RECIPIENT_DOMAINS), or — ONLY when
  * PAYOUT_TRACKER_EMAIL_LIVE=true — one of the tenant's configured recipients; anything else is a 400. Without explicit
@@ -41,10 +48,13 @@ import {
   PAYOUT_TRACKER_MANUAL_REPORT_KEY,
   PAYOUT_TRACKER_REPORT_KEY,
   PAYOUT_TRACKER_SETTING_KEY,
+  chunkRecipients,
+  maxRecipientsPerEmail,
   parsePayoutTrackerConfig,
   payoutTrackerEmailTarget,
   validateRecipientList,
   type PayoutTrackerConfig,
+  type RecipientChunk,
 } from './payout-tracker.config';
 
 /** DI token for the data loader (PayoutTrackerDataService.buildInput) — keeps this service testable in isolation. */
@@ -111,14 +121,58 @@ export function istStamp(now: Date): string {
 }
 
 class RunFailure extends Error {
+  /** Chunk delivery progress to record on the run row (a retry never re-sends these addresses). */
+  state?: DeliveryState;
   constructor(
     message: string,
     readonly retryable: boolean,
     readonly month?: string,
     readonly alertSubject?: string,
+    /** The relay MAY have accepted the message (SMTP lost after DATA). */
+    readonly ambiguous = false,
   ) {
     super(message);
   }
+}
+
+/**
+ * Chunked-delivery progress stored in TenantReportRun.recipients while a day is PENDING / FAILED:
+ * delivered = addresses whose message the relay accepted; uncertain = addresses whose message MAY have gone.
+ * Neither is ever sent again automatically. (A SENT row stores the plain string[] of everyone addressed.)
+ */
+export interface DeliveryState {
+  delivered: string[];
+  uncertain: string[];
+}
+const EMPTY_STATE: DeliveryState = { delivered: [], uncertain: [] };
+
+export function readDeliveryState(raw: unknown): DeliveryState {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return EMPTY_STATE;
+  const o = raw as Record<string, unknown>;
+  const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').map((x) => x.toLowerCase()) : []);
+  return { delivered: list(o.delivered), uncertain: list(o.uncertain) };
+}
+
+interface ChunkProblem {
+  addresses: string[];
+  failure: RunFailure;
+}
+interface ChunkReport {
+  chunks: number;
+  delivered: string[];
+  rejected: string[];
+  failed: ChunkProblem[];
+  uncertain: ChunkProblem[];
+}
+
+const addressesOf = (c: RecipientChunk) => [...c.to, ...c.cc];
+const asJson = (v: unknown) => v as Prisma.InputJsonValue;
+
+/** Test-mode subject prefix: names the real recipients (small list) or how many + how many messages (chunked). */
+function testSubjectPrefix(cfg: PayoutTrackerConfig, chunks: RecipientChunk[], cap: number): string {
+  if (chunks.length <= 1) return `[TEST — would go to ${cfg.recipients.join(', ')}${cfg.cc.length ? `; cc ${cfg.cc.join(', ')}` : ''}]`;
+  const total = chunks.reduce((n, c) => n + addressesOf(c).length, 0);
+  return `[TEST — would go to ${total} recipients (to ${cfg.recipients.length}, cc ${cfg.cc.length}) as ${chunks.length} messages of up to ${cap}]`;
 }
 
 const isUniqueViolation = (e: unknown) => e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002';
@@ -251,11 +305,17 @@ export class PayoutTrackerSender {
     const claim = await this.claim(clientId, runDate, now);
     if (claim.kind === 'taken') return { clientId, status: 'already-done' };
     if (claim.kind === 'stale') {
-      const error = 'the previous attempt was interrupted (no result after 30 min) — the email MAY or may not have gone; check, then use send-now if needed';
+      const error = this.staleMessage(config, claim.prior, claim.priorMonth);
       const alertError = await this.alert(name, clientId, runDate, error);
       return { clientId, status: 'failed', error, ...(alertError ? { alertError } : {}) };
     }
     const runId = claim.id;
+    // A retry that already delivered to some addresses continues THAT month (never switches month mid-delivery).
+    const resumed = claim.prior.delivered.length > 0 || claim.prior.uncertain.length > 0;
+    const lockedMonth = resumed && claim.priorMonth ? claim.priorMonth : null;
+    const resumeNote = resumed
+      ? `note: retry rebuilt the ${lockedMonth ? `${lockedMonth} ` : ''}pack at ${istStamp(now)} — the ${claim.prior.delivered.length} address(es) sent earlier got the pack built on the earlier attempt (figures may differ)`
+      : null;
 
     try {
       if (configError) throw new RunFailure(configError, false);
@@ -275,7 +335,7 @@ export class PayoutTrackerSender {
         throw new RunFailure(`PAYOUT_TRACKER_EMAIL_TEST_RECIPIENT "${target.value}" is not on an internal domain — refused`, false);
       }
 
-      const month = await this.chooseMonth(clientId, now);
+      const month = lockedMonth ?? (await this.chooseMonth(clientId, now));
       let pack: TrackerPack;
       let input: TrackerInput;
       let notes: TrackerNote[] = [];
@@ -288,19 +348,38 @@ export class PayoutTrackerSender {
         throw new RunFailure(`could not build the ${month} report: ${(e as Error)?.message ?? String(e)}`, true, month);
       }
 
-      const addressed =
-        target.mode === 'live'
-          ? { to: cfg.recipients, cc: cfg.cc, subject: pack.email.subject }
-          : {
-              to: [target.to],
-              cc: [] as string[],
-              subject: `[TEST — would go to ${cfg.recipients.join(', ')}${cfg.cc.length ? `; cc ${cfg.cc.join(', ')}` : ''}] ${pack.email.subject}`,
-            };
-      const res = await this.deliver(addressed, pack, month, name);
-      const recipients = [...addressed.to, ...addressed.cc];
-      const rejectedNote = res.rejected.length ? `relay REJECTED ${res.rejected.join(', ')}` : null;
+      const capR = maxRecipientsPerEmail(this.env);
+      if (!capR.ok) throw new RunFailure(`${capR.error} — not sent`, true, month);
+      const fullPlan = chunkRecipients(cfg.recipients, cfg.cc, capR.cap);
+      const totalAddresses = fullPlan.reduce((n, c) => n + addressesOf(c).length, 0);
+      const prior = claim.prior;
+      let report: ChunkReport;
+      if (target.mode === 'live') {
+        // A retry sends ONLY the addresses not yet delivered / not uncertain on an earlier attempt.
+        const done = new Set([...prior.delivered, ...prior.uncertain]);
+        const plan = chunkRecipients(cfg.recipients.filter((e) => !done.has(e)), cfg.cc.filter((e) => !done.has(e)), capR.cap);
+        report = await this.deliverChunks(plan, pack.email.subject, pack, month, name, prior, (state) => this.recordProgress(runId, state, month));
+      } else {
+        // Test mode: ONE email to the internal test address, whatever the real list size.
+        report = await this.deliverChunks(
+          [{ to: [target.to], cc: [] }],
+          `${testSubjectPrefix(cfg, fullPlan, capR.cap)} ${pack.email.subject}`,
+          pack,
+          month,
+          name,
+          EMPTY_STATE,
+        );
+      }
+      const state: DeliveryState = { delivered: [...prior.delivered, ...report.delivered], uncertain: [...prior.uncertain, ...report.uncertain.flatMap((u) => u.addresses)] };
+      if (report.failed.length || state.uncertain.length) {
+        throw await this.chunkFailure(report, state, prior, target.mode === 'live' ? totalAddresses : 1, month, name, clientId, runDate);
+      }
+      const recipients = state.delivered;
+      const rejectedNote = report.rejected.length ? `relay REJECTED ${report.rejected.join(', ')}` : null;
+      // A resumed SENT day carries the rebuild note on the run row + outcome (loud, never log-only).
+      if (resumeNote) notes = [...notes, { audience: 'ops', text: resumeNote } as TrackerNote];
       try {
-        await this.finish(runId, { status: 'SENT', month, recipients, fileName: pack.fileName, error: rejectedNote });
+        await this.finish(runId, { status: 'SENT', ...(lockedMonth ? {} : { month }), recipients, fileName: pack.fileName, error: rejectedNote });
       } catch (e) {
         // The email WENT — never let a retry send it again.
         throw new RunFailure(
@@ -334,49 +413,65 @@ export class PayoutTrackerSender {
       await this.finish(runId, {
         status: 'FAILED',
         error: failure.message,
-        month: failure.month ?? null,
+        // A resumed run keeps the month it is delivering (never overwritten, never nulled).
+        ...(lockedMonth ? {} : { month: failure.month ?? null }),
+        ...(failure.state ? { recipients: failure.state } : {}),
         ...(failure.retryable ? {} : { attempts: MAX_ATTEMPTS }),
       }).catch((we) => this.logger.error(`payout-tracker: could not record the FAILED run for ${clientId}: ${(we as Error)?.message}`));
-      const alertError = await this.alert(name, clientId, runDate, failure.message, failure.alertSubject);
+      const alertError = await this.alert(name, clientId, runDate, resumeNote ? `${failure.message}; ${resumeNote}` : failure.message, failure.alertSubject);
       return { clientId, status: 'failed', error: failure.message, ...(failure.month ? { month: failure.month } : {}), ...(alertError ? { alertError } : {}) };
     }
   }
 
   /** Claim today's row. created/retry → we own the send; taken → someone else did/does it; stale → interrupted run. */
-  private async claim(clientId: string, runDate: string, now: Date): Promise<{ kind: 'claimed'; id: string } | { kind: 'taken' } | { kind: 'stale' }> {
+  private async claim(
+    clientId: string,
+    runDate: string,
+    now: Date,
+  ): Promise<
+    | { kind: 'claimed'; id: string; prior: DeliveryState; priorMonth: string | null }
+    | { kind: 'taken' }
+    | { kind: 'stale'; prior: DeliveryState; priorMonth: string | null }
+  > {
     const key = { clientId, reportKey: PAYOUT_TRACKER_REPORT_KEY, runDate };
     try {
       const row = await this.prisma.tenantReportRun.create({ data: { ...key, status: 'PENDING' }, select: { id: true } });
-      return { kind: 'claimed', id: row.id };
+      return { kind: 'claimed', id: row.id, prior: EMPTY_STATE, priorMonth: null };
     } catch (e) {
       if (!isUniqueViolation(e)) throw e;
     }
     const existing = await this.prisma.tenantReportRun.findUnique({
       where: { clientId_reportKey_runDate: key },
-      select: { id: true, status: true, attempts: true, updatedAt: true },
+      select: { id: true, status: true, attempts: true, updatedAt: true, recipients: true, month: true },
     });
     if (!existing) return { kind: 'taken' };
+    const prior = readDeliveryState(existing.recipients);
+    const priorMonth = existing.month ?? null;
     if (existing.status === 'FAILED' && existing.attempts < MAX_ATTEMPTS) {
       // Compare-and-set on (status, attempts): two concurrent retries can't both win.
       const won = await this.prisma.tenantReportRun.updateMany({
         where: { id: existing.id, status: 'FAILED', attempts: existing.attempts },
         data: { status: 'PENDING', attempts: { increment: 1 }, error: null },
       });
-      return won.count === 1 ? { kind: 'claimed', id: existing.id } : { kind: 'taken' };
+      return won.count === 1 ? { kind: 'claimed', id: existing.id, prior, priorMonth } : { kind: 'taken' };
     }
     if (existing.status === 'PENDING' && now.getTime() - existing.updatedAt.getTime() > STALE_PENDING_MS) {
       const won = await this.prisma.tenantReportRun.updateMany({
         where: { id: existing.id, status: 'PENDING', updatedAt: existing.updatedAt },
-        data: { status: 'FAILED', attempts: MAX_ATTEMPTS, error: 'interrupted — no result after 30 min (email may or may not have gone)' },
+        data: {
+          status: 'FAILED',
+          attempts: MAX_ATTEMPTS,
+          error: `interrupted — no result after 30 min (email may or may not have gone; recorded as delivered: ${prior.delivered.length}, uncertain: ${prior.uncertain.length})`,
+        },
       });
-      return won.count === 1 ? { kind: 'stale' } : { kind: 'taken' };
+      return won.count === 1 ? { kind: 'stale', prior, priorMonth } : { kind: 'taken' };
     }
     return { kind: 'taken' };
   }
 
   private async finish(
     id: string,
-    data: { status: 'SENT' | 'FAILED' | 'SKIPPED'; error?: string | null; month?: string | null; recipients?: string[]; fileName?: string; attempts?: number },
+    data: { status: 'SENT' | 'FAILED' | 'SKIPPED'; error?: string | null; month?: string | null; recipients?: string[] | DeliveryState; fileName?: string; attempts?: number },
   ): Promise<void> {
     await this.prisma.tenantReportRun.update({
       where: { id },
@@ -384,7 +479,7 @@ export class PayoutTrackerSender {
         status: data.status,
         error: data.error ?? null,
         ...(data.month !== undefined ? { month: data.month } : {}),
-        ...(data.recipients ? { recipients: data.recipients } : {}),
+        ...(data.recipients ? { recipients: asJson(data.recipients) } : {}),
         ...(data.fileName ? { fileName: data.fileName } : {}),
         ...(data.attempts !== undefined ? { attempts: data.attempts } : {}),
       },
@@ -419,12 +514,141 @@ export class PayoutTrackerSender {
           false,
           month,
           `${name} payout tracker: delivery UNCERTAIN — check before resending`,
+          true,
         );
       }
       throw new RunFailure(`email send failed: ${msg}`, true, month);
     }
     if (res.skipped) throw new RunFailure('email not sent — SMTP is not configured in this environment (MSG91_SMTP_PASS unset)', false, month);
     return res;
+  }
+
+  /**
+   * Send the SAME email (subject/html/text/xlsx) once per chunk, in order. A chunk failure never stops the others.
+   * `onProgress` (scheduled runs) records the delivered/uncertain addresses after every chunk except the last, so a
+   * crash or retry can never re-send a chunk that already went; if that record fails, sending STOPS (non-retryable).
+   */
+  private async deliverChunks(
+    chunks: RecipientChunk[],
+    subject: string,
+    pack: TrackerPack,
+    month: string,
+    name: string,
+    prior: DeliveryState,
+    onProgress?: (state: DeliveryState) => Promise<void>,
+  ): Promise<ChunkReport> {
+    const report: ChunkReport = { chunks: chunks.length, delivered: [], rejected: [], failed: [], uncertain: [] };
+    for (let i = 0; i < chunks.length; i++) {
+      const c = chunks[i];
+      try {
+        const res = await this.deliver({ to: c.to, cc: c.cc, subject }, pack, month, name);
+        report.delivered.push(...addressesOf(c));
+        report.rejected.push(...res.rejected);
+      } catch (e) {
+        const failure = e instanceof RunFailure ? e : new RunFailure(`email send failed: ${(e as Error)?.message ?? String(e)}`, true, month);
+        (failure.ambiguous ? report.uncertain : report.failed).push({ addresses: addressesOf(c), failure });
+        if (chunks.length > 1) this.logger.error(`payout-tracker: message ${i + 1}/${chunks.length} (${addressesOf(c).length} addresses) failed: ${failure.message}`);
+      }
+      if (onProgress && i < chunks.length - 1 && (report.delivered.length || report.uncertain.length)) {
+        const state = { delivered: [...prior.delivered, ...report.delivered], uncertain: [...prior.uncertain, ...report.uncertain.flatMap((u) => u.addresses)] };
+        try {
+          await onProgress(state);
+        } catch (we) {
+          // Everything in THIS run that did not (certainly) get it: never-sent chunks + failed chunks; uncertain apart.
+          const notSent = [...report.failed.flatMap((p) => p.addresses), ...chunks.slice(i + 1).flatMap(addressesOf)];
+          const unsure = report.uncertain.flatMap((p) => p.addresses);
+          const f = new RunFailure(
+            `${state.delivered.length} address(es) WERE sent (messages 1–${i + 1} of ${chunks.length} attempted) but recording the progress failed (${(we as Error)?.message ?? String(we)}) — sending STOPPED; NOT retried automatically (a retry could re-send). ` +
+              `NOT sent: ${notSent.length} address(es) (${chunks.length - i - 1} message(s) never attempted + ${report.failed.length} failed)${notSent.length ? `: ${notSent.join(', ')}` : ''} — resend ONLY to these with send-now.` +
+              (unsure.length ? ` Delivery UNCERTAIN: ${unsure.length} address(es): ${unsure.join(', ')} — check before resending.` : ''),
+            false,
+            month,
+            `${name} payout tracker: partly sent, progress NOT recorded`,
+          );
+          f.state = state;
+          throw f;
+        }
+      }
+    }
+    return report;
+  }
+
+  /** Records delivery progress AND the month being delivered (a retry continues that month). */
+  private async recordProgress(id: string, state: DeliveryState, month: string): Promise<void> {
+    await this.prisma.tenantReportRun.update({ where: { id }, data: { recipients: asJson(state), month } });
+  }
+
+  /** Stale-PENDING alert text: what is recorded as delivered / not sent / uncertain, never "check" alone. */
+  private staleMessage(config: PayoutTrackerConfig | null, prior: DeliveryState, month: string | null): string {
+    const done = new Set([...prior.delivered, ...prior.uncertain]);
+    const all = config ? chunkRecipients(config.recipients, config.cc, 1_000_000).flatMap(addressesOf) : [];
+    const notSent = all.filter((e) => !done.has(e));
+    return (
+      `the previous attempt${month ? ` (${month})` : ''} was interrupted (no result after 30 min) — NOT retried automatically. ` +
+      `Recorded as delivered: ${prior.delivered.length} — do NOT resend to the delivered ${prior.delivered.length}. ` +
+      `Not recorded as sent: ${config ? notSent.length : 'unknown (config invalid)'}${notSent.length ? ` (${notSent.join(', ')})` : ''} — the message in flight at the interruption MAY have reached some of these; check before resending with send-now. ` +
+      `Delivery uncertain: ${prior.uncertain.length}${prior.uncertain.length ? ` (${prior.uncertain.join(', ')})` : ''}.`
+    );
+  }
+
+  /**
+   * The RunFailure for a run where some chunk failed or is uncertain. Single-message run with nothing delivered → that
+   * message's own failure (unchanged behaviour). Otherwise a combined failure naming the failed message + address
+   * counts; retryable only when every failed chunk is retryable (uncertain addresses are never retried). When there
+   * are BOTH failed and uncertain chunks, the "delivery UNCERTAIN" alert is sent here in addition to the run alert.
+   */
+  private async chunkFailure(
+    report: ChunkReport,
+    state: DeliveryState,
+    prior: DeliveryState,
+    totalAddresses: number,
+    month: string,
+    name: string,
+    clientId: string,
+    runDate: string,
+    manual = false,
+  ): Promise<RunFailure> {
+    const noPrior = prior.delivered.length === 0 && prior.uncertain.length === 0;
+    if (report.chunks === 1 && noPrior && report.delivered.length === 0) {
+      const only = (report.failed[0] ?? report.uncertain[0]).failure;
+      only.state = state;
+      return only;
+    }
+    const failedAddrs = report.failed.flatMap((f) => f.addresses);
+    const newUncertain = report.uncertain.flatMap((u) => u.addresses);
+    const parts: string[] = [];
+    if (report.failed.length) {
+      const reasons = [...new Set(report.failed.map((f) => f.failure.message))].join(' | ');
+      parts.push(`${report.failed.length} of ${report.chunks} message(s) NOT sent (${failedAddrs.length} address(es)): ${reasons}`);
+    }
+    if (newUncertain.length) {
+      parts.push(
+        `${report.uncertain.length} message(s) (${newUncertain.length} address(es): ${newUncertain.join(', ')}) MAY have been delivered — the SMTP connection was lost after the message was handed to the relay; those addresses are NEVER resent automatically: check before resending (send-now)`,
+      );
+    }
+    if (prior.uncertain.length) parts.push(`${prior.uncertain.length} address(es) from an earlier attempt are delivery UNCERTAIN (not resent)`);
+    const retryable = report.failed.length > 0 && report.failed.every((f) => f.failure.retryable);
+    parts.push(
+      `${state.delivered.length} of ${totalAddresses} address(es) received it — ${
+        manual
+          ? failedAddrs.length
+            ? `resend ONLY to the failed addresses with send-now: ${failedAddrs.join(', ')}`
+            : 'do not resend blindly'
+          : retryable
+            ? 'a retry sends ONLY the messages not yet sent'
+            : 'NOT retried automatically'
+      }`,
+    );
+    const message = parts.join('; ');
+    if (report.failed.length && newUncertain.length) {
+      await this.alert(name, clientId, runDate, parts[1], `${name} payout tracker: delivery UNCERTAIN — check before resending`);
+    }
+    const subject = report.failed.length
+      ? `${name} payout tracker: ${report.failed.length} of ${report.chunks} message(s) NOT sent (${failedAddrs.length} addresses)`
+      : `${name} payout tracker: delivery UNCERTAIN — check before resending`;
+    const f = new RunFailure(message, retryable, month, subject);
+    f.state = state;
+    return f;
   }
 
   /** Internal ops recipients (digest list ∩ internal domains, else the fallback address). */
@@ -495,6 +719,9 @@ export class PayoutTrackerSender {
     const name = client.internalName || clientId;
 
     const target = payoutTrackerEmailTarget(this.env);
+    const capR = maxRecipientsPerEmail(this.env);
+    if (!capR.ok) throw new Error(`${capR.error} — not sent`);
+    const cap = capR.cap;
     let addr: { to: string[]; cc: string[]; subject?: string };
     if (recipients !== undefined) {
       // Explicit list: internal addresses always; the tenant's own configured (external) recipients ONLY in a live
@@ -532,8 +759,10 @@ export class PayoutTrackerSender {
       addr =
         target.mode === 'live'
           ? { to: cfg.recipients, cc: cfg.cc }
-          : { to: [target.to], cc: [], subject: `[TEST — would go to ${cfg.recipients.join(', ')}${cfg.cc.length ? `; cc ${cfg.cc.join(', ')}` : ''}]` };
+          : { to: [target.to], cc: [], subject: testSubjectPrefix(cfg, chunkRecipients(cfg.recipients, cfg.cc, cap), cap) };
     }
+    // Test mode is always ONE message (to the test address); otherwise chunk by the per-message cap.
+    const chunks = chunkRecipients(addr.to, addr.cc, cap);
 
     const runId = await this.createManualRun(clientId, month, now);
     let result: SendNowResult;
@@ -542,8 +771,14 @@ export class PayoutTrackerSender {
       const notes = notesOf(input);
       const pack = await this.generate(input, now);
       const subject = addr.subject ? `${addr.subject} ${pack.email.subject}` : pack.email.subject;
-      const res = await this.deliver({ to: addr.to, cc: addr.cc, subject }, pack, month, name);
-      const sentTo = [...addr.to, ...addr.cc];
+      const report = await this.deliverChunks(chunks, subject, pack, month, name, EMPTY_STATE);
+      if (report.failed.length || report.uncertain.length) {
+        const state: DeliveryState = { delivered: report.delivered, uncertain: report.uncertain.flatMap((u) => u.addresses) };
+        const total = chunks.reduce((n, c) => n + addressesOf(c).length, 0);
+        throw await this.chunkFailure(report, state, EMPTY_STATE, total, month, name, clientId, istParts(now).date, true);
+      }
+      const res = { rejected: report.rejected };
+      const sentTo = report.delivered;
       this.logger.log(`payout-tracker send-now ${clientId} ${month} → ${sentTo.join(', ')}`);
       const warnings: string[] = [];
       try {
@@ -575,7 +810,8 @@ export class PayoutTrackerSender {
       };
     } catch (e) {
       const message = (e as Error)?.message ?? String(e);
-      await this.finish(runId, { status: 'FAILED', error: message, month, attempts: MAX_ATTEMPTS }).catch((we) =>
+      const state = e instanceof RunFailure ? e.state : undefined;
+      await this.finish(runId, { status: 'FAILED', error: message, month, attempts: MAX_ATTEMPTS, ...(state ? { recipients: state } : {}) }).catch((we) =>
         this.logger.error(`payout-tracker send-now: could not record the FAILED manual run for ${clientId}: ${(we as Error)?.message}`),
       );
       throw e;

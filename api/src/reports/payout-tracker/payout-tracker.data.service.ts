@@ -184,7 +184,7 @@ export class PayoutTrackerDataService {
       }),
       this.prisma.outletSalesRecord.findMany({ where: { clientId, month: lm }, select: { outletCode: true, kpiValues: true } }),
       this.prisma.salesMonthStatus.findUnique({ where: { clientId_month: { clientId, month } }, select: { state: true, lastAppliedAt: true } }),
-      this.prisma.salesDaySet.findUnique({ where: { clientId_month: { clientId, month } }, select: { lastDay: true } }),
+      this.prisma.salesDaySet.findUnique({ where: { clientId_month: { clientId, month } }, select: { lastDay: true, appliedAt: true } }),
       this.prisma.client.findUnique({ where: { id: clientId }, select: { id: true, internalName: true, branding: true } }),
     ]);
     const targetsBy = new Map(targets.map((t) => [t.outletCode, kpiMap(t.targetValues)]));
@@ -673,10 +673,15 @@ export class PayoutTrackerDataService {
 
     // salesAsOf = the LAST INVOICE DAY in the applied DMS file (SalesDaySet.lastDay) — not the apply time. Without a
     // day set, fall back to the apply time, labelled as such.
+    // Owner 2026-11-27: a file applied ON its own last invoice day (IST) is a same-day partial (e.g. the 27 Nov file
+    // uploaded 27 Nov held only 4 invoice lines of the 27th) → "sales up to" the day before (day 1 stays 1).
     let salesAsOf = '—';
     const [yy, mm] = month.split('-').map(Number);
     if (daySet && Number.isInteger(daySet.lastDay) && daySet.lastDay >= 1 && daySet.lastDay <= 31) {
-      salesAsOf = `${daySet.lastDay} ${MONTH_SHORT[mm - 1]} ${yy}`;
+      let day = daySet.lastDay;
+      const applied = daySet.appliedAt instanceof Date ? new Date(daySet.appliedAt.getTime() + IST_OFFSET_MS) : null;
+      if (applied && applied.getUTCFullYear() === yy && applied.getUTCMonth() + 1 === mm && applied.getUTCDate() === day && day > 1) day -= 1;
+      salesAsOf = `${day} ${MONTH_SHORT[mm - 1]} ${yy}`;
     } else {
       let applied: Date | null = monthStatus?.lastAppliedAt ?? null;
       if (!applied) for (const s of sales) if (s.updatedAt && (!applied || s.updatedAt > applied)) applied = s.updatedAt;

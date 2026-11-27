@@ -1,4 +1,12 @@
-import { parsePayoutTrackerConfig, payoutTrackerEmailTarget, validateRecipientList } from './payout-tracker.config';
+import {
+  MAX_RECIPIENTS_PER_EMAIL,
+  MAX_TOTAL_RECIPIENTS,
+  chunkRecipients,
+  maxRecipientsPerEmail,
+  parsePayoutTrackerConfig,
+  payoutTrackerEmailTarget,
+  validateRecipientList,
+} from './payout-tracker.config';
 
 describe('parsePayoutTrackerConfig', () => {
   it('absent / null / enabled:false / enabled missing → off (inert)', () => {
@@ -56,9 +64,65 @@ describe('payoutTrackerEmailTarget (environment guard)', () => {
 });
 
 describe('validateRecipientList', () => {
-  it('cleans valid lists and throws on junk / empty', () => {
+  it('cleans valid lists and throws on junk / empty / over 1,000', () => {
     expect(validateRecipientList(['A@x.com', 'a@x.com'])).toEqual(['a@x.com']);
     expect(() => validateRecipientList(['nope'])).toThrow(/not a valid email/);
     expect(() => validateRecipientList([])).toThrow(/empty/);
+    expect(validateRecipientList(many(1000))).toHaveLength(1000);
+    expect(() => validateRecipientList(many(1001))).toThrow(/1001 distinct.*at most 1000/);
+  });
+});
+
+const many = (n: number, prefix = 'u') => Array.from({ length: n }, (_, i) => `${prefix}${i}@bajaj.com`);
+
+describe('config: total recipient ceiling (1,000) + every address valid', () => {
+  it('to + cc ≤ 1,000 distinct is fine (duplicates do not count); > 1,000 is invalid', () => {
+    expect(parsePayoutTrackerConfig({ enabled: true, recipients: many(10), cc: [...many(990, 'c'), ...many(10)] }).kind).toBe('on');
+    const r = parsePayoutTrackerConfig({ enabled: true, recipients: many(10), cc: many(991, 'c') });
+    expect(r).toEqual({ kind: 'invalid', error: expect.stringMatching(/1001 distinct addresses — at most 1000/) });
+    expect(MAX_TOTAL_RECIPIENTS).toBe(1000);
+  });
+  it('one bad address in a large cc list → invalid, naming it', () => {
+    const r = parsePayoutTrackerConfig({ enabled: true, recipients: many(3), cc: [...many(300, 'c'), 'broken@'] });
+    expect(r).toEqual({ kind: 'invalid', error: expect.stringMatching(/cc: "broken@" is not a valid email/) });
+  });
+});
+
+describe('maxRecipientsPerEmail', () => {
+  it('default 50; env override 1..500; anything else is an error', () => {
+    expect(MAX_RECIPIENTS_PER_EMAIL).toBe(50);
+    expect(maxRecipientsPerEmail({})).toEqual({ ok: true, cap: 50 });
+    expect(maxRecipientsPerEmail({ PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL: ' 1 ' })).toEqual({ ok: true, cap: 1 });
+    expect(maxRecipientsPerEmail({ PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL: '500' })).toEqual({ ok: true, cap: 500 });
+    for (const bad of ['0', '501', '-5', '1e2', '20.5', 'fifty']) {
+      expect(maxRecipientsPerEmail({ PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL: bad })).toEqual({ ok: false, error: expect.stringMatching(/1\.\.500/) });
+    }
+  });
+});
+
+describe('chunkRecipients', () => {
+  it('within the cap → ONE message, to/cc as given', () => {
+    expect(chunkRecipients(['a@x.com'], ['c@x.com'], 50)).toEqual([{ to: ['a@x.com'], cc: ['c@x.com'] }]);
+  });
+  it('358 → 8 messages: first = all To then Cc fill; later chunks in To; order kept', () => {
+    const to = many(3, 't');
+    const cc = many(355, 'c');
+    const chunks = chunkRecipients(to, cc, 50);
+    expect(chunks).toHaveLength(8);
+    expect(chunks[0]).toEqual({ to, cc: cc.slice(0, 47) });
+    expect(chunks[1]).toEqual({ to: cc.slice(47, 97), cc: [] });
+    expect(chunks[7]).toEqual({ to: cc.slice(347), cc: [] });
+    expect(chunks.flatMap((c) => [...c.to, ...c.cc])).toEqual([...to, ...cc]);
+  });
+  it('a To list longer than the cap spans messages; dedupe is case-insensitive across to + cc', () => {
+    const chunks = chunkRecipients(['A@x.com', 'b@x.com', 'a@X.com', 'c@x.com'], ['B@X.COM', 'd@x.com'], 2);
+    expect(chunks).toEqual([
+      { to: ['a@x.com', 'b@x.com'], cc: [] },
+      { to: ['c@x.com', 'd@x.com'], cc: [] },
+    ]);
+  });
+  it('only cc left (retry after the To addresses went) → they go in To', () => {
+    expect(chunkRecipients([], ['c@x.com', 'd@x.com'], 50)).toEqual([{ to: ['c@x.com', 'd@x.com'], cc: [] }]);
+    expect(chunkRecipients([], [], 50)).toEqual([]);
   });
 });

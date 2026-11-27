@@ -35,6 +35,8 @@ export interface PayoutTrackerConfig {
 export type ParsedConfig = { kind: 'off' } | { kind: 'on'; config: PayoutTrackerConfig } | { kind: 'invalid'; error: string };
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** Hard ceiling on to + cc (distinct addresses) for one tenant's tracker. */
+export const MAX_TOTAL_RECIPIENTS = 1000;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 export const DEFAULT_SEND_TIME_IST = '10:00';
 export const DEFAULT_DAYS = [1, 2, 3, 4, 5, 6];
@@ -65,6 +67,9 @@ export function parsePayoutTrackerConfig(raw: unknown): ParsedConfig {
   const recipients = emails(o.recipients, 'recipients', errors);
   const cc = emails(o.cc, 'cc', errors).filter((e) => !recipients.includes(e));
   if (recipients.length === 0 && !errors.some((e) => e.startsWith('recipients'))) errors.push('recipients is empty');
+  if (recipients.length + cc.length > MAX_TOTAL_RECIPIENTS) {
+    errors.push(`recipients + cc has ${recipients.length + cc.length} distinct addresses — at most ${MAX_TOTAL_RECIPIENTS} allowed`);
+  }
 
   let sendTimeIst = DEFAULT_SEND_TIME_IST;
   if (o.sendTimeIst !== undefined) {
@@ -110,5 +115,56 @@ export function validateRecipientList(list: unknown): string[] {
   const out = emails(list, 'recipients', errors);
   if (errors.length) throw new Error(errors.join('; '));
   if (out.length === 0) throw new Error('recipients is empty');
+  if (out.length > MAX_TOTAL_RECIPIENTS) throw new Error(`recipients has ${out.length} distinct addresses — at most ${MAX_TOTAL_RECIPIENTS} allowed`);
   return out;
+}
+
+/**
+ * Per-message recipient cap. A large list (Bajaj: ~358 addresses, all visible in To/CC by owner decision 2026-11-27)
+ * goes as consecutive copies of the SAME email, each addressed to at most this many recipients.
+ * Override: PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL (integer 1..500). An invalid override is an error, never a silent
+ * fallback to the default.
+ */
+export const MAX_RECIPIENTS_PER_EMAIL = 50;
+export const MAX_RECIPIENTS_PER_EMAIL_LIMIT = 500;
+
+export function maxRecipientsPerEmail(env: NodeJS.ProcessEnv = process.env): { ok: true; cap: number } | { ok: false; error: string } {
+  const raw = (env.PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL ?? '').trim();
+  if (!raw) return { ok: true, cap: MAX_RECIPIENTS_PER_EMAIL };
+  const n = Number(raw);
+  if (/^\d+$/.test(raw) && Number.isInteger(n) && n >= 1 && n <= MAX_RECIPIENTS_PER_EMAIL_LIMIT) return { ok: true, cap: n };
+  return { ok: false, error: `PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL "${raw}" must be a whole number 1..${MAX_RECIPIENTS_PER_EMAIL_LIMIT}` };
+}
+
+export interface RecipientChunk {
+  to: string[];
+  cc: string[];
+}
+
+/**
+ * Split to + cc into messages of at most `cap` addresses (deduped case-insensitively, order kept). The FIRST message
+ * carries the configured `to` list first (in To) then fills with cc (in Cc); every later message puts its chunk in To.
+ * A list within the cap is ONE message with to/cc exactly as configured.
+ */
+export function chunkRecipients(to: string[], cc: string[], cap: number): RecipientChunk[] {
+  if (!Number.isInteger(cap) || cap < 1) throw new Error(`invalid recipient cap ${cap}`);
+  const seen = new Set<string>();
+  const tagged: Array<{ email: string; role: 'to' | 'cc' }> = [];
+  for (const [list, role] of [[to, 'to'], [cc, 'cc']] as const) {
+    for (const raw of list) {
+      const email = raw.trim().toLowerCase();
+      if (!email || seen.has(email)) continue;
+      seen.add(email);
+      tagged.push({ email, role });
+    }
+  }
+  const chunks: RecipientChunk[] = [];
+  for (let i = 0; i < tagged.length; i += cap) {
+    const slice = tagged.slice(i, i + cap);
+    if (i === 0) chunks.push({ to: slice.filter((t) => t.role === 'to').map((t) => t.email), cc: slice.filter((t) => t.role === 'cc').map((t) => t.email) });
+    else chunks.push({ to: slice.map((t) => t.email), cc: [] });
+  }
+  // A first chunk made only of cc addresses (all `to` already delivered on an earlier attempt) → put them in To.
+  if (chunks[0] && chunks[0].to.length === 0) chunks[0] = { to: chunks[0].cc, cc: [] };
+  return chunks;
 }

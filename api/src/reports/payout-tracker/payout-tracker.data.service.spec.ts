@@ -76,7 +76,7 @@ interface World {
   kyc?: Array<{ partnerId: string; status: string; createdAt: Date; updatedAt: Date; id: string }>;
   captures: Array<{ outletCode: string; status: string }>;
   monthStatus: { state: string; lastAppliedAt?: Date | null } | null;
-  daySet: { lastDay: number } | null;
+  daySet: { lastDay: number; appliedAt?: Date } | null;
   client: { id: string; internalName: string; branding: unknown } | null;
   firstLiveMonth: string | null;
   monthly: ComputePreview;
@@ -632,6 +632,24 @@ describe('PayoutTrackerDataService.buildInput', () => {
     expect((await only(w)).provisional).toBe(false);
     w.monthStatus = null;
     expect((await only(w)).provisional).toBe(true);
+  });
+
+  it('salesAsOf: a file applied ON its last invoice day (IST) is a same-day partial → the day before; else lastDay', async () => {
+    const w = baseWorld();
+    w.daySet = { lastDay: 27, appliedAt: new Date('2026-11-27T06:00:00.000Z') }; // 27 Nov 11:30 IST
+    expect((await only(w)).salesAsOf).toBe('26 Nov 2026');
+    w.daySet = { lastDay: 27, appliedAt: new Date('2026-11-26T19:00:00.000Z') }; // 27 Nov 00:30 IST (UTC still 26th)
+    expect((await only(w)).salesAsOf).toBe('26 Nov 2026');
+    w.daySet = { lastDay: 26, appliedAt: new Date('2026-11-26T18:00:00.000Z') }; // 26 Nov 23:30 IST → same day
+    expect((await only(w)).salesAsOf).toBe('25 Nov 2026');
+    w.daySet = { lastDay: 26, appliedAt: new Date('2026-11-27T04:00:00.000Z') }; // applied the next IST day → full day
+    expect((await only(w)).salesAsOf).toBe('26 Nov 2026');
+    w.daySet = { lastDay: 26, appliedAt: new Date('2026-11-26T19:00:00.000Z') }; // 27 Nov 00:30 IST → full day 26
+    expect((await only(w)).salesAsOf).toBe('26 Nov 2026');
+    w.daySet = { lastDay: 1, appliedAt: new Date('2026-11-01T06:00:00.000Z') }; // day 1 same day → stays 1
+    expect((await only(w)).salesAsOf).toBe('1 Nov 2026');
+    w.daySet = { lastDay: 27, appliedAt: new Date('2026-10-27T06:00:00.000Z') }; // same day-of-month, other month → no shift
+    expect((await only(w)).salesAsOf).toBe('27 Nov 2026');
   });
 
   it('salesAsOf: no day set → "data applied <IST date>" from lastAppliedAt, else latest record update; nothing → "—"', async () => {

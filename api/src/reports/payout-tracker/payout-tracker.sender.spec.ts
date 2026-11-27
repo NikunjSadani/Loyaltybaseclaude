@@ -398,6 +398,227 @@ describe('PayoutTrackerSender.runDue', () => {
   });
 });
 
+describe('PayoutTrackerSender — large lists sent as chunks (owner 2026-11-27: ~358 recipients, all visible)', () => {
+  const TO = ['a1@bajaj.com', 'a2@bajaj.com', 'a3@bajaj.com'];
+  const CC = Array.from({ length: 355 }, (_, i) => `c${i + 1}@bajaj.com`);
+  // Mixed-case duplicates in config are dropped (case-insensitive), cc already in To dropped.
+  const big = () => makeWorld({ settings: [{ clientId: 'bajaj', settingValue: { enabled: true, recipients: [...TO, 'A1@Bajaj.com'], cc: [...CC, 'C7@BAJAJ.COM', 'a2@bajaj.com'] } }] });
+  const clientCalls = (w: ReturnType<typeof makeWorld>) => w.sendEmail.mock.calls.map((c) => c[0]).filter((a) => a.attachments);
+  const addrs = (a: { to: string[]; cc?: string[] }) => [...a.to, ...(a.cc ?? [])];
+
+  it('358 recipients → 8 messages of ≤50: first = configured To then Cc fill, rest in To; same email each; SENT with all 358', async () => {
+    const w = big();
+    const r = await w.sender.runDue(FRI_1005);
+    expect(r.outcomes[0].status).toBe('sent');
+    const calls = clientCalls(w);
+    expect(calls).toHaveLength(8);
+    expect(calls[0].to).toEqual(TO);
+    expect(calls[0].cc).toEqual(CC.slice(0, 47));
+    for (let i = 1; i < 8; i++) {
+      expect(calls[i]).not.toHaveProperty('cc');
+      expect(calls[i].to).toEqual(CC.slice(47 + (i - 1) * 50, 47 + i * 50));
+    }
+    expect(calls.map((c) => addrs(c).length)).toEqual([50, 50, 50, 50, 50, 50, 50, 8]);
+    const all = calls.flatMap(addrs);
+    expect(new Set(all).size).toBe(358);
+    expect(all).toEqual([...TO, ...CC]); // order kept, no duplicates
+    for (const c of calls) {
+      expect(c).toEqual(expect.objectContaining({ subject: 'Bajaj Loyalty — Payout tracker', html: '<p>h</p>', text: 't', attachments: [expect.objectContaining({ content: w.pack.workbook })], detectAmbiguousDelivery: true }));
+    }
+    expect(w.runs[0]).toEqual(expect.objectContaining({ status: 'SENT', recipients: [...TO, ...CC], error: null }));
+    expect(r.outcomes[0].recipients).toHaveLength(358);
+  });
+
+  it('PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL overrides the cap (1..500); an invalid value FAILS loudly, never a silent default', async () => {
+    const w = big();
+    w.sender.env = { PAYOUT_TRACKER_EMAIL_LIVE: 'true', PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL: '200' };
+    await w.sender.runDue(FRI_1005);
+    expect(clientCalls(w).map((c) => addrs(c).length)).toEqual([200, 158]);
+
+    for (const bad of ['0', '501', 'abc', '12.5']) {
+      const b = big();
+      b.sender.env = { PAYOUT_TRACKER_EMAIL_LIVE: 'true', PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL: bad };
+      const o = (await b.sender.runDue(FRI_1005)).outcomes[0];
+      expect(o).toEqual(expect.objectContaining({ status: 'failed', error: expect.stringMatching(/PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL/) }));
+      expect(clientCalls(b)).toHaveLength(0);
+      expect(b.sendEmail).toHaveBeenCalledTimes(1); // the alert
+    }
+  });
+
+  it('partial failure → FAILED (retryable) + alert naming failed message + address counts; the retry sends ONLY the remaining chunk', async () => {
+    const w = big();
+    const ok = { skipped: false, accepted: [], rejected: [] };
+    w.sendEmail.mockImplementation(async (a: { to: string[]; attachments?: unknown }) => {
+      if (a.attachments && a.to[0] === CC[147]) throw new Error('421 try later'); // message 4
+      return ok;
+    });
+    const r = await w.sender.runDue(FRI_1005);
+    expect(r.outcomes[0].status).toBe('failed');
+    expect(r.outcomes[0].error).toMatch(/1 of 8 message\(s\) NOT sent \(50 address\(es\)\): email send failed: 421 try later/);
+    expect(r.outcomes[0].error).toMatch(/308 of 358 address\(es\) received it — a retry sends ONLY/);
+    expect(clientCalls(w)).toHaveLength(8); // a failed chunk never stops the others
+    expect(w.runs[0]).toEqual(expect.objectContaining({ status: 'FAILED', attempts: 1 }));
+    expect((w.runs[0].recipients as unknown as { delivered: string[] }).delivered).toHaveLength(308);
+    const alert = w.sendEmail.mock.calls.map((c) => c[0]).find((a) => !a.attachments)!;
+    expect(alert.subject).toBe('Bajaj payout tracker: 1 of 8 message(s) NOT sent (50 addresses)');
+
+    // Retry: exactly ONE message, exactly the 50 that did not get it.
+    w.sendEmail.mockClear();
+    w.sendEmail.mockResolvedValue(ok);
+    const r2 = await w.sender.runDue(ist('2026-11-27T10:20:00'));
+    expect(r2.outcomes[0].status).toBe('sent');
+    const retry = clientCalls(w);
+    expect(retry).toHaveLength(1);
+    expect(addrs(retry[0])).toEqual(CC.slice(147, 197));
+    expect(w.runs[0]).toEqual(expect.objectContaining({ status: 'SENT', attempts: 2, error: null }));
+    expect(new Set(w.runs[0].recipients).size).toBe(358);
+    expect((await w.sender.runDue(ist('2026-11-27T10:35:00'))).outcomes[0].status).toBe('already-done');
+  });
+
+  it('progress is recorded after each chunk: a crash mid-way (stale PENDING) never re-sends; a failed progress write STOPS sending', async () => {
+    const w = big();
+    const orig = w.prisma.tenantReportRun.update.getMockImplementation()!;
+    let n = 0;
+    w.prisma.tenantReportRun.update.mockImplementation(async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+      if (++n === 3) throw new Error('db blip'); // the 3rd progress write (after message 3)
+      return orig(args);
+    });
+    w.sendEmail.mockImplementation(async (a: { to: string[]; attachments?: unknown }) => {
+      if (a.attachments && a.to[0] === CC[47]) throw new Error('421 later'); // message 2 fails
+      return { skipped: false, accepted: [], rejected: [] };
+    });
+    const r = await w.sender.runDue(FRI_1005);
+    expect(clientCalls(w)).toHaveLength(3);
+    expect(r.outcomes[0].error).toMatch(/100 address\(es\) WERE sent .* sending STOPPED; NOT retried/);
+    // The alert lists EVERY address that did not get it: the failed message 2 + the 5 never attempted.
+    expect(r.outcomes[0].error).toMatch(/NOT sent: 258 address\(es\) \(5 message\(s\) never attempted \+ 1 failed\): c48@bajaj\.com,/);
+    expect(r.outcomes[0].error).toContain('c355@bajaj.com');
+    expect(r.outcomes[0].error).not.toContain('c1@bajaj.com,');
+    expect(w.runs[0]).toEqual(expect.objectContaining({ status: 'FAILED', attempts: MAX_ATTEMPTS }));
+    expect((await w.sender.runDue(ist('2026-11-27T10:20:00'))).outcomes[0].status).toBe('already-done');
+    expect(clientCalls(w)).toHaveLength(3);
+  });
+
+  it('an uncertain chunk is NEVER retried (UNCERTAIN alert); other failed chunks are; the day ends FAILED, not SENT', async () => {
+    const w = big();
+    const ok = { skipped: false, accepted: [], rejected: [] };
+    let failFifth = true;
+    w.sendEmail.mockImplementation(async (a: { to: string[]; attachments?: unknown }) => {
+      if (a.attachments && a.to[0] === CC[47]) throw Object.assign(new Error('Timeout'), { deliveryAmbiguous: true }); // message 2
+      if (a.attachments && a.to[0] === CC[197] && failFifth) throw new Error('relay down'); // message 5
+      return ok;
+    });
+    const r = await w.sender.runDue(FRI_1005);
+    expect(r.outcomes[0].status).toBe('failed');
+    expect(r.outcomes[0].error).toMatch(/1 message\(s\) \(50 address\(es\).*MAY have been delivered/);
+    const subjects = w.sendEmail.mock.calls.map((c) => c[0]).filter((a) => !a.attachments).map((a) => a.subject);
+    expect(subjects).toEqual(['Bajaj payout tracker: delivery UNCERTAIN — check before resending', 'Bajaj payout tracker: 1 of 8 message(s) NOT sent (50 addresses)']);
+    expect(w.runs[0]).toEqual(expect.objectContaining({ status: 'FAILED', attempts: 1 }));
+
+    // Retry sends ONLY message 5's addresses — never the uncertain chunk — then stays FAILED (no more retries).
+    failFifth = false;
+    w.sendEmail.mockClear();
+    const r2 = await w.sender.runDue(ist('2026-11-27T10:20:00'));
+    const retry = clientCalls(w);
+    expect(retry).toHaveLength(1);
+    expect(addrs(retry[0])).toEqual(CC.slice(197, 247));
+    expect(r2.outcomes[0]).toEqual(expect.objectContaining({ status: 'failed', error: expect.stringMatching(/50 address\(es\) from an earlier attempt are delivery UNCERTAIN.*308 of 358.*NOT retried/) }));
+    expect(w.sendEmail.mock.calls.map((c) => c[0]).filter((a) => !a.attachments).map((a) => a.subject)).toEqual(['Bajaj payout tracker: delivery UNCERTAIN — check before resending']);
+    expect(w.runs[0]).toEqual(expect.objectContaining({ status: 'FAILED', attempts: MAX_ATTEMPTS }));
+    w.sendEmail.mockClear();
+    expect((await w.sender.runDue(ist('2026-11-27T10:35:00'))).outcomes[0].status).toBe('already-done');
+    expect(w.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('a retry with delivered addresses keeps the month being delivered (no chooseMonth), never overwrites it, and tells ops the pack was rebuilt', async () => {
+    const w = big();
+    const ok = { skipped: false, accepted: [], rejected: [] };
+    w.sendEmail.mockImplementation(async (a: { to: string[]; attachments?: unknown }) => {
+      if (a.attachments && a.to[0] === CC[147]) throw new Error('421 try later');
+      return ok;
+    });
+    await w.sender.runDue(FRI_1005);
+    expect(w.runs[0].month).toBe('2026-11');
+    // Before the retry, the current month "loses" its sales → chooseMonth would now say 2026-10.
+    w.prisma.outletSalesRecord.findFirst.mockResolvedValue(null);
+    w.source.buildInput.mockClear();
+    w.sendEmail.mockClear();
+    w.sendEmail.mockResolvedValue(ok);
+    const r2 = await w.sender.runDue(ist('2026-11-27T10:20:00'));
+    expect(w.source.buildInput).toHaveBeenCalledWith('bajaj', '2026-11', expect.any(Date));
+    expect(w.prisma.outletSalesRecord.findFirst).toHaveBeenCalledTimes(1); // only the first run chose
+    expect(r2.outcomes[0]).toEqual(expect.objectContaining({ status: 'sent', month: '2026-11', notes: [expect.stringMatching(/^note: retry rebuilt the 2026-11 pack at 2026-11-27 10:20:00\.000 IST — the 308 address\(es\) sent earlier/)] }));
+    expect(w.runs[0]).toEqual(expect.objectContaining({ status: 'SENT', month: '2026-11' }));
+    const heads = w.sendEmail.mock.calls.map((c) => c[0]).find((a) => !a.attachments)!;
+    expect(heads.html).toMatch(/\[ops only\] note: retry rebuilt the 2026-11 pack/);
+
+    // A resumed run that fails again: the alert carries the rebuild note; the month is not overwritten / nulled.
+    const f = big();
+    f.sendEmail.mockImplementation(async (a: { to: string[]; attachments?: unknown }) => {
+      if (a.attachments && a.to[0] === CC[147]) throw new Error('421 try later');
+      return ok;
+    });
+    await f.sender.runDue(FRI_1005);
+    f.sender.env ={ PAYOUT_TRACKER_EMAIL_LIVE: 'true', PAYOUT_TRACKER_MAX_RECIPIENTS_PER_EMAIL: 'bad' };
+    f.sendEmail.mockClear();
+    f.sendEmail.mockResolvedValue(ok);
+    const r3 = await f.sender.runDue(ist('2026-11-27T10:20:00'));
+    expect(r3.outcomes[0].status).toBe('failed');
+    expect(f.runs[0].month).toBe('2026-11');
+    expect(f.sendEmail.mock.calls[0][0].html).toMatch(/retry rebuilt the 2026-11 pack/);
+  });
+
+  it('stale PENDING with chunk progress → the alert states delivered / not-sent / uncertain counts + "do NOT resend to the delivered N"', async () => {
+    const w = big();
+    w.runs.push({
+      id: 'old', clientId: 'bajaj', reportKey: 'payout-tracker', runDate: '2026-11-27', status: 'PENDING', attempts: 1, month: '2026-11',
+      recipients: { delivered: [...TO, ...CC.slice(0, 47)], uncertain: CC.slice(47, 52) } as never,
+      updatedAt: new Date(FRI_1005.getTime() - STALE_PENDING_MS - 1),
+    });
+    const r = await w.sender.runDue(FRI_1005);
+    const err = r.outcomes[0].error!;
+    expect(err).toMatch(/previous attempt \(2026-11\) was interrupted/);
+    expect(err).toMatch(/Recorded as delivered: 50 — do NOT resend to the delivered 50\./);
+    expect(err).toMatch(/Not recorded as sent: 303 \(c53@bajaj\.com, /);
+    expect(err).toMatch(/Delivery uncertain: 5 \(c48@bajaj\.com, c49@bajaj\.com, c50@bajaj\.com, c51@bajaj\.com, c52@bajaj\.com\)/);
+    expect(w.sendEmail.mock.calls[0][0].html).toMatch(/do NOT resend to the delivered 50/);
+    expect(w.runs[0]).toEqual(expect.objectContaining({ status: 'FAILED', attempts: MAX_ATTEMPTS, error: expect.stringMatching(/delivered: 50, uncertain: 5/) }));
+    expect(clientCalls(w)).toHaveLength(0);
+  });
+
+  it('test mode: ONE email to the test address; subject names the real recipient + message counts', async () => {
+    const w = big();
+    w.sender.env = { PAYOUT_TRACKER_EMAIL_TEST_RECIPIENT: 'qa@gifsy.in' };
+    expect((await w.sender.runDue(FRI_1005)).outcomes[0]).toEqual(expect.objectContaining({ status: 'sent', recipients: ['qa@gifsy.in'] }));
+    const calls = clientCalls(w);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].to).toEqual(['qa@gifsy.in']);
+    expect(calls[0]).not.toHaveProperty('cc');
+    expect(calls[0].subject).toBe('[TEST — would go to 358 recipients (to 3, cc 355) as 8 messages of up to 50] Bajaj Loyalty — Payout tracker');
+
+    // send-now in test mode too.
+    const s = big();
+    s.sender.env = { PAYOUT_TRACKER_EMAIL_TEST_RECIPIENT: 'qa@gifsy.in' };
+    const res = await s.sender.sendNow('bajaj', '2026-11');
+    expect(clientCalls(s)).toHaveLength(1);
+    expect(res.subject).toMatch(/^\[TEST — would go to 358 recipients/);
+  });
+
+  it('send-now live with no explicit list → the same 8 chunks; a partial failure throws naming the failed addresses', async () => {
+    const w = big();
+    await w.sender.sendNow('bajaj', '2026-11');
+    expect(clientCalls(w).map((c) => addrs(c).length)).toEqual([50, 50, 50, 50, 50, 50, 50, 8]);
+
+    const f = big();
+    f.sendEmail.mockImplementation(async (a: { to: string[]; attachments?: unknown }) => {
+      if (a.attachments && a.to[0] === CC[347]) throw new Error('relay down'); // the last message
+      return { skipped: false, accepted: [], rejected: [] };
+    });
+    await expect(f.sender.sendNow('bajaj', '2026-11')).rejects.toThrow(/1 of 8 message\(s\) NOT sent \(8 address\(es\)\).*350 of 358.*resend ONLY to the failed addresses with send-now: c348@bajaj\.com/);
+    expect(f.runs[0]).toEqual(expect.objectContaining({ reportKey: 'payout-tracker-manual', status: 'FAILED' }));
+  });
+});
+
 describe('PayoutTrackerSender.sendNow', () => {
   it('explicit INTERNAL recipients → sent to exactly them (even with the environment guard off) + a manual run row', async () => {
     const w = makeWorld();

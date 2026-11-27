@@ -3109,7 +3109,7 @@ model TenantReportRun {
   runDate    String // IST calendar day 'YYYY-MM-DD'
   month      String? // report month 'YYYY-MM' (null when the run failed before a month was chosen)
   status     TenantReportRunStatus
-  recipients Json? // string[] actually addressed (to + cc)
+  recipients Json? // SENT: string[] actually addressed (to + cc). PENDING/FAILED payout-tracker: { delivered: string[], uncertain: string[] } chunk progress — never re-sent on retry
   fileName   String?
   error      String?
   attempts   Int                   @default(1)
