@@ -3097,6 +3097,37 @@ model ProgramSetting {
 // MODULE 17: REPORTS
 // ============================================================
 
+/// One row per tenant × scheduled client-facing report × IST day (owner-approved 2026-11-27, platform-wide but
+/// inert: only tenants with a `payoutTracker` ProgramSetting ever get rows). The unique (clientId, reportKey,
+/// runDate) row is the idempotency CLAIM: it is inserted (PENDING) BEFORE the send, so two scheduler hits can never
+/// double-send; then flipped to SENT / FAILED. SKIPPED = a configured day deliberately not sent (holiday / sending
+/// disabled in this environment). `attempts` bounds automatic retries of a FAILED day. No FKs.
+model TenantReportRun {
+  id         String                @id @default(cuid())
+  clientId   String
+  reportKey  String // 'payout-tracker'
+  runDate    String // IST calendar day 'YYYY-MM-DD'
+  month      String? // report month 'YYYY-MM' (null when the run failed before a month was chosen)
+  status     TenantReportRunStatus
+  recipients Json? // string[] actually addressed (to + cc)
+  fileName   String?
+  error      String?
+  attempts   Int                   @default(1)
+  createdAt  DateTime              @default(now())
+  updatedAt  DateTime              @updatedAt
+
+  @@unique([clientId, reportKey, runDate])
+  @@index([reportKey, runDate])
+  @@map("tenant_report_runs")
+}
+
+enum TenantReportRunStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
 model ScheduledReport {
   id              String          @id @default(cuid())
   clientId        String

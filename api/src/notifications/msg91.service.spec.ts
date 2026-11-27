@@ -533,6 +533,44 @@ describe('Msg91Service.sendEmail (SMTP relay)', () => {
     expect(await off.sendEmail({ to: ['a@acme.com'], subject: 'S', html: '<p/>' })).toEqual({ skipped: true, accepted: [], rejected: [] });
   });
 
+  it('no text / no attachments (or empty attachments) → the sendMail argument is byte-identical to before', async () => {
+    const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'secret-pw' }));
+    await service.sendEmail({ to: ['a@acme.com'], subject: 'S', html: '<p/>' });
+    await service.sendEmail({ to: ['a@acme.com'], cc: ['c@acme.com'], subject: 'S', html: '<p/>', attachments: [] });
+    // Exact key set AND order (JSON.stringify is order-sensitive) — what nodemailer receives today.
+    expect(JSON.stringify(sendMail.mock.calls[0][0])).toBe(
+      JSON.stringify({ from: 'reports@notify.gifsy.in', to: ['a@acme.com'], subject: 'S', html: '<p/>' }),
+    );
+    expect(JSON.stringify(sendMail.mock.calls[1][0])).toBe(
+      JSON.stringify({ from: 'reports@notify.gifsy.in', to: ['a@acme.com'], cc: ['c@acme.com'], subject: 'S', html: '<p/>' }),
+    );
+    expect(sendMail.mock.calls[0][0]).not.toHaveProperty('text');
+    expect(sendMail.mock.calls[0][0]).not.toHaveProperty('attachments');
+  });
+
+  it('text + attachments are passed through to nodemailer unchanged (one message)', async () => {
+    const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'secret-pw' }));
+    const content = Buffer.from('xlsx-bytes');
+    await service.sendEmail({
+      to: ['a@client.com'],
+      subject: 'Tracker',
+      html: '<p>t</p>',
+      text: 'plain',
+      attachments: [{ filename: 'T.xlsx', content, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }],
+    });
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    const arg = sendMail.mock.calls[0][0];
+    expect(arg).toEqual({
+      from: 'reports@notify.gifsy.in',
+      to: ['a@client.com'],
+      subject: 'Tracker',
+      html: '<p>t</p>',
+      text: 'plain',
+      attachments: [{ filename: 'T.xlsx', content, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }],
+    });
+    expect(arg.attachments[0].content).toBe(content); // the same Buffer, not a copy/encoding
+  });
+
   it('throws a clear error when the SMTP send fails (and still closes the transport)', async () => {
     sendMail.mockRejectedValue(new Error('535 auth failed'));
     const service = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'pw' }));
@@ -540,6 +578,70 @@ describe('Msg91Service.sendEmail (SMTP relay)', () => {
       service.sendEmail({ to: ['a@b.com'], subject: 'Daily report', html: '<p>hi</p>' }),
     ).rejects.toThrow(/535 auth failed/);
     expect(close).toHaveBeenCalled();
+  });
+
+  describe('ambiguous delivery (connection lost AFTER the message was handed to the relay)', () => {
+    const failAfter = (commands: string[], err: Error & { code?: string }) => {
+      sendMail.mockImplementation(async () => {
+        const cfg = createTransport.mock.calls[createTransport.mock.calls.length - 1][0];
+        for (const c of commands) cfg.logger.debug({ tnx: 'client' }, c);
+        throw err;
+      });
+    };
+    const send = () =>
+      new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'pw' })).sendEmail({ to: ['a@b.com'], subject: 'S', html: '<p/>', detectAmbiguousDelivery: true });
+
+    it('OPT-IN only: an existing-style call gets EXACTLY the previous transport options, sendMail args and a plain Error', async () => {
+      const svc = new Msg91Service(makeConfig({ MSG91_SMTP_PASS: 'pw' }));
+      await svc.sendEmail({ to: ['a@b.com'], subject: 'S', html: '<p/>' });
+      expect(createTransport.mock.calls[0][0]).toStrictEqual({
+        host: 'smtp.mailer91.com',
+        port: 587,
+        secure: false,
+        requireTLS: true,
+        auth: { user: 'emailer@notify.gifsy.in', pass: 'pw' },
+        connectionTimeout: 10_000,
+        greetingTimeout: 10_000,
+        socketTimeout: 20_000,
+      });
+      expect(JSON.stringify(sendMail.mock.calls[0][0])).toBe(JSON.stringify({ from: 'reports@notify.gifsy.in', to: ['a@b.com'], subject: 'S', html: '<p/>' }));
+
+      sendMail.mockRejectedValueOnce(Object.assign(new Error('Timeout'), { code: 'ETIMEDOUT' }));
+      const e = await svc.sendEmail({ to: ['a@b.com'], subject: 'S', html: '<p/>' }).catch((x) => x);
+      expect(e.constructor).toBe(Error);
+      expect(e.message).toBe('Failed to send email "S": Timeout');
+      expect(e).not.toHaveProperty('deliveryAmbiguous');
+      expect(createTransport.mock.calls[1][0]).not.toHaveProperty('logger');
+      expect(createTransport.mock.calls[1][0]).not.toHaveProperty('transactionLog');
+    });
+
+    it('timeout after DATA → deliveryAmbiguous=true (same message as before)', async () => {
+      failAfter(['EHLO x', 'MAIL FROM:<r@n>', 'RCPT TO:<a@b.com>', 'DATA'], Object.assign(new Error('Timeout'), { code: 'ETIMEDOUT' }));
+      const e = await send().catch((x) => x);
+      expect(e.message).toBe('Failed to send email "S": Timeout');
+      expect(e.deliveryAmbiguous).toBe(true);
+    });
+
+    it('timeout BEFORE DATA → not ambiguous (safe to retry)', async () => {
+      failAfter(['EHLO x', 'MAIL FROM:<r@n>'], Object.assign(new Error('Timeout'), { code: 'ETIMEDOUT' }));
+      const e = await send().catch((x) => x);
+      expect(e.deliveryAmbiguous).toBe(false);
+    });
+
+    it('the relay explicitly rejecting the message after DATA (EMESSAGE / EENVELOPE) → not ambiguous', async () => {
+      failAfter(['DATA'], Object.assign(new Error('Message failed'), { code: 'EMESSAGE' }));
+      expect((await send().catch((x) => x)).deliveryAmbiguous).toBe(false);
+      failAfter(['DATA'], Object.assign(new Error('Data command failed'), { code: 'EENVELOPE' }));
+      expect((await send().catch((x) => x)).deliveryAmbiguous).toBe(false);
+    });
+
+    it('opted in: the transport logs only the command lines (transactionLog), never the message body', () => {
+      return send().then(() => {
+        const cfg = createTransport.mock.calls[0][0];
+        expect(cfg.transactionLog).toBe(true);
+        expect(cfg.debug).toBeFalsy();
+      });
+    });
   });
 
   it('honors REPORTS_FROM_EMAIL + SMTP host/port/user overrides (465 → implicit TLS)', async () => {

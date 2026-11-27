@@ -12,6 +12,25 @@ export interface SendEmailResult {
   rejected: string[];
 }
 
+/**
+ * Thrown by sendEmail on an SMTP failure (message unchanged for existing callers). `deliveryAmbiguous` = the connection
+ * was lost AFTER the DATA command (timeout / socket error), so the relay MAY have accepted the message — a caller must
+ * not auto-resend. False = definitely not handed over (or explicitly refused).
+ */
+export class EmailSendError extends Error {
+  constructor(message: string, readonly deliveryAmbiguous: boolean, readonly smtpCode?: string) {
+    super(message);
+    this.name = 'EmailSendError';
+  }
+}
+
+/** A file attached to an email sent by Msg91Service.sendEmail (passed to nodemailer unchanged). */
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+}
+
 export const msg91NonJsonReason =(status: number) => `MSG91 returned a non-JSON response (HTTP ${status})`;
 
 /**
@@ -557,12 +576,29 @@ export class Msg91Service {
    * @param params.subject the email subject line
    * @param params.html    the email body (HTML)
    * @param params.cc      optional Cc addresses (one message, real `Cc:` header; omitted when empty)
+   * @param params.text    optional plain-text part (omitted when absent)
+   * @param params.attachments optional files (omitted when absent/empty). This method applies NO recipient-domain
+   *                       rule — the internal-only rule lives in the callers (report-recipients.ts / fundAlertTarget).
    * @returns the SMTP envelope outcome: `rejected` = addresses the relay refused at RCPT time while
    *          others were accepted (nodemailer resolves on a partial accept and THROWS when every
    *          recipient is refused). `skipped` = not attempted (empty To / SMTP unconfigured).
    *          Acceptance by the relay is not inbox delivery — a later bounce is not visible here.
    */
-  async sendEmail(params: { to: string[]; cc?: string[]; subject: string; html: string }): Promise<SendEmailResult> {
+  async sendEmail(params: {
+    to: string[];
+    cc?: string[];
+    subject: string;
+    html: string;
+    /** Optional plain-text alternative part. Omitted from the message when absent (existing callers unchanged). */
+    text?: string;
+    /** Optional file attachments. Omitted from the message when absent/empty (existing callers unchanged). */
+    attachments?: EmailAttachment[];
+    /**
+     * OPT-IN (payout-tracker sender only): record whether the DATA command went out, and throw an EmailSendError
+     * carrying `deliveryAmbiguous`. Absent/false → the transport and the thrown error are exactly as before.
+     */
+    detectAmbiguousDelivery?: boolean;
+  }): Promise<SendEmailResult> {
     const { to, subject, html } = params;
     const cc = params.cc ?? [];
 
@@ -594,6 +630,25 @@ export class Msg91Service {
     const from =
       this.config.get<string>('REPORTS_FROM_EMAIL')?.trim() || 'reports@notify.gifsy.in';
 
+    // Delivery-ambiguity tracking (OPT-IN via detectAmbiguousDelivery): nodemailer reports every timeout / socket error as command 'CONN', so the error
+    // alone cannot tell "never handed over" (safe to retry) from "lost AFTER the DATA command" (the relay may already
+    // have queued it). `transactionLog` makes nodemailer report each CLIENT COMMAND line (no message body — that needs
+    // `debug`; AUTH lines are masked by nodemailer) to this in-memory recorder, which only notes whether DATA/BDAT went.
+    const detect = params.detectAmbiguousDelivery === true;
+    let dataSent = false;
+    const noop = () => undefined;
+    const recorder = {
+      level: noop,
+      trace: noop,
+      info: noop,
+      warn: noop,
+      error: noop,
+      fatal: noop,
+      debug: (...params: unknown[]) => {
+        const [entry, message] = params as [{ tnx?: string } | undefined, unknown];
+        if (entry?.tnx === 'client' && typeof message === 'string' && /^(DATA|BDAT)\b/i.test(message.trim())) dataSent = true;
+      },
+    };
     const transporter = nodemailer.createTransport({
       host,
       port,
@@ -606,11 +661,22 @@ export class Msg91Service {
       connectionTimeout: 10_000,
       greetingTimeout: 10_000,
       socketTimeout: 20_000,
+      ...(detect ? { transactionLog: true, logger: recorder } : {}),
     });
 
     try {
-      // `cc` only when non-empty so every existing caller's message is byte-identical.
-      const info = await transporter.sendMail(cc.length ? { from, to, cc, subject, html } : { from, to, subject, html });
+      // `cc` / `text` / `attachments` only when present so every existing caller's message is byte-identical
+      // (same keys, same order — asserted in msg91.service.spec.ts).
+      const base = cc.length ? { from, to, cc, subject, html } : { from, to, subject, html };
+      const attachments = params.attachments ?? [];
+      const message = {
+        ...base,
+        ...(params.text !== undefined ? { text: params.text } : {}),
+        ...(attachments.length
+          ? { attachments: attachments.map((a) => ({ filename: a.filename, content: a.content, contentType: a.contentType })) }
+          : {}),
+      };
+      const info = await transporter.sendMail(message);
       const asList = (v: unknown): string[] =>
         (Array.isArray(v) ? v : []).map((x) => (typeof x === 'string' ? x : String((x as { address?: string })?.address ?? x)).toLowerCase());
       const accepted = asList((info as { accepted?: unknown }).accepted);
@@ -621,8 +687,17 @@ export class Msg91Service {
       return { skipped: false, accepted, rejected };
     } catch (e) {
       const reason = (e as Error)?.message ?? String(e);
-      this.logger.error(`MSG91 SMTP email "${subject}" failed: ${reason}`);
-      throw new Error(`Failed to send email "${subject}": ${reason}`);
+      if (!detect) {
+        // Existing callers: exactly the previous log line + plain Error.
+        this.logger.error(`MSG91 SMTP email "${subject}" failed: ${reason}`);
+        throw new Error(`Failed to send email "${subject}": ${reason}`);
+      }
+      const code = (e as { code?: unknown })?.code;
+      // After DATA, only an explicit relay refusal (EMESSAGE / EENVELOPE) is a definite "not sent"; anything else
+      // (timeout, socket reset, connection closed) leaves delivery UNKNOWN — the caller must not auto-resend.
+      const deliveryAmbiguous = dataSent && code !== 'EMESSAGE' && code !== 'EENVELOPE';
+      this.logger.error(`MSG91 SMTP email "${subject}" failed: ${reason}${deliveryAmbiguous ? ' (after DATA — delivery UNKNOWN)' : ''}`);
+      throw new EmailSendError(`Failed to send email "${subject}": ${reason}`, deliveryAmbiguous, typeof code === 'string' ? code : undefined);
     } finally {
       transporter.close();
     }
