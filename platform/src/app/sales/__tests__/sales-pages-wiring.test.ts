@@ -115,9 +115,10 @@ describe('D — sales/catalogue page', () => {
     expect(code).not.toMatch(/\bloadGifts\b/);
   });
 
-  it('D3: still calls /api/rewards/catalog', () => {
+  it('D3: still loads /api/rewards/catalog — every page, via fetchFullCatalogue', () => {
     const code = src('src/app/sales/catalogue/page.tsx');
-    expect(code).toMatch(/\/api\/rewards\/catalog/);
+    expect(code).toMatch(/fetchFullCatalogue/);
+    expect(src('src/lib/rewards/full-catalogue.ts')).toMatch(/\/api\/rewards\/catalog/);
   });
 
   it('D4: shows empty gifts array on API failure (not mock fallback)', () => {

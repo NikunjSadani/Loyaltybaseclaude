@@ -826,7 +826,9 @@ export class RewardsService {
         where,
         skip,
         take: limit,
-        orderBy: { pointsCost: 'asc' },
+        // id tiebreak: many items share a pointsCost (e.g. every "choose an amount" voucher is 0), and an
+        // offset page over a non-unique sort can skip / repeat rows across pages (2026-11-27).
+        orderBy: [{ pointsCost: 'asc' }, { id: 'asc' }],
         // Member-safe projection — drops ops/internal columns (vendorId, giftMasterId,
         // giftCategoryId, moderation*, and mrpPaise — see MEMBER_CATALOG_SELECT). sourceType
         // is read to derive requiresConsent; mrpPaise + sellingValuePaise are selected
@@ -6467,7 +6469,7 @@ export class RewardsService {
       this.prisma.rewardCatalog.findMany({
         where,
         include: { category: { select: { id: true, name: true, code: true } } },
-        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }, { id: 'asc' }], // id tiebreak → stable paging
         skip,
         take: limit,
       }),

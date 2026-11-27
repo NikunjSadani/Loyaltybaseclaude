@@ -18,6 +18,7 @@ import { useToast } from '@/components/ui/toast';
 import { formatPoints, maskAccountNumber } from '@/lib/utils';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api-client';
+import { fetchFullCatalogue } from '@/lib/rewards/full-catalogue';
 import { usePartnerIdentity, type DeliveryDefaults } from '@/lib/partner-identity';
 import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
 import { getGifsySettings } from '@/lib/gifsy-settings';
@@ -1620,6 +1621,8 @@ export default function RewardsPage() {
   const identity = usePartnerIdentity(); // REAL points-presence signal (replaces demo track)
   const [gifts,     setGifts]     = useState<CatalogueItem[]>([]);
   const [loading,   setLoading]   = useState(true);
+  const [catalogueError, setCatalogueError] = useState<string | null>(null);
+  const [catalogueReload, setCatalogueReload] = useState(0);
   const [tab,       setTab]       = useState<MainTab>('catalogue');
   const [category,  setCategory]  = useState('All');
   const [search,    setSearch]    = useState('');
@@ -1706,21 +1709,28 @@ export default function RewardsPage() {
   }, []);
 
   useEffect(() => {
-    // Live catalogue only — no localStorage / GIFT_CATALOGUE fallback.
-    api.get<{
-      items: ApiCatalogItem[];
-      userBalance?: number;
-    }>('/api/rewards/catalog')
+    // Live catalogue only — no localStorage / GIFT_CATALOGUE fallback. EVERY page (the API pages by 20
+    // by default — without this a tenant with >20 items saw only the 20 cheapest; see full-catalogue.ts).
+    // A failed load is said out loud with a Retry — never shown as an empty catalogue ("No items found").
+    let cancelled = false;
+    setLoading(true);
+    fetchFullCatalogue<ApiCatalogItem>()
       .then((result) => {
+        if (cancelled) return;
         if (result.success && result.data) {
           const { items, userBalance } = result.data;
           if (userBalance !== undefined) setBalance(userBalance);
           setGifts((items ?? []).map(mapCatalogItem));
+          setCatalogueError(null);
+        } else {
+          setCatalogueError(result.success ? 'Could not load the rewards catalogue.' : result.error);
         }
-        // On failure we simply show an empty catalogue (EmptyState) — no demo data.
       })
-      .finally(() => setLoading(false));
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [catalogueReload]);
 
+  useEffect(() => {
     // Seed the persistent wishlist (backend source of truth). Failure → empty Set,
     // no crash: the hearts simply render un-filled until the next successful toggle.
     api.get<{ items: unknown[]; rewardIds: string[] }>('/api/rewards/wishlist')
@@ -2124,7 +2134,16 @@ export default function RewardsPage() {
           )}
 
           {/* Grid */}
-          {filtered.length === 0 ? (
+          {catalogueError ? (
+            <div role="alert" data-testid="catalogue-load-error">
+              <EmptyState
+                icon={<Gift className="h-8 w-8" />}
+                title="Couldn't load the rewards"
+                description="Something went wrong while loading the catalogue. Check your connection and try again."
+                action={{ label: 'Retry', onClick: () => setCatalogueReload((n) => n + 1) }}
+              />
+            </div>
+          ) : filtered.length === 0 ? (
             <EmptyState
               icon={<Gift className="h-8 w-8" />}
               title="No items found"

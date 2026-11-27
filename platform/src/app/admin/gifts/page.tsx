@@ -1454,10 +1454,24 @@ function CatalogueTab() {
   const loadCatalog = useCallback(async () => {
     setLoading(true); setError('');
     try {
-      const data = await apiJson<{ items: CatalogItem[]; pagination: Pagination }>(
-        '/api/admin/rewards/catalog?page=1&limit=200',
-      );
-      setItems(data.items ?? []);
+      // Every page (the API caps a page at 200): a tenant with >200 items (incl. inactive ones) must still
+      // see — and be able to edit / restock / deactivate — item 201+. Any failed page fails the whole load.
+      const all: CatalogItem[] = [];
+      const seen = new Set<string>();
+      for (let page = 1; page <= 50; page++) {
+        const data = await apiJson<{ items: CatalogItem[]; pagination?: Pagination }>(
+          `/api/admin/rewards/catalog?page=${page}&limit=200`,
+        );
+        for (const it of data.items ?? []) {
+          if (seen.has(it.id)) continue;
+          seen.add(it.id);
+          all.push(it);
+        }
+        const pages = data.pagination?.pages;
+        if (typeof pages !== 'number' || page >= pages || !(data.items ?? []).length) break;
+        if (page === 50) throw new Error('The catalogue has more than 50 pages — stopped loading it.');
+      }
+      setItems(all);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load catalogue');
     } finally {

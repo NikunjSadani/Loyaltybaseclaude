@@ -606,6 +606,22 @@ describe('GIF — Admin Reward Catalogue + Fulfilment', () => {
     expect(svInput.value).toBe('400');
   });
 
+  it('GIF-PAGES: loads EVERY page of the catalogue (an item past the first 200 is still listed and editable)', async () => {
+    const A = { ...CATALOG_ITEMS[0], id: 'r-page1', name: 'Page One Kettle' };
+    const B = { ...CATALOG_ITEMS[0], id: 'r-page2', name: 'Page Two Mixer' };
+    const { calls } = installFetch((url, init) => {
+      if (!url.startsWith('/api/admin/rewards/catalog') || (init?.method && init.method !== 'GET')) return undefined;
+      if (url === '/api/admin/rewards/catalog?page=1&limit=200') return jsonOk({ items: [A], pagination: { page: 1, limit: 200, total: 201, pages: 2 } });
+      if (url === '/api/admin/rewards/catalog?page=2&limit=200') return jsonOk({ items: [B], pagination: { page: 2, limit: 200, total: 201, pages: 2 } });
+      return undefined;
+    });
+    render(<AdminGiftsPage />);
+    expect(await screen.findByText('Page One Kettle')).toBeInTheDocument();
+    expect(await screen.findByText('Page Two Mixer')).toBeInTheDocument();
+    expect(calls.filter((c) => c.url.startsWith('/api/admin/rewards/catalog?')).map((c) => c.url))
+      .toEqual(['/api/admin/rewards/catalog?page=1&limit=200', '/api/admin/rewards/catalog?page=2&limit=200']);
+  });
+
   describe('GIF-STK — stock history wiring (owner 2026-11-26)', () => {
     const STOCKED = { ...CATALOG_ITEMS[0], id: 'r-stk', sellingValuePaise: 40000, stockQuantity: 5 };
     const serveStocked = (url: string, init?: RequestInit) =>

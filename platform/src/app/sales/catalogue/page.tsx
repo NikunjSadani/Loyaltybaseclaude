@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Spinner } from '@/components/ui/spinner';
 import { type GiftCatalogueItem, GIFT_CATALOGUE } from '@/lib/gifts';
 import { api } from '@/lib/api-client';
+import { fetchFullCatalogue } from '@/lib/rewards/full-catalogue';
 import { isDeliveryDefaults, type DeliveryDefaults } from '@/lib/partner-identity';
 import { applyAddressPrefill, type AddressForm, type TouchedFields } from '@/lib/address-prefill';
 import { WHOLE_RUPEE_INVALID_MESSAGE, isWholeRupeeInvalid, wholeRupeeAmount, wholeRupeeInputProps } from '@/lib/whole-rupee-input';
@@ -147,6 +148,8 @@ function CatalogueInner() {
   const [outlets,      setOutlets]      = useState<Outlet[]>([]);
   const [gifts,        setGifts]        = useState<GiftItem[]>([]);
   const [loading,      setLoading]      = useState(true);
+  const [catalogueError, setCatalogueError] = useState<string | null>(null);
+  const [catalogueReload, setCatalogueReload] = useState(0);
   const [category,     setCategory]     = useState('All');
   const [search,       setSearch]       = useState('');
 
@@ -233,8 +236,8 @@ function CatalogueInner() {
       // Hubble "choose from amounts" gift card (absent otherwise).
       amountOptions?: number[] | null;
     }
-    interface ApiCatalogResponse { items: ApiCatalogItem[] }
-    api.get<ApiCatalogResponse>('/api/rewards/catalog')
+    // EVERY page of /api/rewards/catalog (default page = 20 → items past the 20 cheapest were hidden).
+    fetchFullCatalogue<ApiCatalogItem>()
       .then(result => {
         if (result.success && result.data.items.length > 0) {
           const mapped: GiftCatalogueItem[] = result.data.items.map(item => {
@@ -268,13 +271,16 @@ function CatalogueInner() {
           // Points per listed amount need the tenant rate — fetched ONLY when the catalogue has a
           // "choose from amounts" item (never for a tenant without one).
           if (mapped.some((g) => g.amountOptions?.length)) loadSettings();
+          setCatalogueError(null);
         } else {
           setGifts([]);
+          // Said out loud with a Retry — a failed load is never shown as "No gifts found".
+          setCatalogueError(result.success ? null : result.error);
         }
       })
-      .catch(() => {})
+      .catch(() => setCatalogueError('Could not load the catalogue.'))
       .finally(() => setLoading(false));
-  }, []);
+  }, [catalogueReload]);
 
   // Countdown ticker
   useEffect(() => {
@@ -553,7 +559,18 @@ function CatalogueInner() {
           </div>
 
           {/* Gift grid */}
-          {filtered.length === 0 ? (
+          {catalogueError ? (
+            <div role="alert" data-testid="catalogue-load-error" className="text-center py-12 space-y-3">
+              <p className="text-sm text-red-600">Couldn&apos;t load the catalogue. Check your connection and try again.</p>
+              <button
+                type="button"
+                onClick={() => { setLoading(true); setCatalogueReload((n) => n + 1); }}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Retry
+              </button>
+            </div>
+          ) : filtered.length === 0 ? (
             <p className="text-sm text-gray-400 text-center py-12">No gifts found.</p>
           ) : (
             <div className="grid grid-cols-2 gap-3">
