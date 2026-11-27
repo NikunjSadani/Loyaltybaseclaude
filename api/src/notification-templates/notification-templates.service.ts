@@ -107,6 +107,9 @@ export class NotificationTemplatesService {
         smsTemplateId: ev.smsTemplateId,
         masterSms: config.masterSms,
         masterWhatsapp: config.masterWhatsapp,
+        // Present only when the tenant stored a valid override (absent ⇒ canonical contract order).
+        ...(ev.whatsappVariables ? { whatsappVariables: [...ev.whatsappVariables] } : {}),
+        ...(ev.whatsappVariablesError ? { whatsappVariablesError: ev.whatsappVariablesError } : {}),
       };
     } catch (e) {
       // Belt-and-braces: getConfig already fails soft, but any unexpected throw here must still

@@ -149,6 +149,63 @@ describe('Notification Templates page', () => {
     expect(body.events.KYC_SUBMITTED.smsTemplateId).toBe('111');
   });
 
+  it('T8: whatsappVariables override round-trips (shown, kept on save) and blank omits the key', async () => {
+    const cfg = {
+      ...CONFIG,
+      events: {
+        ...CONFIG.events,
+        POINTS_CREDITED: { mode: 'WHATSAPP', whatsappTemplate: 'bajaj_loyalty_points', smsTemplateId: '', whatsappVariables: ['points', 'balance'] },
+      },
+    };
+    const fetchMock = vi.fn((url: string, init?: RequestInit) =>
+      String(url).includes('/api/admin/notification-templates') ? okJson({ config: cfg, contracts: CONTRACTS }) : okJson({}),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(<GifsyNotificationTemplatesPage />);
+    const input = await screen.findByTestId('wavars-POINTS_CREDITED') as HTMLInputElement;
+    expect(input.value).toBe('points, balance');
+    // Edit another event's override, leave a third blank.
+    fireEvent.change(screen.getByTestId('wavars-ORDER_DISPATCHED'), { target: { value: ' eta , orderId ' } });
+    fireEvent.click(screen.getByTestId('save-btn'));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, i]) => (i as RequestInit | undefined)?.method === 'PUT')).toBe(true));
+    const putCall = fetchMock.mock.calls.find(([, i]) => (i as RequestInit | undefined)?.method === 'PUT');
+    const body = JSON.parse((putCall![1] as RequestInit).body as string);
+    expect(body.events.POINTS_CREDITED.whatsappVariables).toEqual(['points', 'balance']);
+    expect(body.events.ORDER_DISPATCHED.whatsappVariables).toEqual(['eta', 'orderId']);
+    expect('whatsappVariables' in body.events.KYC_SUBMITTED).toBe(false);
+    expect('waVarsText' in body.events.KYC_SUBMITTED).toBe(false);
+  });
+
+  it('T9: an invalid STORED override shows a red blocked message and is kept (not dropped) on save', async () => {
+    const cfg = {
+      ...CONFIG,
+      events: {
+        ...CONFIG.events,
+        POINTS_CREDITED: {
+          mode: 'WHATSAPP', whatsappTemplate: 't', smsTemplateId: '',
+          whatsappVariables: ['points', 'bogus'],
+          whatsappVariablesError: 'Stored events.POINTS_CREDITED.whatsappVariables has unknown variable "bogus".',
+        },
+      },
+    };
+    const fetchMock = vi.fn((url: string, init?: RequestInit) =>
+      String(url).includes('/api/admin/notification-templates') ? okJson({ config: cfg, contracts: CONTRACTS }) : okJson({}),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(<GifsyNotificationTemplatesPage />);
+    const msg = await screen.findByTestId('wavars-error-POINTS_CREDITED');
+    expect(msg.textContent).toMatch(/BLOCKED/);
+    expect(msg.textContent).toMatch(/"bogus"/);
+    expect((screen.getByTestId('wavars-POINTS_CREDITED') as HTMLInputElement).value).toBe('points, bogus');
+    fireEvent.click(screen.getByTestId('save-btn'));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, i]) => (i as RequestInit | undefined)?.method === 'PUT')).toBe(true));
+    const putCall = fetchMock.mock.calls.find(([, i]) => (i as RequestInit | undefined)?.method === 'PUT');
+    const body = JSON.parse((putCall![1] as RequestInit).body as string);
+    expect(body.events.POINTS_CREDITED.whatsappVariables).toEqual(['points', 'bogus']);
+    expect('whatsappVariablesError' in body.events.POINTS_CREDITED).toBe(false);
+    expect('waVarsError' in body.events.POINTS_CREDITED).toBe(false);
+  });
+
   it('T7: the free-channel chip reflects contracts[event].freeChannels', async () => {
     stubFetch();
     render(<GifsyNotificationTemplatesPage />);

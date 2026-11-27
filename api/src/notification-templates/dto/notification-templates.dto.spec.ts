@@ -37,6 +37,23 @@ describe('SetNotificationTemplatesDto under the global whitelist pipe', () => {
     expect(out.masterWhatsapp).toBe(true);
   });
 
+  it('KEEPS a whatsappVariables override array through the whitelist pipe (order preserved)', async () => {
+    const vars = ['ownerName', 'pointsCredited', 'redeemableBalance', 'dateCredited'];
+    const body = {
+      masterSms: false,
+      masterWhatsapp: true,
+      events: { POINTS_CREDITED: { mode: 'WHATSAPP', whatsappTemplate: 'bajaj_loyalty_points', whatsappVariables: vars } },
+    };
+    const out = (await pipe.transform(body, meta)) as SetNotificationTemplatesDto;
+    expect(out.events!.POINTS_CREDITED!.whatsappVariables).toEqual(vars);
+  });
+
+  it('REJECTS a non-array / non-string whatsappVariables at the DTO', async () => {
+    const mk = (wv: unknown) => ({ masterSms: false, masterWhatsapp: true, events: { POINTS_CREDITED: { mode: 'WHATSAPP', whatsappVariables: wv } } });
+    await expect(pipe.transform(mk('ownerName'), meta)).rejects.toThrow();
+    await expect(pipe.transform(mk([1, 2]), meta)).rejects.toThrow();
+  });
+
   it('accepts a masters-only body (events optional)', async () => {
     const out = (await pipe.transform({ masterSms: false, masterWhatsapp: true }, meta)) as SetNotificationTemplatesDto;
     expect(out.masterSms).toBe(false);

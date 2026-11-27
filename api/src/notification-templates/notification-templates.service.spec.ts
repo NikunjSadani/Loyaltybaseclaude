@@ -250,4 +250,85 @@ describe('NotificationTemplatesService', () => {
       expect(dto.value.events).toEqual({});
     });
   });
+
+  // ── whatsappVariables override ──────────────────────────────────────────────
+  describe('whatsappVariables override', () => {
+    const bajajUser: JwtPayload = { ...owner, clientId: 'bajaj' };
+    const bajajVars = ['ownerName', 'pointsCredited', 'redeemableBalance', 'dateCredited'];
+    const put = (ev: Record<string, unknown>) =>
+      service.saveConfig(bajajUser, { masterSms: false, masterWhatsapp: true, events: { POINTS_CREDITED: { mode: 'WHATSAPP', whatsappTemplate: 'bajaj_loyalty_points', ...ev } } });
+
+    it('a valid override is stored verbatim (order kept) and resolved by getChannelConfig', async () => {
+      mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+      await put({ whatsappVariables: bajajVars });
+      const [, dto] = mockAdminCore.upsertSetting.mock.calls[0];
+      expect(dto.value.events.POINTS_CREDITED.whatsappVariables).toEqual(bajajVars);
+
+      service.invalidate('bajaj');
+      mockPrisma.programSetting.findUnique.mockResolvedValue({ settingValue: dto.value });
+      const r = await service.getChannelConfig('bajaj', 'POINTS_CREDITED');
+      expect(r).toEqual({
+        mode: 'WHATSAPP',
+        whatsappTemplate: 'bajaj_loyalty_points',
+        smsTemplateId: '',
+        masterSms: false,
+        masterWhatsapp: true,
+        whatsappVariables: bajajVars,
+      });
+      // GET config (what the panel reads) carries it too.
+      expect((await service.getConfig('bajaj')).events.POINTS_CREDITED.whatsappVariables).toEqual(bajajVars);
+    });
+
+    it('absent override → NOT stored and NOT resolved (key absent: byte-identical shape)', async () => {
+      mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+      await put({});
+      const [, dto] = mockAdminCore.upsertSetting.mock.calls[0];
+      expect('whatsappVariables' in dto.value.events.POINTS_CREDITED).toBe(false);
+    });
+
+    it.each(['KYC_SUBMITTED', 'KYC_APPROVED', 'POINTS_CREDITED', 'PAYOUT_CREDITED'])(
+      'Deoleo %s with no row → resolver has NO whatsappVariables key',
+      async (ev) => {
+        mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+        const r = await service.getChannelConfig('deoleo', ev);
+        expect('whatsappVariables' in r).toBe(false);
+        expect('whatsappVariables' in (await service.getConfig('deoleo')).events[ev as 'KYC_SUBMITTED']).toBe(false);
+      },
+    );
+
+    it.each([
+      [[], /must not be empty/],
+      [['ownerName', 'utr'], /unknown variable "utr"/],
+      [['ownerName', 'ownerName'], /"ownerName" more than once/],
+      [Array(11).fill('ownerName'), /at most 10/],
+      ['ownerName', /must be an array/],
+      [['ownerName', 5], /unknown variable 5/],
+    ])('REJECTS %j with a 400 naming the bad entry', async (wv, msg) => {
+      const p = put({ whatsappVariables: wv });
+      await expect(p).rejects.toBeInstanceOf(BadRequestException);
+      await expect(p).rejects.toThrow(msg as RegExp);
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('a stored but INVALID override is NOT silently replaced: raw value + whatsappVariablesError surfaced (resolver + GET)', async () => {
+      mockPrisma.programSetting.findUnique.mockResolvedValue({
+        settingValue: { masterSms: false, masterWhatsapp: true, events: { POINTS_CREDITED: { mode: 'WHATSAPP', whatsappVariables: ['ownerName', 'bogus'] } } },
+      });
+      const r = await service.getChannelConfig('bajaj', 'POINTS_CREDITED');
+      expect(r.whatsappVariables).toEqual(['ownerName', 'bogus']);
+      expect(r.whatsappVariablesError).toMatch(/unknown variable "bogus"/);
+      const ev = (await service.getConfig('bajaj')).events.POINTS_CREDITED;
+      expect(ev.whatsappVariables).toEqual(['ownerName', 'bogus']);
+      expect(ev.whatsappVariablesError).toMatch(/"bogus"/);
+    });
+
+    it('a stored non-array override is surfaced stringified with an error', async () => {
+      mockPrisma.programSetting.findUnique.mockResolvedValue({
+        settingValue: { masterSms: false, masterWhatsapp: true, events: { POINTS_CREDITED: { mode: 'WHATSAPP', whatsappVariables: 'ownerName' } } },
+      });
+      const r = await service.getChannelConfig('bajaj', 'POINTS_CREDITED');
+      expect(r.whatsappVariables).toEqual(['ownerName']);
+      expect(r.whatsappVariablesError).toMatch(/must be an array/);
+    });
+  });
 });

@@ -152,6 +152,18 @@ function makeService(w: World) {
 const notesOf = (out: { notes: Array<{ audience: string; text: string }> }, audience: 'client' | 'ops', sep: string) =>
   out.notes.filter((n) => n.audience === audience).map((n) => n.text).join(sep);
 
+type Out = Awaited<ReturnType<PayoutTrackerDataService['buildInput']>>;
+/** Owner 2026-11-27: a per-outlet rule/config problem HOLDS BACK that outlet (off the report) — the run still goes out. */
+function expectHeld(out: Out, code: string, programme: string, why: RegExp, heldCount = 1) {
+  expect(out.outlets.map((o) => o.code)).not.toContain(code);
+  expect(notesOf(out, 'client', '\n')).toContain(`${heldCount} outlet(s) held back pending a data check — they will appear once fixed.`);
+  expect(notesOf(out, 'client', '\n')).not.toContain(code); // client never sees codes / rule text
+  const line = out.notes.filter((n) => n.audience === 'ops').map((n) => n.text).find((t) => t.includes(`Held back: ${code} (`));
+  expect(line).toBeDefined();
+  expect(line).toContain(`(${programme}`);
+  expect(line).toMatch(why);
+}
+
 const only = async (w: World, month = '2026-11', now = NOW) => {
   const { svc } = makeService(w);
   const out = await svc.buildInput('bajaj', month, now);
@@ -355,16 +367,16 @@ describe('PayoutTrackerDataService.buildInput', () => {
     const w = baseWorld();
     // A plain TOTAL rule that happens to carry visibility facts is still refused (rule does not read visibility).
     w.monthly = preview([row('U1', 'TOTAL', { payoutRupees: 300, ruleId: 'R-PLAIN', ruleVersion: 2, visibility: { approvedWindows: 1, approved: 1, windows: 1, inScope: 1, scope: 'IN_SCOPE', waitingWindows: 0, openWindows: 0, excludedApprovals: { olderFrequency: 0, notInProgramme: 0 }, note: '' } })]);
-    await expect(only(w)).rejects.toThrow(/U1.*TOTAL.*does not read visibility/);
+    expectHeld(await only(w), 'U1', 'Unnati', /TOTAL.*does not read visibility/);
   });
 
-  it('SAMT: an OK PAYING row on a KPI other than TOTAL / LINES throws naming outlet + KPI + rule (never dropped from Total Payout)', async () => {
+  it('SAMT: an OK PAYING row on a KPI other than TOTAL / LINES holds the outlet back (KPI + rule in the ops note)', async () => {
     for (const kpi of ['ADHO', 'NON ADHO', 'FOCUS BRAND']) {
       const w = baseWorld();
       w.outlets = [outletRow('S1', { programName: 'SAMT', programCategory: 'Elite' })];
       w.targets = [{ outletCode: 'S1', targetValues: {} }];
       w.monthly = preview([row('S1', kpi, { payoutRupees: 120, ruleId: 'R-SAMT-X', ruleVersion: 1, ruleName: 'SAMT extra' })]);
-      await expect(only(w)).rejects.toThrow(new RegExp(`S1.*${kpi}.*SAMT extra`));
+      expectHeld(await only(w), 'S1', 'SAMT', new RegExp(`${kpi}.*SAMT extra`));
     }
     // An OK row that pays 0 on such a KPI moves no money → no refusal (and no column to show it).
     const w0 = baseWorld();
@@ -375,30 +387,35 @@ describe('PayoutTrackerDataService.buildInput', () => {
     expect(out.outlets[0].payout).toEqual({ TOTAL: { amount: 300, reason: null } });
   });
 
-  it('Unnati / Lite: an OK paying row on a KPI the sheet has no column for throws (outlet + KPI + rule)', async () => {
+  it('Unnati / Lite: an OK paying row on a KPI the sheet has no column for holds the outlet back (KPI + rule)', async () => {
     for (const sub of ['Unnati', 'Lite']) {
       const w = baseWorld();
       w.outlets = [outletRow('U1', { programCategory: sub })];
       w.monthly = preview([row('U1', 'FOCUS BRAND 2', { payoutRupees: 40, ruleId: 'R-FB2', ruleVersion: 1, ruleName: 'FB2 rule' })]);
-      await expect(only(w)).rejects.toThrow(/U1.*FOCUS BRAND 2.*FB2 rule/);
+      expectHeld(await only(w), 'U1', `Unnati / ${sub}`, /FOCUS BRAND 2.*FB2 rule/);
     }
   });
 
-  it('B3: an Unnati TOTAL row with no rule identity is refused', async () => {
+  it('B3: an Unnati TOTAL row with no rule identity holds the outlet back', async () => {
     const w = baseWorld();
     w.monthly = preview([row('U1', 'TOTAL', { payoutRupees: 300 })]);
-    await expect(only(w)).rejects.toThrow(/U1.*TOTAL/);
+    expectHeld(await only(w), 'U1', 'Unnati', /TOTAL.*could not be identified/);
   });
 
-  it('B3: a rule that reads visibility but got no visibility data → loud error naming the outlet and the rule', async () => {
+  it('B3: a rule that reads visibility but got no visibility data holds back those outlets (rule named); others still go out', async () => {
     const w = baseWorld();
-    w.outlets.push(outletRow('U2'));
-    w.targets.push({ outletCode: 'U2', targetValues: {} });
+    w.outlets.push(outletRow('U2'), outletRow('U3'));
+    w.targets.push({ outletCode: 'U2', targetValues: {} }, { outletCode: 'U3', targetValues: {} });
     w.monthly = preview([
       row('U1', 'TOTAL', { payoutRupees: 0, ruleId: 'R-VIS', ruleVersion: 1 }),
       row('U2', 'TOTAL', { payoutRupees: 0, ruleId: 'R-VIS', ruleVersion: 1 }),
+      row('U3', 'ADHO', { payoutRupees: 90, ruleId: 'R-PLAIN', ruleVersion: 2 }),
     ]);
-    await expect(only(w)).rejects.toThrow(/visibility data unavailable.*U1, U2.*Unnati visibility/i);
+    const out = await only(w);
+    expectHeld(out, 'U1', 'Unnati', /visibility data unavailable.*Unnati visibility/i, 2);
+    expectHeld(out, 'U2', 'Unnati', /visibility data unavailable.*Unnati visibility/i, 2);
+    expect(out.outlets.map((o) => o.code)).toEqual(['U3']);
+    expect(out.outlets[0].payout).toEqual({ ADHO: { amount: 90, reason: null } });
   });
 
   it('B4: SKIP (not KPI-scope) / NO_RULE rows keep their reason as the part reason (0) + a data note with the codes', async () => {
@@ -485,22 +502,52 @@ describe('PayoutTrackerDataService.buildInput', () => {
     });
   });
 
-  it('an ERROR engine row THROWS naming the outlet code (never silently 0)', async () => {
+  it('an ERROR engine row holds ONLY that outlet back (exact error text + KPI + rule for ops); the rest of the report goes out', async () => {
     const w = baseWorld();
-    w.monthly = preview([row('U1', 'ADHO', { status: 'ERROR', reason: 'Invalid rule: x', payoutRupees: undefined })]);
-    await expect(only(w)).rejects.toThrow(/U1/);
+    w.outlets.push(outletRow('W1', { programName: 'BSC', programCategory: 'BSC' }), outletRow('U2'));
+    w.targets.push({ outletCode: 'W1', targetValues: {} }, { outletCode: 'U2', targetValues: {} });
+    w.monthly = preview([
+      row('U1', 'ADHO', { status: 'ERROR', reason: 'Invalid rule: x', payoutRupees: undefined, ruleId: 'R-A', ruleVersion: 3, ruleName: 'Unnati ADHO' }),
+      row('U1', 'LINES', { status: 'ERROR', reason: 'Credit field "Lines" is inactive', payoutRupees: undefined }),
+      row('U1', 'NON ADHO', { payoutRupees: 70 }),
+      row('W1', 'TOTAL', { status: 'ERROR', reason: 'boom', payoutRupees: undefined }),
+      row('U2', 'ADHO', { payoutRupees: 55 }),
+    ]);
+    const out = await only(w);
+    expectHeld(out, 'U1', 'Unnati', /ADHO \(rule Unnati ADHO\): Invalid rule: x/, 2);
+    expectHeld(out, 'U1', 'Unnati', /LINES.*Credit field "Lines" is inactive/, 2);
+    expectHeld(out, 'W1', 'BSC', /TOTAL.*boom/, 2);
+    expect(out.outlets.map((o) => o.code)).toEqual(['U2']);
+    expect(out.outlets[0].payout).toEqual({ ADHO: { amount: 55, reason: null } });
+    // A held outlet is not repeated in other housekeeping notes (it is not on the report at all).
+    const otherOps = out.notes.filter((n) => n.audience === 'ops' && !n.text.startsWith('Held back:')).map((n) => n.text).join(' ');
+    expect(otherOps).not.toMatch(/\bU1\b|\bW1\b/);
   });
 
-  it('an award type that does not fit the programme (POINTS on Unnati) throws', async () => {
+  it('no held-back outlets → no hold-back notes', async () => {
     const w = baseWorld();
-    w.monthly = preview([row('U1', 'ADHO', { awardType: 'POINTS', points: 10, payoutRupees: undefined })]);
-    await expect(only(w)).rejects.toThrow(/U1/);
+    w.monthly = preview([row('U1', 'ADHO', { payoutRupees: 10 })]);
+    const out = await only(w);
+    expect(out.notes.map((n) => n.text).join(' ')).not.toMatch(/held back/i);
   });
 
-  it('an OK row for an unexpected KPI code throws (money never dropped silently)', async () => {
+  it('an award type that does not fit the programme (POINTS on Unnati / PAYOUT on BSC) holds the outlet back', async () => {
+    const w = baseWorld();
+    w.outlets.push(outletRow('W1', { programName: 'BSC', programCategory: 'BSC' }));
+    w.targets.push({ outletCode: 'W1', targetValues: {} });
+    w.monthly = preview([
+      row('U1', 'ADHO', { awardType: 'POINTS', points: 10, payoutRupees: undefined }),
+      row('W1', 'TOTAL', { awardType: 'PAYOUT', payoutRupees: 10 }),
+    ]);
+    const out = await only(w);
+    expectHeld(out, 'U1', 'Unnati', /ADHO.*pays POINTS.*must be PAYOUT/, 2);
+    expectHeld(out, 'W1', 'BSC', /TOTAL.*pays PAYOUT.*must be POINTS/, 2);
+  });
+
+  it('an OK row for an unexpected KPI code holds the outlet back (money never dropped silently)', async () => {
     const w = baseWorld();
     w.monthly = preview([row('U1', 'MYSTERY', { payoutRupees: 50 })]);
-    await expect(only(w)).rejects.toThrow(/U1.*MYSTERY/);
+    expectHeld(await only(w), 'U1', 'Unnati', /MYSTERY/);
   });
 
   it('engine rows for outlets outside the month universe are ignored', async () => {
@@ -668,10 +715,12 @@ describe('PayoutTrackerDataService.buildInput', () => {
       await expect(only(w, '2026-12', new Date('2026-12-15T00:00:00Z'))).rejects.toThrow(/points engine is switched OFF/i);
     });
 
-    it('an ERROR row in the quarter preview throws', async () => {
+    it('an ERROR row in the quarter preview holds that outlet back (quarter named); W2 still computed', async () => {
       const w = decWorld();
       w.quarterly!.rows.push(row('W1', 'BSC CASES', { status: 'ERROR', reason: 'conflict' }));
-      await expect(only(w, '2026-12', new Date('2026-12-15T00:00:00Z'))).rejects.toThrow(/W1/);
+      const out = await only(w, '2026-12', new Date('2026-12-15T00:00:00Z'));
+      expectHeld(out, 'W1', 'BSC', /Oct–Dec 2026.*BSC CASES.*conflict/);
+      expect(out.outlets.find((o) => o.code === 'W2')).toMatchObject({ consistencyBonus: 0, bonusStatus: 'computed' });
     });
   });
 

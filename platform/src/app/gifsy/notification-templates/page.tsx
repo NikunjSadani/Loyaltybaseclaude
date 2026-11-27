@@ -34,6 +34,23 @@ interface EventConfig {
   mode: Mode;
   whatsappTemplate: string;
   smsTemplateId: string;
+  /** Optional per-tenant WhatsApp body-variable order override (absent ⇒ the contract order). */
+  whatsappVariables?: string[];
+  /** Read-only from GET: the STORED override is invalid (WhatsApp for this event is blocked). */
+  whatsappVariablesError?: string;
+}
+
+/** Form-side row: the override is edited as comma-separated text and parsed on save. */
+interface FormEvent extends Omit<EventConfig, 'whatsappVariables' | 'whatsappVariablesError'> {
+  waVarsText: string;
+  /** Server-reported error for the stored override; never sent back on save. */
+  waVarsError?: string;
+}
+
+/** Parse "a, b ,c" → ['a','b','c']; blank → undefined (no override). */
+function parseVarsText(text: string): string[] | undefined {
+  const list = text.split(',').map((s) => s.trim()).filter(Boolean);
+  return list.length ? list : undefined;
 }
 
 interface EventContract {
@@ -62,7 +79,7 @@ interface NotificationPayload {
 interface FormState {
   masterSms: boolean;
   masterWhatsapp: boolean;
-  events: Record<EventKey, EventConfig>;
+  events: Record<EventKey, FormEvent>;
 }
 
 const MODE_OPTIONS: { value: Mode; label: string }[] = [
@@ -72,17 +89,18 @@ const MODE_OPTIONS: { value: Mode; label: string }[] = [
   { value: 'BOTH', label: 'Both' },
 ];
 
-const EMPTY_EVENT: EventConfig = { mode: 'OFF', whatsappTemplate: '', smsTemplateId: '' };
-
 /** Normalize the (possibly partial) backend events map into a complete, ordered form. */
 function toFormState(cfg: NotificationConfig): FormState {
-  const events = {} as Record<EventKey, EventConfig>;
+  const events = {} as Record<EventKey, FormEvent>;
   for (const key of EVENT_KEYS) {
     const e = cfg.events?.[key];
     events[key] = {
       mode: e?.mode ?? 'OFF',
       whatsappTemplate: e?.whatsappTemplate ?? '',
       smsTemplateId: e?.smsTemplateId ?? '',
+      // Round-trip the override so a later save never silently drops it.
+      waVarsText: (e?.whatsappVariables ?? []).join(', '),
+      ...(e?.whatsappVariablesError ? { waVarsError: e.whatsappVariablesError } : {}),
     };
   }
   return {
@@ -148,7 +166,7 @@ export default function GifsyNotificationTemplatesPage() {
   function setMaster(channel: 'masterSms' | 'masterWhatsapp', value: boolean) {
     setForm((prev) => (prev ? { ...prev, [channel]: value } : prev));
   }
-  function updateEvent(key: EventKey, patch: Partial<EventConfig>) {
+  function updateEvent(key: EventKey, patch: Partial<FormEvent>) {
     setForm((prev) =>
       prev ? { ...prev, events: { ...prev.events, [key]: { ...prev.events[key], ...patch } } } : prev,
     );
@@ -160,7 +178,15 @@ export default function GifsyNotificationTemplatesPage() {
     const res = await api.put<NotificationPayload>('/api/admin/notification-templates', {
       masterSms: form.masterSms,
       masterWhatsapp: form.masterWhatsapp,
-      events: form.events,
+      events: Object.fromEntries(
+        EVENT_KEYS.map((k) => {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { waVarsText, waVarsError, ...rest } = form.events[k];
+          const wv = parseVarsText(waVarsText);
+          // Omit the key entirely when blank → the backend keeps the canonical contract order.
+          return [k, wv ? { ...rest, whatsappVariables: wv } : rest];
+        }),
+      ),
     });
     setSaving(false);
     if (res.success) {
@@ -334,11 +360,11 @@ function EventRow({
   eventKey, config, contract, masterSms, masterWhatsapp, onChange,
 }: {
   eventKey: EventKey;
-  config: EventConfig;
+  config: FormEvent;
   contract?: EventContract;
   masterSms: boolean;
   masterWhatsapp: boolean;
-  onChange: (patch: Partial<EventConfig>) => void;
+  onChange: (patch: Partial<FormEvent>) => void;
 }) {
   const label = contract?.label ?? eventKey;
 
@@ -446,7 +472,30 @@ function EventRow({
           <p className="text-[11px] text-white/30 mt-1">
             {waDisabled
               ? 'WhatsApp is disabled platform-wide — turn on the WhatsApp master toggle to edit.'
-              : `Variables: ${contractHint(contract?.whatsapp)}`}
+              : `Variables: ${contractHint(parseVarsText(config.waVarsText) ?? contract?.whatsapp)}`}
+          </p>
+          <label className="block text-[11px] font-medium text-white/40 mt-2 mb-1" htmlFor={`wavars-${eventKey}`}>
+            Variable order override (optional, comma-separated)
+          </label>
+          <input
+            id={`wavars-${eventKey}`}
+            type="text"
+            data-testid={`wavars-${eventKey}`}
+            value={config.waVarsText}
+            disabled={waDisabled}
+            aria-label={`WhatsApp variable order for ${label}`}
+            placeholder={contract?.whatsapp?.join(', ') ?? ''}
+            onChange={(e) => onChange({ waVarsText: e.target.value })}
+            className={waDisabled ? INPUT_DISABLED_CLS : INPUT_CLS}
+          />
+          {config.waVarsError && (
+            <p role="alert" data-testid={`wavars-error-${eventKey}`} className="flex items-start gap-1.5 text-[11px] text-red-400 mt-1">
+              <XCircle className="w-3 h-3 mt-0.5 shrink-0" />
+              WhatsApp for this trigger is BLOCKED: {config.waVarsError} Fix or clear the list, then save.
+            </p>
+          )}
+          <p className="text-[11px] text-white/30 mt-1">
+            Leave blank to use the default order. Only use when the approved template has different variables.
           </p>
         </div>
 

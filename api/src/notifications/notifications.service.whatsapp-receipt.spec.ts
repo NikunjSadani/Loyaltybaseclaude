@@ -110,6 +110,38 @@ describe('NotificationsService — transactional WhatsApp delivery-receipt lifec
     process.env = OLD_ENV;
   });
 
+  it('override with a MISSING value → no send, a FAILED receipt naming the missing variable', async () => {
+    const send = jest.fn();
+    const { svc, receipts } = makeSvc(send, {
+      whatsappTemplate: 'bajaj_loyalty_points',
+      whatsappVariables: ['ownerName', 'pointsCredited', 'redeemableBalance', 'dateCredited'],
+    });
+    await svc.notifyUserWithChannels({
+      clientId: 'bajaj', userId: 'u1', eventKey: 'POINTS_CREDITED', recipientPhone: '9990000001',
+      vars: { ownerName: 'Asha', pointsCredited: 120, redeemableBalance: 500 }, // dateCredited missing
+      body: 'x', includeFreeChannels: false,
+    });
+    expect(send).not.toHaveBeenCalled();
+    const rows = [...receipts.store.values()];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ clientId: 'bajaj', eventKey: 'POINTS_CREDITED', status: 'FAILED' });
+    expect(rows[0].failureReason).toMatch(/NOT SENT: skipped — missing value .*dateCredited/);
+  });
+
+  it('INVALID stored override → no send, a FAILED receipt with the validation error', async () => {
+    const send = jest.fn();
+    const { svc, receipts } = makeSvc(send, {
+      whatsappVariables: ['ownerName', 'bogus'],
+      whatsappVariablesError: 'Stored events.POINTS_CREDITED.whatsappVariables has unknown variable "bogus".',
+    });
+    await call(svc);
+    expect(send).not.toHaveBeenCalled();
+    const rows = [...receipts.store.values()];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('FAILED');
+    expect(rows[0].failureReason).toMatch(/blocked — invalid whatsappVariables override: .*"bogus"/);
+  });
+
   it('creates a QUEUED WHATSAPP receipt, sends with {crqid}, and flips it SENT with requestId', async () => {
     const send = jest.fn().mockResolvedValue({ requestId: 'REQ-1' });
     const { svc, receipts } = makeSvc(send);

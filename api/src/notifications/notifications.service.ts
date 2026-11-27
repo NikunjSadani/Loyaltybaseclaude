@@ -324,9 +324,36 @@ export class NotificationsService implements OnModuleInit {
       cfg.whatsappTemplate &&
       phone
     ) {
-      const orderedWhatsapp = (contract?.whatsapp ?? []).map((name) =>
-        this.varToString(params.vars?.[name]),
-      );
+      // A per-tenant override (validated at write + read) replaces the canonical order for a template
+      // whose approved body differs. Absent ⇒ the canonical contract, byte-identical to before.
+      // A stored-but-INVALID override (stale/malformed) BLOCKS this leg — never fall back to the
+      // canonical order, since the approved template expects a different variable count.
+      if (cfg.whatsappVariablesError) {
+        await this.recordBlockedWhatsapp(
+          params,
+          phone,
+          cfg.whatsappTemplate,
+          `blocked — invalid whatsappVariables override: ${cfg.whatsappVariablesError}`,
+        );
+        return;
+      }
+      const override = cfg.whatsappVariables?.length ? cfg.whatsappVariables : null;
+      const waNames = override ?? contract?.whatsapp ?? [];
+      const orderedWhatsapp = waNames.map((name) => this.varToString(params.vars?.[name]));
+      if (override) {
+        // An override names an EXACT template body — never send it with a blank {{n}} (MSG91/Meta reject
+        // or render a broken message). Skip LOUDLY. (The canonical path keeps its historical ''-fill.)
+        const missing = override.filter((_, i) => orderedWhatsapp[i].trim() === '');
+        if (missing.length) {
+          await this.recordBlockedWhatsapp(
+            params,
+            phone,
+            cfg.whatsappTemplate,
+            `skipped — missing value for override variable(s) ${missing.join(', ')}`,
+          );
+          return;
+        }
+      }
       const secrets = (params.secretValues ?? []).filter(
         (v): v is string => typeof v === 'string' && v.trim() !== '',
       );
@@ -504,6 +531,25 @@ export class NotificationsService implements OnModuleInit {
     } catch (e) {
       this.logger.warn(`[notifications] WhatsApp receipt ${receipt.id} FAILED write failed: ${e}`);
     }
+  }
+
+  /**
+   * A WhatsApp leg that was deliberately NOT sent (invalid override / missing override value): log at
+   * ERROR (tenant, event, template, reason) and — through the same receipt mechanism a failed send uses
+   * — write a FAILED MessageDeliveryReceipt so it shows in the delivery report. The receipt is subject to
+   * the same DELIVERY_RECEIPTS_ENABLED dormancy gate (off ⇒ log only). Never throws.
+   */
+  private async recordBlockedWhatsapp(
+    params: NotifyUserWithChannelsParams,
+    phone: string,
+    template: string,
+    reason: string,
+  ): Promise<void> {
+    this.logger.error(
+      `[notifications] WhatsApp NOT sent for ${params.userId} (tenant "${params.clientId}", ${params.eventKey}, template ${template}): ${reason}`,
+    );
+    const receipt = await this.createWhatsappReceipt(params.clientId, params.eventKey, phone);
+    await this.markWhatsappReceiptFailed(receipt, `NOT SENT: ${reason}`);
   }
 
   /** Map an ordered contract of variable NAMES to a named { name: value } object for the SMS row. */

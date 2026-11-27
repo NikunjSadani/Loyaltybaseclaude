@@ -412,6 +412,80 @@ describe('NotificationsService', () => {
       expect(msg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
     });
 
+    describe('whatsappVariables override', () => {
+      it('override present → body params built in EXACTLY that order (Bajaj 4-var points template)', async () => {
+        const { svc, msg91 } = makeFanout(
+          cfg({
+            mode: 'WHATSAPP',
+            masterWhatsapp: true,
+            whatsappTemplate: 'bajaj_loyalty_points',
+            whatsappVariables: ['ownerName', 'pointsCredited', 'redeemableBalance', 'dateCredited'],
+          }),
+        );
+        await call(svc, { clientId: 'bajaj' });
+        expect(msg91.sendWhatsappTemplate).toHaveBeenCalledWith('9990000001', 'bajaj_loyalty_points', [
+          'Asha',
+          '120',
+          '500',
+          '06 Jul 2026',
+        ]);
+      });
+
+      it('override present but a mapped value is missing → WhatsApp NOT sent, logged at error', async () => {
+        const { svc, msg91 } = makeFanout(
+          cfg({
+            mode: 'WHATSAPP',
+            masterWhatsapp: true,
+            whatsappTemplate: 'bajaj_loyalty_points',
+            whatsappVariables: ['ownerName', 'pointsCredited', 'redeemableBalance', 'dateCredited'],
+          }),
+        );
+        const err = jest.spyOn((svc as unknown as { logger: { error: () => void } }).logger, 'error').mockImplementation(() => undefined);
+        await call(svc, { vars: { ...baseVars, dateCredited: '' } });
+        expect(msg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+        expect(err).toHaveBeenCalledWith(expect.stringContaining('dateCredited'));
+      });
+
+      it('INVALID stored override → WhatsApp BLOCKED (error log naming tenant/event/bad entry); SMS + in-app unaffected', async () => {
+        const { svc, q, msg91 } = makeFanout(
+          cfg({
+            mode: 'BOTH',
+            masterSms: true,
+            masterWhatsapp: true,
+            whatsappVariables: ['ownerName', 'bogus'],
+            whatsappVariablesError: 'Stored events.POINTS_CREDITED.whatsappVariables has unknown variable "bogus".',
+          }),
+        );
+        const err = jest.spyOn((svc as unknown as { logger: { error: () => void } }).logger, 'error').mockImplementation(() => undefined);
+        await call(svc, { clientId: 'bajaj' });
+        expect(msg91.sendWhatsappTemplate).not.toHaveBeenCalled();
+        expect(err).toHaveBeenCalledWith(expect.stringMatching(/tenant "bajaj".*POINTS_CREDITED.*"bogus"/));
+        expect(q.rows.some((r) => r.channel === 'SMS')).toBe(true);
+        expect(q.rows.some((r) => r.channel === 'IN_APP')).toBe(true);
+      });
+
+      it('empty override array is treated as absent → canonical order', async () => {
+        const { svc, msg91 } = makeFanout(cfg({ mode: 'WHATSAPP', masterWhatsapp: true, whatsappVariables: [] }));
+        await call(svc);
+        expect(msg91.sendWhatsappTemplate.mock.calls[0][2]).toEqual(['Asha', '120', '500', 'July 2026', '06 Jul 2026']);
+      });
+
+      // DEOLEO BYTE-IDENTICAL: with NO override, each of Deoleo's 4 live events sends exactly the
+      // canonical contract order (and the historical ''-fill for a missing value is unchanged).
+      const deoleoCases: Array<{ eventKey: 'KYC_SUBMITTED' | 'KYC_APPROVED' | 'POINTS_CREDITED' | 'PAYOUT_CREDITED'; tpl: string; vars: Record<string, string>; expected: string[] }> = [
+        { eventKey: 'KYC_SUBMITTED', tpl: 'deoleo_kyc_submitted', vars: { ownerName: 'A', submissionDate: 'D', programName: 'P' }, expected: ['A', 'D', 'P'] },
+        { eventKey: 'KYC_APPROVED', tpl: 'deoleo_kyc_approved', vars: { ownerName: 'A', programName: 'P' }, expected: ['A', 'P'] },
+        { eventKey: 'POINTS_CREDITED', tpl: 'deoleo_points_credit', vars: { ...baseVars, redeemableBalance: '' } as unknown as Record<string, string>, expected: ['Asha', '120', '', 'July 2026', '06 Jul 2026'] },
+        { eventKey: 'PAYOUT_CREDITED', tpl: 'deoleo_payout', vars: { ownerName: 'A', points: '10', utr: 'U', paymentDate: 'PD', month: 'M' }, expected: ['A', '10', 'U', 'PD', 'M'] },
+      ];
+      it.each(deoleoCases)('Deoleo $eventKey (no override) → canonical params, unchanged', async ({ eventKey, tpl, vars, expected }) => {
+        const { svc, msg91 } = makeFanout(cfg({ mode: 'WHATSAPP', masterWhatsapp: true, whatsappTemplate: tpl }));
+        await call(svc, { eventKey, vars });
+        expect(msg91.sendWhatsappTemplate).toHaveBeenCalledTimes(1);
+        expect(msg91.sendWhatsappTemplate).toHaveBeenCalledWith('9990000001', tpl, expected);
+      });
+    });
+
     it('master OFF gates the channel even when the mode selects it', async () => {
       const { svc, q, msg91 } = makeFanout(cfg({ mode: 'BOTH', masterSms: false, masterWhatsapp: false }));
       await call(svc);

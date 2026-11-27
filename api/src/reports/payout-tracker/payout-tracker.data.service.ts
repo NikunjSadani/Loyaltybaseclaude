@@ -10,10 +10,12 @@
  *   - a month before the tenant's points-engine first live month (imported from the old system) — checked BEFORE any
  *     compute, and again on the engine's own `importedMonths` flag;
  *   - the points engine switched OFF (preview-only figures are money-critical — never sent);
- *   - any ERROR engine row for an outlet on the report, an OK row for an unexpected KPI, or an award type that does not
- *     fit the outlet's programme (₹ PAYOUT for Unnati / SAMT, POINTS for BSC);
- *   - an Unnati TOTAL rule that does not read visibility (identified from the RULE's inputs), or a rule that reads
- *     visibility while the tenant's visibility data is unavailable.
+ * HELD BACK, not refused (owner 2026-11-27) — PER-OUTLET rule / config problems: an ERROR engine row (monthly or
+ * quarterly), an OK row on a KPI the tracker has no column for, an award type that does not fit the programme (₹ PAYOUT
+ * for Unnati / SAMT, POINTS for BSC), SAMT paying on ADHO / NON ADHO / FB, an Unnati TOTAL rule that is not the
+ * visibility rule (identified from the RULE's inputs), or a visibility-reading rule with no visibility data. The outlet
+ * is left OFF TrackerInput.outlets (so rows / summary / totals exclude it); a client note gives the count only and an
+ * ops note per outlet names its programme + the exact problem (KPI / rule / engine text). The report still goes out.
  * Anything left off the report, paid 0 for want of a rule, or not computed (unknown outlet codes, NO_RULE / SKIP rows,
  * outlets the engine said nothing about, chain cycles, quarter bonus not computed, visibility still pending) is
  * returned in `notes` so the caller prints it — never dropped silently.
@@ -107,13 +109,13 @@ function visStatusOf(statuses: Set<string> | undefined): VisStatus {
   return null;
 }
 
-/** Engine row → whole amount, checked against the award type the programme must use. */
+/** Why an OK row's award type does not fit the programme (₹ PAYOUT for Unnati / SAMT, POINTS for BSC); null = fits. */
+function awardMismatch(r: ComputePreviewRow, expected: 'PAYOUT' | 'POINTS'): string | null {
+  return r.awardType === expected ? null : `the rule pays ${r.awardType ?? 'nothing'} but this programme must be ${expected}`;
+}
+
+/** Engine row → whole amount (caller has checked the award type with awardMismatch). */
 function amountOf(r: ComputePreviewRow, expected: 'PAYOUT' | 'POINTS'): number {
-  if (r.awardType !== expected) {
-    throw new BadRequestException(
-      `Payout tracker: outlet ${r.outletCode} KPI ${r.kpiCode} — the rule pays ${r.awardType ?? 'nothing'} but this programme must be ${expected}. Fix the rule before running the report.`,
-    );
-  }
   const v = expected === 'PAYOUT' ? r.payoutRupees : r.points;
   return typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : 0;
 }
@@ -122,6 +124,11 @@ function part(r: ComputePreviewRow, expected: 'PAYOUT' | 'POINTS'): PartResult {
   const amount = amountOf(r, expected);
   const reason = amount === 0 ? (r.reason ?? '').trim() || null : null;
   return { amount, reason };
+}
+
+/** Client-facing hold-back note (owner 2026-11-27) — never names codes or rules. */
+export function heldBackClientNote(n: number): string {
+  return `${n} outlet(s) held back pending a data check — they will appear once fixed.`;
 }
 
 const RLP_KPI: Record<string, RlpPart> = {
@@ -310,16 +317,22 @@ export class PayoutTrackerDataService {
     }
 
     const routeBy = new Map(outlets.map((o) => [o.outletCode, routeOf(o.programName)]));
-    const assertNoErrors = (p: ComputePreview, label: string) => {
-      const bad = [...new Set(p.rows.filter((r) => r.status === 'ERROR' && known.has(r.outletCode)).map((r) => r.outletCode))].sort();
-      if (bad.length) {
-        const first = p.rows.find((r) => r.status === 'ERROR' && r.outletCode === bad[0]);
-        throw new BadRequestException(
-          `Payout tracker: the rules engine returned ERROR for ${bad.length} outlet(s) in ${label}: ${listCodes(bad)} (e.g. ${bad[0]} ${first?.kpiCode}: ${first?.reason ?? 'error'}). Fix the rules before running the report.`,
-        );
+
+    // PER-OUTLET rule / config problems (owner 2026-11-27): the report still goes out — the affected outlets are HELD
+    // BACK (off the report, so rows / summary / totals exclude them), with a client note (count only) and one ops note
+    // per outlet naming its programme + the exact problem (KPI / rule / engine text). Tenant-wide problems still refuse.
+    const held = new Map<string, string[]>();
+    const hold = (code: string, text: string) => {
+      let list = held.get(code);
+      if (!list) held.set(code, (list = []));
+      if (!list.includes(text)) list.push(text);
+    };
+    const holdErrors = (p: ComputePreview, prefix: string) => {
+      for (const r of p.rows) {
+        if (r.status !== 'ERROR' || !known.has(r.outletCode)) continue;
+        hold(r.outletCode, `${prefix}${r.kpiCode} (rule ${ruleLabel(r)}): ${(r.reason ?? '').trim() || 'engine error (no message)'}`);
       }
     };
-    assertNoErrors(monthly, monthLong(month));
 
     // Which rules read visibility — from the RULE DEFINITIONS the engine resolved (inputs with a `visibility:*`
     // source), never inferred from whether a row happens to carry visibility facts. One query.
@@ -349,18 +362,21 @@ export class PayoutTrackerDataService {
       return k ? readsVisBy.get(k) : undefined;
     };
 
+    holdErrors(monthly, '');
+
     // A rule that reads visibility but got NO visibility facts = the tenant's visibility data is unavailable → its
-    // payout would be computed as "not approved" for every outlet. Refuse, naming the outlets + rules.
-    const visMissing = monthly.rows.filter(
-      (r) => r.status === 'OK' && known.has(r.outletCode) && routeBy.get(r.outletCode) && readsVisibility(r) === true && !r.visibility,
-    );
-    if (visMissing.length) {
-      const codes = [...new Set(visMissing.map((r) => r.outletCode))].sort();
-      const rules = [...new Set(visMissing.map(ruleLabel))].sort();
-      throw new BadRequestException(
-        `Payout tracker: visibility data unavailable for ${codes.length} outlet(s) ${listCodes(codes)} — rule(s) ${rules.join(', ')} read visibility${vs?.unavailableReason ? ` (${vs.unavailableReason})` : ''}. Fix the visibility setup before running the report.`,
-      );
+    // payout would be computed as "not approved". Hold those outlets back, naming the rule.
+    for (const r of monthly.rows) {
+      if (r.status === 'OK' && known.has(r.outletCode) && routeBy.get(r.outletCode) && readsVisibility(r) === true && !r.visibility) {
+        hold(
+          r.outletCode,
+          `${r.kpiCode}: visibility data unavailable for rule ${ruleLabel(r)} (it reads visibility)${vs?.unavailableReason ? ` — ${vs.unavailableReason}` : ''}`,
+        );
+      }
     }
+
+    /** Thrown inside rlpKeyOf (strict) for an Unnati TOTAL rule that is not the visibility rule — caught → hold. */
+    class HoldOutlet extends Error {}
 
     /** The payout part a KPI row lands in for a route — undefined = no column for it. Unnati TOTAL needs the rule. */
     const rlpKeyOf = (r: ComputePreviewRow, route: 'RLP_UNNATI' | 'RLP_SAMT', strict: boolean): RlpPart | undefined => {
@@ -370,8 +386,8 @@ export class PayoutTrackerDataService {
         if (reads === true) return 'VISIBILITY';
         if (!strict && reads === undefined) return 'VISIBILITY'; // NO_RULE / SKIP with no rule: the only Unnati TOTAL part
         if (!strict) return undefined;
-        throw new BadRequestException(
-          `Payout tracker: outlet ${r.outletCode} KPI TOTAL — rule ${ruleLabel(r)} ${reads === false ? 'does not read visibility' : 'could not be identified'}, so it is not a known Unnati payout part (Unnati TOTAL = the visibility payout). Check the rule.`,
+        throw new HoldOutlet(
+          `TOTAL (rule ${ruleLabel(r)}): ${reads === false ? 'does not read visibility' : 'could not be identified'} — not a known Unnati payout part (Unnati TOTAL = the visibility payout)`,
         );
       }
       const key = RLP_KPI[r.kpiCode];
@@ -386,7 +402,7 @@ export class PayoutTrackerDataService {
     const okOutlets = new Set<string>();
     const notPaid = new Map<string, Set<string>>(); // "NO_RULE ADHO" / "SKIP LINES" → outlet codes
     for (const r of monthly.rows) {
-      if (!known.has(r.outletCode)) continue;
+      if (!known.has(r.outletCode) || held.has(r.outletCode)) continue;
       const route = routeBy.get(r.outletCode) ?? null;
       if (route === null) continue; // unknown programme → rows.ts lists the outlet as an exception
       if (r.status === 'SKIP' && r.skipKind === 'KPI_SCOPE') continue; // outside the KPI's scope — expected
@@ -414,30 +430,43 @@ export class PayoutTrackerDataService {
         }
         continue;
       }
-      if (r.status !== 'OK') continue; // ERROR rows already refused above
+      if (r.status !== 'OK') continue; // ERROR rows already held back above
       okOutlets.add(r.outletCode);
+      const expected = route === 'BSC' ? 'POINTS' : 'PAYOUT';
+      const mismatch = awardMismatch(r, expected);
+      if (mismatch) {
+        hold(r.outletCode, `${r.kpiCode} (rule ${ruleLabel(r)}): ${mismatch}`);
+        continue;
+      }
       if (route === 'BSC') {
         const key = BSC_KPI[r.kpiCode];
-        if (!key) throw unexpectedKpi(r, 'BSC');
+        if (!key) {
+          hold(r.outletCode, unexpectedKpiText(r, 'BSC', ruleLabel(r)));
+          continue;
+        }
         let m = bscBy.get(r.outletCode);
         if (!m) bscBy.set(r.outletCode, (m = {}));
         m[key] = part(r, 'POINTS');
         continue;
       }
-      const key = rlpKeyOf(r, route, true);
+      let key: RlpPart | undefined;
+      try {
+        key = rlpKeyOf(r, route, true);
+      } catch (e) {
+        if (!(e instanceof HoldOutlet)) throw e;
+        hold(r.outletCode, e.message);
+        continue;
+      }
       if (!key) {
-        // SAMT: a rule on ADHO / NON ADHO / FB that PAYS would vanish from Total Payout → refuse. One that pays 0
-        // moves no money (and has no column) → ignored. Unnati / Lite: any OK row on a column-less KPI is refused.
+        // SAMT: a rule on ADHO / NON ADHO / FB that PAYS would vanish from Total Payout → hold back. One that pays 0
+        // moves no money (and has no column) → ignored. Unnati / Lite: any OK row on a column-less KPI is held back.
         if (route === 'RLP_SAMT' && r.kpiCode !== KPI.TOTAL && RLP_KPI[r.kpiCode] && amountOf(r, 'PAYOUT') === 0) continue;
-        throw unexpectedKpi(r, route === 'RLP_SAMT' ? 'SAMT' : 'Unnati', ruleLabel(r));
+        hold(r.outletCode, unexpectedKpiText(r, route === 'RLP_SAMT' ? 'SAMT' : 'Unnati', ruleLabel(r)));
+        continue;
       }
       let m = payoutBy.get(r.outletCode);
       if (!m) payoutBy.set(r.outletCode, (m = {}));
       m[key] = part(r, 'PAYOUT');
-    }
-    for (const [label, set] of [...notPaid.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-      const codes = [...set].sort();
-      opsNote(`${codes.length} outlet(s) paid 0 — ${label}: ${listCodes(codes)}`);
     }
 
     // ── 4. Quarterly consistency bonus (quarter-end month only) ─────────────────────────────────────
@@ -470,10 +499,16 @@ export class PayoutTrackerDataService {
         } else if (q.rows.length === 0) {
           notComputed((q.emptyReason ?? 'no quarterly rule').replace(/\.\s*$/, ''));
         } else {
-          assertNoErrors(q, quarter.label);
+          const qPrefix = `${quarter.label} consistency bonus — `;
+          holdErrors(q, qPrefix);
+          for (const r of q.rows) {
+            if (r.status !== 'OK' || !known.has(r.outletCode) || routeBy.get(r.outletCode) !== 'BSC') continue;
+            const mismatch = awardMismatch(r, 'POINTS');
+            if (mismatch) hold(r.outletCode, `${qPrefix}${r.kpiCode} (rule ${ruleLabel(r)}): ${mismatch}`);
+          }
           const acc = new Map<string, { ok: number; points: number; okReasons: string[]; noRule: boolean; skipReasons: string[]; scopeOnly: boolean }>();
           for (const r of q.rows) {
-            if (!known.has(r.outletCode) || routeBy.get(r.outletCode) !== 'BSC') continue;
+            if (!known.has(r.outletCode) || held.has(r.outletCode) || routeBy.get(r.outletCode) !== 'BSC') continue;
             let a = acc.get(r.outletCode);
             if (!a) acc.set(r.outletCode, (a = { ok: 0, points: 0, okReasons: [], noRule: false, skipReasons: [], scopeOnly: true }));
             if (r.status === 'SKIP' && r.skipKind === 'KPI_SCOPE') continue;
@@ -489,7 +524,7 @@ export class PayoutTrackerDataService {
           bonusBy = new Map();
           const notComputedCodes: string[] = [];
           for (const o of outlets) {
-            if (routeBy.get(o.outletCode) !== 'BSC') continue;
+            if (routeBy.get(o.outletCode) !== 'BSC' || held.has(o.outletCode)) continue;
             const a = acc.get(o.outletCode);
             let st: BonusState;
             if (a && a.ok > 0) st = { status: 'computed', points: a.points, reason: a.points === 0 ? a.okReasons.join('; ') || null : null };
@@ -517,7 +552,13 @@ export class PayoutTrackerDataService {
       }
     }
 
-    // ── 5. Assemble ─────────────────────────────────────────────────────────────────────────────────
+    // Housekeeping lists — emitted after every hold-back is known, so a held outlet is never listed twice.
+    for (const [label, set] of [...notPaid.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      const codes = [...set].filter((c) => !held.has(c)).sort();
+      if (codes.length) opsNote(`${codes.length} outlet(s) paid 0 — ${label}: ${listCodes(codes)}`);
+    }
+
+    // ── 5. Assemble (held-back outlets are OFF the report) ──────────────────────────────────────────
     const bonusFields = (route: Route, code: string): Pick<OutletInput, 'consistencyBonus' | 'bonusStatus' | 'bonusReason'> => {
       if (!isQuarterEnd || route !== 'BSC') return { consistencyBonus: null, bonusStatus: 'not-applicable' };
       if (!bonusBy) return { consistencyBonus: null, bonusStatus: 'not-computed', ...(bonusNote ? { bonusReason: bonusNote } : {}) };
@@ -528,7 +569,7 @@ export class PayoutTrackerDataService {
       return { consistencyBonus: null, bonusStatus: 'not-computed', bonusReason: st.reason };
     };
     const zeroPart = (): PartResult => ({ amount: 0, reason: null });
-    const out: OutletInput[] = outlets.map((o) => {
+    const out: OutletInput[] = outlets.filter((o) => !held.has(o.outletCode)).map((o) => {
       const route = routeBy.get(o.outletCode) ?? null;
       const lmRec = lmBy.get(o.outletCode);
       const input: OutletInput = {
@@ -592,6 +633,16 @@ export class PayoutTrackerDataService {
       opsNote(`Sales chain deeper than ${MAX_CHAIN_DEPTH} levels (cut) for ${new Set(deepCodes).size} outlet(s): ${allCodes(deepCodes)}`);
     }
 
+    if (held.size) {
+      clientNote(heldBackClientNote(held.size));
+      const byCode = new Map(outlets.map((o) => [o.outletCode, o]));
+      for (const code of [...held.keys()].sort()) {
+        const o = byCode.get(code);
+        const prog = `${o?.programName?.trim() || '(no programme)'}${o?.programCategory?.trim() ? ` / ${o.programCategory.trim()}` : ''}`;
+        opsNote(`Held back: ${code} (${prog}) — ${held.get(code)!.join(' | ')}`);
+      }
+    }
+
     // salesAsOf = the LAST INVOICE DAY in the applied DMS file (SalesDaySet.lastDay) — not the apply time. Without a
     // day set, fall back to the apply time, labelled as such.
     let salesAsOf = '—';
@@ -623,9 +674,6 @@ export class PayoutTrackerDataService {
   }
 }
 
-function unexpectedKpi(r: ComputePreviewRow, programme: string, rule?: string): BadRequestException {
-  const label = rule ?? (r.ruleName?.trim() || r.ruleId || '(unknown rule)');
-  return new BadRequestException(
-    `Payout tracker: outlet ${r.outletCode} KPI ${r.kpiCode} (rule ${label}) — a ${programme} rule on a KPI the tracker has no column for; its payout would be missing from Total Payout. Check the rule or extend the tracker.`,
-  );
+function unexpectedKpiText(r: ComputePreviewRow, programme: string, rule: string): string {
+  return `${r.kpiCode} (rule ${rule}): a ${programme} rule on a KPI the tracker has no column for — its payout would be missing from Total Payout`;
 }

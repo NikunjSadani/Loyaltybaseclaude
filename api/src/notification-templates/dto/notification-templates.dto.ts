@@ -13,6 +13,7 @@
  * defense-in-depth.
  */
 import {
+  IsArray,
   IsBoolean,
   IsIn,
   IsObject,
@@ -40,6 +41,16 @@ export class EventChannelDto {
   @IsString()
   @MaxLength(MAX_TEMPLATE_LEN)
   smsTemplateId?: string;
+
+  /**
+   * Optional ordered WhatsApp body-variable override. Shape-checked here (array of strings) so it
+   * survives the whitelist pipe; the per-event membership / non-empty / no-duplicate / max-10 rules
+   * live in validateNotificationTemplatesInput (it knows the event) and 400 naming the bad entry.
+   */
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  whatsappVariables?: string[];
 }
 
 /**

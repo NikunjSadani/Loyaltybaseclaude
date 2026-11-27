@@ -81,6 +81,45 @@ export interface EventChannelConfig {
   whatsappTemplate: string;
   /** SMS DLT template id. '' → none configured. */
   smsTemplateId: string;
+  /**
+   * OPTIONAL per-tenant override of the ORDERED WhatsApp body variables ({{1}}, {{2}}, …) for a
+   * template whose approved body differs from the canonical contract (e.g. Bajaj's 4-variable
+   * `bajaj_loyalty_points`). Each name must come from that event's VARIABLE_CONTRACTS whatsapp list.
+   * ABSENT (the key is never present) ⇒ the canonical contract order — byte-identical to before.
+   */
+  whatsappVariables?: string[];
+  /**
+   * READ-PATH ONLY: set when the STORED override is invalid (then `whatsappVariables` holds the raw
+   * stored value for display). The sender blocks that event's WhatsApp leg while this is set.
+   */
+  whatsappVariablesError?: string;
+}
+
+/** Max number of entries in a whatsappVariables override. */
+export const MAX_WHATSAPP_VARIABLES = 10;
+
+/**
+ * Validate a whatsappVariables override for one event. Returns null when valid, else a message
+ * naming the offending entry. Rules: a non-empty array of ≤ MAX_WHATSAPP_VARIABLES strings, each one
+ * of the event's contract whatsapp variables, no duplicates.
+ */
+export function whatsappVariablesError(eventKey: EventKey, value: unknown): string | null {
+  const field = `events.${eventKey}.whatsappVariables`;
+  if (!Array.isArray(value)) return `${field} must be an array of variable names.`;
+  if (value.length === 0) return `${field} must not be empty (omit it to use the default order).`;
+  if (value.length > MAX_WHATSAPP_VARIABLES) {
+    return `${field} may list at most ${MAX_WHATSAPP_VARIABLES} variables (got ${value.length}).`;
+  }
+  const allowed = RAW_VARIABLE_CONTRACTS[eventKey].whatsapp;
+  const seen = new Set<string>();
+  for (const v of value) {
+    if (typeof v !== 'string' || !allowed.includes(v)) {
+      return `${field} has unknown variable ${JSON.stringify(v)}. Allowed for ${eventKey}: ${allowed.join(', ')}.`;
+    }
+    if (seen.has(v)) return `${field} lists ${JSON.stringify(v)} more than once.`;
+    seen.add(v);
+  }
+  return null;
 }
 
 /** The full, resolved per-tenant config (every EVENT_KEY present). */
@@ -97,6 +136,10 @@ export interface ResolvedChannelConfig {
   smsTemplateId: string;
   masterSms: boolean;
   masterWhatsapp: boolean;
+  /** Present ONLY when the tenant stored an override; absent ⇒ use VARIABLE_CONTRACTS order. */
+  whatsappVariables?: string[];
+  /** Set when the stored override is invalid → the WhatsApp leg for this event is BLOCKED. */
+  whatsappVariablesError?: string;
 }
 
 /** One event's variable contract — the ORDERED variable lists for each channel. */
@@ -320,6 +363,20 @@ export function mergeConfig(clientId: string, stored: unknown): NotificationTemp
     ) {
       cur.smsTemplateId = s.smsTemplateId.trim();
     }
+    // A stored override that passes the write-path rules is applied. One that does NOT (malformed /
+    // names a variable no longer in the contract) is NEVER silently replaced by the canonical order —
+    // the approved template expects a different variable count. It is surfaced as-is (stringified for
+    // display) with `whatsappVariablesError`, and the sender BLOCKS that event's WhatsApp leg.
+    if (s.whatsappVariables !== undefined && s.whatsappVariables !== null) {
+      const err = whatsappVariablesError(key, s.whatsappVariables);
+      if (err === null) {
+        cur.whatsappVariables = [...(s.whatsappVariables as string[])];
+      } else {
+        const raw = s.whatsappVariables;
+        cur.whatsappVariables = Array.isArray(raw) ? raw.map((v) => String(v)) : [String(raw)];
+        cur.whatsappVariablesError = `Stored ${err}`;
+      }
+    }
   }
 
   return base;
@@ -386,10 +443,18 @@ export function validateNotificationTemplatesInput(
         throw fail(`events.${key}.smsTemplateId must be a string up to ${MAX_TEMPLATE_LEN} chars.`);
       }
 
+      const wv = raw.whatsappVariables;
+      if (wv !== undefined && wv !== null) {
+        const err = whatsappVariablesError(key as EventKey, wv);
+        if (err) throw fail(err);
+      }
+
       out.events[key as EventKey] = {
         mode: mode as NotificationMode,
         whatsappTemplate: typeof wa === 'string' ? wa.trim() : '',
         smsTemplateId: typeof sms === 'string' ? sms.trim() : '',
+        // Only stored when provided — absent keeps the stored row byte-identical to before.
+        ...(wv !== undefined && wv !== null ? { whatsappVariables: [...(wv as string[])] } : {}),
       };
     }
   }
