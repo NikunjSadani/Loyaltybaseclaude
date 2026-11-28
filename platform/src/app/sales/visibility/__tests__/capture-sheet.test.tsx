@@ -17,7 +17,7 @@
  */
 
 import React, { useState } from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 // requireLocation is DEFAULT ON since 2026-11-21 (LOCATION-GATE.md). These pre-gate cases model a tenant with the
@@ -33,8 +33,10 @@ import type { SalesEligibleOutlet } from '@/lib/visibility-types';
 const getSalesForm = vi.fn();
 const submitCapture = vi.fn();
 const resubmitCapture = vi.fn();
+const getFenceDistance = vi.fn();
 vi.mock('@/lib/visibility', () => ({
   visibilityApi: {
+    getFenceDistance: (i: unknown) => getFenceDistance(i),
     getSalesForm: () => getSalesForm(),
     submitCapture: (i: unknown) => submitCapture(i),
     resubmitCapture: (id: string, i: unknown) => resubmitCapture(id, i),
@@ -48,8 +50,12 @@ vi.mock('@/lib/visibility', () => ({
 // Mock the shared form: a button that forwards onSubmit and surfaces a thrown error
 // inline (mirroring the real renderer's onSubmit contract).
 vi.mock('@/components/visibility/VisibilityCaptureForm', () => ({
-  VisibilityCaptureForm: ({ onSubmit }: { onSubmit: (v: Record<string, unknown>) => Promise<void> | void }) => {
+  VisibilityCaptureForm: ({ onSubmit, measureFenceDistance }: {
+    onSubmit: (v: Record<string, unknown>) => Promise<void> | void;
+    measureFenceDistance?: (fix: { lat: number; lng: number; accuracy?: number }) => Promise<unknown>;
+  }) => {
     const [err, setErr] = useState<string | null>(null);
+    const [measured, setMeasured] = useState<string>('');
     return (
       <div>
         <button
@@ -60,6 +66,19 @@ vi.mock('@/components/visibility/VisibilityCaptureForm', () => ({
         >
           mock-submit
         </button>
+        <button
+          onClick={async () => {
+            try {
+              const m = await measureFenceDistance?.({ lat: 21.150509, lng: 72.832284, accuracy: 13 });
+              setMeasured(JSON.stringify(m));
+            } catch {
+              setMeasured('error');
+            }
+          }}
+        >
+          mock-measure
+        </button>
+        <p data-testid="measured">{measured}</p>
         {err && <p role="alert">{err}</p>}
       </div>
     );
@@ -101,24 +120,159 @@ describe('VCS — VisibilityCaptureSheet', () => {
   it('VCS1: successful submit → success read-back + flags', async () => {
     submitCapture.mockResolvedValue({
       success: true,
-      data: { capture: {}, version: 1, geoFenceOk: true, distanceMeters: 12, flags: ['LATE'], duplicatePhoto: false },
+      data: { capture: {}, version: 1, geoFenceOk: true, distanceMeters: 12, fenceRadiusMeters: 50, fenceDecisionDistanceMeters: 12, flags: ['LATE'], duplicatePhoto: false },
     });
     render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
     fireEvent.click(await screen.findByText('mock-submit'));
     expect(await screen.findByText(/capture submitted/i)).toBeInTheDocument();
     expect(submitCapture).toHaveBeenCalledWith({ outletId: 'o1', formValues: { photo: 'k1' } });
     expect(await screen.findByText(/captured late/i)).toBeInTheDocument();
-    expect(await screen.findByText(/12m from the outlet/i)).toBeInTheDocument();
+    expect((await screen.findByTestId('visibility-success-distance')).textContent).toBe(
+      'Distance from outlet: 12 m — within the allowed radius.',
+    );
+  });
+
+  it('VCS1b: success read-back from 1 km uses km (one decimal)', async () => {
+    submitCapture.mockResolvedValue({
+      success: true,
+      data: { capture: {}, version: 1, geoFenceOk: true, distanceMeters: 1234.56, fenceRadiusMeters: 5000, fenceDecisionDistanceMeters: 1235, flags: [], duplicatePhoto: false },
+    });
+    render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    expect((await screen.findByTestId('visibility-success-distance')).textContent).toBe(
+      'Distance from outlet: 1.2 km — within the allowed radius.',
+    );
+  });
+
+  it('VCS1f: success distance only when the fence applied — a distance with no fence radius shows no line', async () => {
+    submitCapture.mockResolvedValue({
+      success: true,
+      data: { capture: {}, version: 1, geoFenceOk: null, distanceMeters: 37, fenceRadiusMeters: null, fenceDecisionDistanceMeters: null, flags: [], duplicatePhoto: false },
+    });
+    render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    await screen.findByText(/capture submitted/i);
+    expect(screen.queryByTestId('visibility-success-distance')).not.toBeInTheDocument();
+  });
+
+  it('VCS1g: success at the radius never contradicts — 199.6 m at 200 m reads "200 m", inside', async () => {
+    submitCapture.mockResolvedValue({
+      success: true,
+      data: { capture: {}, version: 1, geoFenceOk: true, distanceMeters: 199.6, fenceRadiusMeters: 200, fenceDecisionDistanceMeters: 200, flags: [], duplicatePhoto: false },
+    });
+    render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    expect((await screen.findByTestId('visibility-success-distance')).textContent).toBe(
+      'Distance from outlet: 200 m — within the allowed radius.',
+    );
+  });
+
+  it('VCS1h: the GEO_UNVERIFIABLE flag reads neutrally (no "reference geo" jargon)', async () => {
+    submitCapture.mockResolvedValue({
+      success: true,
+      data: { capture: {}, version: 1, geoFenceOk: null, distanceMeters: null, fenceRadiusMeters: null, flags: ['GEO_UNVERIFIABLE'], duplicatePhoto: false },
+    });
+    render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    expect(await screen.findByText('Location could not be verified — your reviewer will check it.')).toBeInTheDocument();
+    expect(screen.queryByText(/reference geo|for one photo/i)).not.toBeInTheDocument();
+  });
+
+  it('VCS1i: an ACCEPTED capture shows the fence DECISION distance, never the stored re-pointed one, never "outside"', async () => {
+    // Location gate re-pointed the stored distance at a 300 m non-fenced fix; the fence judged Window 1 at 33 m.
+    submitCapture.mockResolvedValue({
+      success: true,
+      data: { capture: {}, version: 1, geoFenceOk: true, distanceMeters: 300.4, fenceRadiusMeters: 200, fenceDecisionDistanceMeters: 33, flags: [], duplicatePhoto: false },
+    });
+    const { container } = render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    expect((await screen.findByTestId('visibility-success-distance')).textContent).toBe(
+      'Distance from outlet: 33 m — within the allowed radius.',
+    );
+    expect(container.textContent).not.toMatch(/outside|300 m|301 m/);
+  });
+
+  it('VCS1j: a decision distance above the radius (should never happen on an accepted capture) shows nothing', async () => {
+    submitCapture.mockResolvedValue({
+      success: true,
+      data: { capture: {}, version: 1, geoFenceOk: null, distanceMeters: 300, fenceRadiusMeters: 200, fenceDecisionDistanceMeters: 300, flags: [], duplicatePhoto: false },
+    });
+    const { container } = render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    await screen.findByText(/capture submitted/i);
+    expect(screen.queryByTestId('visibility-success-distance')).not.toBeInTheDocument();
+    expect(container.textContent).not.toMatch(/outside/);
+  });
+
+  it('VCS1d: a LOW_ACCURACY flag is never shown to the rep (reviewer-only); other flags still are', async () => {
+    submitCapture.mockResolvedValue({
+      success: true,
+      data: { capture: {}, version: 1, geoFenceOk: null, distanceMeters: null, flags: ['LOW_ACCURACY', 'LATE'], duplicatePhoto: false },
+    });
+    render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    expect(await screen.findByText(/captured late/i)).toBeInTheDocument();
+    expect(screen.queryByText(/accuracy/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/low accuracy/i)).not.toBeInTheDocument();
+  });
+
+  it('VCS1e: LOW_ACCURACY alone → no flag box at all', async () => {
+    submitCapture.mockResolvedValue({
+      success: true,
+      data: { capture: {}, version: 1, geoFenceOk: null, distanceMeters: null, flags: ['LOW_ACCURACY'], duplicatePhoto: false },
+    });
+    const { container } = render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    await screen.findByText(/capture submitted/i);
+    expect(container.textContent).not.toMatch(/accura/i);
+  });
+
+  it('VCS1c: no server distance (no outlet coordinates) → no distance line', async () => {
+    submitCapture.mockResolvedValue({
+      success: true,
+      data: { capture: {}, version: 1, geoFenceOk: null, distanceMeters: null, flags: [], duplicatePhoto: false },
+    });
+    render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    await screen.findByText(/capture submitted/i);
+    expect(screen.queryByTestId('visibility-success-distance')).not.toBeInTheDocument();
+    expect(screen.queryByText(/from the outlet/i)).not.toBeInTheDocument();
+  });
+
+  it('VCS2b: the outlet-master far block shows the server distance + radius verbatim', async () => {
+    const msg = 'You are 8.3 km from the outlet. You need to be within 200 m. Please go to the outlet and try again.';
+    submitCapture.mockResolvedValue({ success: false, error: msg });
+    render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-submit'));
+    expect(await screen.findByRole('alert')).toHaveTextContent(msg);
+  });
+
+  it('VCS8: the form’s distance measure asks the SERVER fence for this outlet + fix (no client math)', async () => {
+    getFenceDistance.mockResolvedValue({ success: true, data: { distanceMeters: 8341, radiusMeters: 200 } });
+    render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByText('mock-measure'));
+    expect(await screen.findByTestId('measured')).toHaveTextContent('{"distanceMeters":8341,"radiusMeters":200}');
+    expect(getFenceDistance).toHaveBeenCalledWith({ outletId: 'o1', lat: 21.150509, lng: 72.832284, accuracy: 13 });
+    // Fence not applicable → nulls (the form then shows plain "location captured").
+    getFenceDistance.mockResolvedValue({ success: true, data: { distanceMeters: null, radiusMeters: null } });
+    fireEvent.click(screen.getByText('mock-measure'));
+    await waitFor(() => expect(screen.getByTestId('measured')).toHaveTextContent('{"distanceMeters":null,"radiusMeters":null}'));
+    // A failed check (429 / offline) REJECTS — the form shows "Couldn't check the distance…", never "no coordinates".
+    getFenceDistance.mockResolvedValue({ success: false, error: 'Too many requests' });
+    fireEvent.click(screen.getByText('mock-measure'));
+    await waitFor(() => expect(screen.getByTestId('measured')).toHaveTextContent('error'));
   });
 
   it('VCS2: geo-fence BLOCK surfaces the server error, no success', async () => {
     submitCapture.mockResolvedValue({
       success: false,
-      error: 'Capture is outside the allowed 50m radius of the outlet.',
+      error: 'You are 130 m from the outlet. You need to be within 50 m. Please go to the outlet and try again.',
     });
     render(<VisibilityCaptureSheet outlet={dueOutlet} onCaptured={vi.fn()} onClose={vi.fn()} />);
     fireEvent.click(await screen.findByText('mock-submit'));
-    expect(await screen.findByRole('alert')).toHaveTextContent(/outside the allowed 50m radius/i);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'You are 130 m from the outlet. You need to be within 50 m. Please go to the outlet and try again.',
+    );
     expect(screen.queryByText(/capture submitted/i)).not.toBeInTheDocument();
   });
 

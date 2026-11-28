@@ -7,12 +7,13 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { LimitedFileInterceptor, MEDIA_UPLOAD_MAX_BYTES } from '../common/upload-limits';
 import { VisibilityCaptureService } from './visibility-capture.service';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RequirePermission } from '../common/decorators/require-permission.decorator';
-import { ResubmitCaptureDto, SubmitCaptureDto } from './dto/visibility-capture.dto';
+import { FenceDistanceDto, ResubmitCaptureDto, SubmitCaptureDto } from './dto/visibility-capture.dto';
 
 /**
  * Visibility (POSM) SALES capture API — front-line sales roles (D8). Base path
@@ -77,6 +78,20 @@ export class VisibilityCaptureController {
     @UploadedFile() file: Express.Multer.File,
   ) {
     return this.capture.uploadCaptureMedia(user, file);
+  }
+
+  // ── DISPLAY ONLY: the fence's distance for one phone fix (the rep's "Distance from outlet" line) ──
+  // POST (the fix travels in the body, never in a URL / access log). Writes nothing; submit re-runs the fence.
+  // Returns ONLY { distanceMeters, radiusMeters } — never the outlet's coordinates.
+  // Throttle: TIGHTER than the global 60/min default — 20/min, keyed PER USER by the global IdentityThrottlerGuard
+  // (never a shared IP bucket). One call per fenced photo (2–3 per outlet, plus retakes) fits easily; it bounds
+  // distance-probing (trilaterating an outlet's position from many fixes). A 429 shows the rep "Couldn't check the
+  // distance — it will be checked when you submit"; the submit itself still runs the fence.
+  @Post('sales/fence-distance')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  @RequirePermission('visibility:write')
+  fenceDistance(@CurrentUser() user: JwtPayload, @Body() dto: FenceDistanceDto) {
+    return this.capture.getFenceDistance(user, dto);
   }
 
   // ── Submit a capture (window-key + geo-fence computed server-side) ──────────

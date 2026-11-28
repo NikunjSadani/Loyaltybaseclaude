@@ -149,7 +149,9 @@ describe('validateSubmittedValues — GPS accuracy cap (D15)', () => {
 
   it('rejects a fix whose reported accuracy exceeds the cap', () => {
     const { errors } = validateSubmittedValues(schema, { g: { lat: 12.9, lng: 77.6, accuracy: 120 } });
-    expect(errors.some((e) => e.includes('accuracy'))).toBe(true);
+    expect(errors.some((e) => e.includes('not precise enough'))).toBe(true);
+    // Rep-facing: the rule still rejects, but the text names no ±accuracy figure (owner 2026-11-28).
+    expect(errors.join(' ')).not.toMatch(/±|120/);
   });
 
   it('accepts a fix within the cap', () => {

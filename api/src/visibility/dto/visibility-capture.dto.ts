@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsIn, IsInt, IsObject, IsOptional, IsString, Max, Min, MinLength } from 'class-validator';
+import { IsIn, IsInt, IsNumber, IsObject, IsOptional, IsString, Max, Min, MinLength } from 'class-validator';
 
 /**
  * visibility-capture.dto.ts — Stream-B DTOs for the Visibility (POSM) feature:
@@ -60,6 +60,27 @@ export class SubmitCaptureDto {
   @IsOptional()
   @IsString()
   clientNow?: string;
+}
+
+/**
+ * POST /v1/visibility/sales/fence-distance — DISPLAY ONLY: the fence's distance for one phone fix at an outlet
+ * (the rep's "Distance from outlet" line). Writes nothing; submit re-runs the fence.
+ */
+export class FenceDistanceDto {
+  @IsString()
+  @MinLength(1)
+  outletId!: string;
+
+  @IsNumber()
+  lat!: number;
+
+  @IsNumber()
+  lng!: number;
+
+  /** The phone's reported accuracy (metres) — only used for the fence's accuracy buffer, never shown. */
+  @IsOptional()
+  @IsNumber()
+  accuracy?: number;
 }
 
 /** POST /v1/visibility/captures/:id/resubmit — re-capture after a rejection (D11). */

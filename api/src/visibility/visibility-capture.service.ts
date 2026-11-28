@@ -53,11 +53,13 @@ import {
   outletContextValues,
 } from './visibility-types';
 import {
-  isValidGeo,
   OUTLET_MASTER_GEOFENCE_RADIUS_M,
   outletMasterReference,
   outletMasterFencePolicy,
   classifyPhotoFence,
+  fenceDisplayMeters,
+  fenceRawDistanceMeters,
+  outsideFenceMessage,
   PhotoFencePolicy,
 } from './geo-fence.helper';
 import {
@@ -843,6 +845,87 @@ export class VisibilityCaptureService {
     return this.persistCapture(user, config, caller, outlet, dto.formValues, null, { captureGeo: dto.captureGeo, clientNow: dto.clientNow });
   }
 
+  /**
+   * DISPLAY ONLY (owner 2026-11-28): the fence's distance for one phone fix at this outlet, so the rep sees
+   * "Distance from outlet: 8.3 km" under a fence photo instead of the phone's ±accuracy (which reps read as the
+   * distance). Writes nothing and decides nothing — submit re-runs the fence on the stored fix.
+   *
+   * The number is the one submit would use for the SAME fix: the same reference (outlet master coords under
+   * features.outletMasterGeo, else the latest approved KYC board-photo geo), the same radius (forced 200 m under the
+   * gate, else visibilityConfig.geoFence.radiusMeters), the same accuracy-buffer / 0,0 rules, and the same
+   * fenceDistanceMeters helper as persistCapture's per-photo loop — all resolved by the SAME resolveFence call
+   * persistCapture makes. Returned as WHOLE metres via fenceDisplayMeters (never cm precision; an outside fix rounds UP
+   * so it reads > the radius). Fence not applicable (disabled, or no usable reference) → both null, and the FE shows
+   * no distance line. Never returns the outlet's coordinates. Gated exactly like submit (enabled, PHOTO_APPROVAL,
+   * allowed level, downline reach, in-scope outlet).
+   */
+  async getFenceDistance(
+    user: JwtPayload,
+    dto: { outletId: string; lat: number; lng: number; accuracy?: number },
+  ): Promise<{ distanceMeters: number | null; radiusMeters: number | null }> {
+    await this.assertEnabled(user.clientId);
+    await this.assertPhotoMode(user.clientId);
+    const config = await this.getConfig(user.clientId);
+    const caller = await this.requireCallerSalesUser(user);
+    if (!config.allowedSalesLevels.includes(caller.levelCode)) {
+      throw new ForbiddenException('Your sales level is not permitted to capture visibility.');
+    }
+    const reach = await this.reachOutletIds(user.clientId, caller.id);
+    if (!reach.has(dto.outletId)) {
+      throw new ForbiddenException('This outlet is not within your team.');
+    }
+    const outlet = await this.loadInScopeOutlet(user.clientId, dto.outletId, config);
+
+    // The SAME resolution persistCapture uses (resolveFence) — no re-derived policy, so the two cannot drift.
+    const geoFeatures = await this.resolveGeoFeatures(user.clientId);
+    const fence = await this.resolveFence(user.clientId, outlet, config, geoFeatures.outletMasterGeo === true);
+    if (!fence.enabled || !fence.reference) return { distanceMeters: null, radiusMeters: null };
+    const geo: GpsCapture = { lat: dto.lat, lng: dto.lng };
+    if (typeof dto.accuracy === 'number') geo.accuracy = dto.accuracy;
+    // RAW distance (the number the verdict compares) → display rounding; never the 2-dp stored value.
+    const raw = fenceRawDistanceMeters(geo, fence.policy);
+    return {
+      distanceMeters: raw == null ? null : fenceDisplayMeters(raw, fence.radiusMeters),
+      radiusMeters: fence.radiusMeters,
+    };
+  }
+
+  /**
+   * THE fence resolution for one outlet — used by BOTH persistCapture (the verdict) and getFenceDistance (the rep's
+   * preview), so the reference, radius, enabled flag and per-photo policy can never drift between them.
+   *   • outletMasterGeo tenants (Bajaj): outlet-master coords (isUsableReference-guarded), forced ON at 200 m, accuracy
+   *     buffer + 0,0-unverifiable ON;
+   *   • every other tenant: the latest APPROVED KYC board-photo geo + visibilityConfig.geoFence (enabled / radius),
+   *     no buffer — exactly what evaluateGeoFence derived on its own before.
+   */
+  private async resolveFence(
+    clientId: string,
+    outlet: { partnerId: string | null; latitude?: unknown; longitude?: unknown },
+    config: VisibilityConfigSettings,
+    outletMasterGeoEnabled: boolean,
+  ): Promise<{
+    enabled: boolean;
+    radiusMeters: number;
+    reference: { lat: number; lng: number } | null;
+    policy: PhotoFencePolicy;
+  }> {
+    const reference = outletMasterGeoEnabled
+      ? outletMasterReference(outlet)
+      : await this.outletReferenceGeo(clientId, outlet.partnerId);
+    const radiusMeters = outletMasterGeoEnabled ? OUTLET_MASTER_GEOFENCE_RADIUS_M : config.geoFence.radiusMeters;
+    return {
+      enabled: outletMasterGeoEnabled ? true : config.geoFence.enabled,
+      radiusMeters,
+      reference,
+      policy: {
+        reference,
+        radiusMeters,
+        accuracyBuffer: outletMasterGeoEnabled,
+        nullIslandUnverifiable: outletMasterGeoEnabled,
+      },
+    };
+  }
+
   /** Re-capture after a rejection (D11) — only a REJECTED capture, re-authorized. */
   async resubmitCapture(user: JwtPayload, captureId: string, dto: ResubmitCaptureDto) {
     await this.assertEnabled(user.clientId);
@@ -1115,14 +1198,13 @@ export class VisibilityCaptureService {
     // or out-of-range master value → treated as NO reference → 'unverifiable' (allow+flag) in
     // both fence paths below, never a spurious block of a rep at the real outlet.
     // Shared with the review badges (geo-fence.helper outletMasterReference) so the two never drift.
-    const outletMasterRef = outletMasterGeoEnabled ? outletMasterReference(outlet) : null;
+    // ONE resolution (resolveFence) shared with the rep's distance preview (getFenceDistance), so the two never drift.
+    const fence = await this.resolveFence(user.clientId, outlet, config, outletMasterGeoEnabled);
     // Effective fence params: forced on at the shared 200 m under the gate; the tenant's config otherwise.
-    const fenceEnabled = outletMasterGeoEnabled ? true : config.geoFence.enabled;
-    const fenceRadius = outletMasterGeoEnabled
-      ? OUTLET_MASTER_GEOFENCE_RADIUS_M
-      : config.geoFence.radiusMeters;
-    const OUTSIDE_FENCE_MESSAGE =
-      'You are far from the outlet. Please go to the outlet and try again.';
+    const fenceEnabled = fence.enabled;
+    const fenceRadius = fence.radiusMeters;
+    // Block message (EVERY tenant, owner 2026-11-28) — outsideFenceMessage carries the fence's own distance + radius
+    // (reps read the phone's ±accuracy as the distance; the message now states the real one, e.g. "You are 8.3 km…").
 
     // Geo-fence — TWO paths, chosen by the form schema. A form with ≥1 CAMERA field
     // flagged `geoFenceRequired` uses the NEW per-photo path (each such photo's embedded
@@ -1150,55 +1232,55 @@ export class VisibilityCaptureService {
     let repGeo: CaptureGeo;
     // The fence reference, kept for the location-gate STORED location below (switch-on tenants only).
     let storeReference: { lat: number; lng: number } | null = null;
+    // The RAW distance the fence DECISION used (the farthest judged fenced fix) — what the rep's success screen shows.
+    // Distinct from the stored informational `distanceMeters`, which the location gate may re-point at another fix.
+    let decisionRaw: number | null = null;
 
     if (fenceFields.length > 0) {
       // ── NEW PER-PHOTO PATH ──────────────────────────────────────────────────────
       // Reference geo, resolved ONCE: the OUTLET-MASTER lat/long under the outletMasterGeo gate,
       // else the legacy latest-APPROVED KYC board-photo geo. Radius likewise is the forced 200 m
       // under the gate, else the tenant's configured radius.
-      const reference = outletMasterGeoEnabled
-        ? outletMasterRef
-        : await this.outletReferenceGeo(user.clientId, outlet.partnerId);
+      const reference = fence.reference;
       const radius = fenceRadius;
       storeReference = reference;
 
       let anyInside = false;
       let anyOutside = false;
       let anyUnverifiable = false;
-      let outsideLabel: string | null = null;
       let worstDistance: number | null = null; // max distance among fence photos with a fix
       let worstGeo: GpsCapture | null = null; // representative pin = the worst (farthest) fixed photo
+      let worstLabel: string | null = null; // the farthest photo's label (named in the block message)
+      let worstRaw: number | null = null; // the farthest photo's RAW distance — the number the verdict compared
+      let outsideCount = 0;
 
       if (evaluatedFenceFields.length === 0) anyUnverifiable = true; // nothing applicable with a photo = "no fix", as today
       // ONE policy for every photo — the SAME resolution the reviewer's per-photo badges use
       // (geo-fence.helper classifyPhotoFence). ACCURACY BUFFER (outlet-master tenants only): a fix whose OWN reported
       // accuracy is worse than the fence radius cannot place the photo in/out → 'unverifiable' (allow + flag), never a
-      // block. Non-gated tenants: no buffer (byte-identical).
-      const policy: PhotoFencePolicy = {
-        reference,
-        radiusMeters: radius,
-        accuracyBuffer: outletMasterGeoEnabled,
-        nullIslandUnverifiable: outletMasterGeoEnabled,
-      };
+      // block. Non-gated tenants: no buffer (byte-identical). Resolved by resolveFence (shared with getFenceDistance).
+      const policy: PhotoFencePolicy = fence.policy;
       for (const f of evaluatedFenceFields) {
         const g = readMediaValue(values[f.id]).geo ?? null;
-        const { status, accuracyTooLow } = classifyPhotoFence(g, policy);
-        if (accuracyTooLow) {
-          // unverifiable — no distance for an untrustworthy fix
-        } else if (status !== 'unverifiable' && reference && isValidGeo(g)) {
-          const d = haversineMeters(g.lat, g.lng, reference.lat, reference.lng);
-          const rounded = Math.round(d * 100) / 100;
+        const { status } = classifyPhotoFence(g, policy);
+        // The photo's fence distance — the SAME helper the rep's "Distance from outlet" preview uses
+        // (fenceDistanceMeters: null when unverifiable or the accuracy buffer applies; else haversine, 2 dp).
+        const raw = fenceRawDistanceMeters(g, policy);
+        if (raw != null && g) {
+          const rounded = Math.round(raw * 100) / 100; // the stored (2 dp) informational distance — unchanged
           // Track the worst (farthest) fixed photo so the map pin (repGeo) and distanceMeters
           // always reference the SAME photo (audit fix — a pin/distance mismatch misled the reviewer).
-          if (worstDistance === null || rounded > worstDistance) {
+          if (worstRaw === null || raw > worstRaw) {
+            worstRaw = raw;
             worstDistance = rounded;
             worstGeo = g;
+            worstLabel = f.label;
           }
         }
         if (status === 'inside') anyInside = true;
         else if (status === 'outside') {
           anyOutside = true;
-          if (!outsideLabel) outsideLabel = f.label;
+          outsideCount += 1;
         } else {
           anyUnverifiable = true; // 'unverifiable'
         }
@@ -1221,16 +1303,16 @@ export class VisibilityCaptureService {
         geoFenceOk = true;
       }
       distanceMeters = worstDistance;
+      decisionRaw = worstRaw;
       repGeo = this.photoToCaptureGeo(worstGeo);
 
       if (fenceEnabled) {
         if (anyOutside) {
           await recordOutside(worstDistance, typeof worstGeo?.accuracy === 'number' ? worstGeo.accuracy : null);
+          // Every tenant (owner 2026-11-28, platform-wide): the fence's own distance + radius, never ±accuracy, naming
+          // the farthest photo (with any outside one the farthest fixed photo IS outside: its distance > the radius).
           throw new ForbiddenException(
-            outletMasterGeoEnabled
-              ? OUTSIDE_FENCE_MESSAGE
-              : `Capture is outside the allowed ${radius}m radius of the outlet` +
-                  (outsideLabel ? ` — photo "${outsideLabel}" is out of range.` : '.'),
+            outsideFenceMessage(worstRaw, radius, { label: worstLabel, moreCount: outsideCount - 1 }),
           );
         }
         if (anyUnverifiable) flags.push('GEO_UNVERIFIABLE');
@@ -1261,9 +1343,9 @@ export class VisibilityCaptureService {
         outlet.partnerId,
         config,
         geo,
-        outletMasterGeoEnabled
-          ? { reference: outletMasterRef, enabled: fenceEnabled, radiusMeters: fenceRadius }
-          : undefined,
+        // The shared resolution (resolveFence) for EVERY tenant — identical to the former config-driven default for
+        // non-gated tenants (KYC board reference + config.geoFence), so the verdict is unchanged.
+        { reference: fence.reference, enabled: fenceEnabled, radiusMeters: fenceRadius },
       );
       // ACCURACY BUFFER (gated path only): a fix whose OWN reported accuracy is worse than the
       // fence radius cannot be trusted to place the capture in/out — treat as 'unverifiable'
@@ -1275,10 +1357,11 @@ export class VisibilityCaptureService {
         Number.isFinite(geo.accuracy) &&
         geo.accuracy > fenceRadius;
       distanceMeters = accuracyTooLow ? null : res.distanceMeters;
+      decisionRaw = accuracyTooLow ? null : res.rawDistanceMeters;
       geoFenceOk = accuracyTooLow ? null : res.geoFenceOk;
       repGeo = geo;
       if (locationRequired) {
-        storeReference = outletMasterGeoEnabled ? outletMasterRef : await this.outletReferenceGeo(user.clientId, outlet.partnerId);
+        storeReference = fence.reference;
       }
 
       const captureGeoPresent = geo.lat != null && geo.lng != null;
@@ -1295,11 +1378,12 @@ export class VisibilityCaptureService {
         }
         if (geoFenceOk === false) {
           await recordOutside(res.distanceMeters, geo.accuracy);
-          throw new ForbiddenException(
-            outletMasterGeoEnabled
-              ? OUTSIDE_FENCE_MESSAGE
-              : `Capture is outside the allowed ${config.geoFence.radiusMeters}m radius of the outlet.`,
-          );
+          // Every tenant (owner 2026-11-28, platform-wide): the fence's own distance + radius, never ±accuracy.
+          // fenceRadius === config.geoFence.radiusMeters on non-gated tenants (forced 200 m under the gate).
+          // Named after the fenced GPS field (the FIRST GPS_POINT — the one extractCaptureGeo reads).
+          const gpsLabel = (schema.fields ?? []).find((f) => f.type === 'GPS_POINT')?.label ?? null;
+          // The RAW distance the verdict compared (never the 2-dp stored one) → the shown number can't contradict it.
+          throw new ForbiddenException(outsideFenceMessage(res.rawDistanceMeters, fenceRadius, { label: gpsLabel }));
         }
       }
 
@@ -1335,6 +1419,15 @@ export class VisibilityCaptureService {
             : null;
       }
     }
+
+    // The rep's success-screen distance = the FENCE DECISION's own distance (never the location gate's re-pointed
+    // stored one). Shown only when the fence applied and the judged distance is inside (an accepted capture can never
+    // read "outside"); otherwise null → no distance line.
+    const fenceApplied = fenceEnabled && !!fence.reference;
+    const decisionDisplay =
+      fenceApplied && decisionRaw != null && decisionRaw <= fenceRadius
+        ? fenceDisplayMeters(decisionRaw, fenceRadius)
+        : null;
 
     // Hash the capture photos BEFORE the transaction (network I/O outside the tx).
     const hashes = await this.hashCaptureMedia(user.clientId, schema, values);
@@ -1506,6 +1599,14 @@ export class VisibilityCaptureService {
           version,
           geoFenceOk,
           distanceMeters,
+          // The radius the fence applied — null when it did not apply (fence off / no outlet reference). The rep's
+          // success screen shows the distance only when this is set (the same rule as the capture-screen line).
+          fenceRadiusMeters: fenceApplied ? fenceRadius : null,
+          // The distance the fence DECISION used (whole metres, display-rounded from the raw value the verdict
+          // compared) — what the rep's success screen shows. Accepted capture ⇒ every judged fix was inside, so this
+          // is ≤ the radius; null when nothing was judged (no fix / unverifiable / fence not applied). `distanceMeters`
+          // above keeps its stored informational meaning (the location gate may point it at another fix).
+          fenceDecisionDistanceMeters: decisionDisplay,
           flags,
           duplicatePhoto: dupHashes.length > 0,
         };
@@ -1638,14 +1739,14 @@ export class VisibilityCaptureService {
     // forced enabled/radius, replacing the KYC-board reference and config.geoFence. Undefined →
     // the original config-driven logic (byte-identical for every non-gated tenant).
     override?: { reference: { lat: number; lng: number } | null; enabled: boolean; radiusMeters: number },
-  ): Promise<{ distanceMeters: number | null; geoFenceOk: boolean | null; referencePresent: boolean }> {
+  ): Promise<{ distanceMeters: number | null; rawDistanceMeters: number | null; geoFenceOk: boolean | null; referencePresent: boolean }> {
     // referencePresent distinguishes the two null cases for the caller (H1):
     //   ref exists + no capture geo  → caller HARD-BLOCKS (non-gated path only);
     //   no ref                       → allow-but-flag GEO_UNVERIFIABLE.
     const ref = override ? override.reference : await this.outletReferenceGeo(clientId, partnerId);
     const referencePresent = !!ref;
     if (geo.lat == null || geo.lng == null || !ref) {
-      return { distanceMeters: null, geoFenceOk: null, referencePresent };
+      return { distanceMeters: null, rawDistanceMeters: null, geoFenceOk: null, referencePresent };
     }
     const distance = haversineMeters(geo.lat, geo.lng, ref.lat, ref.lng);
     const rounded = Math.round(distance * 100) / 100;
@@ -1654,7 +1755,8 @@ export class VisibilityCaptureService {
     const fenceEnabled = override ? override.enabled : config.geoFence.enabled;
     const fenceRadius = override ? override.radiusMeters : config.geoFence.radiusMeters;
     const geoFenceOk = fenceEnabled ? distance <= fenceRadius : null;
-    return { distanceMeters: rounded, geoFenceOk, referencePresent };
+    // rawDistanceMeters = the exact number compared with the radius (rep-facing display derives from it).
+    return { distanceMeters: rounded, rawDistanceMeters: distance, geoFenceOk, referencePresent };
   }
 
   /**

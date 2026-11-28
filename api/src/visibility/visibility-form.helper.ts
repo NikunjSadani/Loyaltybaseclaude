@@ -502,7 +502,8 @@ export function validateSubmittedValues(
             const acc = Number(media.geo?.accuracy);
             if (isFinite(acc) && acc > field.gpsMaxAccuracy) {
               errors.push(
-                `Field "${field.label}" (${field.id}) location accuracy (±${acc}m) exceeds the ${field.gpsMaxAccuracy}m limit — move to open sky and recapture.`,
+                // Rep-facing: no ±accuracy figure (owner 2026-11-28 — reps read it as the distance from the outlet).
+                `Field "${field.label}" (${field.id}): the photo's location is not precise enough — move to open sky and recapture.`,
               );
               continue;
             }

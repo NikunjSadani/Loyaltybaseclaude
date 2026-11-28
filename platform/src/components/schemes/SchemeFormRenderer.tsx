@@ -1050,9 +1050,8 @@ function CameraField({
             typeof fix.accuracy === 'number' &&
             fix.accuracy > field.gpsMaxAccuracy
           ) {
-            setError(
-              `Location too imprecise (±${Math.round(fix.accuracy)}m > ±${field.gpsMaxAccuracy}m) — move to open sky and re-capture.`,
-            );
+            // No ±accuracy figure for the rep (owner 2026-11-28 — it reads as the distance from the outlet).
+            setError('Location not precise enough — move to open sky and re-capture.');
             return; // photo NOT stored → field stays uncaptured, Retry re-opens the camera
           }
           setValue(field.id, fix ? { key: uploadedKey, geo: fix } : { key: uploadedKey });
@@ -1125,7 +1124,7 @@ function CameraField({
             // can't know the fence verdict); avoid a green ✓ that reads as approval.
             <p className="flex items-center gap-1 text-[10px] text-gray-500 font-medium">
               <MapPin className="h-3 w-3 shrink-0" />
-              location captured{geo.accuracy != null ? ` · ±${Math.round(geo.accuracy)}m` : ''}
+              location captured
             </p>
           ) : field.geotag ? (
             // Geotag was requested but no fix was obtained (denied / timed out) — tell the rep,
@@ -1584,8 +1583,7 @@ function GpsField({ field, values, setValue, captureGps, req, errorFieldIds }: F
           <span className="text-xs text-green-700 font-medium">
             {v.lat.toFixed(6)}, {v.lng.toFixed(6)}
           </span>
-          {v.accuracy != null && <span className="ml-auto text-[10px] text-green-500">±{v.accuracy}m</span>}
-          <button type="button" onClick={capture} className="text-xs text-green-600 underline ml-1 px-2 py-1 -my-1">
+          <button type="button" onClick={capture} className="text-xs text-green-600 underline ml-auto px-2 py-1 -my-1">
             Re-capture
           </button>
         </div>

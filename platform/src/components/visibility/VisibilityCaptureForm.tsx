@@ -50,6 +50,7 @@ import {
   type VisibilityRejectReasonCode,
 } from '@/lib/visibility-types';
 import { acquirePreciseFix, type PreciseWatchHandle } from '@/lib/geo-acquire';
+import { distanceFromOutletLabel } from '@/lib/geo-distance';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Props contract (implemented EXACTLY so the sales stream can code against it)
@@ -116,6 +117,112 @@ export interface VisibilityCaptureFormProps {
   cameraPaused?: boolean;
   /** Audit #6: hold the shutter (camera button disabled) while the programme settings are still loading. */
   captureHold?: boolean;
+  /**
+   * DISPLAY ONLY (owner 2026-11-28): resolves the SERVER fence's distance (whole metres) + radius for a fix at this
+   * outlet; `distanceMeters: null` when the fence does not apply (no outlet coordinates / fence off / a fix the fence
+   * cannot place). REJECTS when the check itself failed (offline / 429 / 403 / 5xx). Drives the "Distance from
+   * outlet: …" line under each FENCED photo (or the fenced GPS field on a GPS-point form). The phone's own ±accuracy is
+   * never shown to the rep. Absent → no distance line.
+   */
+  measureFenceDistance?: (fix: GpsCapture) => Promise<FenceDistance>;
+}
+
+/** The server fence's answer for one fix (see `measureFenceDistance`). */
+export interface FenceDistance {
+  distanceMeters: number | null;
+  radiusMeters: number | null;
+}
+
+/** Shown while the distance check is in flight. */
+export const DISTANCE_CHECKING_MESSAGE = 'Checking distance…';
+/** Shown when the distance check FAILED (never the same text as "no outlet coordinates"). */
+export const DISTANCE_CHECK_FAILED_MESSAGE = "Couldn't check the distance — it will be checked when you submit";
+
+type FenceDistanceState =
+  | { kind: 'none' } // not a fenced field / no fix / fence does not apply → plain "location captured"
+  | { kind: 'loading' }
+  | { kind: 'error' }
+  | { kind: 'distance'; meters: number; radius: number | null };
+
+/**
+ * The field ids whose fix the server fences — the ONLY ones that get a "Distance from outlet" line. Mirrors the
+ * capture service's path choice: a form with ≥1 CAMERA `geoFenceRequired` field fences those photos (per-photo
+ * path); otherwise the FIRST GPS_POINT field in schema order is fenced (legacy path, `extractCaptureGeo`).
+ */
+export function fenceMeasuredFieldIds(schema: VisibilityFormSchema): Set<string> {
+  const all = schema.fields ?? [];
+  const fence = all.filter((f) => f.type === 'CAMERA' && f.geoFenceRequired === true);
+  if (fence.length > 0) return new Set(fence.map((f) => f.id));
+  const gps = all.find((f) => f.type === 'GPS_POINT');
+  return new Set(gps ? [gps.id] : []);
+}
+
+/**
+ * The server fence distance for one stored fix. Keyed on the fix: a Retake / new fix discards an in-flight answer for
+ * the old one (it can never show on the new photo).
+ */
+function useFenceDistance(
+  geo: GpsCapture | null | undefined,
+  measure: ((fix: GpsCapture) => Promise<FenceDistance>) | undefined,
+): FenceDistanceState {
+  const key = geo && measure && typeof geo.lat === 'number' && typeof geo.lng === 'number'
+    ? `${geo.lat},${geo.lng},${geo.accuracy ?? ''}`
+    : '';
+  const [result, setResult] = useState<{ key: string; state: FenceDistanceState } | null>(null);
+  useEffect(() => {
+    if (!key || !measure || !geo) return;
+    let live = true;
+    Promise.resolve()
+      .then(() => measure(geo))
+      .then((r) => {
+        if (!live) return;
+        const m = r?.distanceMeters;
+        setResult({
+          key,
+          state: typeof m === 'number' && Number.isFinite(m)
+            ? { kind: 'distance', meters: m, radius: typeof r.radiusMeters === 'number' ? r.radiusMeters : null }
+            : { kind: 'none' },
+        });
+      })
+      .catch(() => { if (live) setResult({ key, state: { kind: 'error' } }); });
+    return () => { live = false; };
+  }, [key, measure, geo]);
+  if (!key) return { kind: 'none' };
+  return result && result.key === key ? result.state : { kind: 'loading' };
+}
+
+/** The rep's location line under a fenced fix: checking / failed / distance (outside = warning style) / captured. */
+function FenceDistanceLine({ state, testId, className = '' }: { state: FenceDistanceState; testId: string; className?: string }) {
+  if (state.kind === 'none') return null;
+  if (state.kind === 'loading') {
+    return (
+      <p data-testid={testId} aria-live="polite" className={`flex items-center gap-1 text-xs text-gray-500 font-medium ${className}`}>
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+        {DISTANCE_CHECKING_MESSAGE}
+      </p>
+    );
+  }
+  if (state.kind === 'error') {
+    return (
+      <p data-testid={testId} aria-live="polite" className={`flex items-center gap-1 text-xs text-amber-700 font-medium ${className}`}>
+        <AlertCircle className="h-3 w-3 shrink-0" />
+        {DISTANCE_CHECK_FAILED_MESSAGE}
+      </p>
+    );
+  }
+  const label = distanceFromOutletLabel(state.meters, state.radius);
+  if (!label) return null;
+  return (
+    <p
+      data-testid={testId}
+      data-outside={label.outside ? 'true' : 'false'}
+      aria-live="polite"
+      className={`flex items-center gap-1 text-xs font-medium ${label.outside ? 'text-red-700' : 'text-gray-600'} ${className}`}
+    >
+      {label.outside ? <AlertCircle className="h-3 w-3 shrink-0 text-red-500" /> : <MapPin className="h-3 w-3 shrink-0" />}
+      {label.text}
+    </p>
+  );
 }
 
 /** Shown when a photo had no location on a requireLocation tenant (the shot is not kept). */
@@ -234,6 +341,7 @@ export function VisibilityCaptureForm({
   requireLocation = false,
   cameraPaused = false,
   captureHold = false,
+  measureFenceDistance,
 }: VisibilityCaptureFormProps) {
   const [values, setValues] = useState<Record<string, unknown>>(() => ({ ...(initialValues ?? {}) }));
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -256,6 +364,7 @@ export function VisibilityCaptureForm({
   valuesRef.current = values;
 
   const fields = useMemo(() => orderedFields(schema), [schema]);
+  const measuredIds = useMemo(() => fenceMeasuredFieldIds(schema), [schema]);
 
   // PARTIAL re-capture: the set of CAMERA field ids the reviewer REJECTED — the ONLY fields
   // the rep re-captures. Active only when partial mode is on AND at least one photo is
@@ -515,6 +624,7 @@ export function VisibilityCaptureForm({
                   cameraPaused={cameraPaused}
                   captureHold={captureHold}
                   markCapturePending={markCapturePending}
+                  measureDistance={measuredIds.has(field.id) ? measureFenceDistance : undefined}
                 />
               </div>
             );
@@ -536,6 +646,7 @@ export function VisibilityCaptureForm({
             cameraPaused={cameraPaused}
             captureHold={captureHold}
             markCapturePending={markCapturePending}
+            measureDistance={measuredIds.has(field.id) ? measureFenceDistance : undefined}
           />
         );
       })}
@@ -610,6 +721,8 @@ interface FieldRendererProps {
   captureHold?: boolean;
   /** Marks a photo as mid-capture (upload + GPS fix) so the form blocks Submit until it is stored. */
   markCapturePending?: (fieldId: string, pending: boolean) => void;
+  /** Display only: the server fence distance for this field's fix (fenced fields only; see fenceMeasuredFieldIds). */
+  measureDistance?: (fix: GpsCapture) => Promise<FenceDistance>;
 }
 
 function FieldRenderer(props: FieldRendererProps) {
@@ -769,13 +882,15 @@ function Labeled({
 
 // ── Camera field (native rear-camera, instruction + sample thumbnail, D9/D16) ──
 
-function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, requireLocation = false, cameraPaused = false, captureHold = false, markCapturePending, req }: FieldRendererProps & { req: boolean }) {
+function CameraField({ field, values, setValue, uploading, uploadFile, captureGps, preciseGps, requireLocation = false, cameraPaused = false, captureHold = false, markCapturePending, measureDistance, req }: FieldRendererProps & { req: boolean }) {
   const inputRef = useRef<HTMLInputElement>(null);
   // Read back through readMediaValue so BOTH a legacy bare-key string and a per-photo
   // `{ key, geo }` value resolve to the same shape (full backward-compat).
   const media = readMediaValue(values[field.id]);
   const key = media.key;
   const geo = media.geo;
+  // The SERVER fence's distance for this photo's fix (fenced photos only) — never the phone's ±accuracy.
+  const distance = useFenceDistance(key ? geo : null, measureDistance);
   // Gallery is suppressed by default for visibility (native camera only); an authoring
   // `noGallery === false` re-enables the gallery fallback.
   const cameraOnly = field.noGallery !== false;
@@ -835,9 +950,8 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
           typeof fix.accuracy === 'number' &&
           fix.accuracy > field.gpsMaxAccuracy
         ) {
-          setCapError(
-            `Location too imprecise (±${Math.round(fix.accuracy)}m > ±${field.gpsMaxAccuracy}m) — move to open sky and re-capture.`,
-          );
+          // No ±accuracy figure for the rep (owner 2026-11-28 — it reads as the distance from the outlet).
+          setCapError('Location not precise enough — move to open sky and re-capture.');
           return; // photo NOT stored → field stays uncaptured, the rep can re-capture
         }
         setValue(field.id, fix ? { key: uploadedKey, geo: fix } : { key: uploadedKey });
@@ -912,11 +1026,16 @@ function CameraField({ field, values, setValue, uploading, uploadFile, captureGp
           </div>
           {geo ? (
             // Neutral tone — a captured fix is NOT "inside the fence" (the client can't know the
-            // verdict); avoid a green ✓ that reads as approval.
-            <p className="flex items-center gap-1 text-xs text-gray-500 font-medium">
-              <MapPin className="h-3 w-3 shrink-0" />
-              location captured{geo.accuracy != null ? ` · ±${Math.round(geo.accuracy)}m` : ''}
-            </p>
+            // verdict); avoid a green ✓ that reads as approval. No phone ±accuracy (owner 2026-11-28): a fenced photo
+            // shows the server fence's distance instead; no distance known → just "location captured".
+            distance.kind !== 'none' ? (
+              <FenceDistanceLine state={distance} testId={`camera-${field.id}-distance`} />
+            ) : (
+              <p className="flex items-center gap-1 text-xs text-gray-500 font-medium">
+                <MapPin className="h-3 w-3 shrink-0" />
+                location captured
+              </p>
+            )
           ) : field.geotag ? (
             // Geotag requested but no fix obtained — tell the rep, since a fence-required photo
             // with no location gets flagged for review.
@@ -1010,10 +1129,12 @@ function CarriedForwardPhoto({
 
 // ── GPS field ─────────────────────────────────────────────────────────────────
 
-function GpsField({ field, values, setValue, captureGps, markCapturePending, req }: FieldRendererProps & { req: boolean }) {
+function GpsField({ field, values, setValue, captureGps, markCapturePending, measureDistance, req }: FieldRendererProps & { req: boolean }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const v = values[field.id] as GpsCapture | undefined;
+  // The SERVER fence's distance for this fix (the fenced GPS field of a GPS-point form only) — never ±accuracy.
+  const distance = useFenceDistance(v && typeof v.lat === 'number' ? v : null, measureDistance);
   const auto = (field.captureTrigger ?? 'MANUAL') === 'ON_SUBMIT';
 
   const capture = async () => {
@@ -1040,8 +1161,7 @@ function GpsField({ field, values, setValue, captureGps, markCapturePending, req
           <span className="text-xs text-green-700 font-medium">
             {v.lat.toFixed(6)}, {v.lng.toFixed(6)}
           </span>
-          {v.accuracy != null && <span className="ml-auto text-[10px] text-green-500">±{v.accuracy}m</span>}
-          <button type="button" onClick={capture} className="text-[10px] text-green-600 underline ml-1">
+          <button type="button" onClick={capture} className="ml-auto text-[10px] text-green-600 underline">
             Re-capture
           </button>
         </div>
@@ -1055,6 +1175,9 @@ function GpsField({ field, values, setValue, captureGps, markCapturePending, req
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <MapPin className="h-4 w-4" />}
           {loading ? 'Getting location…' : auto ? 'Capture (auto on submit)' : 'Capture location'}
         </button>
+      )}
+      {v && typeof v.lat === 'number' && (
+        <FenceDistanceLine state={distance} testId={`gps-${field.id}-distance`} className="mt-1" />
       )}
       {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
     </Labeled>

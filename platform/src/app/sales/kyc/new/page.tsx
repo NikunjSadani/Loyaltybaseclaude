@@ -3099,7 +3099,7 @@ export default function NewKYCPage() {
                     {!boardPhotoGeoLoading && !boardPhotoGeo && !boardPhotoGeoError && <Navigation className="h-4 w-4 text-blue-500 shrink-0" />}
                     <div className="flex-1 min-w-0">
                       {boardPhotoGeoLoading && <p className="text-blue-700 font-medium">{boardPhotoGeoPrecise ? 'Getting a precise location…' : 'Getting location…'}</p>}
-                      {boardPhotoGeo && !(locationGate.enabled && boardFixStale) && <p className="text-emerald-700 font-medium">Location captured · {boardPhotoGeo.lat.toFixed(5)}, {boardPhotoGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{boardPhotoGeo.accuracy}m)</span></p>}
+                      {boardPhotoGeo && !(locationGate.enabled && boardFixStale) && <p className="text-emerald-700 font-medium">Location captured · {boardPhotoGeo.lat.toFixed(5)}, {boardPhotoGeo.lng.toFixed(5)}</p>}
                       {boardPhotoGeoError   && (
                         <div>
                           <p data-testid="board-photo-geo-error" className="text-red-700 font-medium">Location required</p>
@@ -3310,7 +3310,7 @@ export default function NewKYCPage() {
                   {!paymentGeoLoading && !paymentGeo && !paymentGeoError && <Navigation className="h-4 w-4 text-blue-500 shrink-0" />}
                   <div data-testid="payment-geo-tag" className="flex-1 min-w-0">
                     {paymentGeoLoading && <p className="text-blue-700 font-medium">Getting location…</p>}
-                    {paymentGeo        && <p className="text-emerald-700 font-medium">Location captured · {paymentGeo.lat.toFixed(5)}, {paymentGeo.lng.toFixed(5)} <span className="font-normal text-emerald-500">(±{paymentGeo.accuracy}m)</span></p>}
+                    {paymentGeo        && <p className="text-emerald-700 font-medium">Location captured · {paymentGeo.lat.toFixed(5)}, {paymentGeo.lng.toFixed(5)}</p>}
                     {paymentGeoError   && (
                       <div>
                         <p data-testid="payment-geo-error" className="text-red-700 font-medium">Location required</p>

@@ -707,7 +707,15 @@ export interface SubmitCaptureResult {
   version: number;
   geoFenceOk: boolean | null;
   distanceMeters: number | null;
-  /** Server-side flags surfaced to the rep (e.g. "late", "geo-fence unverifiable", "low accuracy"). */
+  /** The radius the fence applied; null/absent when the fence did not apply (then no distance is shown to the rep). */
+  fenceRadiusMeters?: number | null;
+  /**
+   * The distance (whole metres) the fence DECISION used — what the rep's success screen shows. Null when nothing was
+   * judged. Distinct from `distanceMeters` (stored informational; the location gate may point it at another fix).
+   */
+  fenceDecisionDistanceMeters?: number | null;
+  /** Server-side flags (e.g. "late", "geo-fence unverifiable"). LOW_ACCURACY is returned but hidden from the rep
+   *  (REP_HIDDEN_FLAGS in VisibilityCaptureSheet) — reps never see phone-accuracy wording (owner 2026-11-28). */
   flags: string[];
   /** True when a submitted photo hash collides with an existing capture's photo. */
   duplicatePhoto: boolean;

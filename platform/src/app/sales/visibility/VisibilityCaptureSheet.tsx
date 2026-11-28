@@ -46,13 +46,19 @@ import { usePreciseGpsPreWarm } from '@/lib/use-precise-gps';
 import { useLocationGate } from '@/lib/use-location-gate';
 import { LocationGatePanel } from '@/components/location/LocationGatePanel';
 import { SETTINGS_FAILED_LOCATION_NOTE, useLocationSetting } from '@/lib/use-location-setting';
+import { distanceFromOutletLabel } from '@/lib/geo-distance';
 
 /** Human labels for the non-blocking server flags surfaced on a successful capture. */
 const FLAG_LABELS: Record<string, string> = {
   LATE: 'Captured late — this window had already closed.',
-  GEO_UNVERIFIABLE: 'Location could not be verified against the outlet (no reference geo on file).',
-  LOW_ACCURACY: 'Low GPS accuracy — the location fix may be imprecise.',
+  GEO_UNVERIFIABLE: 'Location could not be verified — your reviewer will check it.',
 };
+
+/**
+ * Server flags NOT shown to the rep (owner 2026-11-28: reps never see phone-accuracy talk — they read it as the
+ * distance from the outlet). The flag is still stored on the capture and shown to reviewers on the admin side.
+ */
+const REP_HIDDEN_FLAGS: ReadonlySet<string> = new Set(['LOW_ACCURACY']);
 
 function flagLabel(flag: string): string {
   return FLAG_LABELS[flag] ?? flag.replace(/_/g, ' ').toLowerCase();
@@ -92,6 +98,16 @@ export function VisibilityCaptureSheet({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<SubmitCaptureResult | null>(null);
+  // The non-blocking flags the rep sees (accuracy flags stay reviewer-only).
+  const repFlags = (result?.flags ?? []).filter((f) => !REP_HIDDEN_FLAGS.has(f));
+  // The success screen shows the distance the FENCE DECISION used (server `fenceDecisionDistanceMeters`, whole metres)
+  // — never the stored informational `distanceMeters`, which the location gate may point at another fix. An accepted
+  // capture never reads "outside": a decision distance above the radius (should be impossible) shows nothing.
+  const successDistanceLabel =
+    result && typeof result.fenceDecisionDistanceMeters === 'number' && typeof result.fenceRadiusMeters === 'number'
+      ? distanceFromOutletLabel(result.fenceDecisionDistanceMeters, result.fenceRadiusMeters)
+      : null;
+  const successDistance = successDistanceLabel && !successDistanceLabel.outside ? successDistanceLabel : null;
 
   // A REJECTED / CHANGES_REQUESTED capture is re-captured through the resubmit endpoint
   // (D11); anything else is a fresh submit. Keyed on STATUS (not windowState) so a
@@ -104,6 +120,24 @@ export function VisibilityCaptureSheet({
   // REJECTED photo on the outlet row; without it we fall back to a full re-capture.
   const changesRequested = isChangesRequested(outlet);
   const isPartial = changesRequested && rejectedPhotoFieldIds(outlet.photoReviews).length > 0;
+
+  // DISPLAY ONLY (owner 2026-11-28): the server fence's distance (whole metres) + radius for a photo's fix — the
+  // "Distance from outlet" line. distanceMeters null = the fence doesn't apply (no outlet coordinates, fence off) →
+  // plain "location captured". A FAILED check (offline / 429 / 403 / 5xx) REJECTS → "Couldn't check the distance…".
+  const outletId = outlet.outletId;
+  const measureFenceDistance = useCallback(async (fix: { lat: number; lng: number; accuracy?: number }) => {
+    const res = await visibilityApi.getFenceDistance({
+      outletId,
+      lat: fix.lat,
+      lng: fix.lng,
+      ...(typeof fix.accuracy === 'number' ? { accuracy: fix.accuracy } : {}),
+    });
+    if (!res.success) throw new Error(res.error || 'distance check failed');
+    return {
+      distanceMeters: typeof res.data?.distanceMeters === 'number' ? res.data.distanceMeters : null,
+      radiusMeters: typeof res.data?.radiusMeters === 'number' ? res.data.radiusMeters : null,
+    };
+  }, [outletId]);
 
   // Load the active capture form; re-invocable so the error state can offer a Retry.
   const reqIdRef = useRef(0);
@@ -297,6 +331,8 @@ export function VisibilityCaptureSheet({
                 cameraPaused={locationGate.blocking}
                 // Shutter held only for last-known "require location" reps, ≤ 5 s, while settings load (round-3 #4).
                 captureHold={locationSetting.captureHold}
+                // "Distance from outlet" under each fenced photo — the server fence's own number, never ±accuracy.
+                measureFenceDistance={measureFenceDistance}
               />
             )}
             </div>
@@ -319,21 +355,26 @@ export function VisibilityCaptureSheet({
               </div>
             </div>
 
-            {/* Geo distance read-back (informational) */}
-            {result?.distanceMeters != null && (
-              <div className="mt-5 flex items-center gap-2 text-[12px] text-gray-500 bg-gray-50 border border-gray-100 rounded-xl px-3 py-2.5">
+            {/* Geo distance read-back (informational) — the server's stored distance, same m / km wording + the
+                at-the-radius rule. Shown ONLY when the fence applied (fenceRadiusMeters set) — the same rule as the
+                capture-screen line (no outlet coordinates / fence off → no distance at all). */}
+            {successDistance && (
+              <div
+                data-testid="visibility-success-distance"
+                className="mt-5 flex items-center gap-2 text-[12px] text-gray-500 bg-gray-50 border border-gray-100 rounded-xl px-3 py-2.5"
+              >
                 <MapPin className="h-3.5 w-3.5 text-gray-400 shrink-0" />
                 <span>
-                  Captured {Math.round(Number(result.distanceMeters))}m from the outlet
-                  {result.geoFenceOk === true ? ' — within the allowed radius.' : '.'}
+                  {successDistance.text}
+                  {result?.geoFenceOk === true ? ' — within the allowed radius.' : ''}
                 </span>
               </div>
             )}
 
             {/* Non-blocking server flags (late / geo-unverifiable / duplicate) */}
-            {result && (result.flags.length > 0 || result.duplicatePhoto) && (
+            {result && (repFlags.length > 0 || result.duplicatePhoto) && (
               <div className="mt-3 space-y-1.5">
-                {result.flags.map((f) => (
+                {repFlags.map((f) => (
                   <div
                     key={f}
                     className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2"

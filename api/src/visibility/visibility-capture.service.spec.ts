@@ -27,6 +27,7 @@ import { VisibilityMediaService } from './visibility-media.service';
 import { JwtPayload } from '../common/decorators/current-user.decorator';
 import { windowKeyForDate } from './visibility-window.helper';
 import { visibilityOutOfScopeReason } from './visibility-scope.helper';
+import { fenceDisplayMeters, fenceRawDistanceMeters, formatDistance, formatRadius, outsideFenceMessage } from './geo-fence.helper';
 
 const mockPrisma = {
   // persistCapture reads clients.features for the outlet-master geo-fence gate (outletMasterGeo).
@@ -196,6 +197,25 @@ describe('VisibilityCaptureService', () => {
     await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues })).rejects.toThrow(
       ForbiddenException,
     );
+    // Same wording for every tenant (owner 2026-11-28): the fence distance + the tenant's configured radius (50 m).
+    const d = formatDistance(haversineMeters(12.9001, 77.5001, 13.5, 78.5), 50);
+    expect(d).toMatch(/ km$/);
+    await expect(service.submitCapture(user, { outletId: 'o1', formValues: nearFormValues })).rejects.toThrow(
+      `Location: You are ${d} from the outlet. You need to be within 50 m. Please go to the outlet and try again.`,
+    );
+    expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+  });
+
+  it('non-gated per-photo form: an outside photo blocks with the same distance + radius wording', async () => {
+    mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+      clientId: 't1', version: 4,
+      formSchema: { captureGpsOnSubmit: false, fields: [{ id: 'w1', type: 'CAMERA', label: 'Window 1', required: true, order: 1, geotag: true, geoFenceRequired: true }] },
+    });
+    const fix = { lat: 12.9012, lng: 77.5, accuracy: 10 }; // ~133 m north of the KYC board (12.9, 77.5)
+    const m = Math.ceil(haversineMeters(fix.lat, fix.lng, 12.9, 77.5)); // outside → rounded UP
+    await expect(
+      service.submitCapture(user, { outletId: 'o1', formValues: { w1: { key: 'visibility-media/t1/w1.jpg', geo: fix } } }),
+    ).rejects.toThrow(`Window 1: You are ${m} m from the outlet. You need to be within 50 m. Please go to the outlet and try again.`);
     expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
   });
 
@@ -212,7 +232,9 @@ describe('VisibilityCaptureService', () => {
   // (ignoring config.geoFence 50 m/enabled), outside → block with the owner message, and missing
   // master coords / no fix → unverifiable (allow + flag). Deoleo / non-gated stays byte-identical.
   describe('outlet-master geo-fence (outletMasterGeo gate)', () => {
-    const BLOCK_MSG = 'You are far from the outlet. Please go to the outlet and try again.';
+    // Owner 2026-11-28: the block message states the FENCE's distance + radius (never the phone's ±accuracy).
+    // These cases use the legacy GPS-point form → the message names its GPS field ("Location").
+    const BLOCK_MSG = /^Location: You are \d+(\.\d)? (m|km) from the outlet\. You need to be within 200 m\. Please go to the outlet and try again\.$/;
     const gatedOn = () =>
       mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
     /** outletRow + outlet-master coords (loadInScopeOutlet now selects latitude/longitude). */
@@ -577,7 +599,10 @@ describe('VisibilityCaptureService', () => {
           outletId: 'o1',
           formValues: { wtk11hn: near('w1'), np9d0cc: far('w2'), g2: { lat: 12.95, lng: 77.55 } },
         }),
-      ).rejects.toThrow('You are far from the outlet. Please go to the outlet and try again.');
+      ).rejects.toThrow(
+        // The WORST (farthest) fence photo's distance — Window 2 — in km, plus the forced 200 m radius.
+        `Window 2: You are ${formatDistance(haversineMeters(12.95, 77.55, 12.9, 77.5), 200)} from the outlet. You need to be within 200 m. Please go to the outlet and try again.`,
+      );
       expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
     });
 
@@ -1261,6 +1286,257 @@ describe('VisibilityCaptureService', () => {
       // In scope → never notApplicable.
       scopedCfg({});
       expect((await service.getOutletStatus(user, 'o1')).notApplicable).toBe(false);
+    });
+  });
+
+  // ── Rep-facing "Distance from outlet" (owner 2026-11-28, display only) ─────────────────────────────────────────
+  // Reps read the phone's ±accuracy as their distance from the outlet. The capture screen now shows the FENCE's own
+  // distance (getFenceDistance), and the outlet-master block message states it with the radius. Both numbers must be
+  // the one the fence decides with.
+  describe('fence distance shown to the rep', () => {
+    const gatedOn = () =>
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: false } });
+    const perPhotoForm = {
+      clientId: 't1', version: 9,
+      formSchema: {
+        captureGpsOnSubmit: false,
+        fields: [{ id: 'w1', type: 'CAMERA', label: 'Window 1', required: true, order: 1, geotag: true, geoFenceRequired: true }],
+      },
+    };
+    const photo = (geo: Record<string, unknown>) => ({ w1: { key: 'visibility-media/t1/w1.jpg', geo } });
+    // Prod case (outlet 50889136): master 21.2149334,72.7910879 vs capture 21.150509,72.832284 (±13 m on the phone).
+    const MASTER = { lat: 21.2149334, lng: 72.7910879 };
+    const FIX = { lat: 21.150509, lng: 72.832284, accuracy: 13 };
+
+    it('formatDistance: whole metres under 1,000 m, one-decimal km from 1 km', () => {
+      expect(formatDistance(0)).toBe('0 m');
+      expect(formatDistance(12.4)).toBe('12 m');
+      expect(formatDistance(999.4)).toBe('999 m');
+      expect(formatDistance(999.6)).toBe('1.0 km');
+      expect(formatDistance(1000)).toBe('1.0 km');
+      expect(formatDistance(8340.2)).toBe('8.3 km');
+      expect(formatDistance(12_960)).toBe('13.0 km');
+    });
+
+    it('outsideFenceMessage: distance + radius; unknown radius drops that sentence; unknown distance keeps the plain wording', () => {
+      expect(outsideFenceMessage(8340.2, 200)).toBe(
+        'You are 8.3 km from the outlet. You need to be within 200 m. Please go to the outlet and try again.',
+      );
+      expect(outsideFenceMessage(450, 200)).toBe(
+        'You are 450 m from the outlet. You need to be within 200 m. Please go to the outlet and try again.',
+      );
+      expect(outsideFenceMessage(8340.2, null)).toBe('You are 8.3 km from the outlet. Please go to the outlet and try again.');
+      expect(outsideFenceMessage(null, 200)).toBe(
+        'You are far from the outlet. You need to be within 200 m. Please go to the outlet and try again.',
+      );
+    });
+
+    it('at the radius the shown number never contradicts the verdict (199.6 / 200.0 / 200.3 at 200 m)', () => {
+      expect(fenceDisplayMeters(199.6, 200)).toBe(200); // inside → normal rounding, never above the radius
+      expect(formatDistance(199.6, 200)).toBe('200 m');
+      expect(fenceDisplayMeters(200.0, 200)).toBe(200); // exactly the radius = inside (≤)
+      expect(formatDistance(200.0, 200)).toBe('200 m');
+      expect(fenceDisplayMeters(200.3, 200)).toBe(201); // outside → rounded UP, always > the radius
+      expect(formatDistance(200.3, 200)).toBe('201 m');
+      expect(outsideFenceMessage(200.3, 200)).toBe(
+        'You are 201 m from the outlet. You need to be within 200 m. Please go to the outlet and try again.',
+      );
+      // Inside, a non-integer radius never shows a number above it.
+      expect(fenceDisplayMeters(50.5, 50.5)).toBe(50);
+      // Idempotent: the endpoint's whole metres format to the same text as the raw distance.
+      expect(formatDistance(fenceDisplayMeters(8340.2, 200), 200)).toBe(formatDistance(8340.2, 200));
+    });
+
+    it('km radius: units match and an outside km figure is bumped above it', () => {
+      expect(formatRadius(200)).toBe('200 m');
+      expect(formatRadius(1000)).toBe('1.0 km');
+      expect(formatRadius(1550)).toBe('1.5 km');
+      expect(formatDistance(1000.3, 1000)).toBe('1.1 km'); // outside → never "1.0 km" against a 1.0 km radius
+      expect(formatDistance(1000, 1000)).toBe('1.0 km');
+      expect(formatDistance(1549, 1550)).toBe('1.5 km'); // inside → never above the shown radius
+      expect(outsideFenceMessage(1000.3, 1000)).toBe(
+        'You are 1.1 km from the outlet. You need to be within 1.0 km. Please go to the outlet and try again.',
+      );
+    });
+
+    it('the block message names the farthest photo and counts the others', () => {
+      expect(outsideFenceMessage(260, 200, { label: 'Window 2' })).toBe(
+        'Window 2: You are 260 m from the outlet. You need to be within 200 m. Please go to the outlet and try again.',
+      );
+      expect(outsideFenceMessage(260, 200, { label: 'Window 2', moreCount: 1 })).toMatch(/^Window 2 \(and 1 more photo\): You are 260 m/);
+      expect(outsideFenceMessage(260, 200, { label: 'Window 2', moreCount: 2 })).toMatch(/^Window 2 \(and 2 more photos\): /);
+    });
+
+    it('two photos outside → the farthest is named, "(and 1 more photo)"', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: 12.9, longitude: 77.5 });
+      mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+        clientId: 't1', version: 9,
+        formSchema: {
+          captureGpsOnSubmit: false,
+          fields: [
+            { id: 'w1', type: 'CAMERA', label: 'Window 1', required: true, order: 1, geotag: true, geoFenceRequired: true },
+            { id: 'w2', type: 'CAMERA', label: 'Window 2', required: true, order: 2, geotag: true, geoFenceRequired: true },
+          ],
+        },
+      });
+      const near = { lat: 12.903, lng: 77.5, accuracy: 10 }; // ~334 m
+      const far = { lat: 12.906, lng: 77.5, accuracy: 10 }; // ~667 m
+      const d = formatDistance(haversineMeters(far.lat, far.lng, 12.9, 77.5), 200);
+      await expect(service.submitCapture(user, {
+        outletId: 'o1',
+        formValues: { w1: { key: 'visibility-media/t1/w1.jpg', geo: near }, w2: { key: 'visibility-media/t1/w2.jpg', geo: far } },
+      })).rejects.toThrow(`Window 2 (and 1 more photo): You are ${d} from the outlet. You need to be within 200 m.`);
+    });
+
+    // A fix whose RAW distance from (12.9, 77.5) due north is `m` metres (same longitude → haversine = R·Δlat exactly).
+    const northOf = (m: number) => ({ lat: 12.9 + (m / 6371000) * (180 / Math.PI), lng: 77.5, accuracy: 10 });
+
+    it('display derives from the RAW distance the verdict compared (200.003 / 200.0 / 199.996 at 200 m)', async () => {
+      // 200.003 m: the stored 2-dp value is 200.00, but the verdict (raw > 200) blocks → shown "201 m", never "200 m".
+      const out = northOf(200.003);
+      const ref = { lat: 12.9, lng: 77.5 };
+      const policy = { reference: ref, radiusMeters: 200, accuracyBuffer: true, nullIslandUnverifiable: true };
+      expect(fenceRawDistanceMeters(out, policy)! > 200).toBe(true);
+      expect(Math.round(fenceRawDistanceMeters(out, policy)! * 100) / 100).toBe(200); // what the column stores
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: 12.9, longitude: 77.5 });
+      mockPrisma.visibilityForm.findUnique.mockResolvedValue(perPhotoForm);
+      expect(await service.getFenceDistance(user, { outletId: 'o1', ...out })).toEqual({ distanceMeters: 201, radiusMeters: 200 });
+      await expect(service.submitCapture(user, { outletId: 'o1', formValues: photo(out) })).rejects.toThrow(
+        'Window 1: You are 201 m from the outlet. You need to be within 200 m. Please go to the outlet and try again.',
+      );
+      // 200.0 exactly is inside (≤) → "200 m".
+      expect(fenceDisplayMeters(200.0, 200)).toBe(200);
+      expect(formatDistance(200.0, 200)).toBe('200 m');
+      // 199.996 m: inside → accepted, shown "200 m" (never above the radius), preview and success screen agree.
+      const inn = northOf(199.996);
+      expect(await service.getFenceDistance(user, { outletId: 'o1', ...inn })).toEqual({ distanceMeters: 200, radiusMeters: 200 });
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: photo(inn) });
+      expect(res.geoFenceOk).toBe(true);
+      expect(res.fenceDecisionDistanceMeters).toBe(200);
+    });
+
+    it('success screen distance = the fence DECISION distance, never the location gate’s re-pointed stored one', async () => {
+      // Location gate ON: the stored representative fix is chosen fresh-first — here a NON-fenced geotag photo ~300 m
+      // away (schema order first). The fence judged only Window 1 (~33 m, inside) → accepted.
+      mockPrisma.client.findUnique.mockResolvedValue({ features: { outletMasterGeo: true, requireLocation: true } });
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: 12.9, longitude: 77.5 });
+      mockPrisma.visibilityForm.findUnique.mockResolvedValue({
+        clientId: 't1', version: 9,
+        formSchema: {
+          captureGpsOnSubmit: false,
+          fields: [
+            { id: 'shelf', type: 'CAMERA', label: 'Shelf', required: true, order: 1, geotag: true },
+            { id: 'w1', type: 'CAMERA', label: 'Window 1', required: true, order: 2, geotag: true, geoFenceRequired: true },
+          ],
+        },
+      });
+      const now = new Date().toISOString();
+      const res = await service.submitCapture(user, {
+        outletId: 'o1',
+        formValues: {
+          shelf: { key: 'visibility-media/t1/s.jpg', geo: { ...northOf(300), capturedAt: now } },
+          w1: { key: 'visibility-media/t1/w1.jpg', geo: { ...northOf(33), capturedAt: now } },
+        },
+      });
+      expect(res.geoFenceOk).toBe(true);
+      // Stored informational distance keeps its meaning (the re-pointed ~300 m fix — feeds reports, unchanged).
+      expect(Math.round(res.distanceMeters as number)).toBe(300);
+      // The rep sees the DECISION distance (Window 1, inside) — never "300 m — outside the 200 m limit".
+      expect(res.fenceDecisionDistanceMeters).toBe(33);
+      expect(res.fenceRadiusMeters).toBe(200);
+    });
+
+    it('fence not applied (no outlet coordinates) → the submit returns no fence radius (no success-screen distance)', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: null, longitude: null });
+      mockPrisma.visibilityForm.findUnique.mockResolvedValue(perPhotoForm);
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: photo({ lat: 12.9, lng: 77.5, accuracy: 10 }) });
+      expect(res.fenceRadiusMeters).toBeNull();
+      expect(res.distanceMeters).toBeNull();
+    });
+
+    it('prod case 50889136: the preview distance IS the number in the block message (8.3 km, within 200 m)', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: MASTER.lat, longitude: MASTER.lng });
+      mockPrisma.visibilityForm.findUnique.mockResolvedValue(perPhotoForm);
+      const preview = await service.getFenceDistance(user, { outletId: 'o1', ...FIX });
+      // Whole metres (never cm), outside → rounded UP; and ONLY distance + radius (no coordinates).
+      const expected = Math.ceil(haversineMeters(FIX.lat, FIX.lng, MASTER.lat, MASTER.lng));
+      expect(preview).toEqual({ distanceMeters: expected, radiusMeters: 200 });
+      expect(Object.keys(preview).sort()).toEqual(['distanceMeters', 'radiusMeters']);
+      expect(Number.isInteger(preview.distanceMeters)).toBe(true);
+      expect(formatDistance(preview.distanceMeters!, 200)).toBe('8.3 km');
+      await expect(service.submitCapture(user, { outletId: 'o1', formValues: photo(FIX) })).rejects.toThrow(
+        'Window 1: You are 8.3 km from the outlet. You need to be within 200 m. Please go to the outlet and try again.',
+      );
+      expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+    });
+
+    it('inside the fence: the preview distance equals the distance the submit stores (per-photo path)', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: 12.9, longitude: 77.5 });
+      mockPrisma.visibilityForm.findUnique.mockResolvedValue(perPhotoForm);
+      const fix = { lat: 12.9003, lng: 77.5001, accuracy: 20 };
+      const preview = await service.getFenceDistance(user, { outletId: 'o1', ...fix });
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: photo(fix) });
+      expect(res.geoFenceOk).toBe(true);
+      expect(preview.distanceMeters).not.toBeNull();
+      // The preview is the whole-metre display of EXACTLY the distance the submit stores.
+      expect(preview.distanceMeters).toBe(fenceDisplayMeters(res.distanceMeters as number, 200));
+      expect(mockPrisma.visibilityCapture.create.mock.calls[0][0].data.distanceMeters).toBe(res.distanceMeters);
+      expect(res.fenceRadiusMeters).toBe(200);
+    });
+
+    it('legacy GPS-point form: the preview distance is the one in the block message', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: 13.5, longitude: 78.5 });
+      const fix = { lat: 12.9001, lng: 77.5001, accuracy: 10 };
+      const preview = await service.getFenceDistance(user, { outletId: 'o1', ...fix });
+      await expect(
+        service.submitCapture(user, { outletId: 'o1', formValues: { photo: 'visibility-media/t1/x.jpg', geo: fix } }),
+      ).rejects.toThrow(outsideFenceMessage(preview.distanceMeters, 200, { label: 'Location' }));
+    });
+
+    it('no outlet coordinates → no distance (the FE shows no line)', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: null, longitude: null });
+      expect(await service.getFenceDistance(user, { outletId: 'o1', ...FIX })).toEqual({ distanceMeters: null, radiusMeters: null });
+      // 0,0 master coords are "missing" too.
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: 0, longitude: 0 });
+      expect(await service.getFenceDistance(user, { outletId: 'o1', ...FIX })).toEqual({ distanceMeters: null, radiusMeters: null });
+    });
+
+    it('a fix the fence cannot place (accuracy worse than 200 m, or 0,0) → no distance, as the submit stores none', async () => {
+      gatedOn();
+      mockPrisma.outlet.findFirst.mockResolvedValue({ ...outletRow, latitude: 12.9, longitude: 77.5 });
+      expect(await service.getFenceDistance(user, { outletId: 'o1', lat: 12.9001, lng: 77.5001, accuracy: 250 }))
+        .toEqual({ distanceMeters: null, radiusMeters: 200 });
+      expect(await service.getFenceDistance(user, { outletId: 'o1', lat: 0, lng: 0, accuracy: 5 }))
+        .toEqual({ distanceMeters: null, radiusMeters: 200 });
+    });
+
+    it('non-gated tenant: KYC board reference + the configured radius; fence disabled → no distance', async () => {
+      // Default: gate off, KYC board (12.9, 77.5), config radius 50 m.
+      const fix = { lat: 12.9001, lng: 77.5001, accuracy: 10 };
+      const on = await service.getFenceDistance(user, { outletId: 'o1', ...fix });
+      expect(on).toEqual({ distanceMeters: Math.round(haversineMeters(fix.lat, fix.lng, 12.9, 77.5)), radiusMeters: 50 });
+      const res = await service.submitCapture(user, { outletId: 'o1', formValues: { photo: 'visibility-media/t1/x.jpg', geo: fix } });
+      expect(on.distanceMeters).toBe(fenceDisplayMeters(res.distanceMeters as number, 50));
+      expect(res.fenceRadiusMeters).toBe(50);
+      mockSettings.getEffectiveSettings.mockResolvedValue({ visibilityConfig: { ...config, geoFence: { enabled: false, radiusMeters: 50 } } });
+      expect(await service.getFenceDistance(user, { outletId: 'o1', ...fix })).toEqual({ distanceMeters: null, radiusMeters: null });
+    });
+
+    it('is gated like submit: wrong level / outside the team → 403, and it writes nothing', async () => {
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1', hierarchyLevel: { code: 'ISR' } });
+      await expect(service.getFenceDistance(user, { outletId: 'o1', ...FIX })).rejects.toThrow(ForbiddenException);
+      mockPrisma.salesUser.findFirst.mockResolvedValue({ id: 'su1', hierarchyLevel: { code: 'SO' } });
+      mockPrisma.salesUserAssignment.findMany.mockResolvedValue([{ outletId: 'other' }]);
+      await expect(service.getFenceDistance(user, { outletId: 'o1', ...FIX })).rejects.toThrow('This outlet is not within your team.');
+      expect(mockPrisma.visibilityCapture.create).not.toHaveBeenCalled();
+      expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
     });
   });
 });

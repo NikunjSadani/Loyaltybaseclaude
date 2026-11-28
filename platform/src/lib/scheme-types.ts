@@ -693,7 +693,8 @@ export function validateSchemeValues(
           const acc = (raw as { accuracy?: unknown }).accuracy;
           if (typeof acc === 'number' && acc > field.gpsMaxAccuracy) {
             errors.push(
-              `"${field.label}" location accuracy (±${Math.round(acc)}m) exceeds the ±${field.gpsMaxAccuracy}m limit — re-capture in the open.`,
+              // No ±accuracy figure for the rep (owner 2026-11-28 — it reads as the distance from the outlet).
+              `"${field.label}" location is not precise enough — re-capture in the open.`,
             );
           }
         }

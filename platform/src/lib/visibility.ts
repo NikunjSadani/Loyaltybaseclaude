@@ -261,6 +261,13 @@ export const visibilityApi = {
   getSalesCapturePhotos(captureId: string) {
     return api.get<SalesCapturePhotos>(`${BASE}/sales/captures/${encodeURIComponent(captureId)}/photos`);
   },
+  /**
+   * DISPLAY ONLY: the fence's own distance (metres) for one phone fix at this outlet + the radius it uses — the
+   * rep's "Distance from outlet" line. Both null when the fence does not apply (no outlet coordinates / fence off).
+   */
+  getFenceDistance(input: { outletId: string; lat: number; lng: number; accuracy?: number }) {
+    return api.post<{ distanceMeters: number | null; radiusMeters: number | null }>(`${BASE}/sales/fence-distance`, input);
+  },
   /** Submit a capture (window-key + geo-fence computed server-side). */
   submitCapture(input: SubmitCaptureInput) {
     return api.post<SubmitCaptureResult>(`${BASE}/capture`, input);
