@@ -248,6 +248,7 @@ export const VISIBILITY_REJECT_REASON_CODES = [
   'GEO_MISMATCH',
   'DUPLICATE_PHOTO',
   'INCORRECT_POSM',
+  'MOBILE_SCREEN_PHOTO',
   'OTHER',
 ] as const;
 export type VisibilityRejectReasonCode = (typeof VISIBILITY_REJECT_REASON_CODES)[number];
@@ -260,6 +261,7 @@ export const VISIBILITY_REJECT_REASON_LABELS: Record<VisibilityRejectReasonCode,
   GEO_MISMATCH: 'Location mismatch',
   DUPLICATE_PHOTO: 'Duplicate photo',
   INCORRECT_POSM: 'Incorrect POSM',
+  MOBILE_SCREEN_PHOTO: 'Photo of a mobile screen',
   OTHER: 'Other',
 };
 
