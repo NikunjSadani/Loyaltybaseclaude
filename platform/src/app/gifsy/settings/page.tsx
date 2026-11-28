@@ -40,8 +40,8 @@ export default function GifsySettingsPage() {
     flashSaved();
   };
 
-  // ── Owner-only gate (mirrors the sibling operator pages /gifsy/tds-statutory and
-  // /gifsy/notification-templates). The /gifsy shell already routes non-owners away, but the two
+  // ── Owner-only gate (mirrors the sibling operator page /gifsy/tds-statutory and the
+  // client-page notification-templates editor). The /gifsy shell already routes non-owners away, but the two
   // platform-global cards below WRITE GIFSY_ADMIN-only settings, so resolve the role client-side
   // with a ready gate and only load/edit them for a Gifsy Admin. ──
   const [role, setRole]   = useState<string | null>(null);

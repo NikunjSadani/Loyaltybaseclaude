@@ -208,7 +208,7 @@ Each module: **Purpose · Key screens/actions · Data · Reuse/New · Curation n
   can't be disabled in-app, points-earned, redemption status, **expiry reminders**); per-trigger channel
   config (Off/SMS/WhatsApp/Both/Push); **broadcasts** to segments (region / role / achievement band) with
   Excel audience + delivery report.
-- **Data + reuse:** reuses `notification_queue` + drainer, `/gifsy/notification-templates`, the WhatsApp
+- **Data + reuse:** reuses `notification_queue` + drainer, the per-client notification templates (Gifsy → Clients → <client> → Notifications), the WhatsApp
   broadcast console (`/admin/whatsapp-broadcasts`), and delivery-status reporting
   (`/admin/notification-delivery`). **Reuse as-is**, add the employee-rewards trigger set.
 - **Curation note:** the "Contest Alert cannot be disabled" requirement is a **trigger-level policy flag**

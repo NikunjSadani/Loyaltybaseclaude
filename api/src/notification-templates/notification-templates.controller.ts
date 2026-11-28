@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Put } from '@nestjs/common';
+import { Body, Controller, Get, Param, Put } from '@nestjs/common';
 import { CurrentUser, JwtPayload } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { NotificationTemplatesService } from './notification-templates.service';
@@ -35,6 +35,41 @@ export class NotificationTemplatesController {
   @Roles('GIFSY_ADMIN')
   async put(@CurrentUser() user: JwtPayload, @Body() dto: SetNotificationTemplatesDto) {
     const config = await this.svc.saveConfig(user, dto);
+    return { config, contracts: VARIABLE_CONTRACTS };
+  }
+}
+
+/**
+ * The SAME config, targeted at a client by slug — the Gifsy console's Clients → <slug> →
+ * Notifications editor (owner-approved move 2026-11-28; no assume step needed).
+ *
+ *   GET /v1/gifsy/clients/:slug/notification-templates → { config, contracts } for :slug
+ *   PUT /v1/gifsy/clients/:slug/notification-templates { masterSms, masterWhatsapp, events }
+ *
+ * OWNER-ONLY exactly like the assumed-tenant routes above: @Roles('GIFSY_ADMIN') with NO
+ * @RequirePermission (so a GIFSY_STAFF can never reach it), re-checked in the service, which also
+ * 404s an unknown slug. Same validation + upsert path (NotificationTemplatesService.saveConfig) and
+ * the same stored shape; the assumed-tenant routes above are unchanged.
+ */
+@Controller('gifsy/clients/:slug/notification-templates')
+export class GifsyClientNotificationTemplatesController {
+  constructor(private readonly svc: NotificationTemplatesService) {}
+
+  @Get()
+  @Roles('GIFSY_ADMIN')
+  async get(@CurrentUser() user: JwtPayload, @Param('slug') slug: string) {
+    const config = await this.svc.getConfigForClient(user, slug);
+    return { config, contracts: VARIABLE_CONTRACTS };
+  }
+
+  @Put()
+  @Roles('GIFSY_ADMIN')
+  async put(
+    @CurrentUser() user: JwtPayload,
+    @Param('slug') slug: string,
+    @Body() dto: SetNotificationTemplatesDto,
+  ) {
+    const config = await this.svc.saveConfigForClient(user, slug, dto);
     return { config, contracts: VARIABLE_CONTRACTS };
   }
 }

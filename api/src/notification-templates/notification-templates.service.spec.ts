@@ -3,7 +3,7 @@
 // Run: npx jest src/notification-templates/notification-templates.service.spec.ts
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { NotificationTemplatesService } from './notification-templates.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminCoreService } from '../admin-core/admin-core.service';
@@ -15,6 +15,7 @@ import {
 
 const mockPrisma = {
   programSetting: { findUnique: jest.fn() },
+  client: { findUnique: jest.fn() },
 };
 const mockAdminCore = { upsertSetting: jest.fn() };
 
@@ -248,6 +249,89 @@ describe('NotificationTemplatesService', () => {
       await service.saveConfig(owner, { masterSms: true, masterWhatsapp: false });
       const [, dto] = mockAdminCore.upsertSetting.mock.calls[0];
       expect(dto.value.events).toEqual({});
+    });
+  });
+
+  // ── Client-TARGETED (Gifsy console → Clients → <slug>) ──────────────────────
+  describe('getConfigForClient / saveConfigForClient — target by slug', () => {
+    const body = { masterSms: false, masterWhatsapp: true, events: { POINTS_CREDITED: { mode: 'WHATSAPP', whatsappTemplate: 'bajaj_loyalty_points' } } };
+    const existing = (ids: string[]) =>
+      mockPrisma.client.findUnique.mockImplementation(({ where }: { where: { id: string } }) =>
+        Promise.resolve(ids.includes(where.id) ? { id: where.id } : null));
+
+    it('GET reads the PATH slug, not the operator\'s assumed tenant (owner assumed into deoleo reads bajaj)', async () => {
+      existing(['deoleo', 'bajaj']);
+      mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+      const cfg = await service.getConfigForClient(owner, 'bajaj');
+      expect(mockPrisma.programSetting.findUnique).toHaveBeenCalledWith(expect.objectContaining({
+        where: { clientId_settingKey: { clientId: 'bajaj', settingKey: NOTIFICATION_TEMPLATES_SETTING_KEY } },
+      }));
+      // bajaj is not a WHATSAPP_KYC seed tenant → defaults differ from deoleo's (proves which tenant was read).
+      expect(cfg.events.KYC_SUBMITTED.whatsappTemplate).not.toBe('deoleo_kyc_submission');
+    });
+
+    it('PUT writes under the PATH slug with the operator sub kept for the audit; assumed tenant untouched', async () => {
+      existing(['deoleo', 'bajaj']);
+      mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+      await service.saveConfigForClient(owner, 'bajaj', body);
+      expect(mockAdminCore.upsertSetting).toHaveBeenCalledTimes(1);
+      const [passedUser, dto, opts] = mockAdminCore.upsertSetting.mock.calls[0];
+      expect(passedUser.clientId).toBe('bajaj');
+      expect(passedUser.sub).toBe('u1');
+      expect(owner.clientId).toBe('deoleo'); // caller payload not mutated
+      expect(dto.key).toBe(NOTIFICATION_TEMPLATES_SETTING_KEY);
+      expect(dto.value.events.POINTS_CREDITED).toEqual({ mode: 'WHATSAPP', whatsappTemplate: 'bajaj_loyalty_points', smsTemplateId: '' });
+      expect(opts).toEqual({ allowPlatformOnlyKey: true });
+    });
+
+    it('tenant isolation: a write to bajaj busts only bajaj\'s cache — deoleo keeps its cached config', async () => {
+      existing(['deoleo', 'bajaj']);
+      mockPrisma.programSetting.findUnique.mockResolvedValue(null);
+      const deoleoBefore = await service.getConfig('deoleo');
+      await service.saveConfigForClient(owner, 'bajaj', body);
+      mockPrisma.programSetting.findUnique.mockClear();
+      expect(await service.getConfig('deoleo')).toBe(deoleoBefore); // still cached, no re-read
+      expect(mockPrisma.programSetting.findUnique).not.toHaveBeenCalled();
+    });
+
+    it.each([['GIFSY_STAFF', staff], ['CLIENT_ADMIN', clientAdmin]])(
+      '%s is FORBIDDEN on read and write (no DB touch, no write)',
+      async (_label, who) => {
+        existing(['deoleo', 'bajaj']);
+        await expect(service.getConfigForClient(who, 'bajaj')).rejects.toBeInstanceOf(ForbiddenException);
+        await expect(service.saveConfigForClient(who, 'bajaj', body)).rejects.toBeInstanceOf(ForbiddenException);
+        // even targeting its OWN tenant
+        await expect(service.saveConfigForClient(who, 'deoleo', body)).rejects.toBeInstanceOf(ForbiddenException);
+        expect(mockPrisma.programSetting.findUnique).not.toHaveBeenCalled();
+        expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+      },
+    );
+
+    it('an unknown slug → 404 on read and write (never writes a row for a non-existent client)', async () => {
+      existing(['deoleo']);
+      await expect(service.getConfigForClient(owner, 'nope')).rejects.toBeInstanceOf(NotFoundException);
+      await expect(service.saveConfigForClient(owner, 'nope', body)).rejects.toBeInstanceOf(NotFoundException);
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('validation errors surface as 400 with the naming message (bad whatsappVariables)', async () => {
+      existing(['bajaj']);
+      const p = service.saveConfigForClient(owner, 'bajaj', {
+        ...body,
+        events: { POINTS_CREDITED: { mode: 'WHATSAPP', whatsappVariables: ['ownerName', 'utr'] } },
+      });
+      await expect(p).rejects.toBeInstanceOf(BadRequestException);
+      await expect(p).rejects.toThrow(/unknown variable "utr"/);
+      expect(mockAdminCore.upsertSetting).not.toHaveBeenCalled();
+    });
+
+    it('a stored invalid override is surfaced on the slug GET (whatsappVariablesError)', async () => {
+      existing(['bajaj']);
+      mockPrisma.programSetting.findUnique.mockResolvedValue({
+        settingValue: { masterSms: false, masterWhatsapp: true, events: { POINTS_CREDITED: { mode: 'WHATSAPP', whatsappVariables: ['ownerName', 'bogus'] } } },
+      });
+      const cfg = await service.getConfigForClient(owner, 'bajaj');
+      expect(cfg.events.POINTS_CREDITED.whatsappVariablesError).toMatch(/"bogus"/);
     });
   });
 

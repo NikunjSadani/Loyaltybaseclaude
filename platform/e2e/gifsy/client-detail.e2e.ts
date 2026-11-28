@@ -40,8 +40,9 @@ test.describe('@gifsy client detail (B3 / #49)', () => {
     await page.goto('/gifsy/clients/deoleo');
     await expect(page.getByRole('heading', { name: 'Deoleo India' })).toBeVisible();
 
-    // The "Notifications (MSG91)" section HEADER is fine — it's the actual key value that must be absent.
-    await expect(page.getByText('Notifications (MSG91)')).toBeVisible();
+    // The "Notifications" section HEADER (MSG91 sender IDs + templates) is fine — it's the actual key
+    // value that must be absent.
+    await expect(page.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
 
     // No raw secret in the rendered text the operator sees.
     const body = (await page.locator('body').innerText());

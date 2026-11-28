@@ -1,7 +1,10 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../prisma/prisma.module';
 import { AdminCoreModule } from '../admin-core/admin-core.module';
-import { NotificationTemplatesController } from './notification-templates.controller';
+import {
+  GifsyClientNotificationTemplatesController,
+  NotificationTemplatesController,
+} from './notification-templates.controller';
 import { NotificationTemplatesService } from './notification-templates.service';
 
 /**
@@ -14,7 +17,7 @@ import { NotificationTemplatesService } from './notification-templates.service';
  */
 @Module({
   imports: [PrismaModule, AdminCoreModule],
-  controllers: [NotificationTemplatesController],
+  controllers: [NotificationTemplatesController, GifsyClientNotificationTemplatesController],
   providers: [NotificationTemplatesService],
   exports: [NotificationTemplatesService],
 })

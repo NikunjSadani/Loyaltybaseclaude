@@ -1493,9 +1493,10 @@ describe('AdminCoreService', () => {
       // A GIFSY_STAFF with tenancy:write_finance could reach the generic PUT /v1/admin/settings.
       // Writing the notificationTemplates key raw (e.g. masterWhatsapp:false to dark a live tenant)
       // must be blocked here so ALL writes are forced through NotificationTemplatesService.saveConfig.
-      await expect(
-        service.upsertSetting(gifsy, { key: 'notificationTemplates', value: { masterWhatsapp: false } }),
-      ).rejects.toBeInstanceOf(ForbiddenException);
+      const p = service.upsertSetting(gifsy, { key: 'notificationTemplates', value: { masterWhatsapp: false } });
+      await expect(p).rejects.toBeInstanceOf(ForbiddenException);
+      // The refusal points to where the editor now lives (moved 2026-11-28).
+      await expect(p).rejects.toThrow('Gifsy → Clients → <client> → Notifications');
       expect(mockPrisma.programSetting.upsert).not.toHaveBeenCalled();
     });
 

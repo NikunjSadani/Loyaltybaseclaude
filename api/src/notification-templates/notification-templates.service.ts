@@ -20,7 +20,7 @@
  * wired to it yet, so today's live WhatsApp behaviour (the untouched WHATSAPP_KYC path) is
  * unchanged by this module.
  */
-import { BadRequestException, ForbiddenException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { AdminCoreService } from '../admin-core/admin-core.service';
 import { UpsertSettingDto } from '../admin-core/dto/settings.dto';
@@ -155,5 +155,42 @@ export class NotificationTemplatesService {
     this.invalidate(user.clientId);
 
     return this.getConfig(user.clientId);
+  }
+
+  // ── Client-TARGETED variants (Gifsy console → Clients → <slug> → Notifications) ──────────────
+  // The console edits the client being VIEWED, not the operator's assumed tenant, so these take the
+  // target slug (= clients.id) explicitly. Same owner-only posture (GIFSY_ADMIN only — a GIFSY_STAFF
+  // or any tenant role is refused, whatever its tenant), a 404 for an unknown client (never a write
+  // against a non-existent tenant), then the EXACT same read / validate / upsert path as above with
+  // the operator's identity re-pointed at the target tenant (sub kept for the audit) — the same
+  // targetedPayload pattern GifsyService uses for wallet-settings.
+
+  private assertOwner(user: JwtPayload): void {
+    if (user.role !== 'GIFSY_ADMIN') {
+      throw new ForbiddenException('Notification templates can only be configured by a Gifsy admin.');
+    }
+  }
+
+  private async assertClientExists(slug: string): Promise<void> {
+    const client = await this.prisma.client.findUnique({ where: { id: slug }, select: { id: true } });
+    if (!client) throw new NotFoundException(`Client "${slug}" not found.`);
+  }
+
+  /** GET /v1/gifsy/clients/:slug/notification-templates — the resolved config for :slug. */
+  async getConfigForClient(user: JwtPayload, slug: string): Promise<NotificationTemplatesConfig> {
+    this.assertOwner(user);
+    await this.assertClientExists(slug);
+    return this.getConfig(slug);
+  }
+
+  /** PUT /v1/gifsy/clients/:slug/notification-templates — validate + persist for :slug. */
+  async saveConfigForClient(
+    user: JwtPayload,
+    slug: string,
+    input: unknown,
+  ): Promise<NotificationTemplatesConfig> {
+    this.assertOwner(user);
+    await this.assertClientExists(slug);
+    return this.saveConfig({ ...user, clientId: slug }, input);
   }
 }
