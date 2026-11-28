@@ -18,7 +18,8 @@ import { useIsGifsyAdmin } from '@/lib/use-is-gifsy-admin';
 import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
 import { TicketRemarksEmailCard } from '@/components/operator/ticket-remarks-email-card';
 import { FundConsoleSection } from '@/components/operator/fund-console-section';
-import { NotificationTemplatesEditor } from '@/components/operator/notification-templates-editor';
+import { NotificationTemplatesEditor, UNSAVED_NOTIFICATIONS_MESSAGE } from '@/components/operator/notification-templates-editor';
+import { useUnsavedChangesGuard } from '@/lib/use-unsaved-changes-guard';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feature metadata — label + description for each toggle
@@ -210,8 +211,12 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
   const canManageHelpVideos = useCanManageHelpVideos();
   // The per-client Ticket remarks email is GIFSY_ADMIN-only (API-enforced) — owner-only card.
   const isGifsyAdmin = useIsGifsyAdmin();
-  // Unsaved edits in the Notification templates editor → "Unsaved changes" on the section header.
+  // Unsaved edits in the Notifications section (templates editor OR sender IDs) → "Unsaved changes"
+  // on the section header + ONE leave-page guard (unload, in-app links, Back).
   const [ntDirty, setNtDirty] = useState(false);
+  const [senderDirty, setSenderDirty] = useState(false);
+  const notificationsDirty = (isGifsyAdmin && ntDirty) || senderDirty;
+  useUnsavedChangesGuard(notificationsDirty, UNSAVED_NOTIFICATIONS_MESSAGE);
 
   // The console's OWN host decides whether a tenant link needs the `uat-` staging marker, so a
   // staging console links to the staging site (not prod, which 404s for a staging-only tenant).
@@ -550,7 +555,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         title="Notifications"
         id="notifications"
         keepMounted
-        badge={isGifsyAdmin && ntDirty ? (
+        badge={notificationsDirty ? (
           <span data-testid="notifications-unsaved" className="text-[11px] font-medium text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-full px-2 py-0.5">
             Unsaved changes
           </span>
@@ -559,7 +564,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         <div className="space-y-6">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-white/40 pt-2">Sender IDs (MSG91)</p>
-            <NotificationsSection config={config} onSave={saveNotifications} />
+            <NotificationsSection config={config} onSave={saveNotifications} onDirtyChange={setSenderDirty} />
           </div>
           {isGifsyAdmin && (
             <div className="border-t border-white/5 pt-4" data-testid="client-notification-templates">
@@ -1500,10 +1505,13 @@ function HierarchySection({ config }: { config: ClientConfig }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function NotificationsSection({
-  config, onSave,
+  config, onSave, onDirtyChange,
 }: {
   config: ClientConfig;
   onSave: (n: Pick<ClientConfig['notifications'], 'whatsappSenderId' | 'smsSenderId'>) => Promise<{ ok: boolean; error?: string }>;
+  /** true while the sender-ID edit form differs from the saved values (drives the section's
+   *  "Unsaved changes" marker + the leave-page guard). */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft]     = useState(config.notifications);
@@ -1512,6 +1520,15 @@ function NotificationsSection({
 
   // Re-sync the draft when the config changes underneath us (after a save merges).
   useEffect(() => { setDraft(config.notifications); }, [config.notifications]);
+
+  const dirty = editing && (
+    draft.whatsappSenderId !== config.notifications.whatsappSenderId ||
+    draft.smsSenderId !== config.notifications.smsSenderId
+  );
+  const onDirtyRef = useRef(onDirtyChange);
+  useEffect(() => { onDirtyRef.current = onDirtyChange; }, [onDirtyChange]);
+  useEffect(() => { onDirtyRef.current?.(dirty); }, [dirty]);
+  useEffect(() => () => { onDirtyRef.current?.(false); }, []);
 
   // Sender IDs only. The legacy `templateIds` are NOT sent: no sender reads them (verified
   // 2026-11-28 — only the Gifsy client detail/PATCH echo them), so they are read-only below and
