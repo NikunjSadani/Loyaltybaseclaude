@@ -53,6 +53,12 @@ import {
   KYC_SLA_MAX_HOURS,
 } from '../common/kyc-sla-stage';
 import { isGifsyOperator } from '../common/tenant-scope';
+import {
+  escapeLikePattern,
+  loginIdsOperatingMatchingSiblings,
+  ownOutletCodeSearchWhere,
+  resolveLoginOutletIds,
+} from './user-outlet-ids.helper';
 import { NOTIFICATION_TEMPLATES_SETTING_KEY } from '../notification-templates/notification-templates.config';
 import { TDS_IMPORTED_PAYOUTS_SETTING_KEY } from '../tds/tds.helpers';
 import {
@@ -352,6 +358,10 @@ export class AdminCoreService {
     if (user.role === 'GIFSY_STAFF') {
       where.role = { notIn: ['GIFSY_ADMIN', 'GIFSY_STAFF'] };
     }
+    const outletPrefix = q.search ? escapeLikePattern(q.search) : null;
+    const siblingLoginIds = outletPrefix
+      ? await loginIdsOperatingMatchingSiblings(this.prisma, user.clientId, outletPrefix)
+      : [];
     if (q.search) {
       where.OR = [
         { name: { contains: q.search, mode: 'insensitive' } },
@@ -363,6 +373,12 @@ export class AdminCoreService {
         // employeeCode now also returns that employee (intended); it never removes matches
         // and stays tenant-scoped by the outer where.clientId.
         { salesUser: { employeeCode: { contains: q.search, mode: 'insensitive' } } },
+        // Outlet/partner logins are also searchable by the client's OUTLET ID (Outlet.outletCode),
+        // exact or prefix, case-insensitive, LIKE wildcards escaped — over every outlet the login can
+        // OPERATE (own partner + login-less same-group same-phone siblings; see user-outlet-ids.helper).
+        // Never matches admin/MIS/sales rows. Tenant-pinned on top of the outer where.clientId.
+        ownOutletCodeSearchWhere(user.clientId, outletPrefix!),
+        ...(siblingLoginIds.length > 0 ? [{ id: { in: siblingLoginIds } }] : []),
       ];
     }
 
@@ -390,9 +406,18 @@ export class AdminCoreService {
       this.prisma.user.count({ where }),
     ]);
 
+    // Outlet ID column (additive fields — older clients ignore them). Batched for the whole page
+    // (never per row), tenant-pinned, operable-context rule (user-outlet-ids.helper): the login's own
+    // primary outlet code + how many MORE outlets it can operate ("+N"). Non-partner rows (admin /
+    // MIS / sales / vendor) and parent/soft-deleted partners get outletCode null + 0 additional.
+    const outletByUser = await resolveLoginOutletIds(this.prisma, user.clientId, users);
+
     const pages = Math.ceil(total / limit);
     return {
-      users,
+      users: users.map((u) => {
+        const o = outletByUser.get(u.id);
+        return { ...u, outletCode: o?.outletCode ?? null, additionalOutletCount: o?.additionalOutletCount ?? 0 };
+      }),
       pagination: {
         page,
         limit,

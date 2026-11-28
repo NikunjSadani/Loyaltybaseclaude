@@ -67,6 +67,34 @@ function roleBadge(role: string) {
   );
 }
 
+/**
+ * The Outlet ID column's "+N" (more outlets this login can operate). A real button so it is
+ * reachable by keyboard AND touch (a hover `title` alone never shows on a phone): tapping/pressing
+ * toggles the words "and N more outlets" inline. Screen readers always get the words, never "+N".
+ */
+function MoreOutlets({ count }: { count: number }) {
+  const [open, setOpen] = useState(false);
+  const words = `and ${count} more outlet${count === 1 ? '' : 's'}`;
+  return (
+    <button
+      type="button"
+      onClick={() => setOpen((v) => !v)}
+      aria-expanded={open}
+      title={words}
+      className="text-gray-400 hover:text-gray-600 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)]"
+    >
+      {open ? (
+        <span className="font-sans">{words}</span>
+      ) : (
+        <>
+          <span aria-hidden="true">+{count}</span>
+          <span className="sr-only">{words}</span>
+        </>
+      )}
+    </button>
+  );
+}
+
 // ── Create-User modal ───────────────────────────────────────────────────────────
 
 function CreateUserModal({
@@ -229,6 +257,9 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
   const [search,  setSearch]  = useState('');
+  // The search term the CURRENT rows were fetched for (the input runs ahead of the 250ms
+  // debounce) — so the no-match message never quotes a term that hasn't been searched yet.
+  const [resultsFor, setResultsFor] = useState('');
   const [page,    setPage]    = useState(1);
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -277,6 +308,7 @@ export default function AdminUsersPage() {
         if (json.success && json.data) {
           setUsers(json.data.users);
           setPagination(json.data.pagination ?? null);
+          setResultsFor(search.trim());
         } else {
           setError(json.error ?? 'Failed to load users');
         }
@@ -400,7 +432,8 @@ export default function AdminUsersPage() {
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-300" />
         <input
           type="text"
-          placeholder="Search by name, phone, or email…"
+          placeholder="Name, phone, email or outlet ID"
+          aria-label="Search users by name, phone, email or outlet ID"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full bg-white border border-gray-200 rounded-lg pl-9 pr-4 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-[var(--brand-primary)]"
@@ -433,14 +466,22 @@ export default function AdminUsersPage() {
         ) : users.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-12 text-center">
             <ShieldCheck className="w-6 h-6 text-gray-300" />
-            <p className="text-sm text-gray-500">No users yet.</p>
+            <p className="text-sm text-gray-500">
+              {resultsFor
+                ? `No user matches '${resultsFor}'. An outlet without a login won't appear here.`
+                : 'No users yet.'}
+            </p>
           </div>
         ) : (
+          // Horizontal scroll inside the card on narrow screens (the extra Outlet ID column must
+          // never push the page itself wider than the viewport).
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 bg-gray-50">
                 <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Name</th>
                 <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Phone</th>
+                <th className="text-left px-5 py-3 text-xs font-medium text-gray-500 whitespace-nowrap">Outlet ID</th>
                 <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Role</th>
                 <th className="text-left px-5 py-3 text-xs font-medium text-gray-500">Status</th>
                 <th className="text-right px-5 py-3 text-xs font-medium text-gray-500" />
@@ -456,6 +497,21 @@ export default function AdminUsersPage() {
                   </td>
                   <td className="px-5 py-3 text-gray-600 font-mono text-xs">
                     {isVacantPlaceholderPhone(u.phone) ? '—' : u.phone}
+                  </td>
+                  <td className="px-5 py-3 text-gray-600 font-mono text-xs whitespace-nowrap" data-testid={`outlet-id-${u.id}`}>
+                    {u.outletCode ? (
+                      <>
+                        {u.outletCode}
+                        {(u.additionalOutletCount ?? 0) > 0 && (
+                          <>
+                            {' '}
+                            <MoreOutlets count={u.additionalOutletCount ?? 0} />
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-gray-300">—</span>
+                    )}
                   </td>
                   <td className="px-5 py-3">{roleBadge(u.role)}</td>
                   <td className="px-5 py-3">
@@ -509,6 +565,7 @@ export default function AdminUsersPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

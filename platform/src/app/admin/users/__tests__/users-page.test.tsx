@@ -202,7 +202,9 @@ describe('Admin User Accounts page', () => {
     // u1 (self) row: no Deactivate button, a muted dash instead.
     const selfRow = (await screen.findByText('Priya Sharma')).closest('tr')!;
     expect(within(selfRow).queryByRole('button', { name: /deactivate/i })).not.toBeInTheDocument();
-    expect(await within(selfRow).findByText('—')).toBeInTheDocument();
+    // (Scoped to the actions cell — the Outlet ID column also shows "—" for an admin row.)
+    const actionsCell = selfRow.querySelector('td:last-child') as HTMLElement;
+    expect(await within(actionsCell).findByText('—')).toBeInTheDocument();
 
     // u2 (someone else, INACTIVE) row: the Reactivate button is still present.
     const otherRow = (await screen.findByText('Ravi Kumar')).closest('tr')!;
