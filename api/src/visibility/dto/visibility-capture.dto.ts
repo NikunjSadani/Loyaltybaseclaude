@@ -24,6 +24,7 @@ export const VISIBILITY_REJECT_REASON_CODES = [
   'GEO_MISMATCH',
   'DUPLICATE_PHOTO',
   'INCORRECT_POSM', // owner 2026-11-24 — the wrong POSM material is installed / photographed
+  'MOBILE_SCREEN_PHOTO', // owner 2026-11-28 — a photo of a phone screen showing an image, not the real POSM
   'OTHER',
 ] as const;
 export type VisibilityRejectReasonCode = (typeof VISIBILITY_REJECT_REASON_CODES)[number];

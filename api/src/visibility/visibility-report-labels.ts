@@ -59,6 +59,7 @@ export const VISIBILITY_REASON_LABELS: Record<string, string> = {
   GEO_MISMATCH: 'Location mismatch',
   DUPLICATE_PHOTO: 'Duplicate photo',
   INCORRECT_POSM: 'Incorrect POSM',
+  MOBILE_SCREEN_PHOTO: 'Photo of a mobile screen',
   OTHER: 'Other',
 };
 
