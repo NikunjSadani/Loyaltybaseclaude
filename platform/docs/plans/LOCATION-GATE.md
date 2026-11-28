@@ -1,11 +1,11 @@
 # Location gate + Location Report — design note
 
-**Status:** ✅ LIVE on prod `1fa2305c` (2026-11-19 night release; prod now `97332c95`). In the shipped prod code the flag
-`features.requireLocation` is default OFF. **Bajaj prod: ON since 2026-11-21** (owner, Gifsy console → Clients → Bajaj →
+**Status:** ✅ LIVE on prod `1fa2305c` (2026-11-19 night release; current prod: see `RESUME.md` §1). **DEFAULT ON for every tenant since
+`release/next2` (prod `13f5c555`, 2026-11-22)** — before that the flag `features.requireLocation` was default OFF. **Bajaj prod: ON since 2026-11-21** (owner, Gifsy console → Clients → Bajaj →
 **Behaviour flags** — not "Feature Flags"; verified read-only on `gifsy_prod`, probe job `bajaj-prod-vis-verify` exec
 `n9vdj`: `requireLocation` true, `outletMasterGeo` true). Deoleo prod: key **absent** (no `outletMasterGeo`).
 **Owner decision 2026-11-21 (⚠️ PLATFORM-WIDE, approved): DEFAULT ON for every tenant** incl. Deoleo and every new
-client — built on branch `feat/require-location-default` (in the next batch `release/next`; not yet deployed). ON unless
+client — branch `feat/require-location-default` (merged into `release/next`, shipped with `release/next2`). ON unless
 `features.requireLocation` is explicitly `false`; the Gifsy-console switch is only an **emergency off**. **Deoleo goes ON
 at that deploy with no data change — no Deoleo heads-up needed (owner 2026-11-21: reps already keep location on for KYC/visibility)** (their reps will need location allowed + a fix for
 KYC / visibility). The 200 m blocking is unaffected (it stays driven only by `outletMasterGeo` / the visibility

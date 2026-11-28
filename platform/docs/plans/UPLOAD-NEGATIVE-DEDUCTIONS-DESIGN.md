@@ -1,5 +1,6 @@
 # Credits upload — negative points become deductions (design note)
 
+> **Status: ✅ in prod** (in `fe7900af`, deployed 2026-11-26, at the latest) — current prod: see `RESUME.md` §1.
 > Owner decision 2026-11-25. Branch `feat/upload-negative-deductions` (from prod `main` `d1aeb786`).
 > **Deductions are TENANT-SCOPED** (one per-client setting, default OFF; ON for Bajaj only). **The "Before you confirm"
 > checks are for EVERY client, Deoleo included** (owner 2026-11-25, platform-wide approved): the upload preview call, the

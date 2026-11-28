@@ -3,9 +3,12 @@
 Single source of truth for every change **exclusive to, or driven by, the Bajaj tenant**
 (slug `bajaj`; staging host `uat-bajaj.gifsy.in`; prod hosts `bajajloyalty.gifsy.in` (primary) + `bajaj.gifsy.in`).
 Keep Deoleo + all other tenants byte-identical. Update this doc in the SAME pass as any
-Bajaj change. Last updated: 2026-11-21.
+Bajaj change. Last updated: 2026-11-27. **Current prod / staging SHAs: [`RESUME.md`](RESUME.md) §1** (not repeated here).
 
-> **📍 STATE 2026-11-21 (current).** Prod serves **`97332c95`** (`release/2026-11-21`, deployed + verified 2026-11-21; previous prod `4a48dc0d`, release 2026-11-20 night). Bajaj-visible: per-client
+> **📍 2026-11-27.** New for Bajaj on `main` / staging (prod deploy pending): the **Payout Tracker** daily report +
+> Mon–Sat email and the **per-tenant WhatsApp variable order** — §16. Go-live steps after the prod deploy: RESUME §1.
+>
+> **📍 STATE 2026-11-21 (historical).** Prod served **`97332c95`** (`release/2026-11-21`, deployed + verified 2026-11-21; previous prod `4a48dc0d`, release 2026-11-20 night). Bajaj-visible: per-client
 > **App name** "Bajaj Loyalty Club" set on prod by the owner and verified live (§15); Visibility Excel redesign +
 > client-admin download; capture-form GPS-pending fix; tickets assign/escalate (Bajaj prod "Ticket remarks email":
 > **still unset** 2026-11-21 — owner decision pending; per-client To + CC ships in the next release, see
@@ -17,7 +20,7 @@ Bajaj change. Last updated: 2026-11-21.
 > `wholesalerPayoutInclActivation` ON. Server-side location test on Bajaj staging passed 2026-11-21 (`LOCATION-GATE.md`).
 > **Owner decision 2026-11-21 (⚠️ platform-wide, approved):** `requireLocation` DEFAULT ON for every tenant incl. Deoleo
 > and new clients (branch `feat/require-location-default`, in the next batch `release/next`, not deployed) — no change
-> for Bajaj; see §14. Prod = `main` = **`97332c95`** (`release/2026-11-21`, deployed + verified 2026-11-21; stricter
+> for Bajaj; see §14. Prod was `main` = **`97332c95`** (`release/2026-11-21`, deployed + verified 2026-11-21; stricter
 > visibility capture rule — no capture for outlets not KYC-approved; visibility review-history backfill verified on prod:
 > 51,140 Bajaj captures with history, 51,123 imported ones labelled "Imported — old app approval", 0 admin names).
 > 2026-11-20 evening the Cloudflare Workers free-plan cap (Error 1027) took all tenants
@@ -356,7 +359,7 @@ and the Performance trend (`GET /partner/targets/trend`).
 - Sales history keeps programme outlets only, 4 months; import files 7 days — the deletion rules ship OFF
   (`SALES_RETENTION_V2`) and are switched on via `SALES-IMPORT-PIPELINE-PLAN.md` §17b. Decision log F15.
 
-## 14. Location gate — flag `requireLocation` (2026-11-18; LIVE on prod since `1fa2305c`; Bajaj prod ON since 2026-11-21; DEFAULT ON for every tenant from branch `feat/require-location-default`, in `release/next`, not yet deployed)
+## 14. Location gate — flag `requireLocation` (2026-11-18; LIVE on prod since `1fa2305c`; Bajaj prod ON since 2026-11-21; DEFAULT ON for every tenant since `release/next2`, prod 2026-11-22)
 - **Owner decision 2026-11-21 (⚠️ platform-wide, approved): DEFAULT ON for every client incl. Deoleo and every new
   client** — ON unless `features.requireLocation` is explicitly `false`. Gifsy console → Clients → tenant → **Behaviour
   flags** (not "Feature Flags") → "Require location for KYC and visibility capture" is now only the **emergency off**
@@ -381,3 +384,24 @@ and the Performance trend (`GET /partner/targets/trend`).
   propagate. Bajaj staging: "Bajaj Loyalty Club" since 2026-11-20 (`PATCH /v1/gifsy/clients/bajaj`). Deoleo: **no
   appName** (prod manifest "Deoleo" — current naming kept).
 - Note: phones that already installed the app may keep the old name until the app is reinstalled — TODO verify.
+
+## 16. Payout Tracker email + WhatsApp variable order (2026-11-27; LIVE on prod `44341503`)
+
+**Payout Tracker (tenant-scoped).** A daily outlet-level payout report in Bajaj's own format (Book4 outlet sheets
+retail / Ws + Book3 summary), e-mailed Mon–Sat 10:00 IST with the workbook attached and the summary tables in the body.
+Built from the points engine's read-only preview (month-to-date, provisional); only outlets whose KYC is currently
+approved; outlets with per-outlet rule errors are held back with a client note. Inert unless the tenant has a
+`payoutTracker` ProgramSetting — Deoleo has none. Owner decisions 2026-11-27: 10:00 IST Mon–Sat, `sendOnHolidays`
+true, 358 recipients all visible in To/CC (sent in messages of ≤ 50), KYC-approved outlets only, errored outlets held
+back, MTD provisional. Prod enable = the ProgramSetting write + Cloud Scheduler `payout-tracker-prod` (owner steps in
+RESUME §1). Full design, config, secrets, runbook and traps: **[`PAYOUT-TRACKER.md`](PAYOUT-TRACKER.md)**.
+Not started: the owner's formatting request (coloured header sections + conditional formatting on summary values).
+
+**Per-tenant WhatsApp variable order (⚠️ shared code, owner-approved in-session 2026-11-27; inert unless set).** The
+per-tenant notification-templates config takes an optional `whatsappVariables` per event — an ordered subset of that
+event's contract variables, validated on save (Gifsy console → **Notification templates**). Absent ⇒ the params every
+tenant sends today (Deoleo unchanged, pinned by specs). An invalid stored override blocks that WhatsApp send loudly
+(error log + FAILED receipt + red panel message), never a silent fallback. Bajaj set-up to do in the console after the
+prod deploy (owner): points credited → template `bajaj_loyalty_points` with variables
+[ownerName, pointsCredited, redeemableBalance, dateCredited]; payout credited → template `bajaj_payout_loyalty`.
+Open owner question: number formatting in WhatsApp (`12535` vs `12,535`).

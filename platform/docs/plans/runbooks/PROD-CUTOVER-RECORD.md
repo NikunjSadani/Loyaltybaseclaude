@@ -1,8 +1,8 @@
 # Production Cutover — Record (A-9)
 
 > ⚠️ **HISTORICAL as-run log — entries below STOP at cutover #6 (`c36f6c8`, 2026-07-06).** Later releases: the release
-> log in `../../DOCS-INDEX.md` + `../archive/RESUME-ARCHIVE-2026-11-15.md` (CUTOVER LEDGER #14–#52). **Current prod =
-> `2eb8271d` (2026-11-15) = `main` = `develop`.** The live release procedure (gates → backup → prepare main → owner
+> log in `../../DOCS-INDEX.md` + `../archive/RESUME-ARCHIVE-2026-11-15.md` (CUTOVER LEDGER #14–#52). **Current prod: see
+> `../RESUME.md` §1.** The live release procedure (gates → backup → prepare main → owner
 > dispatch → preflight → verify) is **`../RESUME.md` §6–§7**; this file keeps the preflight reference below.
 >
 > Executed 2026-06-20. This is the **as-run record** of the Deoleo production cutover. The cutover was
