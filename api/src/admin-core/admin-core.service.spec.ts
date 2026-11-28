@@ -42,6 +42,8 @@ const mockPrisma = {
   salesUserAssignment: { count: jest.fn() },
   salesHierarchyLevel: { findFirst: jest.fn(), findMany: jest.fn() },
   outlet: { findMany: jest.fn(), count: jest.fn() },
+  // User Accounts Outlet ID column / search (user-outlet-ids.helper).
+  channelPartner: { findMany: jest.fn() },
   kycSubmission: { count: jest.fn() },
   kycStatusHistory: { findMany: jest.fn() },
   programSetting: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), upsert: jest.fn() },
@@ -103,6 +105,9 @@ describe('AdminCoreService', () => {
   });
 
   describe('listUsers', () => {
+    // Default: no partner rows (individual tests queue their own with mockResolvedValueOnce).
+    beforeEach(() => { mockPrisma.channelPartner.findMany.mockReset().mockResolvedValue([]); });
+
     it('scopes the query to the caller clientId', async () => {
       mockPrisma.user.findMany.mockResolvedValue([]);
       mockPrisma.user.count.mockResolvedValue(0);
@@ -119,8 +124,162 @@ describe('AdminCoreService', () => {
       expect(where.clientId).toBe('deoleo');
       expect(where.role).toBe('SALES_SO');
       expect(where.status).toBe('ACTIVE');
-      // name / phone / email / salesUser.employeeCode
-      expect(where.OR).toHaveLength(4);
+      // name / phone / email / salesUser.employeeCode / channelPartner outlet code
+      expect(where.OR).toHaveLength(5);
+    });
+
+    it('OID: searching matches the login\'s own outlet ID (prefix, case-insensitive), live non-parent partner, tenant-pinned', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([]);
+      mockPrisma.user.count.mockResolvedValue(0);
+      await service.listUsers(gifsy, { search: 'bj100' });
+      const where = mockPrisma.user.findMany.mock.calls[0][0].where;
+      expect(where.clientId).toBe('deoleo');
+      expect(where.OR).toContainEqual({
+        channelPartner: {
+          clientId: 'deoleo',
+          deletedAt: null,
+          isParent: false,
+          outlets: {
+            some: { clientId: 'deoleo', deletedAt: null, outletCode: { startsWith: 'bj100', mode: 'insensitive' } },
+          },
+        },
+      });
+      // No sibling match → no extra id branch (5 branches exactly).
+      expect(where.OR).toHaveLength(5);
+      // The count uses the SAME where, so pagination totals agree with the rows.
+      expect(mockPrisma.user.count.mock.calls[0][0].where).toBe(where);
+      // The sibling pre-lookup is tenant-pinned, live, non-parent, login-less, ACTIVE outlets only.
+      expect(mockPrisma.channelPartner.findMany).toHaveBeenCalledTimes(1);
+      expect(mockPrisma.channelPartner.findMany.mock.calls[0][0].where).toEqual({
+        clientId: 'deoleo', deletedAt: null, isParent: false, userId: null, groupId: { not: null },
+        outlets: { some: { clientId: 'deoleo', isActive: true, deletedAt: null, outletCode: { startsWith: 'bj100', mode: 'insensitive' } } },
+      });
+    });
+
+    it('OID: escapes LIKE wildcards (% _ \\) in the outlet-ID prefix — Prisma 7.8 does not', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([]);
+      mockPrisma.user.count.mockResolvedValue(0);
+      await service.listUsers(clientAdmin, { search: 'BJ_1%\\' });
+      const where = mockPrisma.user.findMany.mock.calls[0][0].where;
+      const own = where.OR.find((b: { channelPartner?: unknown }) => b.channelPartner);
+      expect(own.channelPartner.outlets.some.outletCode.startsWith).toBe('BJ\\_1\\%\\\\');
+      expect(mockPrisma.channelPartner.findMany.mock.calls[0][0].where.outlets.some.outletCode.startsWith).toBe('BJ\\_1\\%\\\\');
+      // The name/phone/email branches keep their existing (unescaped `contains`) behaviour.
+      expect(where.OR[0]).toEqual({ name: { contains: 'BJ_1%\\', mode: 'insensitive' } });
+    });
+
+    it('OID: a grouped login is found by a login-less same-phone SIBLING\'s outlet ID (operable rule)', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([]);
+      mockPrisma.user.count.mockResolvedValue(0);
+      mockPrisma.channelPartner.findMany
+        // 1) siblings whose active outlet matches
+        .mockResolvedValueOnce([
+          // Raw-string endsWith, exactly like the helper's Prisma `phone: { endsWith: last10 }`.
+          { groupId: 'g1', phone: '+919830011252' },
+          { groupId: 'g2', phone: '9999999999' },
+        ])
+        // 2) logins in those groups
+        .mockResolvedValueOnce([
+          { userId: 'login-g1', groupId: 'g1', user: { phone: '9830011252' } },   // same last-10 → operates it
+          { userId: 'other-g1', groupId: 'g1', user: { phone: '9000000000' } },   // different phone → not
+          { userId: 'login-g2', groupId: 'g2', user: { phone: '8888888888' } },   // different phone → not
+        ]);
+      await service.listUsers(clientAdmin, { search: 'SIB' });
+      const loginsQuery = mockPrisma.channelPartner.findMany.mock.calls[1][0];
+      expect(loginsQuery.where).toEqual({
+        clientId: 'deoleo', deletedAt: null, isParent: false, userId: { not: null }, groupId: { in: ['g1', 'g2'] },
+      });
+      const where = mockPrisma.user.findMany.mock.calls[0][0].where;
+      expect(where.OR).toHaveLength(6);
+      expect(where.OR).toContainEqual({ id: { in: ['login-g1'] } });
+      expect(where.clientId).toBe('deoleo');
+    });
+
+    it('OID: maps the own primary outlet code + "+N" (own extras + operable siblings), batched, tenant-scoped', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([
+        { id: 'admin', name: 'A', phone: '9000000001', email: null, role: 'CLIENT_ADMIN', status: 'ACTIVE', salesUser: null },
+        { id: 'sss', name: 'S', phone: '9000000002', email: null, role: 'SSS', status: 'ACTIVE', salesUser: null },
+        { id: 'multi', name: 'M', phone: '9000000003', email: null, role: 'WHOLESALER', status: 'ACTIVE', salesUser: null },
+        { id: 'grouped', name: 'G', phone: '9830011252', email: null, role: 'SSS', status: 'ACTIVE', salesUser: null },
+        { id: 'nooutlet', name: 'N', phone: '9000000004', email: null, role: 'SSS', status: 'ACTIVE', salesUser: null },
+      ]);
+      mockPrisma.user.count.mockResolvedValue(5);
+      mockPrisma.channelPartner.findMany
+        // own partners (outlets already primary-first — the DB applies the asserted orderBy)
+        .mockResolvedValueOnce([
+          { userId: 'sss', groupId: null, outlets: [{ outletCode: 'BJ10023' }] },
+          { userId: 'multi', groupId: null, outlets: [{ outletCode: 'BJ20001' }, { outletCode: 'BJ20002' }, { outletCode: 'BJ20003' }] },
+          { userId: 'grouped', groupId: 'g1', outlets: [{ outletCode: 'BJ30001' }] },
+          { userId: 'nooutlet', groupId: null, outlets: [] },
+        ])
+        // login-less siblings of g1
+        .mockResolvedValueOnce([
+          { groupId: 'g1', phone: '919830011252', _count: { outlets: 1 } },  // same phone → operable
+          { groupId: 'g1', phone: '9830011252', _count: { outlets: 2 } },    // same phone → operable
+          { groupId: 'g1', phone: '9111111111', _count: { outlets: 5 } },    // other phone → NOT operable
+          { groupId: 'g1', phone: '9830011252', _count: { outlets: 0 } },    // no active outlet → adds 0
+        ]);
+
+      const res = await service.listUsers(clientAdmin, {});
+
+      expect(mockPrisma.channelPartner.findMany).toHaveBeenCalledTimes(2);
+      const ownArgs = mockPrisma.channelPartner.findMany.mock.calls[0][0];
+      expect(ownArgs.where).toEqual({
+        clientId: 'deoleo', deletedAt: null, isParent: false,
+        userId: { in: ['admin', 'sss', 'multi', 'grouped', 'nooutlet'] },
+      });
+      expect(ownArgs.select.outlets).toEqual({
+        where: { clientId: 'deoleo', deletedAt: null },
+        select: { outletCode: true }, // only the client's outlet code — never the row id / CP- partnerCode
+        orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+      });
+      const sibArgs = mockPrisma.channelPartner.findMany.mock.calls[1][0];
+      expect(sibArgs.where).toEqual({ clientId: 'deoleo', deletedAt: null, isParent: false, userId: null, groupId: { in: ['g1'] } });
+      expect(sibArgs.select._count).toEqual({ select: { outlets: { where: { clientId: 'deoleo', isActive: true, deletedAt: null } } } });
+
+      const byId = Object.fromEntries(res.users.map((u) => [u.id, u]));
+      expect(byId.admin).toMatchObject({ outletCode: null, additionalOutletCount: 0 });
+      expect(byId.sss).toMatchObject({ outletCode: 'BJ10023', additionalOutletCount: 0 });
+      expect(byId.multi).toMatchObject({ outletCode: 'BJ20001', additionalOutletCount: 2 });
+      expect(byId.grouped).toMatchObject({ outletCode: 'BJ30001', additionalOutletCount: 3 });
+      expect(byId.nooutlet).toMatchObject({ outletCode: null, additionalOutletCount: 0 });
+      // Page-size cap unchanged (default 20).
+      expect(mockPrisma.user.findMany.mock.calls[0][0].take).toBe(20);
+    });
+
+    it('OID: no grouped login on the page → only ONE lookup; empty page → none', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([
+        { id: 'p1', name: 'P', phone: '9000000005', email: null, role: 'SSS', status: 'ACTIVE', salesUser: null },
+      ]);
+      mockPrisma.user.count.mockResolvedValue(1);
+      mockPrisma.channelPartner.findMany.mockResolvedValueOnce([{ userId: 'p1', groupId: null, outlets: [{ outletCode: 'X1' }] }]);
+      await service.listUsers(clientAdmin, {});
+      expect(mockPrisma.channelPartner.findMany).toHaveBeenCalledTimes(1);
+
+      jest.clearAllMocks();
+      mockPrisma.channelPartner.findMany.mockResolvedValue([]);
+      mockPrisma.user.findMany.mockResolvedValue([]);
+      mockPrisma.user.count.mockResolvedValue(0);
+      await service.listUsers(clientAdmin, {});
+      expect(mockPrisma.channelPartner.findMany).not.toHaveBeenCalled();
+    });
+
+    it('OID: an assumed GIFSY operator\'s outlet lookups are pinned to the assumed tenant', async () => {
+      const assumedBajaj: JwtPayload = { ...gifsy, clientId: 'bajaj' };
+      mockPrisma.user.findMany.mockResolvedValue([
+        { id: 'p1', name: 'P', phone: '9830011252', email: null, role: 'SSS', status: 'ACTIVE', salesUser: null },
+      ]);
+      mockPrisma.user.count.mockResolvedValue(1);
+      mockPrisma.channelPartner.findMany
+        .mockResolvedValueOnce([{ userId: 'p1', groupId: 'g1', outlets: [{ outletCode: 'B1' }] }])
+        .mockResolvedValueOnce([]);
+      await service.listUsers(assumedBajaj, {});
+      expect(mockPrisma.user.findMany.mock.calls[0][0].where.clientId).toBe('bajaj');
+      for (const [args] of mockPrisma.channelPartner.findMany.mock.calls) {
+        expect(args.where.clientId).toBe('bajaj');
+      }
+      expect(mockPrisma.channelPartner.findMany.mock.calls[0][0].select.outlets.where.clientId).toBe('bajaj');
+      expect(mockPrisma.channelPartner.findMany.mock.calls[1][0].select._count.select.outlets.where.clientId).toBe('bajaj');
     });
 
     it('makes employees searchable by their hierarchy employeeCode', async () => {
@@ -148,7 +307,8 @@ describe('AdminCoreService', () => {
       const select = mockPrisma.user.findMany.mock.calls[0][0].select;
       expect(select.salesUser.select.employeeCode).toBe(true);
       // And the matching employee is returned to the caller.
-      expect(res.users).toEqual([emp]);
+      // (+ the additive Outlet ID fields, blank for an employee — no linked ChannelPartner).
+      expect(res.users).toEqual([{ ...emp, outletCode: null, additionalOutletCount: 0 }]);
     });
 
     it('P5-F2: a GIFSY_STAFF caller cannot enumerate operator accounts (excludes GIFSY_ADMIN/GIFSY_STAFF)', async () => {

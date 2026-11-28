@@ -26,6 +26,11 @@ export interface AdminUser {
     hierarchyLevelId: string | null;
     reportingToId: string | null;
   } | null;
+  // Outlet/partner logins only (GET /admin/users list): the client's outlet code of the
+  // PRIMARY outlet, plus how many further outlets this login owns (shown as " +N"). Null/0
+  // for admin / MIS / sales rows. Optional — absent on older API responses and other sources.
+  outletCode?: string | null;
+  additionalOutletCount?: number;
 }
 
 /** Dropdown sources for the employee edit form (GET /api/admin/sales-users/options). */
