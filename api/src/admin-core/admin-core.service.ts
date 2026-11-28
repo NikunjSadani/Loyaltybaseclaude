@@ -1604,7 +1604,7 @@ export class AdminCoreService {
     // guarantee. Mirrors the tdsStatutory block above exactly.
     if (dto.key === NOTIFICATION_TEMPLATES_SETTING_KEY && !opts?.allowPlatformOnlyKey) {
       throw new ForbiddenException(
-        'Notification templates can only be changed via the dedicated Notification Templates screen.',
+        'Notification templates can only be changed in Gifsy → Clients → <client> → Notifications.',
       );
     }
 

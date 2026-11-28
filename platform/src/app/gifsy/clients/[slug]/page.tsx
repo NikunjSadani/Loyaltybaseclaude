@@ -18,6 +18,7 @@ import { useIsGifsyAdmin } from '@/lib/use-is-gifsy-admin';
 import { BehaviourFlagConfirm } from '@/components/operator/behaviour-flag-confirm';
 import { TicketRemarksEmailCard } from '@/components/operator/ticket-remarks-email-card';
 import { FundConsoleSection } from '@/components/operator/fund-console-section';
+import { NotificationTemplatesEditor } from '@/components/operator/notification-templates-editor';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Feature metadata — label + description for each toggle
@@ -209,6 +210,8 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
   const canManageHelpVideos = useCanManageHelpVideos();
   // The per-client Ticket remarks email is GIFSY_ADMIN-only (API-enforced) — owner-only card.
   const isGifsyAdmin = useIsGifsyAdmin();
+  // Unsaved edits in the Notification templates editor → "Unsaved changes" on the section header.
+  const [ntDirty, setNtDirty] = useState(false);
 
   // The console's OWN host decides whether a tenant link needs the `uat-` staging marker, so a
   // staging console links to the staging site (not prod, which 404s for a staging-only tenant).
@@ -334,12 +337,12 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
   }, [config.slug, flashSaved]);
 
   /**
-   * REAL persistence for notifications (sender IDs + WhatsApp/SMS template names).
-   * Deep-merged server-side into the notifications blob; msg91AuthKey is untouched
-   * (it is never sent to the browser and never written here).
+   * REAL persistence for the MSG91 sender IDs. Deep-merged server-side into the notifications
+   * blob, so the legacy templateIds (read-only, unused by any sender) and msg91AuthKey (never sent
+   * to the browser) are left untouched.
    */
   const saveNotifications = useCallback(async (
-    n: Pick<ClientConfig['notifications'], 'whatsappSenderId' | 'smsSenderId' | 'templateIds'>,
+    n: Pick<ClientConfig['notifications'], 'whatsappSenderId' | 'smsSenderId'>,
   ): Promise<{ ok: boolean; error?: string }> => {
     try {
       const res = await fetch(`/api/gifsy/clients/${config.slug}`, {
@@ -539,8 +542,32 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
         <HierarchySection config={config} />
       </Section>
 
-      <Section icon={Bell} title="Notifications (MSG91)">
-        <NotificationsSection config={config} onSave={saveNotifications} />
+      {/* Notifications — ONE area per client: MSG91 sender IDs + (owner only) the per-trigger
+          notification templates for THIS client (moved here from /gifsy/notification-templates,
+          2026-11-28; edits :slug directly, no assume step). Deep link: /gifsy/clients/<slug>#notifications. */}
+      <Section
+        icon={Bell}
+        title="Notifications"
+        id="notifications"
+        keepMounted
+        badge={isGifsyAdmin && ntDirty ? (
+          <span data-testid="notifications-unsaved" className="text-[11px] font-medium text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-full px-2 py-0.5">
+            Unsaved changes
+          </span>
+        ) : null}
+      >
+        <div className="space-y-6">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-white/40 pt-2">Sender IDs (MSG91)</p>
+            <NotificationsSection config={config} onSave={saveNotifications} />
+          </div>
+          {isGifsyAdmin && (
+            <div className="border-t border-white/5 pt-4" data-testid="client-notification-templates">
+              <p className="text-xs font-semibold uppercase tracking-wide text-white/40 mb-3">Notification templates</p>
+              <NotificationTemplatesEditor slug={config.slug} onDirtyChange={setNtDirty} />
+            </div>
+          )}
+        </div>
       </Section>
 
       {/* Invoicing — READ-ONLY (platform-fixed self-bill identity, no per-tenant store) */}
@@ -571,7 +598,7 @@ function ClientConfigEditor({ initialConfig }: { initialConfig: ClientConfig }) 
 // ─────────────────────────────────────────────────────────────────────────────
 
 function Section({
-  icon: Icon, title, children, defaultOpen = false, id,
+  icon: Icon, title, children, defaultOpen = false, id, keepMounted = false, badge,
 }: {
   icon: React.ElementType;
   title: string;
@@ -579,9 +606,16 @@ function Section({
   defaultOpen?: boolean;
   /** Anchor id — a URL hash matching it (#id) opens the section and scrolls to it. */
   id?: string;
+  /** Once first opened, keep the children MOUNTED (hidden) when collapsed, so unsaved edits inside
+   *  survive a collapse. Still lazy: nothing mounts (or fetches) until the first open. */
+  keepMounted?: boolean;
+  /** Optional marker shown next to the title (e.g. "Unsaved changes"). */
+  badge?: React.ReactNode;
 }) {
   const hashHit = () => !!id && typeof window !== 'undefined' && window.location.hash === `#${id}`;
   const [open, setOpen] = useState(() => defaultOpen || hashHit());
+  const [everOpened, setEverOpened] = useState(open);
+  useEffect(() => { if (open) setEverOpened(true); }, [open]);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!hashHit()) return;
@@ -594,18 +628,20 @@ function Section({
     <div id={id} ref={ref} className="border border-white/10 rounded-xl overflow-hidden">
       <button
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
         className="w-full flex items-center justify-between px-5 py-4 hover:bg-white/5 transition-colors"
       >
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2.5 flex-wrap">
           <Icon className="w-4 h-4 text-white/50" />
           <span className="text-sm font-semibold text-white">{title}</span>
+          {badge}
         </div>
         {open
           ? <ChevronUp className="w-4 h-4 text-white/40" />
           : <ChevronDown className="w-4 h-4 text-white/40" />}
       </button>
-      {open && (
-        <div className="px-5 pb-5 pt-1 border-t border-white/5">
+      {(open || (keepMounted && everOpened)) && (
+        <div className="px-5 pb-5 pt-1 border-t border-white/5" hidden={!open}>
           {children}
         </div>
       )}
@@ -1467,7 +1503,7 @@ function NotificationsSection({
   config, onSave,
 }: {
   config: ClientConfig;
-  onSave: (n: Pick<ClientConfig['notifications'], 'whatsappSenderId' | 'smsSenderId' | 'templateIds'>) => Promise<{ ok: boolean; error?: string }>;
+  onSave: (n: Pick<ClientConfig['notifications'], 'whatsappSenderId' | 'smsSenderId'>) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft]     = useState(config.notifications);
@@ -1477,19 +1513,35 @@ function NotificationsSection({
   // Re-sync the draft when the config changes underneath us (after a save merges).
   useEffect(() => { setDraft(config.notifications); }, [config.notifications]);
 
+  // Sender IDs only. The legacy `templateIds` are NOT sent: no sender reads them (verified
+  // 2026-11-28 — only the Gifsy client detail/PATCH echo them), so they are read-only below and
+  // the server's deep-merge leaves the stored values untouched when the key is omitted.
   const save = async () => {
     setSaving(true);
     setError(null);
     const res = await onSave({
       whatsappSenderId: draft.whatsappSenderId,
       smsSenderId:      draft.smsSenderId,
-      templateIds:      draft.templateIds,
     });
     setSaving(false);
     if (res.ok) setEditing(false);
     else setError(res.error ?? 'Save failed');
   };
   const cancel = () => { setDraft(config.notifications); setError(null); setEditing(false); };
+
+  const legacyTemplateIds = (
+    <div data-testid="legacy-template-ids" className="space-y-2">
+      <p className="text-xs font-medium text-white/50 pt-1">Template IDs (legacy)</p>
+      <p className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+        Legacy — not used for sending. Use Notification templates below.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        {(Object.entries(config.notifications.templateIds) as [string, string][]).map(([k, v]) => (
+          <InfoRow key={k} label={camelToLabel(k)} value={v} mono />
+        ))}
+      </div>
+    </div>
+  );
 
   if (!editing) {
     return (
@@ -1504,13 +1556,7 @@ function NotificationsSection({
             <Pencil className="w-3.5 h-3.5" />Edit
           </button>
         </div>
-
-        <p className="text-xs font-medium text-white/50 pt-1">Template IDs</p>
-        <div className="grid grid-cols-2 gap-2">
-          {(Object.entries(config.notifications.templateIds) as [string, string][]).map(([k, v]) => (
-            <InfoRow key={k} label={camelToLabel(k)} value={v} mono />
-          ))}
-        </div>
+        {legacyTemplateIds}
       </div>
     );
   }
@@ -1531,18 +1577,7 @@ function NotificationsSection({
         </Field>
       </div>
 
-      <p className="text-xs font-medium text-white/50">Template IDs / names</p>
-      <div className="grid grid-cols-2 gap-3">
-        {(Object.keys(config.notifications.templateIds) as (keyof typeof config.notifications.templateIds)[]).map((k) => (
-          <Field key={k} label={camelToLabel(k)}>
-            <input
-              value={draft.templateIds[k]}
-              onChange={(e) => setDraft((p) => ({ ...p, templateIds: { ...p.templateIds, [k]: e.target.value } }))}
-              className={INPUT_CLS + ' font-mono text-xs'}
-            />
-          </Field>
-        ))}
-      </div>
+      {legacyTemplateIds}
       {error && <p className="text-xs text-red-400">{error}</p>}
       <EditActions onSave={save} onCancel={cancel} saving={saving} />
     </div>

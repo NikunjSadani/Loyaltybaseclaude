@@ -4,7 +4,14 @@
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { Reflector } from '@nestjs/core';
-import { NotificationTemplatesController } from './notification-templates.controller';
+import { ExecutionContext, ForbiddenException } from '@nestjs/common';
+import { PATH_METADATA } from '@nestjs/common/constants';
+import {
+  GifsyClientNotificationTemplatesController,
+  NotificationTemplatesController,
+} from './notification-templates.controller';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { PERMISSION_KEY } from '../common/decorators/require-permission.decorator';
 import { NotificationTemplatesService } from './notification-templates.service';
 import { ROLES_KEY } from '../common/decorators/roles.decorator';
 import { EVENT_KEYS, VARIABLE_CONTRACTS } from './notification-templates.config';
@@ -64,5 +71,73 @@ describe('NotificationTemplatesController', () => {
     const putRoles = reflector.get<string[]>(ROLES_KEY, NotificationTemplatesController.prototype.put);
     expect(getRoles).toEqual(['GIFSY_ADMIN']);
     expect(putRoles).toEqual(['GIFSY_ADMIN']);
+  });
+});
+
+// ── Client-targeted routes: /v1/gifsy/clients/:slug/notification-templates ──────────────────────
+describe('GifsyClientNotificationTemplatesController', () => {
+  let controller: GifsyClientNotificationTemplatesController;
+  const svc = { getConfigForClient: jest.fn(), saveConfigForClient: jest.fn() };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    const module: TestingModule = await Test.createTestingModule({
+      controllers: [GifsyClientNotificationTemplatesController],
+      providers: [{ provide: NotificationTemplatesService, useValue: svc }],
+    }).compile();
+    controller = module.get(GifsyClientNotificationTemplatesController);
+  });
+
+  it('is mounted at gifsy/clients/:slug/notification-templates', () => {
+    expect(Reflect.getMetadata(PATH_METADATA, GifsyClientNotificationTemplatesController)).toBe(
+      'gifsy/clients/:slug/notification-templates',
+    );
+  });
+
+  it('GET targets the PATH slug (not the assumed tenant) and returns { config, contracts }', async () => {
+    const cfg = { masterSms: false, masterWhatsapp: true, events: {} } as never;
+    svc.getConfigForClient.mockResolvedValue(cfg);
+    // owner is assumed into deoleo, but views bajaj's page → bajaj is read.
+    const res = await controller.get(owner, 'bajaj');
+    expect(svc.getConfigForClient).toHaveBeenCalledWith(owner, 'bajaj');
+    expect(res.config).toBe(cfg);
+    expect(res.contracts).toBe(VARIABLE_CONTRACTS);
+  });
+
+  it('PUT delegates to saveConfigForClient(user, slug, dto)', async () => {
+    const cfg = { masterSms: true, masterWhatsapp: true, events: {} } as never;
+    svc.saveConfigForClient.mockResolvedValue(cfg);
+    const dto = { masterSms: true, masterWhatsapp: true } as never;
+    const res = await controller.put(owner, 'bajaj', dto);
+    expect(svc.saveConfigForClient).toHaveBeenCalledWith(owner, 'bajaj', dto);
+    expect(res).toEqual({ config: cfg, contracts: VARIABLE_CONTRACTS });
+  });
+
+  it('both routes are @Roles(GIFSY_ADMIN) with NO @RequirePermission (staff can never defer past it)', () => {
+    const reflector = new Reflector();
+    for (const h of [GifsyClientNotificationTemplatesController.prototype.get, GifsyClientNotificationTemplatesController.prototype.put]) {
+      expect(reflector.get<string[]>(ROLES_KEY, h)).toEqual(['GIFSY_ADMIN']);
+      expect(reflector.get(PERMISSION_KEY, h)).toBeUndefined();
+    }
+  });
+
+  describe('real RolesGuard on the new routes', () => {
+    const guard = new RolesGuard(new Reflector());
+    const ctx = (role: string, handler: (...a: never[]) => unknown) =>
+      ({
+        getHandler: () => handler,
+        getClass: () => GifsyClientNotificationTemplatesController,
+        switchToHttp: () => ({ getRequest: () => ({ user: { sub: 'x', role, clientId: 'bajaj' } }) }),
+      }) as unknown as ExecutionContext;
+
+    it.each(['GIFSY_STAFF', 'CLIENT_ADMIN'])('%s gets 403 on GET and PUT (even for its own clientId)', (role) => {
+      for (const h of [GifsyClientNotificationTemplatesController.prototype.get, GifsyClientNotificationTemplatesController.prototype.put]) {
+        expect(() => guard.canActivate(ctx(role, h))).toThrow(ForbiddenException);
+      }
+    });
+
+    it('GIFSY_ADMIN passes', () => {
+      expect(guard.canActivate(ctx('GIFSY_ADMIN', GifsyClientNotificationTemplatesController.prototype.put))).toBe(true);
+    });
   });
 });
