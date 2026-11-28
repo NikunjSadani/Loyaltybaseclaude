@@ -244,7 +244,7 @@ describe('writeTrackerWorkbook', () => {
       expect(ws.getCell(1, RETAIL_COLUMNS.length + 1).value).toBeNull();
       expect(ws.getCell(1, 1).font?.bold).toBe(true);
       expect((ws.getCell(1, 1).fill as ExcelJS.FillPattern).fgColor?.argb).toBe(`FF${SECTION_FILL.outlet}`); // Zone
-      expect(ws.views[0]).toMatchObject({ state: 'frozen', ySplit: 1 });
+      expect(ws.views[0]).toMatchObject({ state: 'frozen', ySplit: 1, xSplit: 0 });
       expect(ws.autoFilter).toBeTruthy();
       const widths = Array.from({ length: RETAIL_COLUMNS.length }, (_, i) => ws.getColumn(i + 1).width);
       // exceljs' reader collapses equal-width adjacent <col> ranges, so a few read back undefined — check the rest.
@@ -302,7 +302,7 @@ describe('writeTrackerWorkbook', () => {
     it('header = wsColumns(quarterLabel) exactly, frozen + filtered', () => {
       expect(rowValues(ws, 1, headers.length)).toEqual(headers);
       expect(headers).toContain('Consistency Bonus (Oct–Dec 2026)');
-      expect(ws.views[0]).toMatchObject({ state: 'frozen', ySplit: 1 });
+      expect(ws.views[0]).toMatchObject({ state: 'frozen', ySplit: 1, xSplit: 0 });
       expect(ws.autoFilter).toBeTruthy();
     });
 

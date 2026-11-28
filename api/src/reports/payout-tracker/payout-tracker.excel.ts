@@ -153,9 +153,9 @@ function writeDataSheet(
   formatOf: (h: string) => string | null,
   sectionOf: (h: string) => Section = outletSheetSection,
 ): ExcelJS.Worksheet {
-  // Freeze the header row AND the columns up to Customer Name, so the outlet stays visible while scrolling right.
-  const nameCol = headers.indexOf('Customer Name');
-  const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1, xSplit: nameCol >= 0 ? nameCol + 1 : 0 }] });
+  // Freeze ONLY the header row. Owner 2026-11-28: no frozen columns — freezing up to Customer Name locked too many
+  // columns and made the sheets hard to navigate.
+  const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1, xSplit: 0 }] });
   const widths = headers.map((h) => h.length);
   const header = ws.getRow(1);
   headers.forEach((h, i) => {
