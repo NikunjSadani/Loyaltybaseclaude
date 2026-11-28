@@ -5,11 +5,24 @@ import {
   NO_DATA_TEXT,
   formatIst,
   notBillingHeaders,
+  colLetter,
   provisionalLine,
+  ragFormula,
   rlpHeaders,
   writeTrackerWorkbook,
   type TrackerWorkbookInput,
 } from './payout-tracker.excel';
+import {
+  BAND_STYLE,
+  COLOUR_KEY_INTRO,
+  HEADER_TEXT,
+  outletSheetSection,
+  SECTION_FILL,
+  summarySection,
+  VALUE_RULES,
+  type RagRule,
+  type Section,
+} from './payout-tracker.format';
 import {
   RETAIL_COLUMNS,
   wsColumns,
@@ -158,7 +171,8 @@ describe('writeTrackerWorkbook', () => {
         const h = weighted ? t + 2 : t + 1;
         expect(rowValues(ws, h, headers.length)).toEqual([...headers]);
         expect(ws.getCell(h, 2).font?.bold).toBe(true);
-        expect((ws.getCell(h, 2).fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFE7ECF3');
+        expect((ws.getCell(h, 2).fill as ExcelJS.FillPattern).fgColor?.argb).toBe(`FF${SECTION_FILL.outlet}`); // Outlet Count = outlet section
+        expect((ws.getCell(h, 1).fill as ExcelJS.FillPattern).fgColor?.argb).toBe(`FF${SECTION_FILL.hierarchy}`);
         expect(ws.getCell(h, 2).border?.top?.style).toBe('thin');
         if (weighted) {
           const w = t + 1;
@@ -195,7 +209,9 @@ describe('writeTrackerWorkbook', () => {
       expect(ws.getCell(north, 2).value).toBe(100);
       expect(ws.getCell(north, 2).numFmt).toBe('0');
       expect(ws.getCell(north, 4).value).toBe(0.4);
-      expect(ws.getCell(north, 4).numFmt).toBe('0%');
+      expect(ws.getCell(north, 4).numFmt).toBe(FMT.PCT1); // value-coloured % → 1 decimal (owner 2026-11-27)
+      for (const c of [7, 11, 13]) expect([c, ws.getCell(north, c).numFmt]).toEqual([c, FMT.PCT1]); // Ach %, Approved %, % Outlets
+      expect(ws.getCell(total, 7).numFmt).toBe(FMT.PCT1); // Total row too (same column format, just not coloured)
       expect(ws.getCell(north, 5).value).toBe(1234567.5);
       expect(ws.getCell(north, 5).numFmt).toBe(FMT.MONEY); // summary ₹ = whole rupees, same as the email
       expect(ws.getCell(north, 14).numFmt).toBe(FMT.SCORE); // score 0–1, 2 decimals (not a %)
@@ -208,7 +224,9 @@ describe('writeTrackerWorkbook', () => {
 
       const nbT = findRow(ws, '2. Zone Summary - Outlets Not yet Started Billing');
       expect(ws.getCell(nbT + 2, 5).value).toBe(0.1);
-      expect(ws.getCell(nbT + 2, 5).numFmt).toBe('0%');
+      expect(ws.getCell(nbT + 2, 5).numFmt).toBe(FMT.PCT1); // Retail %
+      expect(ws.getCell(nbT + 2, 7).numFmt).toBe(FMT.PCT1); // WS %
+      expect(ws.getCell(nbT + 2, 4).numFmt).toBe('0'); // counts unchanged
       expect(ws.getCell(nbT + 2, 9).value).toBeNull();
       expect(ws.getCell(nbT + 4, 1).value).toBe('Total');
       expect(ws.getCell(nbT + 4, 1).font?.bold).toBe(true);
@@ -225,7 +243,7 @@ describe('writeTrackerWorkbook', () => {
       expect(rowValues(ws, 1, RETAIL_COLUMNS.length)).toEqual([...RETAIL_COLUMNS]);
       expect(ws.getCell(1, RETAIL_COLUMNS.length + 1).value).toBeNull();
       expect(ws.getCell(1, 1).font?.bold).toBe(true);
-      expect((ws.getCell(1, 1).fill as ExcelJS.FillPattern).fgColor?.argb).toBe('FFE7ECF3');
+      expect((ws.getCell(1, 1).fill as ExcelJS.FillPattern).fgColor?.argb).toBe(`FF${SECTION_FILL.outlet}`); // Zone
       expect(ws.views[0]).toMatchObject({ state: 'frozen', ySplit: 1 });
       expect(ws.autoFilter).toBeTruthy();
       const widths = Array.from({ length: RETAIL_COLUMNS.length }, (_, i) => ws.getColumn(i + 1).width);
@@ -389,5 +407,185 @@ describe('writeTrackerWorkbook', () => {
     expect(findRow(s, '5. Bottom 10 ASM HQs (by score)')).toBeGreaterThan(t);
     expect(provisionalLine('X', 'Y')).toContain('Not a payment file.');
     expect(FMT.MONEY).toContain('[>=100000]');
+  });
+});
+
+// ─── Visual formatting (owner 2026-11-27): section-coloured headers + conditional formatting on Summary values only ──
+describe('writeTrackerWorkbook — visual formatting', () => {
+  let wb: ExcelJS.Workbook;
+  type CF = {
+    ref: string;
+    rules: Array<{
+      type: string;
+      formulae?: string[];
+      cfvo?: Array<{ type: string; value?: number }>;
+      style?: { fill?: { bgColor?: { argb?: string } }; font?: { color?: { argb?: string } } };
+    }>;
+  };
+  const cfsOf = (b: ExcelJS.Workbook, name: string): CF[] =>
+    (b.getWorksheet(name) as unknown as { conditionalFormattings?: CF[] }).conditionalFormattings ?? [];
+  const cfs = (name: string) => cfsOf(wb, name);
+  const headerFill = (ws: ExcelJS.Worksheet, r: number, c: number) => (ws.getCell(r, c).fill as ExcelJS.FillPattern | undefined)?.fgColor?.argb;
+
+  beforeAll(async () => {
+    wb = await load(await writeTrackerWorkbook(INPUT, ROWS, SUMMARY, GENERATED));
+  });
+
+  it('retail header: each column filled by its section, white bold text, 6 sections', () => {
+    const ws = wb.getWorksheet('retail')!;
+    const expectSection: Record<string, Section> = {
+      Zone: 'outlet', 'Customer Name': 'outlet', Program: 'outlet', 'SM HQ': 'hierarchy', 'ISR Name': 'hierarchy',
+      'Total Target': 'target', 'Line Target': 'target', 'Total Ach': 'achievement', 'FB Ach %': 'achievement', WOA: 'achievement',
+      'Visibility Status': 'visibility', 'Potential Payout': 'visibility', 'Total Payout': 'outcome', 'Visibility Payout': 'outcome',
+      Reason: 'outcome', 'Gifsy Approval': 'outcome',
+    };
+    for (const [h, s] of Object.entries(expectSection)) {
+      const c = (RETAIL_COLUMNS as readonly string[]).indexOf(h) + 1;
+      expect([h, headerFill(ws, 1, c)]).toEqual([h, `FF${SECTION_FILL[s]}`]);
+      expect(ws.getCell(1, c).font?.color?.argb).toBe(`FF${HEADER_TEXT}`);
+      expect(ws.getCell(1, c).font?.bold).toBe(true);
+    }
+    const fills = new Set(RETAIL_COLUMNS.map((_, i) => headerFill(ws, 1, i + 1)));
+    expect(fills.size).toBe(6);
+    for (const f of fills) expect(Object.values(SECTION_FILL).map((x) => `FF${x}`)).toContain(f);
+  });
+
+  it('Ws header: points / bonus / final points = outcome; cases = achievement; Target = target', () => {
+    const ws = wb.getWorksheet('Ws')!;
+    const headers = wsColumns(INPUT.quarterLabel);
+    const at = (h: string) => headerFill(ws, 1, headers.indexOf(h) + 1);
+    expect(at('Target')).toBe(`FF${SECTION_FILL.target}`);
+    expect(at('Ach%')).toBe(`FF${SECTION_FILL.achievement}`);
+    expect(at('FB2 Cases')).toBe(`FF${SECTION_FILL.achievement}`);
+    expect(at('Base Points')).toBe(`FF${SECTION_FILL.outcome}`);
+    expect(at('Consistency Bonus (Oct–Dec 2026)')).toBe(`FF${SECTION_FILL.outcome}`);
+    expect(at('Final Points')).toBe(`FF${SECTION_FILL.outcome}`);
+    expect(at('ASM HQ')).toBe(`FF${SECTION_FILL.hierarchy}`);
+    expect(at('WH Name')).toBe(`FF${SECTION_FILL.outlet}`);
+    expect(outletSheetSection('Something new')).toBe('outlet');
+  });
+
+  it('outlet rows stay plain: NO conditional formatting on retail / Ws / Exceptions / About, no data-cell fill', () => {
+    for (const name of ['retail', 'Ws', 'Exceptions', 'About']) expect([name, cfs(name)]).toEqual([name, []]);
+    const ws = wb.getWorksheet('retail')!;
+    for (let c = 1; c <= RETAIL_COLUMNS.length; c++) expect(headerFill(ws, 2, c)).toBeUndefined();
+  });
+
+  it('Summary headers are section-coloured (label = hierarchy, Value Target = target, Score = outcome…)', () => {
+    const ws = wb.getWorksheet('Summary')!;
+    const h = findRow(ws, '1. Zone Summary - RLP') + 2;
+    rlpHeaders('Zone').forEach((name, i) => {
+      expect([name, headerFill(ws, h, i + 1)]).toEqual([name, `FF${SECTION_FILL[summarySection(name, i)]}`]);
+    });
+    expect(summarySection('Value Target', 4)).toBe('target');
+    expect(summarySection('Approved %', 10)).toBe('visibility');
+    expect(summarySection('Score', 13)).toBe('outcome');
+    const nbh = findRow(ws, '2. Zone Summary - Outlets Not yet Started Billing') + 1;
+    expect(headerFill(ws, nbh, 5)).toBe(`FF${SECTION_FILL.achievement}`); // Retail %
+    expect(headerFill(ws, nbh, 8)).toBe(`FF${SECTION_FILL.outlet}`); // Last month ₹0 - Retail
+  });
+
+  it('Summary CF: RAG on ratio columns, colour scales on Score and ₹ — data rows only, never a Total row', () => {
+    const ws = wb.getWorksheet('Summary')!;
+    const list = cfs('Summary');
+    expect(list.length).toBeGreaterThan(0);
+    const t1 = findRow(ws, '1. Zone Summary - RLP');
+    const north = t1 + 3; // title, weights, header, North, Total
+    const total = t1 + 4;
+    const byRef = new Map(list.map((c) => [c.ref, c]));
+
+    const ach = byRef.get(`G${north}:G${north}`)!; // Ach %
+    expect(ach).toBeDefined();
+    expect(ach.rules.map((r) => r.type)).toEqual(['expression', 'expression', 'expression']);
+    const x = `ROUND(G${north},3)`; // banded on the value rounded to the printed 1-decimal %
+    expect(ach.rules[0].formulae![0]).toBe(`AND(ISNUMBER(G${north}),${x}>=1)`);
+    expect(ach.rules[1].formulae![0]).toBe(`AND(ISNUMBER(G${north}),${x}>=0.9,${x}<1)`);
+    expect(ach.rules[2].formulae![0]).toBe(`AND(ISNUMBER(G${north}),${x}<0.9)`);
+    expect(ach.rules[0].style?.fill?.bgColor?.argb).toBe(`FF${BAND_STYLE.green.fill}`);
+    expect(ach.rules[2].style?.font?.color?.argb).toBe(`FF${BAND_STYLE.red.text}`);
+    for (const col of ['D', 'K', 'M']) expect([col, byRef.has(`${col}${north}:${col}${north}`)]).toEqual([col, true]); // WoA, Approved %, % Outlets
+
+    const score = byRef.get(`N${north}:N${north}`)!;
+    expect(score.rules[0].type).toBe('colorScale');
+    expect(score.rules[0].cfvo).toEqual([{ type: 'num', value: 0.4 }, { type: 'num', value: 0.6 }, { type: 'num', value: 0.8 }]);
+    // ₹ min→max scale is skipped on a ONE-data-row table (Excel would paint it blue; the email shows white)
+    expect(byRef.has(`E${north}:E${north}`)).toBe(false);
+    expect(byRef.has(`F${north}:F${north}`)).toBe(false);
+
+    // counts / rank / label columns: never formatted
+    for (const col of ['A', 'B', 'C', 'H', 'I', 'J', 'L', 'O']) expect([col, [...byRef.keys()].some((k) => k.startsWith(col))]).toEqual([col, false]);
+
+    // no range on the Summary sheet touches ANY Total row
+    const totalRows: number[] = [];
+    ws.eachRow((row, r) => {
+      if (row.getCell(1).value === 'Total') totalRows.push(r);
+    });
+    expect(totalRows).toContain(total);
+    for (const c of list) {
+      const [, a, b] = /^[A-Z]+(\d+):[A-Z]+(\d+)$/.exec(c.ref)!;
+      for (const tr of totalRows) expect([c.ref, tr >= Number(a) && tr <= Number(b)]).toEqual([c.ref, false]);
+    }
+    expect(ws.getCell(total, 7).font?.bold).toBe(true);
+    expect(headerFill(ws, total, 7)).toBe('FFF4F6FA');
+
+    // not-billing: Retail % (E) / WS % (G), lower is better, over North..South; counts plain
+    const nbT = findRow(ws, '2. Zone Summary - Outlets Not yet Started Billing');
+    const nbcf = byRef.get(`E${nbT + 2}:E${nbT + 3}`)!;
+    expect(nbcf.rules[0].formulae![0]).toBe(`AND(ISNUMBER(E${nbT + 2}),ROUND(E${nbT + 2},3)<=0.1)`);
+    expect(nbcf.rules[2].formulae![0]).toBe(`AND(ISNUMBER(E${nbT + 2}),ROUND(E${nbT + 2},3)>0.25)`);
+    expect(byRef.has(`G${nbT + 2}:G${nbT + 3}`)).toBe(true);
+    expect(byRef.has(`D${nbT + 2}:D${nbT + 3}`)).toBe(false);
+
+    // Bottom ASM (no Total row) is formatted too
+    const bT = findRow(ws, '5. Bottom 10 ASM HQs (by score)');
+    expect(byRef.has(`G${bT + 3}:G${bT + 3}`)).toBe(true);
+  });
+
+  it('keeps the Indian-grouping numFmt (quoted commas) on coloured ₹ cells', () => {
+    const ws = wb.getWorksheet('Summary')!;
+    const north = findRow(ws, '1. Zone Summary - RLP') + 3;
+    expect(ws.getCell(north, 5).numFmt).toBe(FMT.MONEY);
+    expect(FMT.MONEY).toContain('##","##","##0');
+    expect(FMT.MONEY.includes(String.fromCharCode(92))).toBe(false); // no backslash escapes
+  });
+
+  it('a table that is ONLY a Total row gets no conditional formatting', async () => {
+    const onlyTotal: TrackerSummary = { ...SUMMARY, zoneRlp: [rlp('Total', 0.6, null)], zoneNotBilling: [], smRlp: [], smNotBilling: [], bottomAsm: [] };
+    const b = await load(await writeTrackerWorkbook(INPUT, ROWS, onlyTotal, GENERATED));
+    expect(cfsOf(b, 'Summary')).toEqual([]);
+  });
+
+  it('₹ min→max scale present on a table with ≥ 2 data rows (Total still excluded)', async () => {
+    const two: TrackerSummary = { ...SUMMARY, zoneRlp: [rlp('North', 0.6, 1), rlp('East', 0.5, 2), rlp('Total', 0.55, null)] };
+    const b = await load(await writeTrackerWorkbook(INPUT, ROWS, two, GENERATED));
+    const s = b.getWorksheet('Summary')!;
+    const first = findRow(s, '1. Zone Summary - RLP') + 3;
+    const refs = new Map(cfsOf(b, 'Summary').map((c) => [c.ref, c]));
+    expect(refs.get(`E${first}:E${first + 1}`)!.rules[0].cfvo!.map((c) => c.type)).toEqual(['min', 'max']);
+    expect(refs.get(`F${first}:F${first + 1}`)!.rules[0].type).toBe('colorScale');
+    expect(s.getCell(first + 2, 1).value).toBe('Total');
+  });
+
+  it('Total detection is the shared exact-label helper (a "total"-ish label is a normal row)', async () => {
+    const odd: TrackerSummary = { ...SUMMARY, zoneRlp: [rlp(' total ', 0.6, 1), rlp('Total', 0.6, null)], zoneNotBilling: [], smRlp: [], smNotBilling: [], bottomAsm: [] };
+    const b = await load(await writeTrackerWorkbook(INPUT, ROWS, odd, GENERATED));
+    const s = b.getWorksheet('Summary')!;
+    const first = findRow(s, '1. Zone Summary - RLP') + 3;
+    expect(cfsOf(b, 'Summary').some((c) => c.ref === `G${first}:G${first}`)).toBe(true); // coloured like any data row
+    expect(s.getCell(first, 1).font?.bold).toBeFalsy();
+    expect(s.getCell(first + 1, 1).font?.bold).toBe(true);
+  });
+
+  it('ragFormula / colLetter helpers', () => {
+    expect(ragFormula('E5', VALUE_RULES['Retail %'] as RagRule, 'amber')).toBe('AND(ISNUMBER(E5),ROUND(E5,3)>0.1,ROUND(E5,3)<=0.25)');
+    expect([colLetter(1), colLetter(15), colLetter(26), colLetter(27), colLetter(52)]).toEqual(['A', 'O', 'Z', 'AA', 'AZ']);
+  });
+
+  it('About sheet carries the colour key', () => {
+    const col1: unknown[] = [];
+    wb.getWorksheet('About')!.eachRow((r) => col1.push(r.getCell(1).value));
+    const at = col1.indexOf(COLOUR_KEY_INTRO);
+    expect(at).toBeGreaterThan(-1);
+    expect(String(col1[at + 1])).toContain('Ach %: green ≥ 100%');
   });
 });
