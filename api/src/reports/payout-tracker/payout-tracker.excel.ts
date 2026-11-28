@@ -23,6 +23,26 @@ import {
   type TrackerRows,
   type TrackerSummary,
 } from './payout-tracker.types';
+import {
+  BAND_STYLE,
+  HEADER_TEXT,
+  isTotalLabel,
+  outletSheetSection,
+  RAG_ROUND_DECIMALS,
+  ragBand,
+  SCALE2_COLORS,
+  SCALE3_COLORS,
+  SECTION_FILL,
+  summarySection,
+  TOTAL_FILL,
+  valueRuleOf,
+  colourKeyLines,
+  COLOUR_KEY_INTRO,
+  type Band,
+  type RagRule,
+  type Section,
+  type ValueRule,
+} from './payout-tracker.format';
 
 export type TrackerWorkbookInput = Pick<TrackerInput, 'clientName' | 'month' | 'monthLabel' | 'salesAsOf' | 'provisional' | 'quarterLabel'> &
   Partial<Pick<TrackerInput, 'notes'>>;
@@ -41,7 +61,8 @@ export const FMT = {
   TEXT: '@',
 } as const;
 
-const HEADER_FILL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE7ECF3' } };
+const solid = (hex: string): ExcelJS.Fill => ({ type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${hex}` } });
+const TOTAL_ROW_FILL = solid(TOTAL_FILL);
 const THIN: ExcelJS.Border = { style: 'thin', color: { argb: 'FFB0B8C4' } };
 const BORDER: Partial<ExcelJS.Borders> = { top: THIN, left: THIN, bottom: THIN, right: THIN };
 const MAX_WIDTH = 40;
@@ -105,9 +126,10 @@ function setCell(cell: ExcelJS.Cell, v: Cellish, fmt: string | null): void {
   cell.value = cellSafe(v);
 }
 
-function styleHeaderCell(cell: ExcelJS.Cell): void {
-  cell.font = { bold: true };
-  cell.fill = HEADER_FILL;
+/** Header cell coloured by its section (white bold text on the section fill). */
+function styleHeaderCell(cell: ExcelJS.Cell, section: Section): void {
+  cell.font = { bold: true, color: { argb: `FF${HEADER_TEXT}` } };
+  cell.fill = solid(SECTION_FILL[section]);
   cell.border = BORDER;
   cell.alignment = { vertical: 'middle', wrapText: true };
 }
@@ -129,17 +151,19 @@ function writeDataSheet(
   headers: readonly string[],
   rows: readonly Row[],
   formatOf: (h: string) => string | null,
+  sectionOf: (h: string) => Section = outletSheetSection,
 ): ExcelJS.Worksheet {
-  // Freeze the header row AND the columns up to Customer Name, so the outlet stays visible while scrolling right.
-  const nameCol = headers.indexOf('Customer Name');
-  const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1, xSplit: nameCol >= 0 ? nameCol + 1 : 0 }] });
+  // Freeze ONLY the header row. Owner 2026-11-28: no frozen columns — freezing up to Customer Name locked too many
+  // columns and made the sheets hard to navigate.
+  const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1, xSplit: 0 }] });
   const widths = headers.map((h) => h.length);
   const header = ws.getRow(1);
   headers.forEach((h, i) => {
     const c = header.getCell(i + 1);
     c.value = cellSafe(h);
-    styleHeaderCell(c);
+    styleHeaderCell(c, sectionOf(h));
   });
+  // Outlet rows are deliberately plain — no conditional formatting on outlet sheets (owner 2026-11-27).
   const fmts = headers.map(formatOf);
   rows.forEach((r, ri) => {
     const row = ws.getRow(ri + 2);
@@ -194,6 +218,78 @@ function nbValues(l: NotBillingLine): Cellish[] {
   return [l.label, l.retailOutlets, l.wsOutlets, l.retailZero, l.retailZeroPct, l.wsZero, l.wsZeroPct, l.lmZeroRetail, l.lmZeroWs];
 }
 
+// ─── Summary conditional formatting ────────────────────────────────────────────────────────────────────
+/** 1-based column → letters (1 → A, 27 → AA). */
+export function colLetter(n: number): string {
+  let s = '';
+  for (let x = n; x > 0; x = Math.floor((x - 1) / 26)) s = String.fromCharCode(65 + ((x - 1) % 26)) + s;
+  return s;
+}
+
+/** Expression for one RAG band, relative to the range's top-left cell; blanks (null ratios) never match. The value
+ *  is ROUNDed to the printed precision first (same as ragBand), so the colour always agrees with the shown number. */
+export function ragFormula(cell: string, rule: RagRule, band: Band): string {
+  const { green: g, amber: a } = rule;
+  const x = `ROUND(${cell},${RAG_ROUND_DECIMALS})`;
+  const cond = rule.higherIsBetter
+    ? { green: `${x}>=${g}`, amber: `${x}>=${a},${x}<${g}`, red: `${x}<${a}` }
+    : { green: `${x}<=${g}`, amber: `${x}>${g},${x}<=${a}`, red: `${x}>${a}` };
+  return `AND(ISNUMBER(${cell}),${cond[band]})`;
+}
+
+/** Per-sheet CF priority counter (unique, ascending in write order). */
+interface Prio { n: number }
+
+function addValueFormatting(ws: ExcelJS.Worksheet, col: number, fromRow: number, toRow: number, rule: ValueRule, prio: Prio): void {
+  const L = colLetter(col);
+  const ref = `${L}${fromRow}:${L}${toRow}`;
+  const top = `${L}${fromRow}`;
+  if (rule.kind === 'rag') {
+    ws.addConditionalFormatting({
+      ref,
+      rules: (['green', 'amber', 'red'] as const).map((band) => ({
+        type: 'expression' as const,
+        priority: prio.n++,
+        formulae: [ragFormula(top, rule, band)],
+        style: {
+          fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: `FF${BAND_STYLE[band].fill}` } },
+          font: { color: { argb: `FF${BAND_STYLE[band].text}` } },
+        },
+      })),
+    });
+    return;
+  }
+  if (rule.kind === 'scale3') {
+    ws.addConditionalFormatting({
+      ref,
+      rules: [
+        {
+          type: 'colorScale',
+          priority: prio.n++,
+          cfvo: [
+            { type: 'num', value: rule.min },
+            { type: 'num', value: rule.mid },
+            { type: 'num', value: rule.max },
+          ],
+          color: [{ argb: `FF${SCALE3_COLORS.min}` }, { argb: `FF${SCALE3_COLORS.mid}` }, { argb: `FF${SCALE3_COLORS.max}` }],
+        },
+      ],
+    });
+    return;
+  }
+  ws.addConditionalFormatting({
+    ref,
+    rules: [
+      {
+        type: 'colorScale',
+        priority: prio.n++,
+        cfvo: [{ type: 'min' }, { type: 'max' }],
+        color: [{ argb: `FF${SCALE2_COLORS.min}` }, { argb: `FF${SCALE2_COLORS.max}` }],
+      },
+    ],
+  });
+}
+
 export function provisionalLine(monthLabel: string, salesAsOf: string): string {
   return `PROVISIONAL — ${monthLabel} to date (sales up to ${salesAsOf}). Figures will change until the month is closed. Not a payment file.`;
 }
@@ -207,6 +303,7 @@ function writeSummarySheet(wb: ExcelJS.Workbook, input: TrackerWorkbookInput, su
     widths[ci] = Math.max(widths[ci] ?? 0, n);
   };
   let r = 1;
+  const prio: Prio = { n: 1 };
 
   const title = ws.getCell(r, 1);
   title.value = cellSafe(`${input.clientName} — Payout Tracker — ${input.monthLabel}`);
@@ -244,7 +341,7 @@ function writeSummarySheet(wb: ExcelJS.Workbook, input: TrackerWorkbookInput, su
     headers.forEach((h, ci) => {
       const c = ws.getCell(r, ci + 1);
       c.value = cellSafe(h);
-      styleHeaderCell(c);
+      styleHeaderCell(c, summarySection(h, ci));
       track(ci, Math.min(h.length, 22)); // long headers wrap
     });
     r++;
@@ -254,17 +351,38 @@ function writeSummarySheet(wb: ExcelJS.Workbook, input: TrackerWorkbookInput, su
       c.font = { italic: true };
       r++;
     }
+    // Owner 2026-11-27: every RAG-coloured % column shows 1 decimal (99.6% must not read "100%" in amber).
+    const cellFormats = headers.map((h, ci) => (valueRuleOf(h, ci)?.kind === 'rag' ? FMT.PCT1 : formats[ci]));
+    // Runs of consecutive NON-Total data rows: conditional formatting covers these only (Totals stay plain bold).
+    const runs: Array<[number, number]> = [];
     for (const vals of lines) {
-      const isTotal = vals[0] === 'Total';
+      const isTotal = isTotalLabel(vals[0]);
       vals.forEach((v, ci) => {
         const c = ws.getCell(r, ci + 1);
-        setCell(c, v, formats[ci]);
+        setCell(c, v, cellFormats[ci]);
         c.border = BORDER;
-        if (isTotal) c.font = { bold: true };
+        if (isTotal) {
+          c.font = { bold: true };
+          c.fill = TOTAL_ROW_FILL;
+        }
         track(ci, displayLen(v));
       });
+      if (!isTotal) {
+        const last = runs[runs.length - 1];
+        if (last && last[1] === r - 1) last[1] = r;
+        else runs.push([r, r]);
+      }
       r++;
     }
+    headers.forEach((h, ci) => {
+      const rule = valueRuleOf(h, ci);
+      if (!rule) return;
+      for (const [from, to] of runs) {
+        // A min→max scale over ONE value is meaningless (Excel would paint it the max colour; the email shows white).
+        if (rule.kind === 'scale2' && to - from < 1) continue;
+        addValueFormatting(ws, ci + 1, from, to, rule, prio);
+      }
+    });
     r++; // blank row between tables
   };
 
@@ -338,6 +456,15 @@ function writeAboutSheet(wb: ExcelJS.Workbook, input: TrackerWorkbookInput, rows
   nh.font = { bold: true };
   r++;
   for (const n of ABOUT_NOTES) {
+    ws.getCell(r, 1).value = cellSafe(n);
+    r++;
+  }
+  r++;
+  const kh = ws.getCell(r, 1);
+  kh.value = cellSafe(COLOUR_KEY_INTRO);
+  kh.font = { bold: true };
+  r++;
+  for (const n of colourKeyLines()) {
     ws.getCell(r, 1).value = cellSafe(n);
     r++;
   }

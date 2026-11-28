@@ -10,6 +10,21 @@
  * (0.84321 → '84.32%'); null / non-finite → '–'. ALL dynamic text is HTML-escaped.
  */
 import { clientNoteTexts, type NotBillingLine, type RlpLine, type TrackerInput, type TrackerSummary } from './payout-tracker.types';
+import {
+  BAND_STYLE,
+  BODY_TEXT,
+  COLOUR_KEY_INTRO,
+  colourKeyLines,
+  HEADER_TEXT,
+  isTotalLabel,
+  ragBand,
+  scale2Color,
+  scale3Color,
+  SECTION_FILL,
+  summarySection,
+  TOTAL_FILL,
+  valueRuleOf,
+} from './payout-tracker.format';
 
 export type TrackerEmailMeta = Pick<TrackerInput, 'clientName' | 'monthLabel' | 'salesAsOf' | 'provisional'> &
   Partial<Pick<TrackerInput, 'notes'>>;
@@ -68,6 +83,12 @@ export function fmtPct(f: number | null | undefined): string {
   return `${Math.round(f * 100)}%`;
 }
 
+/** Fraction → 1-decimal % for the value-coloured ratio columns: 0.996 → '99.6%' (owner 2026-11-27). */
+export function fmtPct1(f: number | null | undefined): string {
+  if (f === null || f === undefined || !Number.isFinite(f)) return DASH;
+  return `${(Math.round(f * 1000) / 10).toFixed(1)}%`;
+}
+
 /** Score (weighted 0–1) → 2 decimals: 0.84321 → '0.84' — the same as the Excel Summary (not a %, so it isn't
  *  mistaken for an achievement figure; audit 2026-11-27). */
 export function fmtScore(f: number | null | undefined): string {
@@ -80,8 +101,22 @@ interface TableSpec {
   title: string;
   headers: string[];
   rows: string[][]; // already formatted (unescaped) cell text; column 0 = label
+  values: Array<Array<number | null>>; // raw numbers behind `rows` (column 0 = null) — drives value colouring
   totalRows: boolean[]; // per row: is this the Total row
   caption?: string;
+}
+
+const n = (v: number | null | undefined): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
+function rlpValues(l: RlpLine): Array<number | null> {
+  return [
+    null, l.outlets, l.outletsOver100, l.woa, l.valueTarget, l.valueAch, l.achPct, l.visEligible, l.visAttempted,
+    l.visApproved, l.visApprovedPct, l.linesOver100, l.linesPct, l.score, l.rank,
+  ].map(n);
+}
+
+function notBillingValues(l: NotBillingLine): Array<number | null> {
+  return [null, l.retailOutlets, l.wsOutlets, l.retailZero, l.retailZeroPct, l.wsZero, l.wsZeroPct, l.lmZeroRetail, l.lmZeroWs].map(n);
 }
 
 // Headers are IDENTICAL to the Excel Summary sheet (payout-tracker.excel.ts rlpHeaders / notBillingHeaders) —
@@ -99,15 +134,15 @@ export const NOT_BILLING_HEADERS_TAIL = [
 
 export const SCORE_CAPTION = 'Score (0–1) = 30% WoA + 30% Ach % + 20% Approved % + 20% % Outlets. Rank 1 = best. Counts include only KYC-approved outlets.';
 
-const isTotal = (label: string) => label.trim().toLowerCase() === 'total';
+const isTotal = (label: string) => isTotalLabel(label); // shared with the Excel writer (exact TOTAL_LABEL)
 
 function rlpCells(l: RlpLine): string[] {
   return [
     l.label ?? '',
-    fmtInt(l.outlets), fmtInt(l.outletsOver100), fmtPct(l.woa),
-    fmtMoney(l.valueTarget), fmtMoney(l.valueAch), fmtPct(l.achPct),
-    fmtInt(l.visEligible), fmtInt(l.visAttempted), fmtInt(l.visApproved), fmtPct(l.visApprovedPct),
-    fmtInt(l.linesOver100), fmtPct(l.linesPct), fmtScore(l.score), fmtInt(l.rank),
+    fmtInt(l.outlets), fmtInt(l.outletsOver100), fmtPct1(l.woa),
+    fmtMoney(l.valueTarget), fmtMoney(l.valueAch), fmtPct1(l.achPct),
+    fmtInt(l.visEligible), fmtInt(l.visAttempted), fmtInt(l.visApproved), fmtPct1(l.visApprovedPct),
+    fmtInt(l.linesOver100), fmtPct1(l.linesPct), fmtScore(l.score), fmtInt(l.rank),
   ];
 }
 
@@ -115,8 +150,8 @@ function notBillingCells(l: NotBillingLine): string[] {
   return [
     l.label ?? '',
     fmtInt(l.retailOutlets), fmtInt(l.wsOutlets),
-    fmtInt(l.retailZero), fmtPct(l.retailZeroPct),
-    fmtInt(l.wsZero), fmtPct(l.wsZeroPct),
+    fmtInt(l.retailZero), fmtPct1(l.retailZeroPct),
+    fmtInt(l.wsZero), fmtPct1(l.wsZeroPct),
     fmtInt(l.lmZeroRetail), fmtInt(l.lmZeroWs),
   ];
 }
@@ -126,6 +161,7 @@ function rlpTable(title: string, firstHeader: string, lines: RlpLine[]): TableSp
     title,
     headers: [firstHeader, ...RLP_HEADERS_TAIL],
     rows: lines.map(rlpCells),
+    values: lines.map(rlpValues),
     totalRows: lines.map((l) => isTotal(l.label ?? '')),
     caption: SCORE_CAPTION,
   };
@@ -136,6 +172,7 @@ function notBillingTable(title: string, firstHeader: string, lines: NotBillingLi
     title,
     headers: [firstHeader, ...NOT_BILLING_HEADERS_TAIL],
     rows: lines.map(notBillingCells),
+    values: lines.map(notBillingValues),
     totalRows: lines.map((l) => isTotal(l.label ?? '')),
   };
 }
@@ -153,19 +190,45 @@ function buildTables(s: TrackerSummary): TableSpec[] {
 // ─── HTML ──────────────────────────────────────────────────────────────────────────────────────────────
 const C_TEXT = '#1f2933';
 const C_BORDER = '#d0d7e2';
-const C_HEAD = '#E7ECF3';
-const C_TOTAL = '#F4F6FA';
+const C_TOTAL = `#${TOTAL_FILL}`;
 const C_MUTED = '#6b7280';
 
 const CELL = `padding:6px 8px;border:1px solid ${C_BORDER};`;
+
+/** Inline fill (+ text colour) for one summary VALUE cell, or null = plain. Never called for Total rows. */
+export function valueTone(
+  header: string,
+  index: number,
+  v: number | null,
+  range: { lo: number; hi: number } | null,
+): { bg: string; fg: string } | null {
+  const rule = valueRuleOf(header, index);
+  if (!rule || v === null) return null;
+  if (rule.kind === 'rag') {
+    const band = ragBand(rule, v);
+    return band ? { bg: `#${BAND_STYLE[band].fill}`, fg: `#${BAND_STYLE[band].text}` } : null;
+  }
+  const bg = rule.kind === 'scale3' ? scale3Color(rule, v) : range ? scale2Color(v, range.lo, range.hi) : null;
+  return bg ? { bg: `#${bg}`, fg: `#${BODY_TEXT}` } : null;
+}
+
+/** Min / max of each column over the NON-Total rows (feeds the 2-colour amount scale, like Excel's min→max). */
+function columnRanges(t: TableSpec): Array<{ lo: number; hi: number } | null> {
+  return t.headers.map((_, ci) => {
+    const vs = t.values.filter((_, ri) => !t.totalRows[ri]).map((row) => row[ci]).filter((v): v is number => v !== null);
+    return vs.length ? { lo: Math.min(...vs), hi: Math.max(...vs) } : null;
+  });
+}
 
 function renderTableHtml(t: TableSpec): string {
   const head = t.headers
     .map((h, i) => {
       const align = i === 0 ? 'text-align:left;white-space:nowrap;' : 'text-align:right;';
-      return `<th style="${CELL}background-color:${C_HEAD};font-weight:bold;${align}vertical-align:bottom;">${escapeHtml(h)}</th>`;
+      const fill = `#${SECTION_FILL[summarySection(h, i)]}`;
+      return `<th bgcolor="${fill}" style="${CELL}background-color:${fill};color:#${HEADER_TEXT};font-weight:bold;${align}vertical-align:bottom;">${escapeHtml(h)}</th>`;
     })
     .join('');
+  const ranges = columnRanges(t);
   const body = t.rows.length
     ? t.rows
         .map((cells, r) => {
@@ -175,7 +238,10 @@ function renderTableHtml(t: TableSpec): string {
             .map((c, i) => {
               const align = i === 0 ? 'text-align:left;white-space:nowrap;' : 'text-align:right;white-space:nowrap;';
               const bold = total ? 'font-weight:bold;' : '';
-              return `<td style="${CELL}${align}${bold}">${escapeHtml(c)}</td>`;
+              const tone = total ? null : valueTone(t.headers[i], i, t.values[r]?.[i] ?? null, ranges[i]);
+              return tone
+                ? `<td bgcolor="${tone.bg}" style="${CELL}${align}background-color:${tone.bg};color:${tone.fg};">${escapeHtml(c)}</td>`
+                : `<td style="${CELL}${align}${bold}">${escapeHtml(c)}</td>`;
             })
             .join('');
           return `<tr${rowStyle}>${tds}</tr>`;
@@ -225,6 +291,19 @@ export function renderTrackerEmail(
     ? `<div style="margin:16px 0;padding:10px 14px;background-color:#FFF4D6;border:1px solid #D99A00;border-left:4px solid #D99A00;color:#7a4f00;font-weight:bold;">${escapeHtml(PROVISIONAL_NOTE)}</div>`
     : '';
 
+  // Colour key (HTML only — the text fallback is unchanged): green / amber / red chips + the per-column thresholds,
+  // so colour is never the only signal (the numbers are always printed too).
+  const chip = (b: keyof typeof BAND_STYLE, label: string) =>
+    `<td bgcolor="#${BAND_STYLE[b].fill}" style="padding:3px 8px;background-color:#${BAND_STYLE[b].fill};color:#${BAND_STYLE[b].text};font-size:12px;font-weight:bold;border:1px solid ${C_BORDER};white-space:nowrap;">${label}</td><td style="width:6px;font-size:1px;">&nbsp;</td>`;
+  const colourKey =
+    `<div style="margin:16px 0 0 0;font-size:12px;color:${C_MUTED};">` +
+    `<p style="margin:0 0 6px 0;">${escapeHtml(COLOUR_KEY_INTRO)}</p>` +
+    `<table role="presentation" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:0 0 6px 0;"><tr>` +
+    chip('green', 'On track') + chip('amber', 'Watch') + chip('red', 'Needs attention') +
+    `</tr></table>` +
+    `<ul style="margin:0;padding:0 0 0 18px;">${colourKeyLines().map((l) => `<li style="margin:0 0 2px 0;">${escapeHtml(l)}</li>`).join('')}</ul>` +
+    '</div>';
+
   const notes = dataNotesOf(meta);
   const notesBox = notes.length
     ? `<div style="margin:24px 0 0 0;padding:10px 14px;background-color:#F4F6FA;border:1px solid ${C_BORDER};border-left:4px solid #D99A00;font-size:13px;color:${C_TEXT};">` +
@@ -245,6 +324,7 @@ export function renderTrackerEmail(
     `<p style="margin:0 0 12px 0;">Dear Team,</p>` +
     `<p style="margin:0 0 12px 0;">${escapeHtml(intro)}</p>` +
     provisionalBox +
+    colourKey +
     tables.map(renderTableHtml).join('') +
     notesBox +
     `<p style="margin:28px 0 0 0;font-size:12px;color:${C_MUTED};">${escapeHtml(FOOTER)}</p>` +
