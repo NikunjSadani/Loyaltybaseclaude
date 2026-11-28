@@ -22,6 +22,10 @@ import {
 import { api } from '@/lib/api-client';
 import { Button } from '@/components/ui/button';
 import { getStoredUser } from '@/lib/auth-client';
+import { useUnsavedChangesGuard } from '@/lib/use-unsaved-changes-guard';
+
+export const UNSAVED_NOTIFICATIONS_MESSAGE =
+  'You have unsaved notification changes — leave without saving?';
 
 // ── Contract (mirrors GET/PUT /api/gifsy/clients/:slug/notification-templates) ───────────────────
 
@@ -199,13 +203,10 @@ export function NotificationTemplatesEditor({
   useEffect(() => { onDirtyRef.current?.(dirty); }, [dirty]);
   useEffect(() => () => { onDirtyRef.current?.(false); }, []);
 
-  // Warn before leaving / reloading the page with unsaved edits.
-  useEffect(() => {
-    if (!dirty) return;
-    const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
-    window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
-  }, [dirty]);
+  // Leave-page guard (unload, in-app links, Back). When a parent takes `onDirtyChange` it OWNS the
+  // guard (so the client page can combine this with its sender-ID edits into ONE prompt); standalone,
+  // the editor guards itself.
+  useUnsavedChangesGuard(!onDirtyChange && dirty, UNSAVED_NOTIFICATIONS_MESSAGE);
 
   function setMaster(channel: 'masterSms' | 'masterWhatsapp', value: boolean) {
     setForm((prev) => (prev ? { ...prev, [channel]: value } : prev));
@@ -297,6 +298,9 @@ export function NotificationTemplatesEditor({
         </p>
       )}
 
+      {/* Every control is LOCKED while a save is in flight (native fieldset disable), so nothing
+          typed during the save can be overwritten by the server echo. */}
+      <fieldset disabled={saving} data-testid="nt-fields" className="space-y-4 min-w-0 border-0 p-0 m-0">
       {!loading && !loadError && form && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <MasterToggle
@@ -348,6 +352,7 @@ export function NotificationTemplatesEditor({
           ))}
         </div>
       )}
+      </fieldset>
     </div>
   );
 }

@@ -7,7 +7,7 @@
  */
 
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 let mockRole = 'GIFSY_ADMIN';
@@ -16,7 +16,7 @@ vi.mock('@/lib/auth-client', async (importOriginal) => {
   return { ...actual, getStoredUser: () => ({ id: 'u1', name: 'Owner', role: mockRole, phone: '900' }) };
 });
 
-import { NotificationTemplatesEditor } from '../notification-templates-editor';
+import { NotificationTemplatesEditor, UNSAVED_NOTIFICATIONS_MESSAGE } from '../notification-templates-editor';
 
 const CONFIG = {
   masterSms: true,
@@ -167,18 +167,57 @@ describe('NotificationTemplatesEditor (per client)', () => {
     expect(screen.getByTestId('free-chip-ORDER_CANCELLED').textContent).toMatch(/Always on/i);
   });
 
-  it('dirty tracking: reports dirty on edit, clean after save; beforeunload warns only while dirty', async () => {
+  it('standalone (no onDirtyChange): the editor guards itself — beforeunload + in-app link confirm while dirty', async () => {
+    stubFetch();
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    vi.spyOn(window.history, 'back').mockImplementation(() => {});
+    render(<><NotificationTemplatesEditor slug="bajaj" /><a href="/gifsy/clients" data-testid="nav-link">Clients</a></>);
+    await screen.findByTestId('row-KYC_SUBMITTED');
+    const unload = () => { const e = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(e); return e.defaultPrevented; };
+    expect(unload()).toBe(false);
+    fireEvent.change(screen.getByTestId('sms-KYC_SUBMITTED'), { target: { value: '999' } });
+    expect(unload()).toBe(true);
+    const e = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    screen.getByTestId('nav-link').dispatchEvent(e);
+    expect(confirmSpy).toHaveBeenCalledWith(UNSAVED_NOTIFICATIONS_MESSAGE);
+    expect(e.defaultPrevented).toBe(true);
+    vi.restoreAllMocks();
+  });
+
+  it('with onDirtyChange the PARENT owns the guard (editor installs none, so no double prompt)', async () => {
+    stubFetch();
+    render(<NotificationTemplatesEditor slug="bajaj" onDirtyChange={() => {}} />);
+    await screen.findByTestId('row-KYC_SUBMITTED');
+    fireEvent.change(screen.getByTestId('sms-KYC_SUBMITTED'), { target: { value: '999' } });
+    const e = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(false);
+  });
+
+  it('every control is locked while a save is in flight, and unlocked after', async () => {
+    let resolvePut: (v: unknown) => void = () => {};
+    stubFetch({ put: () => new Promise((r) => { resolvePut = r; }) });
+    render(<NotificationTemplatesEditor slug="bajaj" />);
+    await screen.findByTestId('row-KYC_SUBMITTED');
+    fireEvent.click(screen.getByTestId('save-btn'));
+    await waitFor(() => expect(screen.getByTestId('nt-fields')).toBeDisabled());
+    for (const id of ['wavars-ORDER_DISPATCHED', 'mode-ORDER_DISPATCHED', 'sms-KYC_SUBMITTED', 'master-sms-toggle']) {
+      expect(screen.getByTestId(id)).toBeDisabled();
+    }
+    await act(async () => { resolvePut(await okJson(PAYLOAD)); });
+    await waitFor(() => expect(screen.getByTestId('nt-fields')).not.toBeDisabled());
+    expect(screen.getByTestId('wavars-ORDER_DISPATCHED')).not.toBeDisabled();
+  });
+
+  it('dirty tracking: reports dirty on edit, clean on revert and after save', async () => {
     stubFetch();
     const onDirty = vi.fn();
     render(<NotificationTemplatesEditor slug="bajaj" onDirtyChange={onDirty} />);
     await screen.findByTestId('row-KYC_SUBMITTED');
     expect(onDirty).toHaveBeenLastCalledWith(false);
-    const ev = () => { const e = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(e); return e; };
-    expect(ev().defaultPrevented).toBe(false);
 
     fireEvent.change(screen.getByTestId('sms-KYC_SUBMITTED'), { target: { value: '999' } });
     expect(onDirty).toHaveBeenLastCalledWith(true);
-    expect(ev().defaultPrevented).toBe(true);
 
     // Reverting to the loaded value is clean again.
     fireEvent.change(screen.getByTestId('sms-KYC_SUBMITTED'), { target: { value: '111' } });
@@ -189,7 +228,6 @@ describe('NotificationTemplatesEditor (per client)', () => {
     fireEvent.click(screen.getByTestId('save-btn'));
     await screen.findByTestId('nt-save-status');
     await waitFor(() => expect(onDirty).toHaveBeenLastCalledWith(false));
-    expect(ev().defaultPrevented).toBe(false);
   });
 
   it('the variable-order override stays EDITABLE while WhatsApp is off (a BLOCKED list can be cleared)', async () => {

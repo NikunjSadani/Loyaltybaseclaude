@@ -160,6 +160,38 @@ describe('Client page → Notifications section', () => {
     expect(body.notifications).toEqual({ whatsappSenderId: 'wa-onb', smsSenderId: 'ONBSMS' });
   });
 
+  it('sender-ID edits mark the section "Unsaved changes" and arm ONE leave guard (in-app link asks once)', async () => {
+    vi.stubGlobal('fetch', mockFetch());
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    vi.spyOn(window.history, 'back').mockImplementation(() => {});
+    await renderPage();
+    await act(async () => { fireEvent.click(sectionButton()); });
+    await screen.findByTestId('row-POINTS_CREDITED');
+    const block = screen.getByTestId('legacy-template-ids').parentElement as HTMLElement;
+    await act(async () => { fireEvent.click(within(block).getByRole('button', { name: /Edit/ })); });
+    expect(screen.queryByTestId('notifications-unsaved')).not.toBeInTheDocument(); // editing alone isn't dirty
+    const smsInput = within(screen.getByTestId('legacy-template-ids').parentElement as HTMLElement)
+      .getAllByRole('textbox').find((i) => (i as HTMLInputElement).value === 'ONBSMS') as HTMLInputElement;
+    fireEvent.change(smsInput, { target: { value: 'NEWSMS' } });
+    expect(await screen.findByTestId('notifications-unsaved')).toBeInTheDocument();
+
+    // In-app link (the page's own "back to clients" style link) → ONE confirm with the shared message; Cancel stays.
+    const a = document.createElement('a');
+    a.href = '/gifsy/clients';
+    document.body.appendChild(a);
+    const e = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    a.dispatchEvent(e);
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(confirmSpy).toHaveBeenCalledWith('You have unsaved notification changes — leave without saving?');
+    expect(e.defaultPrevented).toBe(true);
+    a.remove();
+
+    // Reverting the value clears the marker.
+    fireEvent.change(smsInput, { target: { value: 'ONBSMS' } });
+    await waitFor(() => expect(screen.queryByTestId('notifications-unsaved')).not.toBeInTheDocument());
+    vi.restoreAllMocks();
+  });
+
   it('a non-owner sees the sender IDs but NOT the templates editor, and it is never fetched', async () => {
     roleRef.current = null;
     const fetchMock = mockFetch();
